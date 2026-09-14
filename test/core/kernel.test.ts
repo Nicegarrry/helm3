@@ -37,58 +37,63 @@ function opened(path = databasePath(), options: Partial<KernelOptions> = {}) {
 }
 function allowed() { return { actorId: 'trusted-runtime-actor', allowedOrigins: ['worker'] as const }; }
 const trueFact = async () => ({ value: true, state: 'known' as const, source: 'git', observedAt: now, subjectVersion: 'sha-1' });
-const successfulEffect = { execute: async () => undefined, observe: async () => ({ state: 'succeeded' as const, detail: 'external receipt' }) };
+const successfulEffect = { effectId: 'effect-1', execute: async () => undefined, observe: async (input: { commandId: string }) => ({ commandId: input.commandId, effectId: 'effect-1', state: 'succeeded' as const, source: 'test-observer', observedAt: now, evidenceRefs: ['artifact:receipt'], detail: 'external receipt' }) };
 
 test('admission uses trusted identity, validates kind payload, and preserves idempotent immutable intent', () => {
   const { kernel, host } = opened();
   host.issueAutonomyLease(lease());
-  const admitted = kernel.admit(command(), allowed());
+  const admitted = host.admit(command(), allowed());
   assert.equal(admitted.command.actorId, 'trusted-runtime-actor');
   assert.equal('issueAutonomyLease' in kernel, false);
   assert.equal('acquireOwnership' in kernel, false);
   assert.equal('db' in kernel, false);
-  assert.equal(kernel.admit(command(), allowed()).immutableHash, admitted.immutableHash);
-  assert.throws(() => kernel.admit(command({ payload: { invalid: true } }), allowed()), /Required/);
-  assert.throws(() => kernel.admit(command({ payload: { value: 'different' } }), allowed()), /collision/);
-  kernel.close();
+  assert.equal(host.admit(command(), allowed()).immutableHash, admitted.immutableHash);
+  assert.throws(() => host.admit(command({ payload: { invalid: true } }), allowed()), /Required/);
+  assert.throws(() => host.admit(command({ payload: { value: 'different' } }), allowed()), /collision/);
+  host.close();
 });
 
 test('leases fail closed for expiry, revocation, and wrong scope', () => {
   const { kernel, host, setNow } = opened();
   host.issueAutonomyLease(lease());
   setNow(later);
-  assert.throws(() => kernel.admit(command(), allowed()), /expired/);
+  assert.throws(() => host.admit(command(), allowed()), /expired/);
   setNow(now);
   host.revokeAutonomyLease('lease-1');
-  assert.throws(() => kernel.admit(command(), allowed()), /revoked/);
+  assert.throws(() => host.admit(command(), allowed()), /revoked/);
   host.issueAutonomyLease(lease({ leaseId: 'lease-2', scope: { repositoryId: 'repo-2', mapNodeIds: [] } }));
-  assert.throws(() => kernel.admit(command({ leaseId: 'lease-2' }), allowed()), /scope/);
-  kernel.close();
+  assert.throws(() => host.admit(command({ leaseId: 'lease-2' }), allowed()), /scope/);
+  assert.throws(() => host.issueAutonomyLease(lease({ leaseId: 'future-lease', issuedAt: later, expiresAt: '2026-09-15T02:00:00Z' })), /future/);
+  assert.throws(() => host.claim('command-1', { executorId: 'bad-expiry' }, 'not-a-timestamp'), /datetime/);
+  host.close();
 });
 
 test('a false known fact refuses an effect and a stale claimant cannot begin it', async () => {
   const { kernel, host, setNow } = opened();
   host.issueAutonomyLease(lease());
   const withFact = command({ expected: [{ authority: 'git', subject: 'head', version: 'sha-1', predicate: 'is exact head' }] });
-  kernel.admit(withFact, allowed());
-  const first = kernel.claim('command-1', 'worker-a', '2026-09-15T00:10:00Z');
-  await assert.rejects(kernel.perform('command-1', first, async () => ({ value: false, state: 'known', source: 'git', observedAt: now, subjectVersion: 'sha-1' }), successfulEffect), /not freshly known/);
+  host.admit(withFact, allowed());
+  const first = host.claim('command-1', { executorId: 'worker-a' }, '2026-09-15T00:10:00Z');
+  await assert.rejects(host.perform('command-1', first, { executorId: 'worker-a' }, async () => ({ value: false, state: 'known', source: 'git', observedAt: now, subjectVersion: 'sha-1' }), successfulEffect), /not freshly known/);
+  assert.equal(kernel.getCommand('command-1')?.status, 'refused');
+  host.admit(command({ commandId: 'stale-claim', idempotencyKey: 'stale-claim' }), allowed());
+  const stale = host.claim('stale-claim', { executorId: 'worker-a' }, '2026-09-15T00:10:00Z');
   setNow('2026-09-15T00:11:00Z');
-  const second = kernel.claim('command-1', 'worker-b', '2026-09-15T00:20:00Z');
-  await assert.rejects(kernel.perform('command-1', first, trueFact, successfulEffect), /claim is stale/);
-  assert.equal((await kernel.perform('command-1', second, trueFact, successfulEffect)).state, 'succeeded');
-  kernel.close();
+  const second = host.claim('stale-claim', { executorId: 'worker-b' }, '2026-09-15T00:20:00Z');
+  await assert.rejects(host.perform('stale-claim', stale, { executorId: 'worker-a' }, trueFact, successfulEffect), /claim is stale/);
+  assert.equal((await host.perform('stale-claim', second, { executorId: 'worker-b' }, trueFact, successfulEffect)).state, 'succeeded');
+  host.close();
 });
 
 test('opening a second connection does not recover a live claimant', () => {
   const path = databasePath();
   const first = opened(path);
   first.host.issueAutonomyLease(lease());
-  first.kernel.admit(command(), allowed());
-  first.kernel.claim('command-1', 'live-worker', '2026-09-15T00:10:00Z');
+  first.host.admit(command(), allowed());
+  first.host.claim('command-1', { executorId: 'live-worker' }, '2026-09-15T00:10:00Z');
   const second = opened(path);
   assert.equal(second.kernel.getCommand('command-1')?.status, 'claimed');
-  first.kernel.close(); second.kernel.close();
+  first.host.close(); second.host.close();
 });
 
 test('ownership compare-and-swap fences stale orchestrator commands while supervisor authority survives transfer', async () => {
@@ -97,33 +102,33 @@ test('ownership compare-and-swap fences stale orchestrator commands while superv
   const second = opened(path);
   first.host.issueAutonomyLease(lease());
   first.host.acquireOwnership({ runId: 'run-1', leaseId: 'controller-1', owner: 'astra', sessionId: 'session-1', epoch: 1, issuedAt: now, expiresAt: later }, 0);
-  first.kernel.admit(command({ origin: 'orchestrator', commandId: 'queued-old-epoch', idempotencyKey: 'queued-old-epoch', orchestratorLeaseId: 'controller-1', orchestratorEpoch: 1 }), { actorId: 'trusted-orchestrator', sessionId: 'session-1', allowedOrigins: ['orchestrator'] });
+  first.host.admit(command({ origin: 'orchestrator', commandId: 'queued-old-epoch', idempotencyKey: 'queued-old-epoch', orchestratorLeaseId: 'controller-1', orchestratorEpoch: 1 }), { actorId: 'trusted-orchestrator', sessionId: 'session-1', allowedOrigins: ['orchestrator'] });
   assert.throws(() => second.host.acquireOwnership({ runId: 'run-1', leaseId: 'controller-race', owner: 'fable', sessionId: 'session-race', epoch: 1, issuedAt: now, expiresAt: later }, 0), /compare-and-swap/);
   first.host.acquireOwnership({ runId: 'run-1', leaseId: 'controller-2', owner: 'fable', sessionId: 'session-2', epoch: 2, issuedAt: now, expiresAt: later }, 1);
-  assert.throws(() => first.kernel.claim('queued-old-epoch', 'stale-owner', '2026-09-15T00:10:00Z'), /stale/);
-  assert.throws(() => first.kernel.admit(command({ origin: 'orchestrator', orchestratorLeaseId: 'controller-1', orchestratorEpoch: 1 }), { actorId: 'trusted-orchestrator', allowedOrigins: ['orchestrator'] }), /stale/);
-  assert.throws(() => first.kernel.admit(command({ origin: 'orchestrator', commandId: 'controller-2-command', idempotencyKey: 'controller-2-command', orchestratorLeaseId: 'controller-2', orchestratorEpoch: 2 }), { actorId: 'trusted-orchestrator', sessionId: 'wrong-session', allowedOrigins: ['orchestrator'] }), /session/);
+  assert.throws(() => first.host.claim('queued-old-epoch', { executorId: 'stale-owner' }, '2026-09-15T00:10:00Z'), /stale/);
+  assert.throws(() => first.host.admit(command({ origin: 'orchestrator', orchestratorLeaseId: 'controller-1', orchestratorEpoch: 1 }), { actorId: 'trusted-orchestrator', allowedOrigins: ['orchestrator'] }), /stale/);
+  assert.throws(() => first.host.admit(command({ origin: 'orchestrator', commandId: 'controller-2-command', idempotencyKey: 'controller-2-command', orchestratorLeaseId: 'controller-2', orchestratorEpoch: 2 }), { actorId: 'trusted-orchestrator', sessionId: 'wrong-session', allowedOrigins: ['orchestrator'] }), /session/);
   const supervisor = command({ origin: 'supervisor', commandId: 'supervisor-1', idempotencyKey: 'supervisor-1' });
-  first.kernel.admit(supervisor, { actorId: 'trusted-supervisor', allowedOrigins: ['supervisor'] });
-  const claim = first.kernel.claim('supervisor-1', 'supervisor', '2026-09-15T00:10:00Z');
-  assert.equal((await first.kernel.perform('supervisor-1', claim, trueFact, successfulEffect)).state, 'succeeded');
-  first.kernel.close(); second.kernel.close();
+  first.host.admit(supervisor, { actorId: 'trusted-supervisor', allowedOrigins: ['supervisor'] });
+  const claim = first.host.claim('supervisor-1', { executorId: 'supervisor' }, '2026-09-15T00:10:00Z');
+  assert.equal((await first.host.perform('supervisor-1', claim, { executorId: 'supervisor' }, trueFact, successfulEffect)).state, 'succeeded');
+  first.host.close(); second.host.close();
 });
 
 test('events and attempts are append-only durable records', () => {
-  const { kernel } = opened();
+  const { host } = opened();
   const event = { eventId: 'event-1', schemaVersion: 1, kind: 'worker.completed', source: 'pi', sourceEventId: 'pi-1', occurredAt: now, recordedAt: now, correlationId: 'run-1', payload: {} } as const;
-  kernel.appendEvent(event); kernel.appendEvent(event);
-  assert.throws(() => kernel.appendEvent({ ...event, payload: { changed: true } }), /collision/);
+  host.appendEvent(event); host.appendEvent(event);
+  assert.throws(() => host.appendEvent({ ...event, payload: { changed: true } }), /collision/);
   const attempt = {
     attemptId: 'attempt-1', mapNodeId: 'node-1', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder',
     model: 'sol', family: 'openai', provider: 'openai', capability: 'build', poolId: 'subscription', workspace: '/safe/worktree', baseSha: 'abc',
     contextManifestHash: 'sha256:context', leaseId: 'lease-1', sessionIds: ['session-1'], commandIds: ['command-1'], startedAt: now,
     evidenceRefs: [], usageRefs: [], findingRefs: [],
   };
-  kernel.appendAttempt(attempt); kernel.appendAttempt(attempt);
-  assert.throws(() => kernel.appendAttempt({ ...attempt, role: 'reviewer' }), /immutable/);
-  kernel.close();
+  host.appendAttempt(attempt); host.appendAttempt(attempt);
+  assert.throws(() => host.appendAttempt({ ...attempt, role: 'reviewer' }), /immutable/);
+  host.close();
 });
 
 test('a real child-process interruption leaves an unknown effect that cannot be blindly retried', () => {
@@ -136,25 +141,27 @@ test('a real child-process interruption leaves an unknown effect that cannot be 
   const reopened = opened(path);
   reopened.host.recoverAfterRestart();
   assert.equal(reopened.kernel.getCommand('command-1')?.status, 'unknown');
-  assert.throws(() => reopened.kernel.claim('command-1', 'retry', '2026-09-15T00:10:00Z'), /not claimable/);
-  reopened.kernel.recordObservation('command-1', { state: 'succeeded', detail: 'read external identity' });
+  assert.throws(() => reopened.host.claim('command-1', { executorId: 'retry' }, '2026-09-15T00:10:00Z'), /not claimable/);
+  reopened.host.recordObservation('command-1', { commandId: 'command-1', effectId: 'effect-1', state: 'succeeded', source: 'external-readback', observedAt: now, evidenceRefs: ['artifact:external-id'], detail: 'read external identity' });
   assert.equal(reopened.kernel.getCommand('command-1')?.status, 'succeeded');
-  reopened.kernel.close();
+  reopened.host.close();
 });
 
 test('a terminal observation cannot be overwritten and clock rollback refuses new authority', async () => {
   const { kernel, host, setNow } = opened();
   host.issueAutonomyLease(lease());
-  kernel.admit(command(), allowed());
-  const claim = kernel.claim('command-1', 'worker', '2026-09-15T00:10:00Z');
+  host.admit(command(), allowed());
+  const claim = host.claim('command-1', { executorId: 'worker' }, '2026-09-15T00:10:00Z');
   assert.equal(claim.generation, 1);
-  await kernel.perform('command-1', claim, trueFact, { execute: async () => undefined, observe: async () => ({ state: 'unknown' }) });
-  kernel.recordObservation('command-1', { state: 'succeeded' });
-  kernel.recordObservation('command-1', { state: 'failed', detail: 'late stale observer' });
+  await host.perform('command-1', claim, { executorId: 'worker' }, trueFact, { effectId: 'effect-1', execute: async () => undefined, observe: async (input) => ({ commandId: input.commandId, effectId: 'effect-1', state: 'unknown', source: 'observer', observedAt: now, evidenceRefs: ['artifact:unknown'] }) });
+  host.recordObservation('command-1', { commandId: 'command-1', effectId: 'effect-1', state: 'succeeded', source: 'readback', observedAt: now, evidenceRefs: ['artifact:success'] });
+  host.recordObservation('command-1', { commandId: 'command-1', effectId: 'effect-1', state: 'failed', source: 'late', observedAt: now, evidenceRefs: ['artifact:late'], detail: 'late stale observer' });
   assert.equal(kernel.getCommand('command-1')?.status, 'succeeded');
+  assert.equal(kernel.getCommand('command-1')?.observations.length, 2);
+  assert.throws(() => host.recordObservation('command-1', { commandId: 'command-1', effectId: 'wrong-effect', state: 'succeeded', source: 'bad', observedAt: now, evidenceRefs: ['artifact:bad'] }), /identity/);
   setNow('2026-09-15T00:30:00Z');
-  kernel.admit(command({ commandId: 'highwater', idempotencyKey: 'highwater' }), allowed());
+  host.admit(command({ commandId: 'highwater', idempotencyKey: 'highwater' }), allowed());
   setNow('2026-09-15T00:20:00Z');
-  assert.throws(() => kernel.admit(command({ commandId: 'rollback', idempotencyKey: 'rollback' }), allowed()), /clock moved backwards/);
-  kernel.close();
+  assert.throws(() => host.admit(command({ commandId: 'rollback', idempotencyKey: 'rollback' }), allowed()), /clock moved backwards/);
+  host.close();
 });

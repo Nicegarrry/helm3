@@ -73,6 +73,21 @@ test('a command envelope is not executable until its registered payload validate
   }).commandId, 'cmd-1');
 });
 
+test('an executable payload registry cannot alter the command payload', () => {
+  const withExtraField = { ...command, origin: 'worker', payload: { attemptId: 'attempt-1', unexpected: true } };
+  assert.throws(() => parseExecutableCommand(withExtraField, {
+    'worker.spawn': z.object({ attemptId: z.string() }),
+  }), /preserve exact JSON semantics/);
+  assert.throws(() => parseExecutableCommand({ ...command, origin: 'worker', payload: { retries: '3' } }, {
+    'worker.spawn': z.object({ retries: z.coerce.number() }),
+  }), /preserve exact JSON semantics/);
+  assert.throws(() => parseExecutableCommand({ ...command, origin: 'worker', payload: {} }, {
+    'worker.spawn': z.object({ retries: z.number().default(1) }),
+  }), /preserve exact JSON semantics/);
+  const inheritedRegistry = Object.create({ 'worker.spawn': z.object({ attemptId: z.string() }) }) as Record<string, z.ZodType<unknown>>;
+  assert.throws(() => parseExecutableCommand({ ...command, origin: 'worker' }, inheritedRegistry), /No payload schema/);
+});
+
 test('timestamps, identifiers, and quantities are validated at contract boundaries', () => {
   assert.equal(createObservationSchema(z.string()).safeParse({
     value: 'fresh', state: 'known', source: 'github', observedAt: '2026-09-15T00:00:00+10:00',
@@ -83,6 +98,13 @@ test('timestamps, identifiers, and quantities are validated at contract boundari
     issuedAt: '2026-09-15T00:00:00Z', expiresAt: '2026-09-16T00:00:00Z',
     maxConcurrency: Number.POSITIVE_INFINITY, maxAttemptsPerNode: -1,
     poolLimits: [{ poolId: 'pool', unit: 'tokens', limit: Number.NaN }], protectedReserves: [],
+  }).success, false);
+  assert.equal(commandSchema.safeParse({ ...command, origin: 'worker', commandId: ' cmd-1' }).success, false);
+  assert.equal(autonomyLeaseSchema.safeParse({
+    leaseId: 'l', revision: Number.MAX_SAFE_INTEGER + 1, issuedBy: 'human', parentAuthorityId: 'p',
+    scope: { repositoryId: 'r', mapNodeIds: [] }, allowedActions: [],
+    issuedAt: '2026-09-15T00:00:00Z', expiresAt: '2026-09-15T00:00:00Z',
+    maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [],
   }).success, false);
 });
 
@@ -98,4 +120,22 @@ test('result and event seams reject malformed durable records', () => {
     runId: 'run', leaseId: 'lease', owner: 'astra', sessionId: 'session', epoch: 0,
     issuedAt: '2026-09-15T00:00:00Z', expiresAt: '2026-09-15T01:00:00Z',
   }).success, false);
+});
+
+test('worker and gate results round-trip as claims and evidence records', () => {
+  const workerResult = {
+    status: 'succeeded', summary: 'Implemented the change.', changed_files: ['src/a.ts'], commits: ['abc123'],
+    decisions: ['Use contracts.'], discoveries: ['No prior schema.'], tests_claimed: ['npm test'],
+    acceptance_claims: [{ criterionId: 'ac-1', claim: 'Schema validates.', evidenceRefs: ['artifact:test-log'] }],
+    risks: [], unresolved: [], artifacts: [{ ref: 'artifact:worker-result', hash: 'sha256:abc', mediaType: 'application/json' }],
+    recommended_next_action: 'Review the evidence.',
+  };
+  const gateResult = {
+    gateId: 'unit', trustedDefinitionRef: 'policy:unit', definitionHash: 'sha256:def', command: ['npm', 'test'],
+    repositoryId: 'repo', headSha: 'abc123', exitStatus: 0,
+    checks: [{ name: 'contracts', result: 'pass', evidenceRefs: ['artifact:test-log'] }],
+    artifactRefs: ['artifact:test-log'], observedAt: '2026-09-15T00:00:00Z',
+  };
+  assert.deepEqual(workerResultSchema.parse(workerResult), workerResult);
+  assert.deepEqual(gateResultSchema.parse(gateResult), gateResult);
 });

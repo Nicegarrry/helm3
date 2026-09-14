@@ -19,6 +19,11 @@ preconditions before an effect. An authenticated runtime resolves actor
 identity; parsing model-supplied payload never authenticates `actorId` or grants
 authority.
 
+A registered payload schema must preserve the supplied payload's exact JSON
+semantics. The boundary rejects schemas whose parse result strips fields,
+coerces values, inserts defaults, or transforms the payload. It therefore never
+validates one payload and returns another under the same command hash.
+
 The `origin: 'orchestrator'` discriminator requires an ownership lease reference
 and a positive epoch. Other origins structurally reject those controller fields.
 The schemas validate nonempty opaque IDs, UTC RFC3339 timestamps, and finite

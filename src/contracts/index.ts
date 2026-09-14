@@ -2,9 +2,13 @@ import { z, type ZodType } from 'zod';
 
 /** UTC RFC3339 timestamps are strings at the domain boundary. */
 export const utcTimestampSchema = z.string().datetime({ offset: false });
-const nonEmptyString = z.string().trim().min(1);
+const nonEmptyString = z.string().min(1).refine(
+  (value) => value.trim() === value && value.trim().length > 0,
+  'must be nonempty and must not have surrounding whitespace',
+);
 const nonNegativeFiniteNumber = z.number().finite().nonnegative();
-const positiveInteger = z.number().int().positive();
+const nonNegativeSafeInteger = z.number().int().safe().nonnegative();
+const positiveInteger = z.number().int().safe().positive();
 
 export const rawArtifactRefSchema = z.object({
   ref: nonEmptyString,
@@ -72,17 +76,44 @@ export type Command = z.infer<typeof commandSchema>;
 
 export type CommandPayloadRegistry = Readonly<Record<string, ZodType<unknown>>>;
 
+function preservesJsonSemantics(input: unknown, validated: unknown): boolean {
+  if (input === null || validated === null) return input === validated;
+  if (typeof input === 'string' || typeof input === 'boolean') return input === validated;
+  if (typeof input === 'number') return Number.isFinite(input) && input === validated;
+  if (Array.isArray(input)) {
+    return Array.isArray(validated)
+      && input.length === validated.length
+      && input.every((value, index) => preservesJsonSemantics(value, validated[index]));
+  }
+  if (typeof input !== 'object' || typeof validated !== 'object' || validated === null || Array.isArray(validated)) {
+    return false;
+  }
+  const inputPrototype = Object.getPrototypeOf(input);
+  const validatedPrototype = Object.getPrototypeOf(validated);
+  if ((inputPrototype !== Object.prototype && inputPrototype !== null)
+    || (validatedPrototype !== Object.prototype && validatedPrototype !== null)) return false;
+  const inputRecord = input as Record<string, unknown>;
+  const validatedRecord = validated as Record<string, unknown>;
+  const inputKeys = Object.keys(inputRecord);
+  const validatedKeys = Object.keys(validatedRecord);
+  return inputKeys.length === validatedKeys.length
+    && inputKeys.every((key) => Object.hasOwn(validatedRecord, key)
+      && preservesJsonSemantics(inputRecord[key], validatedRecord[key]));
+}
+
 /** Rejects unknown kinds: a generic envelope is never executable authority. */
 export function parseExecutableCommand(
   input: unknown,
   payloadRegistry: CommandPayloadRegistry,
 ): Command {
   const command = commandSchema.parse(input);
-  const payloadSchema = payloadRegistry[command.kind];
-  if (!payloadSchema) {
+  if (!Object.hasOwn(payloadRegistry, command.kind)) {
     throw new Error(`No payload schema is registered for command kind: ${command.kind}`);
   }
-  payloadSchema.parse(command.payload);
+  const validatedPayload = payloadRegistry[command.kind].parse(command.payload);
+  if (!preservesJsonSemantics(command.payload, validatedPayload)) {
+    throw new Error(`Payload schema for command kind ${command.kind} must preserve exact JSON semantics`);
+  }
   return command;
 }
 
@@ -128,8 +159,8 @@ export const autonomyLeaseSchema = z.object({
   allowedActions: z.array(nonEmptyString),
   issuedAt: utcTimestampSchema,
   expiresAt: utcTimestampSchema,
-  maxConcurrency: nonNegativeFiniteNumber,
-  maxAttemptsPerNode: nonNegativeFiniteNumber,
+  maxConcurrency: nonNegativeSafeInteger,
+  maxAttemptsPerNode: nonNegativeSafeInteger,
   poolLimits: z.array(resourceLimitSchema),
   protectedReserves: z.array(protectedReserveSchema),
 }).strict().superRefine((lease, context) => {
@@ -180,6 +211,7 @@ export const attemptSchema = z.object({
   role: nonEmptyString,
   model: nonEmptyString,
   family: nonEmptyString,
+  provider: nonEmptyString,
   capability: nonEmptyString,
   poolId: nonEmptyString,
   workspace: nonEmptyString,
@@ -187,10 +219,13 @@ export const attemptSchema = z.object({
   contextManifestHash: nonEmptyString,
   leaseId: nonEmptyString,
   sessionIds: z.array(nonEmptyString),
+  commandIds: z.array(nonEmptyString),
   startedAt: utcTimestampSchema,
   endedAt: utcTimestampSchema.optional(),
   outcome: z.enum(['succeeded', 'partial', 'failed', 'cancelled', 'unknown']).optional(),
   evidenceRefs: z.array(nonEmptyString),
+  usageRefs: z.array(nonEmptyString),
+  findingRefs: z.array(nonEmptyString),
   handoffId: nonEmptyString.optional(),
 }).strict();
 export type Attempt = z.infer<typeof attemptSchema>;

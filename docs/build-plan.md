@@ -1,6 +1,6 @@
 # Proposed Helm 3 Map and build plan
 
-Status: proposed Map, pending the `APPROVAL` gate. It is a changeable approach
+Status: first implementation wave approved after context clean; see [authority record](wave1-authority.md). Remaining waves are planned. It is a changeable approach
 to the approved Brief, not a workflow DSL or a promise that elapsed time alone
 authorises action.
 

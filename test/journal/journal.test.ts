@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { chmod, mkdtemp, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -164,6 +164,27 @@ test('concurrent same-identity writes fence metadata while retaining a losing ra
 
     const same = await Promise.all([journal.append(event(Buffer.from('first'), 'pi:event:same-race')), journal.append(event(Buffer.from('first'), 'pi:event:same-race'))]);
     assert.deepEqual(same[0], same[1]);
+
+    const crossSource = await Promise.allSettled([
+      journal.append({ ...event(Buffer.from('source-a'), 'pi:event:global-id'), source: 'pi-a' }),
+      journal.append({ ...event(Buffer.from('source-b'), 'pi:event:global-id'), source: 'pi-b' }),
+    ]);
+    const crossWinner = crossSource.find((result): result is PromiseFulfilledResult<{ ref: string; hash: string; mediaType: string }> => result.status === 'fulfilled');
+    assert.ok(crossWinner);
+    assert.ok(crossSource.some((result) => result.status === 'rejected' && result.reason instanceof ArtifactConflictError));
+    assert.deepEqual(await journal.read(crossWinner.value, 'pi:event:global-id'), crossWinner.value.hash.endsWith(sha256(Buffer.from('source-a'))) ? Buffer.from('source-a') : Buffer.from('source-b'));
+  });
+});
+
+test('fails closed when a sidecar classification or record binding is tampered', async () => {
+  await withJournal(async (journal, root) => {
+    const raw = await journal.append(event(Buffer.from('policy'), 'pi:event:policy'));
+    const sidecar = join(root, 'metadata', `${sha256(Buffer.from(JSON.stringify(['pi:event:policy'])))}.json`);
+    const metadata = JSON.parse(await readFile(sidecar, 'utf8'));
+    metadata.classification = 'not-a-policy';
+    await writeFile(sidecar, JSON.stringify(metadata), { mode: 0o600 });
+    await assert.rejects(journal.read(raw, 'pi:event:policy'), /invalid artifact metadata/);
+    await assert.rejects(journal.rebuildIndex(), /invalid artifact metadata/);
   });
 });
 

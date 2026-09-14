@@ -1,6 +1,6 @@
 # Helm 3
 
-Preparation repository for a durable control plane for autonomous software development.
+A durable control plane for autonomous software development.
 
 Status: first-wave foundation in progress (2026-09-15). The human approval is recorded; the live ACCESS check remains open and the kernel/raw-artifact work is still in progress.
 
@@ -17,7 +17,7 @@ This repository is independent of `Nicegarrry/helm-cli` while Opus completes Mil
 - [Current first-wave progress](docs/wave1-progress.md)
 - [Operator preparation runbook](docs/operator-runbook.md) and [worker brief template](docs/worker-brief-template.md)
 
-## Validate preparation
+## Validate the current foundation
 
 ```sh
 python3 scripts/check-preparation.py

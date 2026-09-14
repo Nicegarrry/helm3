@@ -1,0 +1,16 @@
+name: Preparation validation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  documents:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate design provenance, Map dependencies and document links
+        run: python3 scripts/check-preparation.py

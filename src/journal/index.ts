@@ -71,6 +71,23 @@ function refFor(hash: string, mediaType: string): RawArtifactRef {
   return { ref: `${REF_PREFIX}${hash}`, hash: `sha256:${hash}`, mediaType };
 }
 
+function recordIdFor(metadata: Omit<ArtifactMetadata, 'recordId'>): string {
+  return hashBytes(Buffer.from(JSON.stringify([
+    metadata.schemaVersion,
+    metadata.source,
+    metadata.sourceIdentity,
+    metadata.raw.ref,
+    metadata.raw.hash,
+    metadata.raw.mediaType,
+    metadata.classification,
+    metadata.derivedFrom ?? null,
+  ])));
+}
+
+function metadataPathId(sourceIdentity: string): string {
+  return hashBytes(Buffer.from(JSON.stringify([sourceIdentity])));
+}
+
 function hashFromRef(raw: RawArtifactRef): string {
   const hash = raw.hash.replace(/^sha256:/, '');
   if (!SHA256.test(hash) || raw.ref !== `${REF_PREFIX}${hash}` || raw.mediaType.trim() !== raw.mediaType || raw.mediaType.length === 0) {
@@ -166,9 +183,7 @@ export class ArtifactJournal {
     const raw = refFor(hash, mediaType);
     const sensitiveAlias = (await this.allMetadata()).some((entry) => entry.raw.hash === raw.hash && entry.classification === 'sensitive');
     if (sensitiveAlias && classification !== 'sensitive') throw new ArtifactAccessError('ordinary artifact cannot alias existing sensitive bytes');
-    const recordId = hashBytes(Buffer.from(JSON.stringify([source, sourceIdentity, hash])));
-    const metadata: ArtifactMetadata = {
-      recordId,
+    const metadataWithoutId: Omit<ArtifactMetadata, 'recordId'> = {
       schemaVersion: 1,
       source,
       sourceIdentity,
@@ -176,6 +191,7 @@ export class ArtifactJournal {
       classification,
       ...(input.derivedFrom ? { derivedFrom: input.derivedFrom } : {}),
     };
+    const metadata: ArtifactMetadata = { ...metadataWithoutId, recordId: recordIdFor(metadataWithoutId) };
     const existing = await this.findMetadata(sourceIdentity);
     if (existing) {
       if (JSON.stringify(existing) === JSON.stringify(metadata)) {
@@ -198,7 +214,7 @@ export class ArtifactJournal {
     }
     await this.hooks.afterRawPublished?.();
 
-    await atomicFile(this.metadataPath(metadata.recordId), Buffer.from(JSON.stringify(metadata)));
+    await atomicFile(this.metadataPath(sourceIdentity), Buffer.from(JSON.stringify(metadata)));
     await this.hooks.afterMetadataPublishedBeforeIndex?.();
     await this.index.record(metadata);
     return raw;
@@ -249,6 +265,9 @@ export class ArtifactJournal {
 
   async rebuildIndex(): Promise<number> {
     const metadata = await this.allMetadata();
+    // Validate the complete durable input before touching the replaceable projection.
+    // A failed rebuild must leave the last known-good index intact.
+    for (const entry of metadata) await this.assertRawIntact(hashFromRef(entry.raw));
     await this.index.reset();
     for (const entry of metadata) await this.index.record(entry);
     return metadata.length;
@@ -257,7 +276,9 @@ export class ArtifactJournal {
   close(): void { this.index.close?.(); }
 
   private rawPath(hash: string): string { return join(this.root, 'raw', 'sha256', hash); }
-  private metadataPath(recordId: string): string { return join(this.root, 'metadata', `${recordId}.json`); }
+  private metadataPath(sourceIdentity: string): string {
+    return join(this.root, 'metadata', `${metadataPathId(sourceIdentity)}.json`);
+  }
 
   private async allMetadata(): Promise<ArtifactMetadata[]> {
     const files = await readdir(join(this.root, 'metadata'));
@@ -267,10 +288,7 @@ export class ArtifactJournal {
       if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
       const path = join(this.root, 'metadata', file);
       await regularFile(path);
-      const entry = JSON.parse(await readFile(path, 'utf8')) as ArtifactMetadata;
-      const rawHash = hashFromRef(entry.raw);
-      const expectedRecordId = hashBytes(Buffer.from(JSON.stringify([entry.source, entry.sourceIdentity, rawHash])));
-      if (entry.recordId !== file.slice(0, -5) || entry.recordId !== expectedRecordId || entry.schemaVersion !== 1) throw new ArtifactIntegrityError(`invalid artifact metadata: ${file}`);
+      const entry = this.parseMetadata(JSON.parse(await readFile(path, 'utf8')), file);
       const sameIdentity = identities.get(entry.sourceIdentity);
       if (sameIdentity && sameIdentity.recordId !== entry.recordId) throw new ArtifactConflictError(`duplicate durable source identity: ${entry.sourceIdentity}`);
       identities.set(entry.sourceIdentity, entry);
@@ -281,6 +299,34 @@ export class ArtifactJournal {
 
   private async findMetadata(sourceIdentity: string): Promise<ArtifactMetadata | undefined> {
     return (await this.allMetadata()).find((entry) => entry.sourceIdentity === sourceIdentity);
+  }
+
+  private parseMetadata(input: unknown, file: string): ArtifactMetadata {
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new ArtifactIntegrityError(`invalid artifact metadata: ${file}`);
+    const entry = input as Partial<ArtifactMetadata>;
+    if (entry.schemaVersion !== 1
+      || typeof entry.recordId !== 'string'
+      || typeof entry.source !== 'string'
+      || typeof entry.sourceIdentity !== 'string'
+      || entry.classification !== 'ordinary' && entry.classification !== 'sensitive'
+      || typeof entry.raw !== 'object' || entry.raw === null) throw new ArtifactIntegrityError(`invalid artifact metadata: ${file}`);
+    required(entry.source, 'metadata source');
+    required(entry.sourceIdentity, 'metadata sourceIdentity');
+    const raw = entry.raw as RawArtifactRef;
+    hashFromRef(raw);
+    if (entry.derivedFrom !== undefined) hashFromRef(entry.derivedFrom);
+    const metadataWithoutId: Omit<ArtifactMetadata, 'recordId'> = {
+      schemaVersion: 1,
+      source: entry.source,
+      sourceIdentity: entry.sourceIdentity,
+      raw,
+      classification: entry.classification,
+      ...(entry.derivedFrom ? { derivedFrom: entry.derivedFrom } : {}),
+    };
+    if (file.slice(0, -5) !== metadataPathId(entry.sourceIdentity) || entry.recordId !== recordIdFor(metadataWithoutId)) {
+      throw new ArtifactIntegrityError(`invalid artifact metadata: ${file}`);
+    }
+    return { ...metadataWithoutId, recordId: entry.recordId };
   }
 
   private async assertRawIntact(hash: string): Promise<void> {

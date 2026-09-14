@@ -10,6 +10,7 @@ import {
   ArtifactIntegrityError,
   ArtifactJournal,
 } from '../../src/journal/index.js';
+import { SQLiteArtifactIndex } from '../../src/journal/sqlite-index.js';
 
 const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
@@ -116,17 +117,74 @@ test('reports missing and tampered raw bytes instead of silently accepting them'
   });
 });
 
-test('conflicting durable source sidecars fail reconciliation instead of selecting one record', async () => {
+test('rebuild validates every raw artifact before preserving or changing the existing projection', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helm3-journal-rebuild-'));
+  const index = await SQLiteArtifactIndex.open(join(root, 'projection.sqlite'));
+  const journal = await ArtifactJournal.open({ root, index });
+  const goodBytes = Buffer.from('good');
+  const badBytes = Buffer.from('bad');
+  try {
+    const good = await journal.append(event(goodBytes, 'pi:event:good'));
+    const bad = await journal.append(event(badBytes, 'pi:event:bad'));
+    const badPath = join(root, 'raw', 'sha256', bad.hash.slice('sha256:'.length));
+    await unlink(badPath);
+    await assert.rejects(journal.rebuildIndex(), /artifact bytes are missing/);
+    assert.equal((await index.findBySourceIdentity('pi:event:good'))?.raw.hash, good.hash);
+    assert.equal((await index.findBySourceIdentity('pi:event:bad'))?.raw.hash, bad.hash);
+
+    await writeFile(badPath, badBytes, { mode: 0o600 });
+    await chmod(badPath, 0o600);
+    assert.equal(await journal.rebuildIndex(), 2);
+    await writeFile(badPath, 'tampered', { mode: 0o600 });
+    await chmod(badPath, 0o600);
+    await assert.rejects(journal.rebuildIndex(), /artifact bytes do not match/);
+    assert.equal((await index.findBySourceIdentity('pi:event:good'))?.raw.hash, good.hash);
+    assert.equal((await index.findBySourceIdentity('pi:event:bad'))?.raw.hash, bad.hash);
+  } finally {
+    journal.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('concurrent same-identity writes fence metadata while retaining a losing raw blob as an orphan', async () => {
+  await withJournal(async (journal) => {
+    const identity = 'pi:event:concurrent';
+    const results = await Promise.allSettled([
+      journal.append(event(Buffer.from('first'), identity)),
+      journal.append(event(Buffer.from('second'), identity)),
+    ]);
+    const winner = results.find((result): result is PromiseFulfilledResult<{ ref: string; hash: string; mediaType: string }> => result.status === 'fulfilled');
+    const loser = results.find((result) => result.status === 'rejected');
+    assert.ok(winner, 'one identity publication must win');
+    assert.ok(loser?.reason instanceof ArtifactConflictError, 'the losing metadata publication must refuse');
+    assert.deepEqual(await journal.read(winner.value, identity), winner.value.hash.endsWith(sha256(Buffer.from('first'))) ? Buffer.from('first') : Buffer.from('second'));
+    const issues = await journal.reconcile();
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].kind, 'orphan_raw');
+
+    const same = await Promise.all([journal.append(event(Buffer.from('first'), 'pi:event:same-race')), journal.append(event(Buffer.from('first'), 'pi:event:same-race'))]);
+    assert.deepEqual(same[0], same[1]);
+
+    const crossSource = await Promise.allSettled([
+      journal.append({ ...event(Buffer.from('source-a'), 'pi:event:global-id'), source: 'pi-a' }),
+      journal.append({ ...event(Buffer.from('source-b'), 'pi:event:global-id'), source: 'pi-b' }),
+    ]);
+    const crossWinner = crossSource.find((result): result is PromiseFulfilledResult<{ ref: string; hash: string; mediaType: string }> => result.status === 'fulfilled');
+    assert.ok(crossWinner);
+    assert.ok(crossSource.some((result) => result.status === 'rejected' && result.reason instanceof ArtifactConflictError));
+    assert.deepEqual(await journal.read(crossWinner.value, 'pi:event:global-id'), crossWinner.value.hash.endsWith(sha256(Buffer.from('source-a'))) ? Buffer.from('source-a') : Buffer.from('source-b'));
+  });
+});
+
+test('fails closed when a sidecar classification or record binding is tampered', async () => {
   await withJournal(async (journal, root) => {
-    await journal.append(event(Buffer.from('first'), 'pi:event:race'));
-    const other = await journal.append(event(Buffer.from('second'), 'pi:event:other'));
-    const otherPath = join(root, 'metadata', `${sha256(Buffer.from(JSON.stringify(['pi', 'pi:event:other', other.hash.slice('sha256:'.length)])))}.json`);
-    const conflicting = JSON.parse(await readFile(otherPath, 'utf8'));
-    conflicting.sourceIdentity = 'pi:event:race';
-    conflicting.recordId = sha256(Buffer.from(JSON.stringify([conflicting.source, conflicting.sourceIdentity, other.hash.slice('sha256:'.length)])));
-    await writeFile(join(root, 'metadata', `${conflicting.recordId}.json`), JSON.stringify(conflicting), { mode: 0o600 });
-    await assert.rejects(journal.reconcile(), /duplicate durable source identity/);
-    await assert.rejects(journal.rebuildIndex(), /duplicate durable source identity/);
+    const raw = await journal.append(event(Buffer.from('policy'), 'pi:event:policy'));
+    const sidecar = join(root, 'metadata', `${sha256(Buffer.from(JSON.stringify(['pi:event:policy'])))}.json`);
+    const metadata = JSON.parse(await readFile(sidecar, 'utf8'));
+    metadata.classification = 'not-a-policy';
+    await writeFile(sidecar, JSON.stringify(metadata), { mode: 0o600 });
+    await assert.rejects(journal.read(raw, 'pi:event:policy'), /invalid artifact metadata/);
+    await assert.rejects(journal.rebuildIndex(), /invalid artifact metadata/);
   });
 });
 

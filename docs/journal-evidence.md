@@ -1,6 +1,6 @@
 # Wave 1 raw artifact journal evidence
 
-Date: 2026-09-15. Scope: the raw execution-artifact portion of [JOURNAL #31](https://github.com/Nicegarrry/helm3/issues/31). This implements evidence retention and an artifact projection only. It does not create Helm Log facts, alter GitHub/Map task truth, or close #31.
+Date: 2026-09-15. Scope: library-only acceptance of the raw execution-artifact portion of [JOURNAL #31](https://github.com/Nicegarrry/helm3/issues/31), delivered through [PR #40](https://github.com/Nicegarrry/helm3/pull/40) and the provider-free same-SQLite integration in [PR #42](https://github.com/Nicegarrry/helm3/pull/42). Native producer wiring remains later work. This retains evidence and an artifact projection only; it does not create Helm Log facts or alter GitHub/Map task truth.
 
 ## Durable shape
 
@@ -41,4 +41,6 @@ PATH=/Users/sa/.nvm/versions/node/v22.22.2/bin:$PATH npm run typecheck
 PATH=/Users/sa/.nvm/versions/node/v22.22.2/bin:$PATH npm test
 ```
 
-Both passed. The suite reports 18 passing tests, including byte preservation for event/envelope/context/gate inputs; duplicate and conflict behavior across global source identities; both crash windows; missing/tampered bytes; projection rebuild preservation; traversal rejection; file modes; sensitive policy and alias protection; and malformed-sidecar failure. Node prints its current experimental warning for `node:sqlite`; that warning is retained as an implementation limitation, not hidden as a production-readiness claim.
+The standalone journal head `9aaa614` reports 19 test groups: nine contracts and ten journal groups. It covers byte preservation for event/envelope/context/gate inputs; duplicate and conflict behavior across global source identities; both crash windows; missing/tampered bytes; projection rebuild preservation; traversal rejection; file modes; sensitive policy and alias protection; and malformed-sidecar failure.
+
+[PR #42](https://github.com/Nicegarrry/helm3/pull/42) adds the provider-free same-SQLite integration oracle. The merged combined suite reports 28 groups: nine contracts, eight kernel, ten journal, and one integration group. It proves library-level coordination between the kernel Log and artifact projection in a shared SQLite file; native producer wiring remains later work. Node prints its current experimental warning for `node:sqlite`; that warning is retained as an implementation limitation, not hidden as a production-readiness claim.

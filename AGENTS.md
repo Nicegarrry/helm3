@@ -2,9 +2,9 @@
 
 ## Current authority
 
-The human authorised repository creation, private GitHub setup, briefing documents, a proposed Map/issues, and independent feasibility preparation. Product implementation, continuous operation, paid model probes, merging product work, and migration from Helm CLI are not yet authorised. Stop at a concrete proposed build plan for human approval. Public SDK/package reads and local no-network/mock feasibility tests are authorised preparation.
+The human explicitly approved the first implementation wave after context clean on 2026-09-15: “pick up the handoff and review map and the first wave. Let’s get working using mostly Luna/terra workers and reviewers please”. The scoped decision is recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235) and [wave-one authority](docs/wave1-authority.md). Implement and review that foundation in isolated worktrees and integrate reviewed PRs. No purchases, top-ups, incremental paid API fallback, unattended Helm run lease or predecessor import is authorised. Public SDK/package reads and local provider-free tests remain permitted.
 
-Do not read, modify, fetch, build, test, index, dispatch into, or otherwise interfere with `/Users/sa/code/other/helm-cli` or its worktrees during this preparation. Opus is finishing Milestone 1 there. Do not infer completion from historic state. Await an explicit handoff and immutable commit SHA.
+Do not read, modify, fetch, build, test, index, dispatch into, or otherwise interfere with `/Users/sa/code/other/helm-cli` or its worktrees until an explicit immutable handoff. Opus is finishing Milestone 1 there. Do not infer completion from historic state. Await an explicit handoff and immutable commit SHA.
 
 ## Durable contract
 
@@ -27,4 +27,4 @@ Use Terra for bounded implementation/investigation and Luna for mechanical tasks
 
 Prefer codebase-memory-mcp for code discovery: search_graph, trace_path, get_code_snippet, query_graph, search_code. Run index_repository first when unindexed. Use file search for non-code/config/string literals or insufficient graph results. Do not index the predecessor repository.
 
-No product build begins until a CONTEXT CLEAN return and the explicit build-approval issue records the human's approval. A proposed plan or elapsed time is not authority.
+Context clean and first-wave approval are now recorded. Subsequent autonomous waves require their actual delegated scope and bounds; elapsed time is not authority.

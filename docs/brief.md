@@ -31,13 +31,13 @@ Reference scenario: add Instagram sharing to a capture system so shared content 
 
 ## Current delegated authority
 
-On 2026-09-15 the human authorised independent preparation: a new private repository, GitHub Map/issues, briefing documents, and hours 0–4 work that does not depend on Helm CLI. Opus is completing predecessor Milestone 1. Do not touch that repository or its worktrees. The latest instruction authorises saving this addendum and revising the Map/plan, then requires a context clean followed by an explicit go-ahead before the first implementation wave.
+On 2026-09-15, after context clean, the human approved beginning the first implementation wave using mostly Luna/Terra workers and reviewers. See [the scoped authority record](wave1-authority.md). The fixed original design and addendum are unchanged. Opus is completing predecessor Milestone 1; do not touch that repository or its worktrees without the immutable handoff.
 
 The new repository is an authorised preparation location. Final history-preserving migration/import is a later decision; no claim that this setup has already preserved predecessor history.
 
 ## Resources and planning target
 
-Use Terra/Luna workers where appropriate and retain frontier cognition for coordination, difficult decisions and acceptance. The addendum expands the target: use 48–72 elapsed hours of continuous multi-agent execution after build authorisation with a 96-hour contingency, or explicitly re-estimate at six hours from observed constraints. This is not a promise or a spending lease. No dollar cap, live provider probe allowance, continuous-run lease or production merge authority has yet been granted. Absence of a limit is not unlimited authority.
+Use Terra/Luna workers where appropriate and retain frontier cognition for coordination, difficult decisions and acceptance. The addendum expands the target: use 48–72 elapsed hours of continuous multi-agent execution after build authorisation with a 96-hour contingency, or explicitly re-estimate at six hours from observed constraints. This is not a promise or a spending lease. Reviewed first-wave PR integration is authorised. No incremental API spend cap, unattended continuous-run lease or production deployment authority has been granted. Live provider probes still require provable finite subscription-route bounds. Absence of a limit is not unlimited authority.
 
 ## Completion evidence
 

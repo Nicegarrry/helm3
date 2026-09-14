@@ -26,16 +26,18 @@ The thread options include `approvalPolicy`, `sandboxMode`, `networkAccessEnable
 
 ## Provider-free conformance evidence
 
-`spikes/sdk-feasibility/codex-sdk-conformance.mjs` runs the installed SDK against a generated local fake Codex executable. It does not invoke an OpenAI endpoint, reads no login state, and passes no API key. The fake executable records the SDK CLI arguments, emits local JSONL events, and blocks until its process receives cancellation.
+`spikes/sdk-feasibility/codex-sdk-conformance.mjs` runs the installed SDK against a generated local fake Codex executable. It does not invoke an OpenAI endpoint, reads no login state, and passes no API key. The fake executable receives an explicitly limited environment (`PATH` plus two fake-test paths; the SDK adds its internal originator marker), records the SDK CLI arguments, emits local JSONL events, and blocks until its process receives cancellation.
 
 Observed command and result:
 
 ```text
 PATH=/Users/sa/.nvm/versions/node/v22.22.2/bin:$PATH npm run codex-conformance
-{"network":"none; the pinned SDK launched only a generated local fake executable","sdk":"@openai/codex-sdk@0.154.0","lifecycle":{"startThread":true,"run":true,"resumeThread":true,"streamedEvents":true,"abortSignalCancellation":true},"nativeDriverGaps":["interrupt","stop","checkpoint","handoff"]}
+{"network":"none; the pinned SDK launched only a generated local fake executable","sdk":"@openai/codex-sdk@0.154.0","lifecycle":{"startThread":true,"run":true,"resumeThread":true,"streamedEvents":true,"abortSignalCancellation":"local child exit observed"},"cancellationObservation":{"timeoutMs":1000,"pid":"observed local PID","localOnly":true},"nativeDriverGaps":["interrupt","stop","checkpoint","handoff"]}
 ```
 
-The conformance test verifies that the real SDK starts a thread, receives a thread ID from `thread.started`, buffers a completed run, resumes by the returned ID, forwards restrictive thread options to its executable, consumes streamed events, and propagates an aborted turn through `AbortSignal`. `typecheck.ts` separately compiles the imported SDK classes and event/cancellation types. This is interface and local-process evidence only; the fake executable is deliberately not a provider oracle.
+The conformance test verifies that the real SDK starts a thread, receives a thread ID from `thread.started`, buffers a completed run, resumes by the returned ID, forwards restrictive thread options to its executable, consumes streamed events, and propagates an aborted turn through `AbortSignal`. For the cancellation case, the fake writes its PID before the stream event; after abort, the test requires both an `exit` marker for that PID and an `ESRCH` process check within 1,000 ms. If either observation misses the finite timeout, the test fails; its `finally` block sends `SIGKILL` to a still-live fake child before removing temporary files. `typecheck.ts` separately compiles the imported SDK classes and event/cancellation types.
+
+This proves local child-process termination through the pinned SDK's `AbortSignal` path. It does not prove provider-side cancellation, zero charge after cancellation, or a native driver `interrupt`/`stop` result. Consistent with the protocol, `cancel_requested` remains only an event until Helm observes the relevant real external outcome; a missing or ambiguous provider observation must be recorded as `pending` or `unknown`.
 
 ## ACCESS status and next bounded action
 

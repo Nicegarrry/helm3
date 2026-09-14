@@ -1,6 +1,6 @@
-# Proposed minimum protocol, revision 1
+# Frozen first-wave protocol, revision 1
 
-This is a reviewable interface proposal, not a shipped API or approved implementation. It defines the seams independently of the predecessor. Field spellings may change together before the contract freeze; semantics must not drift independently across workers. All timestamps are UTC RFC3339; IDs are opaque; hashes identify exact immutable bytes. Credentials never appear in these records.
+This freezes the first-wave shared interface names and boundary semantics. It is not a shipped API, executor, store, journal, provider integration, or claim that either SDK implements a driver method natively. It defines the seams independently of the predecessor. Field spellings in `src/contracts/index.ts` are frozen for this wave; later additions require an explicit compatible revision. All timestamps are UTC RFC3339; IDs are opaque; hashes identify exact immutable bytes. Credentials never appear in these records.
 
 ## Command and observation
 

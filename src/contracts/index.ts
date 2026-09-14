@@ -147,6 +147,56 @@ const protectedReserveSchema = z.object({
   amount: nonNegativeFiniteNumber,
 }).strict();
 
+const knownIntegerTelemetrySchema = z.object({
+  state: z.literal('known'),
+  value: nonNegativeSafeInteger,
+}).strict();
+const unavailableIntegerTelemetrySchema = z.object({
+  state: z.enum(['unknown', 'unavailable']),
+  value: z.null(),
+  reason: nonEmptyString.optional(),
+}).strict();
+export const integerTelemetrySchema = z.union([knownIntegerTelemetrySchema, unavailableIntegerTelemetrySchema]);
+export type IntegerTelemetry = z.infer<typeof integerTelemetrySchema>;
+
+export const contextOccupancySchema = z.object({
+  contextTokens: integerTelemetrySchema,
+  contextWindow: integerTelemetrySchema,
+  compactionCount: integerTelemetrySchema,
+}).strict();
+export type ContextOccupancy = z.infer<typeof contextOccupancySchema>;
+
+const knownCostTelemetrySchema = z.object({
+  state: z.literal('known'),
+  amount: nonNegativeFiniteNumber,
+  unit: nonEmptyString,
+}).strict();
+const unavailableCostTelemetrySchema = z.object({
+  state: z.enum(['unknown', 'unavailable']),
+  amount: z.null(),
+  unit: nonEmptyString.optional(),
+  reason: nonEmptyString.optional(),
+}).strict();
+export const costTelemetrySchema = z.union([knownCostTelemetrySchema, unavailableCostTelemetrySchema]);
+export type CostTelemetry = z.infer<typeof costTelemetrySchema>;
+
+export const usageRecordSchema = z.object({
+  usageId: nonEmptyString,
+  schemaVersion: z.literal(1),
+  attemptId: nonEmptyString,
+  sessionId: nonEmptyString,
+  model: nonEmptyString,
+  provider: nonEmptyString,
+  poolId: nonEmptyString,
+  consumer: nonEmptyString,
+  observedAt: utcTimestampSchema,
+  contextOccupancy: contextOccupancySchema,
+  consumedTokens: integerTelemetrySchema,
+  cachedTokens: integerTelemetrySchema,
+  cost: costTelemetrySchema,
+}).strict();
+export type UsageRecord = z.infer<typeof usageRecordSchema>;
+
 export const autonomyLeaseSchema = z.object({
   leaseId: nonEmptyString,
   revision: positiveInteger,

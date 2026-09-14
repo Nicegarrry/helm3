@@ -33,8 +33,15 @@ or provider SDK behavior.
 
 `Attempt` records the prescribed historical snapshot shape. This wave does not
 make it persistent or enforce its immutability; storage and mutation policy are
-the kernel lane's responsibility. `WorkerResult` remains a claim manifest and
-`GateResult` records observation/evidence: neither makes a claim true.
+the kernel lane's responsibility. Its `usageRefs` name separate immutable
+`UsageRecord` entries, which retain an ID/version; attempt, session, model,
+provider, pool and consumer provenance; observation time; context occupancy
+(`contextTokens`, `contextWindow`, `compactionCount`); consumed/cached token
+telemetry; and cost telemetry. Each telemetry field records known versus
+unknown/unavailable explicitly. A known cost retains its source unit; this
+contract has no dollar conversion, inferred zero, reservation, or economy
+policy. `WorkerResult` remains a claim manifest and `GateResult` records
+observation/evidence: neither makes a claim true.
 
 The driver has no embedded authority. Starting a driver session does not grant a
 controller epoch, and no Fable/Astra SDK is assumed to implement the interface

@@ -9,6 +9,7 @@ import {
   orchestratorLeaseSchema,
   parseExecutableCommand,
   rawArtifactRefSchema,
+  usageRecordSchema,
   workerResultSchema,
 } from '../../src/contracts/index.js';
 import { z } from 'zod';
@@ -138,4 +139,45 @@ test('worker and gate results round-trip as claims and evidence records', () => 
   };
   assert.deepEqual(workerResultSchema.parse(workerResult), workerResult);
   assert.deepEqual(gateResultSchema.parse(gateResult), gateResult);
+});
+
+test('usage records preserve provenance and distinguish known from unavailable telemetry', () => {
+  const knownUsage = {
+    usageId: 'usage-1', schemaVersion: 1, attemptId: 'attempt-1', sessionId: 'session-1',
+    model: 'astra', provider: 'openai', poolId: 'subscription', consumer: 'orchestrator',
+    observedAt: '2026-09-15T00:00:00Z',
+    contextOccupancy: {
+      contextTokens: { state: 'known', value: 1200 }, contextWindow: { state: 'known', value: 128000 },
+      compactionCount: { state: 'known', value: 1 },
+    },
+    consumedTokens: { state: 'known', value: 900 }, cachedTokens: { state: 'unknown', value: null, reason: 'provider omitted cache telemetry' },
+    cost: { state: 'known', amount: 1.25, unit: 'provider-credit' },
+  };
+  const unknownUsage = {
+    ...knownUsage,
+    usageId: 'usage-2',
+    contextOccupancy: {
+      contextTokens: { state: 'unavailable', value: null }, contextWindow: { state: 'unknown', value: null },
+      compactionCount: { state: 'unknown', value: null },
+    },
+    consumedTokens: { state: 'unknown', value: null }, cachedTokens: { state: 'unavailable', value: null },
+    cost: { state: 'unknown', amount: null, reason: 'provider did not report cost' },
+  };
+  assert.deepEqual(usageRecordSchema.parse(knownUsage), knownUsage);
+  assert.deepEqual(usageRecordSchema.parse(unknownUsage), unknownUsage);
+});
+
+test('usage records reject malformed or internally inconsistent telemetry', () => {
+  const usage = {
+    usageId: 'usage-1', schemaVersion: 1, attemptId: 'attempt-1', sessionId: 'session-1', model: 'astra',
+    provider: 'openai', poolId: 'subscription', consumer: 'orchestrator', observedAt: '2026-09-15T00:00:00Z',
+    contextOccupancy: {
+      contextTokens: { state: 'known', value: 1 }, contextWindow: { state: 'known', value: 2 }, compactionCount: { state: 'known', value: 0 },
+    },
+    consumedTokens: { state: 'known', value: 1 }, cachedTokens: { state: 'known', value: 0 }, cost: { state: 'known', amount: 0, unit: 'credit' },
+  };
+  assert.equal(usageRecordSchema.safeParse({ ...usage, consumedTokens: { state: 'known', value: -1 } }).success, false);
+  assert.equal(usageRecordSchema.safeParse({ ...usage, contextOccupancy: { ...usage.contextOccupancy, contextWindow: { state: 'known', value: Number.POSITIVE_INFINITY } } }).success, false);
+  assert.equal(usageRecordSchema.safeParse({ ...usage, cachedTokens: { state: 'unknown', value: 0 } }).success, false);
+  assert.equal(usageRecordSchema.safeParse({ ...usage, cost: { state: 'unknown', amount: 0 } }).success, false);
 });

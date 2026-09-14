@@ -57,6 +57,19 @@ test('deduplicates identical source records and refuses source identity conflict
   });
 });
 
+test('snapshots caller-owned bytes before asynchronous publication', async () => {
+  await withJournal(async (journal) => {
+    const original = Buffer.from('original');
+    const expected = Buffer.from(original);
+    const pending = journal.append(event(original, 'pi:event:mutable'));
+    original.fill(120);
+    const raw = await pending;
+    assert.equal(raw.hash, `sha256:${sha256(expected)}`);
+    assert.deepEqual(await journal.read(raw, 'pi:event:mutable'), expected);
+    assert.deepEqual(await journal.reconcile(), []);
+  });
+});
+
 test('crash after raw publish leaves an explicit unknown-identity orphan without inventing metadata', async () => {
   const root = await mkdtemp(join(tmpdir(), 'helm3-journal-crash-'));
   const bytes = Buffer.from('raw-before-metadata');

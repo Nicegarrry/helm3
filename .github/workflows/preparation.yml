@@ -30,3 +30,6 @@ jobs:
       - name: Run deterministic local SDK assertions
         run: npm run probe
         working-directory: spikes/sdk-feasibility
+      - name: Check Codex SDK lifecycle against local fake executable
+        run: npm run codex-conformance
+        working-directory: spikes/sdk-feasibility

@@ -167,6 +167,10 @@ export class ArtifactJournal {
   }
 
   async append(input: ArtifactAppend, access: ArtifactAccessContext = { permitSensitive: false }): Promise<RawArtifactRef> {
+    // Callers may mutate Uint8Arrays or reference objects after invoking this async method.
+    // Freeze the durable input before the first await so hash, bytes, and metadata agree.
+    const bytes = Buffer.from(input.bytes);
+    const derivedFrom = input.derivedFrom ? { ...input.derivedFrom } : undefined;
     const source = required(input.source, 'source');
     const sourceIdentity = required(input.sourceIdentity, 'sourceIdentity');
     const mediaType = required(input.mediaType, 'mediaType');
@@ -174,12 +178,12 @@ export class ArtifactJournal {
     if (classification === 'sensitive' && (!this.hostPolicy.allowSensitiveWrites || !access.permitSensitive)) {
       throw new ArtifactAccessError('sensitive artifact write requires trusted host policy and access context');
     }
-    if (input.derivedFrom) {
-      const parentHash = hashFromRef(input.derivedFrom);
+    if (derivedFrom) {
+      const parentHash = hashFromRef(derivedFrom);
       await this.assertRawIntact(parentHash);
     }
 
-    const hash = hashBytes(input.bytes);
+    const hash = hashBytes(bytes);
     const raw = refFor(hash, mediaType);
     const sensitiveAlias = (await this.allMetadata()).some((entry) => entry.raw.hash === raw.hash && entry.classification === 'sensitive');
     if (sensitiveAlias && classification !== 'sensitive') throw new ArtifactAccessError('ordinary artifact cannot alias existing sensitive bytes');
@@ -189,7 +193,7 @@ export class ArtifactJournal {
       sourceIdentity,
       raw,
       classification,
-      ...(input.derivedFrom ? { derivedFrom: input.derivedFrom } : {}),
+      ...(derivedFrom ? { derivedFrom } : {}),
     };
     const metadata: ArtifactMetadata = { ...metadataWithoutId, recordId: recordIdFor(metadataWithoutId) };
     const existing = await this.findMetadata(sourceIdentity);
@@ -210,7 +214,7 @@ export class ArtifactJournal {
       if (hashBytes(existingBytes) !== hash) throw new ArtifactIntegrityError(`existing raw file hash mismatch: ${hash}`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      await atomicFile(rawPath, input.bytes);
+      await atomicFile(rawPath, bytes);
     }
     await this.hooks.afterRawPublished?.();
 

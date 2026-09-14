@@ -13,6 +13,7 @@ This repository is independent of `Nicegarrry/helm-cli` while Opus completes Mil
 - [Proposed build plan](docs/build-plan.md), [Map snapshot](docs/map.md), and [39-section coverage](docs/coverage.md)
 - [Control-plane contracts](docs/contracts.md) and [minimum protocol](docs/protocol.md)
 - [Full acceptance protocol](docs/acceptance.md) and [migration handoff requirements](docs/migration-handoff.md)
+- [SDK feasibility and remaining live-access gaps](docs/sdk-feasibility.md)
 - [Operator preparation runbook](docs/operator-runbook.md) and [worker brief template](docs/worker-brief-template.md)
 
 ## Validate preparation

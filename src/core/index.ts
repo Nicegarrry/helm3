@@ -16,7 +16,7 @@ import {
   type OrchestratorLease,
   type Precondition,
 } from '../contracts/index.js';
-import type { ZodType } from 'zod';
+import { z, type ZodType } from 'zod';
 
 type Statement = { run(...values: unknown[]): { changes?: number }; get(...values: unknown[]): unknown; all(...values: unknown[]): unknown[] };
 type Database = { exec(sql: string): void; prepare(sql: string): Statement; close(): void };
@@ -31,19 +31,30 @@ export type KernelOptions = {
   kinds: Readonly<Record<string, KernelKind>>;
   now?: () => string;
 };
-export type Claim = { commandId: string; token: string; generation: number; expiresAt: string };
-export type CommandStatus = 'queued' | 'claimed' | 'effect_started' | 'succeeded' | 'failed' | 'unknown';
-export type CommandRecord = { command: Command; status: CommandStatus; immutableHash: string; claim?: Claim };
+export type TrustedExecutor = { executorId: string };
+export type Claim = { commandId: string; executorId: string; token: string; generation: number; expiresAt: string };
+export type CommandStatus = 'queued' | 'claimed' | 'effect_started' | 'observing' | 'succeeded' | 'failed' | 'refused' | 'unknown';
+export type CommandRecord = { command: Command; status: CommandStatus; immutableHash: string; claim?: Claim; observations: EffectObservation[] };
+export const effectObservationSchema = z.object({
+  commandId: z.string().min(1),
+  effectId: z.string().min(1),
+  state: z.enum(['succeeded', 'failed', 'unknown']),
+  source: z.string().min(1),
+  observedAt: z.string().datetime({ offset: false }),
+  evidenceRefs: z.array(z.string().min(1)).min(1),
+  detail: z.string().optional(),
+}).strict();
+export type EffectObservation = z.infer<typeof effectObservationSchema>;
 export type KernelEffect = {
+  effectId: string;
   execute(command: Command): Promise<void> | void;
   observe(command: Command): Promise<EffectObservation> | EffectObservation;
 };
-export type EffectObservation = { state: 'succeeded' | 'failed' | 'unknown'; detail?: string };
 
 type CommandRow = {
   command_id: string; immutable_json: string; immutable_hash: string; status: CommandStatus;
   payload_json: string; payload_hash: string;
-  claim_token: string | null; claim_generation: number; claim_expires_at: string | null;
+  claim_token: string | null; claim_executor_id: string | null; claim_generation: number; claim_expires_at: string | null; effect_id: string | null;
 };
 
 function exactHash(value: string): string {
@@ -62,7 +73,7 @@ function isExpired(at: string, now: string): boolean {
  * Opens a single-host SQLite kernel. `host` is a privileged embedding seam;
  * callers exposed to models receive only `kernel` and cannot issue authority.
  */
-export type KernelClient = Pick<Kernel, 'admit' | 'claim' | 'perform' | 'recordObservation' | 'appendEvent' | 'appendAttempt' | 'getCommand' | 'close'>;
+export type KernelClient = Pick<Kernel, 'getCommand'>;
 
 export function openKernel(options: KernelOptions): { kernel: KernelClient; host: KernelHost } {
   const database = new DatabaseSync(options.databasePath, { timeout: 5_000 });
@@ -70,9 +81,7 @@ export function openKernel(options: KernelOptions): { kernel: KernelClient; host
   core.initialize();
   return {
     kernel: {
-      admit: core.admit.bind(core), claim: core.claim.bind(core), perform: core.perform.bind(core),
-      recordObservation: core.recordObservation.bind(core), appendEvent: core.appendEvent.bind(core),
-      appendAttempt: core.appendAttempt.bind(core), getCommand: core.getCommand.bind(core), close: core.close.bind(core),
+      getCommand: core.getCommand.bind(core),
     },
     host: new KernelHost(core),
   };
@@ -94,6 +103,13 @@ export class KernelHost {
   }
 
   recoverAfterRestart(): void { this.core.recoverInterrupted(); }
+  close(): void { this.core.close(); }
+  admit(intent: unknown, caller: TrustedCaller): CommandRecord { return this.core.admit(intent, caller); }
+  claim(commandId: string, executor: TrustedExecutor, expiresAt: string): Claim { return this.core.claim(commandId, executor, expiresAt); }
+  perform(commandId: string, claim: Claim, executor: TrustedExecutor, readFact: (precondition: Precondition) => Promise<Observation<boolean>>, effect: KernelEffect): Promise<EffectObservation> { return this.core.perform(commandId, claim, executor, readFact, effect); }
+  recordObservation(commandId: string, observation: EffectObservation): void { this.core.recordObservation(commandId, observation); }
+  appendEvent(event: Event): void { this.core.appendEvent(event); }
+  appendAttempt(attempt: Attempt): void { this.core.appendAttempt(attempt); }
 }
 
 class Kernel {
@@ -116,11 +132,12 @@ class Kernel {
       CREATE TABLE IF NOT EXISTS commands (
         command_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, repository_id TEXT NOT NULL, kind TEXT NOT NULL, idempotency_key TEXT NOT NULL,
         immutable_json TEXT NOT NULL, immutable_hash TEXT NOT NULL, payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
-        status TEXT NOT NULL, claim_token TEXT, claim_generation INTEGER NOT NULL DEFAULT 0, claim_expires_at TEXT,
+        status TEXT NOT NULL, claim_token TEXT, claim_executor_id TEXT, claim_generation INTEGER NOT NULL DEFAULT 0, claim_expires_at TEXT, effect_id TEXT,
         UNIQUE(run_id, repository_id, kind, idempotency_key)
       );
       CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, source TEXT NOT NULL, source_event_id TEXT NOT NULL, bytes TEXT NOT NULL, UNIQUE(source, source_event_id));
       CREATE TABLE IF NOT EXISTS attempts (attempt_id TEXT PRIMARY KEY, bytes TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS effect_observations (observation_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, bytes TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS clock_highwater (name TEXT PRIMARY KEY, observed_at TEXT NOT NULL);
     `);
   }
@@ -140,7 +157,7 @@ class Kernel {
     const immutableHash = exactHash(immutableJson);
     return this.transaction(() => {
     this.assertAuthority(command, caller);
-      const existing = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_generation, claim_expires_at FROM commands WHERE run_id = ? AND repository_id = ? AND kind = ? AND idempotency_key = ?`).get(command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey));
+      const existing = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id FROM commands WHERE run_id = ? AND repository_id = ? AND kind = ? AND idempotency_key = ?`).get(command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey));
       if (existing) {
         if (existing.immutable_json !== immutableJson) throw new Error('idempotency collision has different immutable command bytes');
         return this.toRecord(existing);
@@ -149,11 +166,13 @@ class Kernel {
         command.commandId, command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey, immutableJson, immutableHash, payloadJson, exactHash(payloadJson),
       );
       this.appendGeneratedEvent('command.queued', command.commandId, { immutableHash });
-      return { command, status: 'queued', immutableHash };
+      return { command, status: 'queued', immutableHash, observations: [] };
     });
   }
 
-  claim(commandId: string, claimantId: string, expiresAt: string): Claim {
+  claim(commandId: string, executor: TrustedExecutor, expiresAt: string): Claim {
+    z.string().min(1).parse(executor.executorId);
+    z.string().datetime({ offset: false }).parse(expiresAt);
     return this.transaction(() => {
       const row = this.requireCommand(commandId);
       const now = this.safeNow();
@@ -166,44 +185,57 @@ class Kernel {
       const command = this.parseCommand(refreshed);
       this.assertAuthority(command);
       if (isExpired(expiresAt, now)) throw new Error('claim expiry must be in the future');
-      const claim: Claim = { commandId, token: randomUUID(), generation: refreshed.claim_generation + 1, expiresAt };
-      this.db.prepare(`UPDATE commands SET status = 'claimed', claim_token = ?, claim_generation = ?, claim_expires_at = ? WHERE command_id = ?`).run(claim.token, claim.generation, claim.expiresAt, commandId);
-      this.appendGeneratedEvent('command.claimed', commandId, { claimantId, generation: claim.generation });
+      const claim: Claim = { commandId, executorId: executor.executorId, token: randomUUID(), generation: refreshed.claim_generation + 1, expiresAt };
+      this.db.prepare(`UPDATE commands SET status = 'claimed', claim_token = ?, claim_executor_id = ?, claim_generation = ?, claim_expires_at = ? WHERE command_id = ?`).run(claim.token, claim.executorId, claim.generation, claim.expiresAt, commandId);
+      this.appendGeneratedEvent('command.claimed', commandId, { executorId: executor.executorId, generation: claim.generation });
       return claim;
     });
   }
 
-  async perform(commandId: string, claim: Claim, readFact: (precondition: Precondition) => Promise<Observation<boolean>>, effect: KernelEffect): Promise<EffectObservation> {
+  async perform(commandId: string, claim: Claim, executor: TrustedExecutor, readFact: (precondition: Precondition) => Promise<Observation<boolean>>, effect: KernelEffect): Promise<EffectObservation> {
+    z.string().min(1).parse(effect.effectId);
     const row = this.requireCommand(commandId);
-    this.assertCurrentClaim(row, claim);
+    this.assertCurrentClaim(row, claim, executor);
     const command = this.parseCommand(row);
     const observations: Array<Pick<Observation<boolean>, 'source' | 'observedAt' | 'subjectVersion'>> = [];
-    for (const precondition of command.expected) {
-      const observation = await readFact(precondition);
-      if (observation.state !== 'known' || observation.value !== true || (precondition.version && observation.subjectVersion !== precondition.version)) {
-        throw new Error(`precondition is not freshly known: ${precondition.subject}`);
+    try {
+      for (const precondition of command.expected) {
+        const observation = await readFact(precondition);
+        if (observation.state !== 'known' || observation.value !== true || (precondition.version && observation.subjectVersion !== precondition.version)) {
+          throw new Error(`precondition is not freshly known: ${precondition.subject}`);
+        }
+        observations.push({ source: observation.source, observedAt: observation.observedAt, subjectVersion: observation.subjectVersion });
       }
-      observations.push({ source: observation.source, observedAt: observation.observedAt, subjectVersion: observation.subjectVersion });
+      this.transaction(() => {
+        const current = this.requireCommand(commandId);
+        this.assertCurrentClaim(current, claim, executor);
+        this.assertAuthority(command);
+        this.db.prepare(`UPDATE commands SET status = 'effect_started', effect_id = ? WHERE command_id = ?`).run(effect.effectId, commandId);
+        this.appendGeneratedEvent('command.effect_started', commandId, { claimGeneration: claim.generation, executorId: executor.executorId, effectId: effect.effectId, observations });
+      });
+    } catch (error) {
+      this.refuseIfCurrent(commandId, claim, executor, error instanceof Error ? error.message : 'authority or precondition refusal');
+      throw error;
     }
-    this.transaction(() => {
-      const current = this.requireCommand(commandId);
-      this.assertCurrentClaim(current, claim);
-      this.assertAuthority(command);
-      this.db.prepare(`UPDATE commands SET status = 'effect_started' WHERE command_id = ?`).run(commandId);
-      this.appendGeneratedEvent('command.effect_started', commandId, { claimGeneration: claim.generation, observations });
-    });
     try {
       await effect.execute(command);
+      this.transaction(() => {
+        const current = this.requireCommand(commandId);
+        if (current.status === 'effect_started' && current.effect_id === effect.effectId) {
+          this.db.prepare(`UPDATE commands SET status = 'observing' WHERE command_id = ?`).run(commandId);
+          this.appendGeneratedEvent('command.observing', commandId, { effectId: effect.effectId });
+        }
+      });
       const observation = await effect.observe(command);
-      return this.setTerminal(commandId, observation.state, observation.detail ?? 'effect observation');
+      return this.setTerminal(commandId, observation);
     } catch (error) {
-      return this.setTerminal(commandId, 'unknown', error instanceof Error ? error.message : 'effect failed before observed result');
+      return this.setTerminal(commandId, { commandId, effectId: effect.effectId, state: 'unknown', source: 'kernel-effect', observedAt: this.now(), evidenceRefs: ['kernel:effect-error'], detail: error instanceof Error ? error.message : 'effect failed before observed result' });
     }
   }
 
   recordObservation(commandId: string, observation: EffectObservation): void {
     this.requireCommand(commandId);
-    this.setTerminal(commandId, observation.state, observation.detail ?? 'external observation');
+    this.setTerminal(commandId, observation);
   }
 
   appendEvent(event: Event): void {
@@ -225,11 +257,12 @@ class Kernel {
   }
 
   getCommand(commandId: string): CommandRecord | undefined {
-    const row = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_generation, claim_expires_at FROM commands WHERE command_id = ?`).get(commandId));
+    const row = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id FROM commands WHERE command_id = ?`).get(commandId));
     return row ? this.toRecord(row) : undefined;
   }
 
   storeLease(lease: AutonomyLease): void {
+    if (Date.parse(lease.issuedAt) > Date.parse(this.safeNow())) throw new Error('autonomy lease issuance cannot be in the future');
     const bytes = JSON.stringify(lease);
     this.transaction(() => {
       const existing = this.db.prepare(`SELECT bytes FROM autonomy_leases WHERE lease_id = ?`).get(lease.leaseId) as { bytes: string } | undefined;
@@ -257,7 +290,7 @@ class Kernel {
 
   recoverInterrupted(): void {
     this.transaction(() => {
-      const rows = this.db.prepare(`SELECT command_id, status FROM commands WHERE status IN ('claimed', 'effect_started')`).all() as Array<{ command_id: string; status: CommandStatus }>;
+      const rows = this.db.prepare(`SELECT command_id, status FROM commands WHERE status IN ('claimed', 'effect_started', 'observing')`).all() as Array<{ command_id: string; status: CommandStatus }>;
       for (const row of rows) {
         const next = row.status === 'claimed' ? 'queued' : 'unknown';
         this.db.prepare(`UPDATE commands SET status = ?, claim_token = NULL, claim_expires_at = NULL WHERE command_id = ?`).run(next, row.command_id);
@@ -287,24 +320,40 @@ class Kernel {
     }
   }
 
-  private setTerminal(commandId: string, status: EffectObservation['state'], detail: string): EffectObservation {
+  private setTerminal(commandId: string, input: EffectObservation): EffectObservation {
+    const observation = effectObservationSchema.parse(input);
     this.transaction(() => {
       const current = this.requireCommand(commandId);
-      if (current.status !== 'effect_started' && current.status !== 'unknown') return;
-      this.db.prepare(`UPDATE commands SET status = ?, claim_token = NULL, claim_expires_at = NULL WHERE command_id = ? AND status IN ('effect_started', 'unknown')`).run(status, commandId);
-      this.appendGeneratedEvent(`command.${status}`, commandId, { detail });
+      if (observation.commandId !== commandId || current.effect_id !== observation.effectId) throw new Error('observation does not match the expected command effect identity');
+      if (current.status !== 'effect_started' && current.status !== 'observing' && current.status !== 'unknown') return;
+      this.db.prepare(`UPDATE commands SET status = ?, claim_token = NULL, claim_executor_id = NULL, claim_expires_at = NULL WHERE command_id = ? AND status IN ('effect_started', 'observing', 'unknown')`).run(observation.state, commandId);
+      this.db.prepare(`INSERT INTO effect_observations (observation_id, command_id, bytes) VALUES (?, ?, ?)`).run(randomUUID(), commandId, JSON.stringify(observation));
+      this.appendGeneratedEvent(`command.${observation.state}`, commandId, { effectId: observation.effectId, source: observation.source, observedAt: observation.observedAt, evidenceRefs: observation.evidenceRefs });
     });
     const current = this.requireCommand(commandId);
-    return { state: current.status === 'succeeded' || current.status === 'failed' || current.status === 'unknown' ? current.status : 'unknown', detail };
+    return current.status === 'succeeded' || current.status === 'failed' || current.status === 'unknown' ? observation : { ...observation, state: 'unknown' };
   }
 
-  private assertCurrentClaim(row: CommandRow, claim: Claim): void {
-    if (row.status !== 'claimed' || row.claim_token !== claim.token || row.claim_generation !== claim.generation || row.claim_expires_at !== claim.expiresAt) throw new Error('claim is stale');
+  private assertCurrentClaim(row: CommandRow, claim: Claim, executor: TrustedExecutor): void {
+    if (row.status !== 'claimed' || row.claim_token !== claim.token || row.claim_executor_id !== claim.executorId || claim.executorId !== executor.executorId || row.claim_generation !== claim.generation || row.claim_expires_at !== claim.expiresAt) throw new Error('claim is stale');
     if (isExpired(claim.expiresAt, this.safeNow())) throw new Error('claim is expired');
   }
 
+  private refuseIfCurrent(commandId: string, claim: Claim, executor: TrustedExecutor, reason: string): void {
+    try {
+      this.transaction(() => {
+        const current = this.requireCommand(commandId);
+        if (current.status !== 'claimed' || current.claim_token !== claim.token || current.claim_executor_id !== executor.executorId || current.claim_generation !== claim.generation) return;
+        this.db.prepare(`UPDATE commands SET status = 'refused', claim_token = NULL, claim_executor_id = NULL, claim_expires_at = NULL WHERE command_id = ? AND status = 'claimed' AND claim_token = ? AND claim_generation = ?`).run(commandId, claim.token, claim.generation);
+        this.appendGeneratedEvent('command.refused', commandId, { reason, executorId: executor.executorId, claimGeneration: claim.generation });
+      });
+    } catch {
+      // A refusal record must never overwrite a newer claimant or terminal result.
+    }
+  }
+
   private requireCommand(commandId: string): CommandRow {
-    const row = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_generation, claim_expires_at FROM commands WHERE command_id = ?`).get(commandId));
+    const row = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id FROM commands WHERE command_id = ?`).get(commandId));
     if (!row) throw new Error('unknown command');
     return row;
   }
@@ -322,8 +371,10 @@ class Kernel {
 
   private toRecord(row: CommandRow): CommandRecord {
     const command = this.parseCommand(row);
-    const claim = row.claim_token && row.claim_expires_at ? { commandId: row.command_id, token: row.claim_token, generation: row.claim_generation, expiresAt: row.claim_expires_at } : undefined;
-    return { command, status: row.status, immutableHash: row.immutable_hash, claim };
+    const claim = row.claim_token && row.claim_expires_at && row.claim_executor_id ? { commandId: row.command_id, executorId: row.claim_executor_id, token: row.claim_token, generation: row.claim_generation, expiresAt: row.claim_expires_at } : undefined;
+    const observations = this.db.prepare(`SELECT bytes FROM effect_observations WHERE command_id = ? ORDER BY rowid`).all(row.command_id)
+      .map((item) => effectObservationSchema.parse(JSON.parse((item as { bytes: string }).bytes)));
+    return { command, status: row.status, immutableHash: row.immutable_hash, claim, observations };
   }
 
   private appendGeneratedEvent(kind: string, commandId: string, payload: unknown): void {

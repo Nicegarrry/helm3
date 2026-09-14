@@ -12,10 +12,10 @@ once semantics, public API authentication, provider quarantine, resource
 accounting, or SDK/GitHub execution.
 
 The trusted embedding receives a separate `KernelHost` for issuing/revoking
-Autonomy Leases, acquiring ownership epochs, and explicit restart recovery. A
-model-facing `KernelClient` facade has only command, claim, effect, observation,
-and append-only Log operations. This is a library capability boundary, not an
-authenticated transport boundary.
+Autonomy Leases, acquiring ownership epochs, explicit restart recovery, trusted
+admission/claim attribution, effect execution/observation, and append-only Log
+operations. The model-facing `KernelClient` is read-only (`getCommand`). This
+is a library capability boundary, not an authenticated transport boundary.
 
 Admission replaces the supplied actor with the trusted caller identity, checks
 the registered payload schema, recomputes the exact persisted payload hash, and
@@ -29,10 +29,11 @@ clock rollback.
 false value, unknown state, or version mismatch refuses before `effect_started`.
 It rechecks claim, authority, and ownership immediately after the awaited reads,
 then commits `effect_started` before awaiting the effect. An effect must be
-observed separately; an exception or interruption becomes `unknown` and cannot
-be claimed for blind replay. Observed terminal results can be appended after an
-ownership transfer, but a later stale result cannot overwrite an existing
-terminal record.
+observed separately; every terminal observation binds the command ID, persisted
+effect ID, source, UTC observation time, and evidence references. An exception
+or interruption becomes `unknown` and cannot be claimed for blind replay.
+Observed terminal results can be appended after an ownership transfer, but a
+later stale result cannot overwrite an existing terminal record.
 
 The test suite proves close/reopen durability, idempotency collisions, event
 source deduplication, immutable attempts, lease refusals, stale claims,

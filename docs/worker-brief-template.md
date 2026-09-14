@@ -25,6 +25,7 @@ State the narrow behaviour the operator or dependent worker will be able to obse
 ## Authority and resources
 
 - Lease/delegation ID and expiry:
+- Active orchestrator lease ID/epoch for orchestration-originated commands; separate supervisor authority if applicable:
 - Approved role/model/provider/pool; capability/data policy requirements:
 - Bounds on attempts, requests, concurrency and usage:
 - Permitted tools/network/destinations and enforced filesystem boundary:
@@ -32,4 +33,4 @@ State the narrow behaviour the operator or dependent worker will be able to obse
 
 ## Evidence and delivery
 
-Commit explicit paths on the assigned branch. Record tested head, exact commands and observed results. Label local mocks, actual SDK execution and live provider evidence separately. Attach a structured handoff: summary, changes/commits, tests, acceptance evidence, decisions, discoveries, risks, open questions and next action. Open a PR; never merge your own work. Preserve failed worktrees for recovery.
+Commit explicit paths on the assigned branch. Record tested head, exact commands and observed results. Label local mocks, actual SDK execution and live provider evidence separately. Attach a typed claim manifest: status, summary, changed files, commits, decisions, discoveries, claimed tests, acceptance claims, risks, unresolved items, artifacts and next action. Gates—not the manifest—record checked evidence. On a repairable gate failure, await same-session steer unless independence is requested. Open a PR; never merge your own work. Preserve failed worktrees for recovery.

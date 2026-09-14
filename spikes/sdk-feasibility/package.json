@@ -7,13 +7,15 @@
   "scripts": {
     "probe": "node probe.mjs",
     "sandbox-smoke": "node sandbox-smoke.mjs",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "codex-conformance": "node codex-sdk-conformance.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.270",
     "@anthropic-ai/sandbox-runtime": "0.0.76",
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-coding-agent": "0.85.1",
+    "@openai/codex-sdk": "0.154.0",
     "zod": "4.6.5"
   },
   "devDependencies": {

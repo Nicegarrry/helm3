@@ -10,7 +10,11 @@ First-wave authority is recorded in [APPROVAL #2](https://github.com/Nicegarrry/
 
 [ACCESS #5](https://github.com/Nicegarrry/helm3/issues/5) remains open. [PR #37](https://github.com/Nicegarrry/helm3/pull/37) provides provider-free Codex SDK 0.154.0 evidence: local start/resume/run/streaming and child exit after AbortSignal. It does not prove subscription entitlement, live Pi/Fable/Astra access, provider cancellation, quota bounds or cost.
 
-[KERNEL #6](https://github.com/Nicegarrry/helm3/issues/6) is the active Terra implementation frontier. Raw-artifact work may proceed against the frozen reference schema, but final Log integration depends on the kernel. No complete worker fabric, autonomous run, failover, production deployment or acceptance scenario is complete.
+[KERNEL #6](https://github.com/Nicegarrry/helm3/issues/6) is implemented in [PR #41](https://github.com/Nicegarrry/helm3/pull/41). It provides immutable commands, append-only events/attempts, trusted execution, separate ownership/autonomy checks, durable refusals and unknown-effect recovery. [PR #40](https://github.com/Nicegarrry/helm3/pull/40) implements the raw artifact journal and rebuildable SQLite index. Both passed independent Terra/Luna reviews and CI at their final heads.
+
+The integration oracle in `test/integration/evidence-log.test.ts` combines both modules in one SQLite file: after a simulated lost acknowledgement, the effect remains unknown; raw bytes survive; rebuilding the artifact index preserves commands and human decisions; hash-verified evidence reconciles success without executing twice. The complete local suite is 28 test groups (9 contracts, 8 kernel, 10 journal, 1 integration). Node 22's SQLite module remains experimental. These are local deterministic and provider-free SDK proofs, not full runtime acceptance.
+
+Live ACCESS remains the unresolved first-wave item. Full resource accounting/reserves/quarantine (#7), complete orchestrator-driver integration (#27/#16/#29), native Pi execution (#11/#12), and controlled failover (#33) remain later work. No complete worker fabric, unattended autonomous run, production deployment or original-plus-addendum acceptance scenario is complete. The predecessor handoff (#3) remains independent and untouched.
 
 ## Verification
 
@@ -23,7 +27,7 @@ npm run typecheck
 npm test
 ```
 
-These checks cover preparation and merged contract schemas/tests. They do not establish live provider access or full system readiness.
+These checks cover preparation, contracts, the deterministic kernel, raw artifacts and their shared-database integration. They do not establish live provider access or full system readiness.
 
 ## Orientation links
 

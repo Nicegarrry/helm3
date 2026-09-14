@@ -2,7 +2,8 @@
 
 This repository begins independently while Opus completes Helm CLI Milestone 1.
 Until an explicit handoff includes an immutable source SHA, do not inspect,
-fetch, copy, test or depend on the predecessor repository.
+fetch, copy, test or depend on the predecessor repository. Receiving the packet
+is a preparation gate only; import still requires build approval.
 
 ## Required handoff packet
 

@@ -2,7 +2,7 @@
 
 ## Current boundary
 
-The private repository is prepared; product implementation is awaiting explicit approval. The active predecessor belongs to Opus until its Milestone 1 handoff. This preparation did not inspect or modify it. Do not resume a historical Helm CLI task based on memory or this repository's existence.
+The first implementation wave is approved and supervised foundation work is underway; [current status](wave1-progress.md) is the operator entrypoint. The active predecessor belongs to Opus until its Milestone 1 handoff. This repository has not inspected or modified it. Do not resume a historical Helm CLI task based on memory or this repository's existence.
 
 ## Orient
 
@@ -11,9 +11,9 @@ The private repository is prepared; product implementation is awaiting explicit 
 3. Verify repository status and worktree ownership. Do not overwrite an existing worker's WIP.
 4. Run `python3 scripts/check-preparation.py`. Reproduce the pinned SDK probes if package/runtime changes or reported evidence needs refreshing; do not confuse a mock success with authenticated model access.
 
-## CONTEXT CLEAN, then explicit build approval
+## Historical approval gate
 
-Return the revised packet for CONTEXT CLEAN. Do not start any implementation wave until the human then explicitly approves it in issue 2. The first wave is contract/journal/epoch-fencing/SDK feasibility foundation only; automatic failover comes later. Do not claim a Codex SDK probe or subscription entitlement from the existing Claude SDK evidence.
+The context-clean and explicit first-wave approval gate is complete. The first wave remains contract/journal/epoch-fencing/SDK-feasibility foundation only; automatic failover comes later. Do not claim a Codex SDK probe or subscription entitlement from unrelated evidence.
 
 ## After explicit build approval
 

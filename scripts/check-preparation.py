@@ -34,6 +34,11 @@ for ticket in tickets:
     assert all(ticket.get(k) for k in ("key", "title", "body", "area", "phase")), "Incomplete ticket"
     assert isinstance(ticket["blocked_by"], list)
     visit(ticket["key"])
+for mapping, count in [("original-coverage.json", 39), ("addendum-coverage.json", 29)]:
+    coverage = json.loads((root / "docs" / mapping).read_text())
+    assert set(coverage) == set(map(str, range(1, count + 1))), f"Incomplete {mapping}"
+    for keys in coverage.values():
+        assert keys and all(key in by_key for key in keys), f"Unknown ticket in {mapping}"
 for file in root.rglob("*.md"):
     if any(part in {".git", "node_modules", ".firecrawl", ".codebase-memory"} for part in file.parts):
         continue

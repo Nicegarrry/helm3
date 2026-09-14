@@ -5,7 +5,7 @@ implementation must prove; it does not prescribe a worker workflow.
 
 ## Ownership and authority
 
-The human owns the Brief and all fixed requirements. Fable owns a fluid Map
+The human owns the Brief and all fixed requirements. The active orchestrator owns a fluid Map
 within that Brief and may propose, never silently apply, Brief changes. GitHub
 is authoritative for issue and PR state; Git/CI for repository reality; Pi for
 live native sessions; Helm's append-only Log for orchestration history. Cockpit
@@ -16,7 +16,7 @@ authority for a Map scope. It includes expiry, per-pool limits, concurrency,
 attempt limits and an orchestrator reserve. Expiry stops new spending and
 in-flight effect dispatch; safe observation and evidence capture continue.
 Cancellation requests are recorded and reconciled. A worker that cannot be
-confirmed stopped is quarantined from new authority and surfaced to Fable.
+confirmed stopped is quarantined from new authority and surfaced to the active orchestrator.
 Only a human can approve consumption of the orchestrator reserve or a Brief
 change. Pool reservations retain provider, pool, consumer class, command and
 usage-observation provenance; the active orchestrator reserve is enforced per
@@ -90,7 +90,7 @@ preserved until an explicit reclamation command observes them safe to reclaim.
 The deterministic supervisor performs only unambiguous lease-authorised
 transitions: record events, collect results, bounded retry, launch a required
 review, block on provider limits and reconcile. It never invents a plan. Events
-that need judgement create a deduplicated, coalesced Fable wake reason; Fable
+that need judgement create a deduplicated, coalesced active-orchestrator wake reason; the active orchestrator
 does not poll routinely. The orchestrator queue contains operational judgement;
 the human queue contains only product ambiguity, fixed-Brief changes, material
 risk or spending beyond authority.
@@ -109,17 +109,17 @@ those facts immediately before the irreversible action and reads back the
 result. Any changed head invalidates preparation.
 
 A Map node closes only after repository/CI reality and acceptance evidence agree,
-required handoffs are durable, dependencies are resolved, and Fable records a
+required handoffs are durable, dependencies are resolved, and the active orchestrator records a
 closure rationale. A merge alone is not closure; a UI projection alone is not
 evidence.
 
 ## Economy and context
 
 The model registry exposes provider facts, capability/role floors, pool,
-availability, data policy and observed calibration. Fable chooses legal models;
+availability, data policy and observed calibration. The active orchestrator chooses legal models;
 Helm reports compact resource reality and refuses illegal choices. Subscription
 capacity, API spend and top-up pools remain distinct. Calibration is evidence
-for Fable, never an automatic re-tiering rule.
+for the active orchestrator, never an automatic re-tiering rule.
 
 Context is deliberately scoped to objective, acceptance, relevant Brief and Map
 branch, decisions, dependencies and code evidence. Every substantial attempt

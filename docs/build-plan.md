@@ -25,7 +25,7 @@ After approval, run ACCESS first: finite, authorised native Pi and selected
 orchestrator-route requests. This chat's Terra/Luna availability is not proof
 those routes are usable. The Claude route has prior narrow SDK evidence; Codex
 SDK lifecycle/tool feasibility, including actual parity, remains unprobed. Freeze
-[protocol revision 0](protocol.md) after findings, then fan out across three lanes:
+[protocol revision 1](protocol.md) after findings, then fan out across three lanes:
 
 1. Terra: Pi native sessions, tool policy, context and isolation.
 2. Terra: command/journal/lease/epoch-fencing spine, then first driver and quality integration.
@@ -35,20 +35,30 @@ Keep stable predecessor behaviour behind proposed interfaces rather than specula
 checkpoint: report discovered interfaces, provider/authentication/isolation
 blockers and revised sequencing; it is not a guaranteed completion gate.
 
-Target 48–72 working hours after approval, with a 96-hour contingency: first the
+Target 48–72 elapsed hours of continuous multi-agent execution after approval, with a 96-hour contingency: first the
 foundation and one driver, then the second driver/comparable-feature proof,
 consultation, supervisor and quality loop, then acceptance and injected faults.
 Re-estimate at six hours from accepted output; do not promise the former 24–48
 hour range for the expanded scope.
 
-## Dependencies and migration boundary
+## Proposed first implementation wave
+
+After the requested context clean and explicit approval, start from [FREEZE #4](https://github.com/Nicegarrry/helm3/issues/4) and [ACCESS #5](https://github.com/Nicegarrry/helm3/issues/5). These finalise the contract and demonstrate the actual SDK routes without relying on predecessor code. The proposed worker allocation is:
+
+- Terra: common driver/lifecycle conformance and bounded Codex/Claude SDK access proof; distinguish supported operations from Helm-owned checkpoint/handoff mechanisms.
+- Terra: the minimal command/event/authority spine, including current-owner identity and old-epoch refusal at admission and effect. Add the ownership implementation only after KERNEL's durable command boundary exists.
+- Luna/Terra: terminal-envelope and raw-artifact schema fixtures, source/coverage checks and early API projection fixtures; avoid implementing a second authoritative store or a complete cockpit before the spine exists.
+
+Work the native dependency frontier rather than starting every named issue at once. Wave-one exit evidence is pinned SDK readiness, the shared contract, command durability under an interrupted effect, one-owner/stale-epoch tests, and raw evidence/index consistency. Live worker production, complete driver interchange, peer consultations and automated failover are later slices. No predecessor test freeze/import is claimed before HANDOFF. Subsequent execution follows only the scope actually delegated by the human.
+
+## Predecessor dependency
 
 No predecessor source, tests, credentials or working state are imported until
 Opus supplies an explicit Milestone 1 handoff with immutable SHA. Receipt of
 that handoff is independent of build approval. The later approved import lane
 classifies predecessor tests as behavioural or implementation-specific, pins
 the SHA in the Log, and ports only verified behaviours behind Helm 3 interfaces.
-It does not block independent Pi/Fable/client preparation or new control-plane slices. Full outcome closure remains blocked on the handoff/import/transition evidence; do not claim the entire migration complete without it.
+It does not block independent Pi/orchestrator/client preparation or new control-plane slices. Full outcome closure remains blocked on the handoff/import/transition evidence; do not claim the entire migration complete without it.
 
 ## Freeze checklist
 
@@ -62,9 +72,9 @@ assumptions; required machine gates; and exact section-35 acceptance scenario.
 
 One real feature must demonstrate: human outcome and Brief; Fable and Astra
 interchange on comparable work; Map change;
-at least three parallel Pi workers; Fable model choice from resource facts; a
+at least three parallel Pi workers; active-orchestrator model choice from resource facts; a
 worker failure handled by supervisor or correctly escalated; an independent
-review; an implementation repair; exact-SHA evidence-bound merge; Fable restart
+review; an implementation repair; exact-SHA evidence-bound merge; primary restart
 mid-run with reconstruction; lease expiry or renewal; durable handoffs; final
 Map state matching repository reality; and CLI/Cockpit projection agreement.
 The run must clearly distinguish mock/provider-free evidence from live-provider
@@ -76,6 +86,6 @@ Return this revised approach for CONTEXT CLEAN before seeking explicit approval.
 Then record permitted provider routes, pool bounds/reserve, max concurrency,
 execution expiry and merge scope in the approval issue before issuing an
 autonomous run lease. The proposed initial topology is three workers plus
-coordinator, with no purchases or automatic top-ups. The 48–72-hour working
+coordinator, with no purchases or automatic top-ups. The 48–72-hour continuous-execution
 target starts at build approval, assumes live access and timely predecessor
 handoff, and must be revised from actual accepted output at six hours.

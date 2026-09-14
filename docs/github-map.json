@@ -27,7 +27,7 @@
     "number": 5,
     "id": 5453055663,
     "url": "https://github.com/Nicegarrry/helm3/issues/5",
-    "title": "[ACCESS] Prove bounded live Pi and Fable model access"
+    "title": "[ACCESS] Prove bounded live Pi and active-orchestrator model access"
   },
   "KERNEL": {
     "number": 6,
@@ -154,5 +154,53 @@
     "id": 5453058960,
     "url": "https://github.com/Nicegarrry/helm3/issues/26",
     "title": "[PREP] Prepare independent private repository, Brief, Map and SDK evidence"
+  },
+  "ORCH-DRIVER": {
+    "number": 27,
+    "id": 5454708433,
+    "url": "https://github.com/Nicegarrry/helm3/issues/27",
+    "title": "[ORCH-DRIVER] Define the small shared orchestrator-driver and Helm tool contract"
+  },
+  "ORCH-OWNERSHIP": {
+    "number": 28,
+    "id": 5454708591,
+    "url": "https://github.com/Nicegarrry/helm3/issues/28",
+    "title": "[ORCH-OWNERSHIP] Fence one active orchestrator with durable lease epochs"
+  },
+  "ASTRA": {
+    "number": 29,
+    "id": 5454709069,
+    "url": "https://github.com/Nicegarrry/helm3/issues/29",
+    "title": "[ASTRA] Run Astra through Codex SDK and the common Helm tools"
+  },
+  "CONSULT": {
+    "number": 30,
+    "id": 5454709236,
+    "url": "https://github.com/Nicegarrry/helm3/issues/30",
+    "title": "[CONSULT] Consult an independent frontier peer and record disposition"
+  },
+  "JOURNAL": {
+    "number": 31,
+    "id": 5454709484,
+    "url": "https://github.com/Nicegarrry/helm3/issues/31",
+    "title": "[JOURNAL] Preserve raw execution artifacts with recoverable Log indexes"
+  },
+  "INTERCHANGE": {
+    "number": 32,
+    "id": 5454710197,
+    "url": "https://github.com/Nicegarrry/helm3/issues/32",
+    "title": "[INTERCHANGE] Prove Fable and Astra interchange with comparable outcomes"
+  },
+  "FAILOVER": {
+    "number": 33,
+    "id": 5454710385,
+    "url": "https://github.com/Nicegarrry/helm3/issues/33",
+    "title": "[FAILOVER] Transfer orchestrator ownership across providers without losing the fleet"
+  },
+  "ADDENDUM-PREP": {
+    "number": 34,
+    "id": 5454710912,
+    "url": "https://github.com/Nicegarrry/helm3/issues/34",
+    "title": "[ADDENDUM-PREP] Save addendum, revise Map and prepare context-clean handoff"
   }
 }

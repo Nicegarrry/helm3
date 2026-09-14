@@ -27,4 +27,4 @@ Receive the immutable packet without altering the source checkout. After authori
 
 ## Stop conditions
 
-Lease expiry/revocation blocks further spending/effects while observation continues. Unknown external outcomes are reconciled before retry. Missing enforceable bounds, unmet model/role/policy floors, stale integration evidence or an ownership conflict refuse the operation. Engineering ambiguity wakes Fable; only product/authority/high-impact decisions reach the human. A human pause stops dispatch/build/publish activity and preserves WIP.
+Lease expiry/revocation blocks further spending/effects while observation continues. Unknown external outcomes are reconciled before retry. Missing enforceable bounds, unmet model/role/policy floors, stale integration evidence or an ownership conflict refuse the operation. Engineering ambiguity wakes the active orchestrator; only product/authority/high-impact decisions reach the human. A human pause stops dispatch/build/publish activity and preserves WIP.

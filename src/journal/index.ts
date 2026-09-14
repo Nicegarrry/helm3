@@ -198,7 +198,7 @@ export class ArtifactJournal {
     }
     await this.hooks.afterRawPublished?.();
 
-    await atomicFile(this.metadataPath(metadata.recordId), Buffer.from(JSON.stringify(metadata)));
+    await atomicFile(this.metadataPath(source, sourceIdentity), Buffer.from(JSON.stringify(metadata)));
     await this.hooks.afterMetadataPublishedBeforeIndex?.();
     await this.index.record(metadata);
     return raw;
@@ -249,6 +249,9 @@ export class ArtifactJournal {
 
   async rebuildIndex(): Promise<number> {
     const metadata = await this.allMetadata();
+    // Validate the complete durable input before touching the replaceable projection.
+    // A failed rebuild must leave the last known-good index intact.
+    for (const entry of metadata) await this.assertRawIntact(hashFromRef(entry.raw));
     await this.index.reset();
     for (const entry of metadata) await this.index.record(entry);
     return metadata.length;
@@ -257,7 +260,9 @@ export class ArtifactJournal {
   close(): void { this.index.close?.(); }
 
   private rawPath(hash: string): string { return join(this.root, 'raw', 'sha256', hash); }
-  private metadataPath(recordId: string): string { return join(this.root, 'metadata', `${recordId}.json`); }
+  private metadataPath(source: string, sourceIdentity: string): string {
+    return join(this.root, 'metadata', `${hashBytes(Buffer.from(JSON.stringify([source, sourceIdentity])))}.json`);
+  }
 
   private async allMetadata(): Promise<ArtifactMetadata[]> {
     const files = await readdir(join(this.root, 'metadata'));
@@ -270,7 +275,8 @@ export class ArtifactJournal {
       const entry = JSON.parse(await readFile(path, 'utf8')) as ArtifactMetadata;
       const rawHash = hashFromRef(entry.raw);
       const expectedRecordId = hashBytes(Buffer.from(JSON.stringify([entry.source, entry.sourceIdentity, rawHash])));
-      if (entry.recordId !== file.slice(0, -5) || entry.recordId !== expectedRecordId || entry.schemaVersion !== 1) throw new ArtifactIntegrityError(`invalid artifact metadata: ${file}`);
+      const expectedIdentityPath = hashBytes(Buffer.from(JSON.stringify([entry.source, entry.sourceIdentity])));
+      if (file.slice(0, -5) !== expectedIdentityPath || entry.recordId !== expectedRecordId || entry.schemaVersion !== 1) throw new ArtifactIntegrityError(`invalid artifact metadata: ${file}`);
       const sameIdentity = identities.get(entry.sourceIdentity);
       if (sameIdentity && sameIdentity.recordId !== entry.recordId) throw new ArtifactConflictError(`duplicate durable source identity: ${entry.sourceIdentity}`);
       identities.set(entry.sourceIdentity, entry);

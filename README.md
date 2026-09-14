@@ -2,7 +2,7 @@
 
 A durable control plane for autonomous software development.
 
-Status: first-wave foundation in progress (2026-09-15). The human approval is recorded; the live ACCESS check remains open and the kernel/raw-artifact work is still in progress.
+Status: first-wave deterministic foundation implemented (2026-09-15). Live SDK access verification remains open; see the progress page for exact evidence and remaining work.
 
 This repository is independent of `Nicegarrry/helm-cli` while Opus completes Milestone 1 there. No source, tests, credentials, or working state have been imported from that repository. A later, SHA-pinned handoff will supply reusable behaviours and implementation.
 
@@ -26,6 +26,6 @@ npm run typecheck
 npm test
 ```
 
-The Python check verifies original design provenance, Map dependencies and local document links. The npm commands validate the merged root contract schemas and tests on Node 22.22.2. SDK feasibility probes are separate provider-free evidence; no complete product CLI, service, autonomous supervisor, live provider route, failover, or worker fabric is shipped.
+The Python check verifies original design provenance, Map dependencies and local document links. The npm commands validate the root contracts, kernel, journal and integration tests on Node 22.22.2. SDK feasibility probes are separate provider-free evidence; no complete product CLI, service, autonomous supervisor, live provider route, failover, or worker fabric is shipped.
 
 The GitHub repository is private. First-wave approval is recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235), and merged foundation work is tracked in [PR #36](https://github.com/Nicegarrry/helm3/pull/36), [PR #37](https://github.com/Nicegarrry/helm3/pull/37), and [PR #38](https://github.com/Nicegarrry/helm3/pull/38). Product changes use isolated worktrees and PRs; read [AGENTS.md](AGENTS.md) before starting.

@@ -6,10 +6,15 @@ import pathlib
 import re
 
 root = pathlib.Path(__file__).resolve().parents[1]
+original = root / "docs/design-original.md"
+addendum = root / "docs/design-addendum.md"
 source = root / "docs/design-source.md"
-assert hashlib.sha256(source.read_bytes()).hexdigest() == "d203c57e88842b1413f9f8c20c10ac09c38da83a5e04eb70a12511f09bbcf337", "Human design changed without an explicit amendment"
-sections = re.findall(r"^(\d+)\. ", source.read_text(), re.M)
-assert set(map(str, range(1, 40))).issubset(sections), "Missing original design section"
+assert hashlib.sha256(original.read_bytes()).hexdigest() == "d203c57e88842b1413f9f8c20c10ac09c38da83a5e04eb70a12511f09bbcf337", "Original human design changed"
+assert hashlib.sha256(addendum.read_bytes()).hexdigest() == "2804ec1cbfc91f1accd2e800fc60da560c449b811628b6daf82c234c8e69d5f9", "Human addendum changed"
+assert source.read_bytes() == original.read_bytes() + b"\n\n---\n\n" + addendum.read_bytes(), "Combined brief differs from its verbatim sources"
+for document, count in [(original, 39), (addendum, 29)]:
+    sections = re.findall(r"^(\d+)\. ", document.read_text(), re.M)
+    assert set(map(str, range(1, count + 1))).issubset(sections), f"Missing section in {document.name}"
 tickets = json.loads((root / "docs/ticket-drafts.json").read_text())
 by_key = {t["key"]: t for t in tickets}
 assert len(by_key) == len(tickets), "Duplicate ticket key"
@@ -37,4 +42,4 @@ for file in root.rglob("*.md"):
             continue
         target = target.split("#")[0].strip("<>")
         assert (file.parent / target).exists(), f"Broken local link in {file.relative_to(root)}: {target}"
-print(f"Preparation valid: original source preserved; {len(tickets)} Map tickets; acyclic dependencies; local document links resolve.")
+print(f"Preparation valid: original and addendum preserved; {len(tickets)} Map tickets; acyclic dependencies; local document links resolve.")

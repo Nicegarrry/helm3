@@ -6,11 +6,11 @@ authorises action.
 
 ## Outcome
 
-Deliver a local Helm 3 control plane in which a human Brief is pursued by Fable
-through a fluid GitHub-backed Map, Pi-native workers, durable evidence and
-bounded autonomous authority. The full-brief capability is the target of this
-build; later phases sequence risk and polish, rather than silently defer core
-invariants.
+Deliver a local Helm 3 control plane in which a human Brief is pursued by one
+active, replaceable Fable or Astra orchestrator through a fluid GitHub-backed
+Map, Pi-native workers, durable evidence and bounded autonomous authority. The
+full original 39-section design plus addendum is the target; phases sequence
+risk and polish rather than silently defer invariants.
 
 ## Proposed build operating approach after approval
 
@@ -21,22 +21,25 @@ coordination owns contracts, cross-cutting decisions and acceptance. Limit to
 three active workers plus coordinator until machine and provider capacity is
 observed. Verify every dispatched brief against the accepted design and ticket.
 
-After approval, run ACCESS first: one finite, authorised native Pi model request and one Fable SDK request. This chat's Terra/Luna availability is not proof those models are usable from Pi. Freeze [protocol revision 0](protocol.md) after those findings, then fan out across three lanes:
+After approval, run ACCESS first: finite, authorised native Pi and selected
+orchestrator-route requests. This chat's Terra/Luna availability is not proof
+those routes are usable. The Claude route has prior narrow SDK evidence; Codex
+SDK lifecycle/tool feasibility, including actual parity, remains unprobed. Freeze
+[protocol revision 0](protocol.md) after findings, then fan out across three lanes:
 
 1. Terra: Pi native sessions, tool policy, context and isolation.
-2. Terra: command/lease/recovery spine, then Fable and quality integration.
+2. Terra: command/journal/lease/epoch-fencing spine, then first driver and quality integration.
 3. Luna/Terra as complexity requires: early Map/API/cockpit; SHA-pinned predecessor reuse when the handoff arrives.
 
-Keep stable predecessor behaviour behind proposed interfaces rather than speculatively rebuilding it while Opus works. New command durability and Pi semantics can proceed independently. The first six hours of the build are an observational
+Keep stable predecessor behaviour behind proposed interfaces rather than speculatively rebuilding it while Opus works. Wave 1 is foundation only: contracts, raw-artifact journal/durable Log clarity, orchestrator epochs and SDK feasibility; it builds no product workflow. Implement the second driver early and prove the same comparable feature through both drivers before treating interchangeability as established. The first six hours of the build are an observational
 checkpoint: report discovered interfaces, provider/authentication/isolation
 blockers and revised sequencing; it is not a guaranteed completion gate.
 
-Target the first 24 hours at the command/log/authority spine, Pi session slice,
-shared Map/API, and resource view. Target hours 24–40 at Fable, supervisor,
-context/model-switch, external cognition, dynamic review, quality and
-integration. Target hours 40–48 at the complete acceptance scenario, injected
-faults, repair and rerun. If concrete runtime, authentication or isolation
-failures arise, retain this Map and allow 48–96 hours for integration repair.
+Target 48–72 working hours after approval, with a 96-hour contingency: first the
+foundation and one driver, then the second driver/comparable-feature proof,
+consultation, supervisor and quality loop, then acceptance and injected faults.
+Re-estimate at six hours from accepted output; do not promise the former 24–48
+hour range for the expanded scope.
 
 ## Dependencies and migration boundary
 
@@ -57,7 +60,8 @@ assumptions; required machine gates; and exact section-35 acceptance scenario.
 
 ## Acceptance run
 
-One real feature must demonstrate: human outcome and Brief; Fable Map change;
+One real feature must demonstrate: human outcome and Brief; Fable and Astra
+interchange on comparable work; Map change;
 at least three parallel Pi workers; Fable model choice from resource facts; a
 worker failure handled by supervisor or correctly escalated; an independent
 review; an implementation repair; exact-SHA evidence-bound merge; Fable restart
@@ -68,4 +72,10 @@ evidence.
 
 ## Approval boundary
 
-Approve the approach and native runtime choices first. Record permitted provider routes, pool bounds/reserve, max concurrency, execution expiry and merge scope in the approval issue before issuing an autonomous run lease. The proposed initial topology is three workers plus coordinator, with no purchases or automatic top-ups. The 24–48-hour target starts at build approval, assumes live access and timely predecessor handoff, and must be revised from actual accepted output at the six-hour checkpoint. Preparation time is already spent and is not scheduled again.
+Return this revised approach for CONTEXT CLEAN before seeking explicit approval.
+Then record permitted provider routes, pool bounds/reserve, max concurrency,
+execution expiry and merge scope in the approval issue before issuing an
+autonomous run lease. The proposed initial topology is three workers plus
+coordinator, with no purchases or automatic top-ups. The 48–72-hour working
+target starts at build approval, assumes live access and timely predecessor
+handoff, and must be revised from actual accepted output at six hours.

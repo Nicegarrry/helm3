@@ -18,7 +18,17 @@ in-flight effect dispatch; safe observation and evidence capture continue.
 Cancellation requests are recorded and reconciled. A worker that cannot be
 confirmed stopped is quarantined from new authority and surfaced to Fable.
 Only a human can approve consumption of the orchestrator reserve or a Brief
-change.
+change. Pool reservations retain provider, pool, consumer class, command and
+usage-observation provenance; the active orchestrator reserve is enforced per
+shared pool.
+
+`OrchestratorLease` is separate. It names the sole active Fable/Claude Agent SDK
+or Astra/Codex SDK owner, session, expiry and monotonic `epoch`. Every
+orchestrator-originated mutation carries that epoch before queueing and again at
+effect. Transfer revokes the old owner and increments the epoch; stale queued,
+claimed and at-effect commands refuse. Supervisor effects already valid under
+their own Autonomy Lease are not invalidated merely by orchestrator transfer.
+This fencing contract is first-wave foundation; automatic failover is later.
 
 ## Commands and evidence
 
@@ -36,6 +46,29 @@ and delegated-authority violation. Provider quota, rate limit and availability
 are physical constraints. Budget/concurrency targets are separately authorised
 resource refusals. Unknown quota, usage, cost, reset or availability remains
 unknown and is never converted to a reassuring value.
+
+## Orchestrators, consultation and recovery
+
+The driver is deliberately small (`start`, `resume`, `sendEvent`, `invoke`,
+`interrupt`, `checkpoint`, `handoff`, `stop`) and exposes the same Helm domain
+tools to both supported orchestrators. It does not make generic workers or
+reasoning behaviour interchangeable. Pi is the sole worker runtime. Current
+Codex SDK lifecycle parity is a feasibility item, not a claim of a completed
+probe or entitlement.
+
+`orchestrator.consult` supplies a bounded evidence/context package before any
+primary conclusion where independence matters. A consultant has no mutation
+authority and creates a record with model/provider/mode/objective, context refs,
+resource provenance, result and primary disposition (`accepted`,
+`partially_accepted`, `rejected`, `superseded`). It is selective, not voting.
+
+Recovery bundles contain Brief, current Map, material decisions, workers,
+pending commands, handoffs, findings/gates, integration/resource/lease state,
+Needs You and material journal events. They permit deterministic takeover after
+death, unresumable session or *confirmed* hard quota/provider failure without a
+transcript or subjective decision-quality algorithm. Unknown provider state
+fails closed and is reconciled/escalated. Failover does not renew expired
+Autonomy Leases; preserved workers continue only under still-valid authority.
 
 ## Attempts, sessions and workspace
 
@@ -90,5 +123,19 @@ for Fable, never an automatic re-tiering rule.
 
 Context is deliberately scoped to objective, acceptance, relevant Brief and Map
 branch, decisions, dependencies and code evidence. Every substantial attempt
-ends in a structured handoff: summary, changes/commits, tests and acceptance
-evidence, decisions, discoveries, risks, questions and recommended action.
+ends in a typed `WorkerResult` claim manifest: status, summary, changed files,
+commits, decisions, discoveries, claimed tests, acceptance claims, risks,
+unresolved items, artifact refs and recommended action. Claims are not evidence:
+`GateResult` records command, exact SHA, exit status, checks performed and
+evidence refs. Repairable gate failures normally steer the same Pi session; use
+a fresh one when independence is required.
+
+Worker policy preventively restricts assigned worktree/write roots, protected
+paths and lease authority before tools run. A post-attempt diff detects indirect
+or shell changes beyond scope, particularly control configuration, gate/security
+machinery, factory runtime and CI policy. Append-only raw Pi events, envelopes,
+context manifests, permitted prompts, tool events and gate evidence are a raw
+artifact journal. SQLite indexes it; durable Helm command/orchestration facts
+remain authoritative in the Log/database and must not be assumed reconstructible
+from Pi-only raw events. Track context tokens/window and compactions separately
+from consumed/cached tokens and cost.

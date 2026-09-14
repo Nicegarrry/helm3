@@ -16,16 +16,18 @@ Reference scenario: add Instagram sharing to a capture system so shared content 
 
 1. The human owns the Brief. Fable may propose changes, not silently make them.
 2. The Map is fluid. GitHub owns issue/PR facts; Git/GitHub/CI own repository facts; Pi owns live sessions; Helm's Log owns orchestration history. UI projections are disposable.
-3. Fable is a first-class Claude Agent SDK component with typed Helm tools. Pi Agent SDK plus the Helm extension is the native worker fabric.
+3. One active, replaceable frontier orchestrator uses typed Helm tools: Fable through Claude Agent SDK or Astra through Codex SDK. A deliberately small driver handles lifecycle/tool differences without abstracting reasoning. Pi Agent SDK plus the Helm extension is the single native worker fabric.
 4. Models choose work decomposition, topology, routing and review depth. Helm refuses invalid choices without encoding a fixed development workflow.
 5. Consequential actions have an immutable validated command, execution record and observed result. Fresh facts authorise effects. Irreversible operations bind to exact evidence and are read back.
 6. Authority expires. Lease expiry stops new spending; observation and evidence collection continue. Hard correctness rules cannot be waived by Fable.
 7. One writer owns one isolated worktree. Review independence and machine oracles are enforced where required. Failed work and structured handoffs survive agent loss.
 8. The deterministic supervisor handles unambiguous mechanics; Fable handles judgement. The reconciler recovers across process death and ambiguous state.
-9. Economy preserves separate subscription/API/top-up pools, unknown values, capability floors, data policy, usage provenance and an orchestrator reserve that Fable cannot self-override.
+9. Economy preserves separate subscription/API/top-up pools, unknown values, capability floors, data policy, per-pool usage provenance and a protected active-orchestrator reserve that no orchestrator can self-override.
 10. CLI and local cockpit use the same core API. Needs You contains human decisions; normal engineering exceptions belong to Fable.
 11. External cognition is tracked. Context is deliberately scoped and compressed. Calibration informs model judgement without automatically re-tiering models.
-12. The complete source design, including runtime steering/forking/compaction, dynamic review, closure and migration, remains the build target.
+12. One orchestrator ownership lease with monotonic epochs fences every mutating command from queue through effect; it is separate from the bounded Autonomy Lease. Peer consultation has independent context, no mutation authority, and a recorded disposition. Recovery reconstructs from durable state rather than a predecessor transcript; provider state that cannot be confirmed fails closed.
+13. Workers return typed claims; gates record the exact evidence they checked. Repairable gate near-misses normally return to the same Pi session. Protected paths use preventive scope policy and post-diff detection. Append-only raw artifacts are execution evidence and SQLite is a rebuildable projection. Context occupancy is tracked separately from resource cost.
+14. The complete original 39-section design plus addendum, including runtime steering/forking/compaction, dynamic review, closure and migration, remains the build target.
 
 ## Current delegated authority
 
@@ -35,7 +37,7 @@ The new repository is an authorised preparation location. Final history-preservi
 
 ## Resources and planning target
 
-Use Terra/Luna workers where appropriate and retain frontier cognition for coordination, difficult decisions and acceptance. Plan around 24–48 hours after build authorisation, with 48–96 hours as a contingency estimate, not a promise or a spending lease. No dollar cap, live provider probe allowance, continuous-run lease or production merge authority has yet been granted. Absence of a limit is not unlimited authority.
+Use Terra/Luna workers where appropriate and retain frontier cognition for coordination, difficult decisions and acceptance. The addendum expands the target: use 48–72 working hours after build authorisation with a 96-hour contingency, or explicitly re-estimate at six hours from observed constraints. This is not a promise or a spending lease. No dollar cap, live provider probe allowance, continuous-run lease or production merge authority has yet been granted. Absence of a limit is not unlimited authority.
 
 ## Completion evidence
 

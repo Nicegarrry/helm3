@@ -6,14 +6,18 @@ The private repository is prepared; product implementation is awaiting explicit 
 
 ## Orient
 
-1. Read `AGENTS.md`, the [Brief](brief.md), [original design](design-source.md), [protocol](protocol.md), [build plan](build-plan.md), and [coverage table](coverage.md).
+1. Read `AGENTS.md`, the [Brief](brief.md), [original design](design-source.md), [addendum](design-addendum.md), [protocol](protocol.md), [build plan](build-plan.md), and [coverage table](coverage.md).
 2. Read current GitHub [approval](https://github.com/Nicegarrry/helm3/issues/2), [handoff](https://github.com/Nicegarrry/helm3/issues/3) and [Map](https://github.com/Nicegarrry/helm3/issues/1) state. Cached documents never establish authority.
 3. Verify repository status and worktree ownership. Do not overwrite an existing worker's WIP.
 4. Run `python3 scripts/check-preparation.py`. Reproduce the pinned SDK probes if package/runtime changes or reported evidence needs refreshing; do not confuse a mock success with authenticated model access.
 
+## CONTEXT CLEAN, then explicit build approval
+
+Return the revised packet for CONTEXT CLEAN. Do not start any implementation wave until the human then explicitly approves it in issue 2. The first wave is contract/journal/epoch-fencing/SDK feasibility foundation only; automatic failover comes later. Do not claim a Codex SDK probe or subscription entitlement from the existing Claude SDK evidence.
+
 ## After explicit build approval
 
-Record the exact approved contract revision and concrete delegation: repositories, allowed actions, run expiry, provider/pool limits, reserve, max attempts/concurrency and merge scope. Start ACCESS with finite live requests against actual Pi/Fable routes. Do not infer auth interoperability from an installed CLI or this chat's model selector.
+Record the exact approved contract revision and concrete delegation: repositories, allowed actions, run expiry, provider/pool limits, reserve, max attempts/concurrency and merge scope. Start ACCESS with finite live requests against actual Pi and selected Fable/Astra routes. Do not infer auth interoperability from an installed CLI or this chat's model selector.
 
 Freeze the agreed contracts, then dispatch brief-checked isolated worktrees. Preserve one writer per worktree. Keep a frontier reserve; workers use Terra/Luna where appropriate. Report accepted outcomes and hard blockers at the six-hour checkpoint. The target is the complete brief, not just a unit-test count or the number of open worker sessions.
 

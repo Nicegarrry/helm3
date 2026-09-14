@@ -15,6 +15,8 @@ type Command = {
   actorId: string;
   leaseId: string;
   leaseRevision: number;
+  orchestratorLeaseId?: string;
+  orchestratorEpoch?: number;     // mandatory for orchestrator-originated mutation
   plannedAt: string;
   notAfter: string;
   expected: Precondition[];
@@ -62,6 +64,23 @@ type Lease = {
 };
 ```
 
+```typescript
+type OrchestratorLease = {
+  leaseId: string;
+  owner: 'fable' | 'astra';
+  sessionId: string;
+  epoch: number;
+  issuedAt: string;
+  expiresAt: string;
+};
+```
+
+Validation fences the orchestrator lease at queue, claim and immediately before
+effect. An epoch mismatch refuses and is never retried under a new epoch.
+`AutonomyLease` remains the separate authority/spend boundary; supervisor work
+with valid independent authority can continue after a takeover. First-wave work
+persists these fields and refusal semantics, not automatic failover.
+
 Revocation is a durable event and takes priority over expiry. Renewal creates an attributable revision and rechecks its parent authority; Fable cannot enlarge human delegation or authorise reserve consumption. A human may approve a declared discretionary limit override; physical/provider constraints and hard correctness rules remain non-overridable.
 
 Reserve capacity atomically before billable requests, retries, forks that generate summaries, compaction, model probes, reviews and external cognition. Accounting distinguishes observed actual usage from reserved upper bounds and unknown final consumption. Never silently convert token quotas to dollars. If a hard pool cap cannot be enforced because a worst-case bound is unknown, refuse that spend; expose the reason for an authority decision.
@@ -70,9 +89,9 @@ Expiry prevents new billable requests and new tool effects, including autonomous
 
 ## Events, attempts and sessions
 
-Event minimum: `eventId`, `schemaVersion`, `kind`, `source`, `sourceEventId`, `occurredAt`, `recordedAt`, `commandId?`, `attemptId?`, `sessionId?`, `correlationId`, `causationId?`, `payload`. Enforce deduplication by source identity; do not assume remote clocks or delivery order establish causality. A durable per-consumer cursor and idempotent handler make projection rebuild and wake replay safe.
+Event minimum: `eventId`, `schemaVersion`, `kind`, `source`, `sourceEventId`, `occurredAt`, `recordedAt`, `commandId?`, `attemptId?`, `sessionId?`, `correlationId`, `causationId?`, `payload`. Semantic kinds include worker/tool/gate/review/integration start/completion, steering, compaction and envelopes. Enforce deduplication by source identity; do not assume remote clocks or delivery order establish causality. A durable per-consumer cursor and idempotent handler make projection rebuild and wake replay safe.
 
-Attempt minimum: `attemptId`, Map node/revision, objective/acceptance version, role label, initial model/family/capability/pool snapshot, workspace/base SHA, context manifest hash, lease ID, session IDs, start/end observations, outcome, usage records, findings, evidence IDs and handoff ID. A model change is a new attributable segment; it never rewrites historical model/family/cost facts. Review independence checks all relevant contributing segments, not just the last selected model.
+Attempt minimum: `attemptId`, Map node/revision, objective/acceptance version, role label, initial model/family/capability/pool snapshot, workspace/base SHA, context manifest hash, lease ID, session IDs, start/end observations, outcome, usage records, findings, evidence IDs and handoff ID. A model change is a new attributable segment; it never rewrites historical model/family/cost facts. Usage retains provider/pool/consumer provenance, context tokens/window, compaction count, consumed/cached tokens and cost/unknown status. Review independence checks all relevant contributing segments, not just the last selected model.
 
 Worktree ownership is a separate fenced record: repository, canonical path, allowed write roots, branch/base SHA, attempt owner, generation and expiry. Process PID alone is not a session identity. SDK session continuation must re-establish live ownership before work; a persisted transcript is not proof the original process survived.
 

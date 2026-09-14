@@ -8,7 +8,7 @@ Do not read, modify, fetch, build, test, index, dispatch into, or otherwise inte
 
 ## Durable contract
 
-- The human owns the Brief. Proposals must not silently change fixed requirements.
+- The human owns the Brief. Proposals must not silently change fixed requirements. The full original design and its addendum are authoritative together.
 - The Map is fluid; GitHub is authoritative for issue/PR state. Documents are dated projections.
 - Agents are disposable; command/evidence/handoff records are durable.
 - Re-read authority and relevant external facts immediately before effects.
@@ -18,6 +18,8 @@ Do not read, modify, fetch, build, test, index, dispatch into, or otherwise inte
 - Root bootstrap commits are permitted for the authorised empty-repository preparation only.
 - Keep secrets, local account files, transcripts, and dependency trees out of Git.
 - Models choose workflows; machinery enforces authority, evidence and recovery.
+- One active, replaceable frontier orchestrator owns mutation at a time: Fable via Claude Agent SDK or Astra via Codex SDK. Helm's small driver normalises lifecycle/tool calls, never reasoning behaviour; Pi remains the one native worker runtime.
+- An orchestrator ownership lease and its monotonic epoch fence queued and at-effect mutating commands. It is distinct from the bounded Autonomy Lease that controls spend and effects.
 
 ## Working method
 
@@ -25,4 +27,4 @@ Use Terra for bounded implementation/investigation and Luna for mechanical tasks
 
 Prefer codebase-memory-mcp for code discovery: search_graph, trace_path, get_code_snippet, query_graph, search_code. Run index_repository first when unindexed. Use file search for non-code/config/string literals or insufficient graph results. Do not index the predecessor repository.
 
-No product build begins until the explicit build-approval issue records the human's approval. A proposed plan or elapsed time is not authority.
+No product build begins until a CONTEXT CLEAN return and the explicit build-approval issue records the human's approval. A proposed plan or elapsed time is not authority.

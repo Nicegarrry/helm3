@@ -22,9 +22,13 @@ Use an explicitly approved disposable fixture repository for failure injection, 
 | Closure | Fable closes the Map branch only with outcomes evidenced against the original intent | Original acceptance, latest repo facts, closure command |
 | Cockpit | Overview, Map, Needs You, Workers, Models and Log agree with machine-readable API | API fixtures/live responses, UI checks, screenshots |
 
+## Addendum acceptance
+
+Prove the same comparable feature through `fable -> Helm -> Pi` and `astra -> Helm -> Pi` without provider concepts leaking into Helm domain behaviour. A peer consultation must receive independent context before the primary conclusion, possess no mutation authority, and record its disposition. For controlled failover, kill a primary: valid autonomous worker effects continue, a recovery bundle reconstructs durable state, a new epoch is issued, and old queued/at-effect orchestrator commands refuse. Test confirmed quota/provider failure separately from unknown provider state, which must fail closed. Test context-pressure checkpoint/handoff continuity. Record provider/pool/consumer reserves and provenance; do not make causal claims from A/B metrics (accepted outcomes, time, interventions, churn, attempts, utilisation, rework, recovery, resource/quota and intent preservation).
+
 ## Fault boundaries
 
-Test crash before dispatch, after external effect but before acknowledgement, and during readback. Re-delivery must not repeat a known effect. Unknown outcomes must trigger observation rather than blind replay. Test lease revocation/expiry across queued and active work, stale evidence after head changes, duplicate/reordered events, and conflicting writer claims. Shell writes outside workspace must be refused by the actual isolation mechanism, not only a mock edit hook.
+Test crash before dispatch, after external effect but before acknowledgement, and during readback. Re-delivery must not repeat a known effect. Unknown outcomes must trigger observation rather than blind replay. Test lease revocation/expiry across queued and active work, stale evidence after head changes, duplicate/reordered events, and conflicting writer claims. Test typed worker claims against gate evidence details, same-session repair of a near-miss, protected-path prevention plus post-diff detection, and raw-artifact/SQLite projection provenance. Shell writes outside workspace must be refused by the actual isolation mechanism, not only a mock edit hook.
 
 ## Closure dossier
 
@@ -32,4 +36,4 @@ Record exact commits, pinned SDK/runtime versions, gate commands/results, source
 
 ## Full design coverage
 
-Section 35 is the first serious end-to-end test, not the entire specification. Before declaring the complete brief delivered, each of source sections 1–39 must map to a implemented capability, retained invariant, demonstrated evidence, or an explicitly approved change. Runtime pause/resume/fork/model change/compaction, context shaping, tracked external cognition, calibration views, two escalation queues, CLI/UI parity and legacy retirement need their own evidence beyond this scenario.
+Section 35 is the first serious end-to-end test, not the entire specification. Before declaring the complete brief delivered, each original source section 1–39 and addendum tests/invariants 16–23 must map to an implemented capability, retained invariant, demonstrated evidence, or an explicitly approved change. Runtime pause/resume/fork/model change/compaction, context shaping, tracked external cognition, calibration views, two escalation queues, CLI/UI parity and legacy retirement need their own evidence beyond this scenario.

@@ -43,7 +43,7 @@ hour range for the expanded scope.
 
 ## Proposed first implementation wave
 
-After the requested context clean and explicit approval, start from [FREEZE #4](https://github.com/Nicegarrry/helm3/issues/4) and [ACCESS #5](https://github.com/Nicegarrry/helm3/issues/5). These finalise the contract and demonstrate the actual SDK routes without relying on predecessor code. The proposed worker allocation is:
+The approved first wave starts from [FREEZE #4](https://github.com/Nicegarrry/helm3/issues/4) and [ACCESS #5](https://github.com/Nicegarrry/helm3/issues/5). These finalise the contract and demonstrate the actual SDK routes without relying on predecessor code. The proposed worker allocation is:
 
 - Terra: common driver/lifecycle conformance and bounded Codex/Claude SDK access proof; distinguish supported operations from Helm-owned checkpoint/handoff mechanisms.
 - Terra: the minimal command/event/authority spine, including current-owner identity and old-epoch refusal at admission and effect. Add the ownership implementation only after KERNEL's durable command boundary exists.
@@ -80,12 +80,8 @@ Map state matching repository reality; and CLI/Cockpit projection agreement.
 The run must clearly distinguish mock/provider-free evidence from live-provider
 evidence.
 
-## Approval boundary
+## Current approval boundary
 
-Return this revised approach for CONTEXT CLEAN before seeking explicit approval.
-Then record permitted provider routes, pool bounds/reserve, max concurrency,
-execution expiry and merge scope in the approval issue before issuing an
-autonomous run lease. The proposed initial topology is three workers plus
-coordinator, with no purchases or automatic top-ups. The 48–72-hour continuous-execution
-target starts at build approval, assumes live access and timely predecessor
-handoff, and must be revised from actual accepted output at six hours.
+Context clean is complete and the human's first-wave go-ahead is recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235) and [wave-one authority](wave1-authority.md). Begin the supervised foundation work and independently reviewed PR integration with at most three workers plus coordinator.
+
+Before issuing any unattended Helm run lease, separately record actual provider routes, resource caps/reserves, concurrency, expiry and merge scope. No purchases or automatic top-ups are authorised. Live ACCESS must demonstrate bounded intended subscription routes; provider-free code and tests can progress while that evidence remains incomplete. The 48–72-hour estimate remains a planning target for the expanded build, not a granted continuous execution lease or promise. Re-estimate at six hours from accepted output.

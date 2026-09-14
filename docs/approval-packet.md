@@ -1,6 +1,8 @@
 # Build approval packet
 
-Prepared 2026-09-15. Status: awaiting the human's explicit approval. This packet does not start a build or issue a lease.
+Prepared 2026-09-15. Historical preparation packet. First-wave approval is now recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235); see [current first-wave progress](wave1-progress.md) for live status and bounds.
+
+The proposal and execution-boundary sections below describe the preparation state before approval; they are retained for provenance and are not the current operator instruction.
 
 ## Completed independent preparation
 
@@ -37,4 +39,4 @@ Build in this private repository with isolated worktrees and at most three worke
 
 The next approval should name the [first-wave scope](build-plan.md#proposed-first-implementation-wave), code/tests/PR authority and resource bounds in Helm 3. Merge only verified Helm 3 work and an explicitly named disposable acceptance fixture within recorded merge authority. Do not merge into, modify or dispatch work in the predecessor repository. Record actual pool bounds/reserve, run expiry and attempt limits before autonomous execution; this preparation cannot manufacture resource telemetry.
 
-The immediate requested step is CONTEXT CLEAN on this revised packet. Only after that return should the human explicitly approve the first implementation wave in the [approval issue](https://github.com/Nicegarrry/helm3/issues/2). No product build has started.
+The immediate requested step and approval gate described above are complete. This packet does not claim full system readiness; consult [current first-wave progress](wave1-progress.md) for the merged foundation, open ACCESS work and active kernel frontier.

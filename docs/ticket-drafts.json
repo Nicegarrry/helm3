@@ -1,26 +1,304 @@
 [
-  {"key":"MAP","title":"Outcome: Helm 3 durable autonomous development control plane","body":"Outcome: Deliver the full Brief as a fluid Map, not a fixed workflow.\nBrief sections: 1-39.\nAcceptance checklist:\n- Map records outcomes, dependencies, gates and questions.\n- Fable can change it within the Brief.\n- GitHub remains authoritative for issue and PR state.\nEvidence: linked issue graph and acceptance-run Log.\nBoundary: proposed parent outcome; it does not authorise product work.","blocked_by":[],"area":"map","phase":"outcome"},
-  {"key":"APPROVAL","title":"Record human approval of Brief and proposed Map","body":"Outcome: Establish authority to begin product build.\nBrief sections: 1, 3, 12, 28, 38.\nAcceptance checklist:\n- Approved Brief version and fixed requirements are recorded.\n- Delegated authority and spending limits are recorded.\n- Approval names this Map revision.\nEvidence: human decision Log record and GitHub issue closure.\nBoundary: no approval is inferred from a plan or elapsed time.","blocked_by":[],"area":"authority","phase":"gate"},
-  {"key":"HANDOFF","title":"Receive immutable Helm CLI Milestone 1 handoff","body":"Outcome: Capture, without importing, an explicit predecessor handoff.\nBrief sections: 30, 33, 34.\nAcceptance checklist:\n- Packet names repository and immutable SHA.\n- Packet states scope, exclusions and observed checks.\n- Packet lists invariants, landmines and reuse authority.\nEvidence: SHA-bound handoff record.\nBoundary: receipt neither imports code nor authorises product build.","blocked_by":[],"area":"migration","phase":"gate"},
-  {"key":"FREEZE","title":"Freeze current-spec contracts and build deltas","body":"Outcome: Freeze Helm 3's present Brief-derived behavioural contract before implementation.\nBrief sections: 3, 8-15, 18, 23, 35, 38.\nAcceptance checklist:\n- Source-of-truth and refusal tables are versioned.\n- Command, lease, ownership and closure predicates are versioned.\n- Required gates and full acceptance scenario are versioned.\nEvidence: reviewed contract snapshot.\nBoundary: does not classify Helm CLI tests or access predecessor material.","blocked_by":["APPROVAL"],"area":"contracts","phase":"0"},
-  {"key":"KERNEL","title":"Persist commands, events, attempts and uncertain effects","body":"Outcome: Provide a durable append-only control-plane record.\nBrief sections: 8, 10, 25, 38.\nAcceptance checklist:\n- Intent plans to immutable validated command.\n- Replay key prevents duplicate confirmed effects.\n- Unknown outcome is recorded and reconciled, not blindly retried.\n- Attempts retain session, model, worktree and evidence facts.\nEvidence: unit and fault-injection command traces.\nBoundary: no workflow policy or model routing is encoded.","blocked_by":["APPROVAL","FREEZE"],"area":"core","phase":"1"},
-  {"key":"AUTHORITY","title":"Enforce leases, reserve and refusal classes","body":"Outcome: Give deterministic machinery bounded authority.\nBrief sections: 12, 15, 28, 38.\nAcceptance checklist:\n- Lease bounds scope, limits, expiry and attempts.\n- Expiry stops new spend and requests in-flight cancellation.\n- Unconfirmed stopped worker is quarantined and escalated.\n- Correctness, resource and provider refusals differ.\nEvidence: expiry, reserve and refusal tests.\nBoundary: Fable cannot override hard correctness or provider constraints.","blocked_by":["APPROVAL","KERNEL"],"area":"authority","phase":"1"},
-  {"key":"ECONOMY","title":"Expose model registry, pools and honest resource reality","body":"Outcome: Supply Fable compact model and pool facts without routing policy.\nBrief sections: 13-15, 38.\nAcceptance checklist:\n- Registry holds capabilities, roles, policy and availability.\n- Subscription, API and top-up pools stay distinct.\n- Unknown quota, cost or reset remains unknown.\n- Dispatch rejects disabled or policy-ineligible models.\nEvidence: model snapshots and refusal tests.\nBoundary: Helm reports reality; Fable chooses legal models.","blocked_by":["APPROVAL","KERNEL"],"area":"economy","phase":"1"},
-  {"key":"CALIBRATION","title":"Measure calibration and accepted-outcome metrics","body":"Outcome: Make routing and autonomy improvement evidence-based.\nBrief sections: 10, 13, 14, 36.\nAcceptance checklist:\n- Attempt usage/cost attaches to pool, model and Map branch.\n- Completion, repair, review and latency metrics are queryable.\n- Accepted nodes per human intervention is calculated.\n- No metric auto-retiers a model.\nEvidence: fixture Log and metric projection.\nBoundary: observations are advisory to Fable, not deterministic selection.","blocked_by":["APPROVAL","ECONOMY"],"area":"economy","phase":"6"},
-  {"key":"WORKSPACE","title":"Isolate worktrees and enforce writer ownership","body":"Outcome: Make writing parallelism safe and inspectable.\nBrief sections: 16, 18, 38.\nAcceptance checklist:\n- Each writing attempt receives one isolated worktree.\n- Review has independent read-only attribution where possible.\n- Path, Git target and subprocess escape boundary is tested/documented.\n- Failed worktrees persist until explicit safe reclamation.\nEvidence: isolation probes and ownership records.\nBoundary: edit-hook checks alone do not prove shell containment.","blocked_by":["APPROVAL","KERNEL"],"area":"workspace","phase":"1"},
-  {"key":"PI-SLICE","title":"Prove Pi-native worker lifecycle vertical slice","body":"Outcome: Run a native worker end-to-end through Helm.\nBrief sections: 5, 16, 17, 20, 34.2.\nAcceptance checklist:\n- Helm creates worktree and Pi session.\n- A Sol worker emits semantic events.\n- Attempt produces structured handoff and shuts down.\n- Durable Log links worker, session and worktree.\nEvidence: provider-free/mock or authorised live slice transcript.\nBoundary: no Fable autonomy requirement yet.","blocked_by":["APPROVAL","AUTHORITY","WORKSPACE"],"area":"runtime","phase":"2"},
-  {"key":"PI-EXTENSION","title":"Control Pi tools and native session operations","body":"Outcome: Enforce Helm invariants inside the Pi loop.\nBrief sections: 16, 17, 18.\nAcceptance checklist:\n- Tool calls check valid lease, node, worktree and path.\n- Session supports steer, pause, resume, fork and terminate.\n- Checkpoint and semantic event subscription are durable.\n- Invalid tool operation is refused with evidence.\nEvidence: extension integration tests.\nBoundary: OS containment remains owned by WORKSPACE.","blocked_by":["APPROVAL","PI-SLICE"],"area":"runtime","phase":"2"},
-  {"key":"CONTEXT","title":"Manage context lifecycle, compaction and model change","body":"Outcome: Give workers only relevant durable context across lifecycle changes.\nBrief sections: 16, 19, 20.\nAcceptance checklist:\n- Spawn context includes objective, acceptance and relevant Map/Brief.\n- Irrelevant transcripts are excluded by default.\n- Compaction preserves a structured checkpoint and handoff.\n- Model change records provenance and preserves ownership.\nEvidence: context fixture comparisons and session audit.\nBoundary: context selection is a capability, not a fixed prompt pipeline.","blocked_by":["APPROVAL","PI-EXTENSION"],"area":"runtime","phase":"2"},
-  {"key":"EXTERNAL","title":"Track narrow external cognition contracts","body":"Outcome: Invoke non-Pi cognition without losing provenance or control.\nBrief sections: 5, 22, 24, 38.\nAcceptance checklist:\n- External request supports run, cancel and result.\n- Objective, model/family, pool, usage and outcome enter Log.\n- Result has independent provenance for review checks.\n- Unavailable/cancelled result has a durable observed state.\nEvidence: mock harness lifecycle trace.\nBoundary: external agents do not claim Pi session semantics.","blocked_by":["APPROVAL","KERNEL","AUTHORITY","ECONOMY"],"area":"external","phase":"2"},
-  {"key":"MAP-TRACKER","title":"Operate a GitHub-backed fluid Map and closure predicate","body":"Outcome: Let Fable evolve approach while preserving human intent and external truth.\nBrief sections: 3, 6, 9, 28, 37.\nAcceptance checklist:\n- Map nodes express outcomes, dependencies, gates and questions.\n- Fable can split, merge and propose changes within Brief.\n- Mutations fresh-read authoritative GitHub state.\n- Closure requires evidence, resolved dependencies and rationale.\nEvidence: issue relationship fixtures and closure trace.\nBoundary: Map is not a workflow DSL or a replacement tracker.","blocked_by":["APPROVAL","KERNEL"],"area":"map","phase":"3"},
-  {"key":"FABLE","title":"Run Fable through typed Helm control-plane tools","body":"Outcome: Establish Fable as strategic orchestrator, not terminal automation.\nBrief sections: 4, 6, 7, 14, 37.\nAcceptance checklist:\n- Fable reads Brief, Map, Log and resource view.\n- Typed tools cover worker, gate, review, lease, log and escalation actions.\n- Fable proposes Brief changes rather than silently applying them.\n- Tool effects create validated commands.\nEvidence: small-feature orchestration trace.\nBoundary: Fable does not routinely poll or bypass authority.","blocked_by":["APPROVAL","KERNEL","AUTHORITY","ECONOMY","MAP-TRACKER"],"area":"orchestrator","phase":"3"},
-  {"key":"SUPERVISOR","title":"Reconcile deterministically and coalesce judgement wakes","body":"Outcome: Recover mechanics without a model loop.\nBrief sections: 11, 12, 25, 28, 38.\nAcceptance checklist:\n- Safe retries occur only within lease bounds.\n- Provider blocks are recorded without invented recovery.\n- Multiple related exceptions create one coalesced Fable wake.\n- Restart compares Log against Pi, Git, worktrees and CI.\nEvidence: death, orphan and restart fault tests.\nBoundary: ambiguous repair goes to Fable, product decisions to humans.","blocked_by":["APPROVAL","AUTHORITY","PI-SLICE","MAP-TRACKER"],"area":"supervisor","phase":"4"},
-  {"key":"REASONING","title":"Choose dynamic review and alternative cognitive approaches","body":"Outcome: Let Fable allocate independent thinking when value warrants it.\nBrief sections: 2, 22, 24, 38.\nAcceptance checklist:\n- Fable can request independent, compare and adversarial work.\n- Review provenance detects same-session non-independence.\n- Alternative approaches return findings to Log and Map.\n- Depth is selected by judgement rather than fixed pipeline.\nEvidence: review topology fixtures and refusal trace.\nBoundary: multi-model reasoning is available, never mandatory.","blocked_by":["APPROVAL","FABLE","EXTERNAL","CONTEXT"],"area":"review","phase":"5"},
-  {"key":"QUALITY","title":"Run gates, independent review and repair against acceptance","body":"Outcome: Convert model judgement into machine and review evidence.\nBrief sections: 20-22, 35.\nAcceptance checklist:\n- Gate results attach to exact attempt/head context.\n- Required independent review is verified before acceptance.\n- Failed implementation creates an evidence-linked repair path.\n- Handoff carries tests, decisions, risks and next action.\nEvidence: red/green or equivalent gate and repair trace.\nBoundary: gate selection remains Fable judgement within fixed requirements.","blocked_by":["APPROVAL","PI-SLICE","REASONING","MAP-TRACKER"],"area":"verification","phase":"5"},
-  {"key":"INTEGRATION","title":"Prepare and merge only exact fresh evidence","body":"Outcome: Make irreversible integration SHA-bound and observable.\nBrief sections: 9, 23, 38.\nAcceptance checklist:\n- Prepare binds expected head, mergeability, CI and independent approval.\n- Merge re-reads all required facts immediately before effect.\n- Changed head invalidates prior preparation.\n- Result is read back and interrupted merge reconciles.\nEvidence: stale-head rejection and merge readback tests.\nBoundary: workers do not merge their own work.","blocked_by":["APPROVAL","QUALITY","AUTHORITY"],"area":"integration","phase":"5"},
-  {"key":"CLIENTS","title":"Expose shared API through CLI and local cockpit","body":"Outcome: Make operator state inspectable without creating a second control plane.\nBrief sections: 26, 27, 38.\nAcceptance checklist:\n- CLI and web read the same machine-readable API.\n- Overview shows Map, active work, needs-you and model economy.\n- Workers, logs and evidence are drill-down state.\n- UI action re-reads authority rather than trusting projection.\nEvidence: API parity fixtures and local UI run.\nBoundary: commentary is visibly separate from authoritative state.","blocked_by":["APPROVAL","KERNEL","MAP-TRACKER","ECONOMY","CALIBRATION"],"area":"clients","phase":"7"},
-  {"key":"IMPORT","title":"Classify and import approved Milestone 1 behaviour","body":"Outcome: Port useful predecessor behaviour only after immutable handoff.\nBrief sections: 30-34.\nAcceptance checklist:\n- Import record pins supplied SHA and handoff packet.\n- Tests are classified behavioural or implementation-specific.\n- Each retained component maps to Helm 3 contracts.\n- Retired adapter/Herdr architecture is documented.\nEvidence: SHA-bound import review and selected regression results.\nBoundary: no predecessor material enters before HANDOFF and approval.","blocked_by":["APPROVAL","HANDOFF","KERNEL"],"area":"migration","phase":"reuse"},
-  {"key":"ACCEPTANCE","title":"Prove the complete autonomous feature scenario","body":"Outcome: Demonstrate full-brief feature autonomy without human worker shepherding.\nBrief sections: 4, 35-39.\nAcceptance checklist:\n- Three parallel Pi workers run with Fable model choices.\n- Failure, independent review and repair complete or correctly escalate.\n- Fable restart reconstructs state; lease expires or renews correctly.\n- Exact-evidence merge and Map/UI/repository agreement are recorded.\nEvidence: durable end-to-end Log, handoffs, gates and projections.\nBoundary: mock and live-provider evidence are explicitly distinguished.","blocked_by":["APPROVAL","FABLE","SUPERVISOR","QUALITY","INTEGRATION","CLIENTS","CALIBRATION"],"area":"acceptance","phase":"acceptance"},
-  {"key":"LEGACY","title":"Retire legacy worker path after Pi-native proof","body":"Outcome: Retire legacy worker execution as default after replacement evidence.\nBrief sections: 31, 34.8.\nAcceptance checklist:\n- Pi-native acceptance evidence is linked.\n- Legacy default is disabled only after recovery proof.\n- Any temporary fallback has explicit justification.\n- Obsolete adapter dependency is removed or time-bounded.\nEvidence: configuration change and acceptance linkage.\nBoundary: legacy retirement does not gate initial Helm 3 capability.","blocked_by":["APPROVAL","ACCEPTANCE"],"area":"migration","phase":"8"},
-  {"key":"OUTCOME-CLOSURE","title":"Close Helm 3 outcome against Brief and legacy evidence","body":"Outcome: Record whether Helm 3 materially achieved the human outcome.\nBrief sections: 3, 23, 35-39.\nAcceptance checklist:\n- Acceptance evidence matches repository and tracker reality.\n- Fable records closure rationale against Brief.\n- Open risks and human rulings are explicit.\n- Legacy retirement evidence is linked or an explicit exception remains open.\nEvidence: final Map closure record and durable Log query.\nBoundary: a merged PR, dashboard state or elapsed time alone cannot close outcome.","blocked_by":["APPROVAL","ACCEPTANCE","LEGACY"],"area":"map","phase":"closure"}
+  {
+    "key": "MAP",
+    "title": "Outcome: Helm 3 durable autonomous development control plane",
+    "body": "Outcome: Deliver the full Brief as a fluid Map, not a fixed workflow.\nBrief sections: 1-39.\nAcceptance checklist:\n- [ ] Map records outcomes, dependencies, gates and questions.\n- [ ] Fable can change it within the Brief.\n- [ ] GitHub remains authoritative for issue and PR state.\nEvidence: linked issue graph and acceptance-run Log.\nBoundary: proposed parent outcome; it does not authorise product work.",
+    "blocked_by": [],
+    "area": "map",
+    "phase": "outcome"
+  },
+  {
+    "key": "APPROVAL",
+    "title": "Record human approval of Brief and proposed Map",
+    "body": "Outcome: Establish authority to begin product build.\nBrief sections: 1, 3, 12, 28, 38.\nAcceptance checklist:\n- [ ] Approved Brief version and fixed requirements are recorded.\n- [ ] Delegated authority and spending limits are recorded.\n- [ ] Approval names this Map revision.\nEvidence: human decision Log record and GitHub issue closure.\nBoundary: no approval is inferred from a plan or elapsed time.\nProposed initial execution topology: at most three workers plus coordinator. Record actual provider routes, resource caps/reserves, concurrency, run expiry, merge scope and escalation rules; model names available in this chat do not prove Pi access. No purchases or automatic top-ups are implied.",
+    "blocked_by": [],
+    "area": "authority",
+    "phase": "gate"
+  },
+  {
+    "key": "HANDOFF",
+    "title": "Receive immutable Helm CLI Milestone 1 handoff",
+    "body": "Outcome: Capture, without importing, an explicit predecessor handoff.\nBrief sections: 30, 33, 34.\nAcceptance checklist:\n- [ ] Packet names repository and immutable SHA.\n- [ ] Packet states scope, exclusions and observed checks.\n- [ ] Packet lists invariants, landmines and reuse authority.\nEvidence: SHA-bound handoff record.\nBoundary: receipt neither imports code nor authorises product build.",
+    "blocked_by": [],
+    "area": "migration",
+    "phase": "gate"
+  },
+  {
+    "key": "FREEZE",
+    "title": "Freeze current-spec contracts and build deltas",
+    "body": "Outcome: Freeze Helm 3's present Brief-derived behavioural contract before implementation.\nBrief sections: 3, 8-15, 18, 23, 35, 38.\nAcceptance checklist:\n- [ ] Source-of-truth and refusal tables are versioned.\n- [ ] Command, lease, ownership and closure predicates are versioned.\n- [ ] Required gates and full acceptance scenario are versioned.\nEvidence: reviewed contract snapshot.\nBoundary: does not classify Helm CLI tests or access predecessor material.",
+    "blocked_by": [
+      "APPROVAL"
+    ],
+    "area": "contracts",
+    "phase": "0"
+  },
+  {
+    "key": "ACCESS",
+    "title": "Prove bounded live Pi and Fable model access",
+    "body": "Outcome: Verify the actual native model routes before relying on them for the build.\nBrief sections: 5, 6, 13-16, 24.\nAcceptance checklist:\n- [ ] Auth source class and exact available model/provider identities are recorded without secrets.\n- [ ] One bounded native Pi request and one bounded Fable SDK request succeed using an approved route.\n- [ ] Request upper bounds, observed usage and unknown quota fields are recorded.\n- [ ] Cancellation and provider failure are surfaced without assuming subscription interoperability.\nEvidence: dated live request receipts and redacted capability observations.\nBoundary: requires build approval and finite authorised per-pool bounds; no purchase, login change or top-up implied. Local faux-provider evidence is not live access evidence.",
+    "blocked_by": [
+      "APPROVAL"
+    ],
+    "area": "runtime",
+    "phase": "0"
+  },
+  {
+    "key": "KERNEL",
+    "title": "Persist commands, events, attempts and uncertain effects",
+    "body": "Outcome: Provide a durable append-only control-plane record.\nBrief sections: 8, 10, 25, 38.\nAcceptance checklist:\n- [ ] Intent plans to immutable validated command.\n- [ ] Replay key prevents duplicate confirmed effects.\n- [ ] Unknown outcome is recorded and reconciled, not blindly retried.\n- [ ] Attempts retain session, model, worktree and evidence facts.\nEvidence: unit and fault-injection command traces.\nBoundary: no workflow policy or model routing is encoded.",
+    "blocked_by": [
+      "APPROVAL",
+      "FREEZE"
+    ],
+    "area": "core",
+    "phase": "1"
+  },
+  {
+    "key": "AUTHORITY",
+    "title": "Enforce leases, reserve and refusal classes",
+    "body": "Outcome: Give deterministic machinery bounded authority.\nBrief sections: 12, 15, 28, 38.\nAcceptance checklist:\n- [ ] Lease bounds scope, limits, expiry and attempts.\n- [ ] Expiry stops new spend and requests in-flight cancellation.\n- [ ] Unconfirmed stopped worker is quarantined and escalated.\n- [ ] Correctness, resource and provider refusals differ.\nEvidence: expiry, reserve and refusal tests.\nBoundary: Fable cannot override hard correctness or provider constraints.",
+    "blocked_by": [
+      "APPROVAL",
+      "KERNEL"
+    ],
+    "area": "authority",
+    "phase": "1"
+  },
+  {
+    "key": "ECONOMY",
+    "title": "Expose model registry, pools and honest resource reality",
+    "body": "Outcome: Supply Fable compact model and pool facts without routing policy.\nBrief sections: 13-15, 38.\nAcceptance checklist:\n- [ ] Registry holds capabilities, roles, policy and availability.\n- [ ] Subscription, API and top-up pools stay distinct.\n- [ ] Unknown quota, cost or reset remains unknown.\n- [ ] Dispatch rejects disabled or policy-ineligible models.\nEvidence: model snapshots and refusal tests.\nBoundary: Helm reports reality; Fable chooses legal models.",
+    "blocked_by": [
+      "APPROVAL",
+      "KERNEL"
+    ],
+    "area": "economy",
+    "phase": "1"
+  },
+  {
+    "key": "CALIBRATION",
+    "title": "Measure calibration and accepted-outcome metrics",
+    "body": "Outcome: Make routing and autonomy improvement evidence-based.\nBrief sections: 10, 13, 14, 36.\nAcceptance checklist:\n- [ ] Attempt usage/cost attaches to pool, model and Map branch.\n- [ ] Completion, repair, review and latency metrics are queryable.\n- [ ] Accepted nodes per human intervention is calculated.\n- [ ] No metric auto-retiers a model.\nEvidence: fixture Log and metric projection.\nBoundary: observations are advisory to Fable, not deterministic selection.",
+    "blocked_by": [
+      "APPROVAL",
+      "ECONOMY"
+    ],
+    "area": "economy",
+    "phase": "6"
+  },
+  {
+    "key": "WORKSPACE",
+    "title": "Isolate worktrees and enforce writer ownership",
+    "body": "Outcome: Make writing parallelism safe and inspectable.\nBrief sections: 16, 18, 38.\nAcceptance checklist:\n- [ ] Each writing attempt receives one isolated worktree.\n- [ ] Review has independent read-only attribution where possible.\n- [ ] Path, Git target and subprocess escape boundary is tested/documented.\n- [ ] Failed worktrees persist until explicit safe reclamation.\nEvidence: isolation probes and ownership records.\nBoundary: edit-hook checks alone do not prove shell containment.",
+    "blocked_by": [
+      "APPROVAL",
+      "KERNEL"
+    ],
+    "area": "workspace",
+    "phase": "1"
+  },
+  {
+    "key": "PI-SLICE",
+    "title": "Prove Pi-native worker lifecycle vertical slice",
+    "body": "Outcome: Run a native worker end-to-end through Helm.\nBrief sections: 5, 16, 17, 20, 34.2.\nAcceptance checklist:\n- [ ] Helm creates worktree and Pi session.\n- [ ] A Sol worker emits semantic events.\n- [ ] Attempt produces structured handoff and shuts down.\n- [ ] Durable Log links worker, session and worktree.\nEvidence: local SDK tests plus an authorised live native-worker slice with exact model/provider identity. Mock evidence alone cannot close the live slice.\nBoundary: no Fable autonomy requirement yet.",
+    "blocked_by": [
+      "APPROVAL",
+      "AUTHORITY",
+      "WORKSPACE",
+      "ACCESS"
+    ],
+    "area": "runtime",
+    "phase": "2"
+  },
+  {
+    "key": "PI-EXTENSION",
+    "title": "Control Pi tools and native session operations",
+    "body": "Outcome: Enforce Helm invariants inside the Pi loop.\nBrief sections: 16, 17, 18.\nAcceptance checklist:\n- [ ] Tool calls check valid lease, node, worktree and path.\n- [ ] Session supports steer, pause, resume, fork and terminate.\n- [ ] Checkpoint and semantic event subscription are durable.\n- [ ] Invalid tool operation is refused with evidence.\nEvidence: extension integration tests.\nBoundary: OS containment remains owned by WORKSPACE.",
+    "blocked_by": [
+      "APPROVAL",
+      "PI-SLICE"
+    ],
+    "area": "runtime",
+    "phase": "2"
+  },
+  {
+    "key": "CONTEXT",
+    "title": "Manage context lifecycle, compaction and model change",
+    "body": "Outcome: Give workers only relevant durable context across lifecycle changes.\nBrief sections: 16, 19, 20.\nAcceptance checklist:\n- [ ] Spawn context includes objective, acceptance and relevant Map/Brief.\n- [ ] Irrelevant transcripts are excluded by default.\n- [ ] Compaction preserves a structured checkpoint and handoff.\n- [ ] Model change records provenance and preserves ownership.\nEvidence: context fixture comparisons and session audit.\nBoundary: context selection is a capability, not a fixed prompt pipeline.",
+    "blocked_by": [
+      "APPROVAL",
+      "PI-EXTENSION"
+    ],
+    "area": "runtime",
+    "phase": "2"
+  },
+  {
+    "key": "EXTERNAL",
+    "title": "Track narrow external cognition contracts",
+    "body": "Outcome: Invoke non-Pi cognition without losing provenance or control.\nBrief sections: 5, 22, 24, 38.\nAcceptance checklist:\n- [ ] External request supports run, cancel and result.\n- [ ] Objective, model/family, pool, usage and outcome enter Log.\n- [ ] Result has independent provenance for review checks.\n- [ ] Unavailable/cancelled result has a durable observed state.\nEvidence: mock harness lifecycle trace.\nBoundary: external agents do not claim Pi session semantics.",
+    "blocked_by": [
+      "APPROVAL",
+      "KERNEL",
+      "AUTHORITY",
+      "ECONOMY"
+    ],
+    "area": "external",
+    "phase": "2"
+  },
+  {
+    "key": "MAP-TRACKER",
+    "title": "Operate a GitHub-backed fluid Map and closure predicate",
+    "body": "Outcome: Let Fable evolve approach while preserving human intent and external truth.\nBrief sections: 3, 6, 9, 28, 37.\nAcceptance checklist:\n- [ ] Map nodes express outcomes, dependencies, gates and questions.\n- [ ] Fable can split, merge and propose changes within Brief.\n- [ ] Mutations fresh-read authoritative GitHub state.\n- [ ] Closure requires evidence, resolved dependencies and rationale.\nEvidence: issue relationship fixtures and closure trace.\nBoundary: Map is not a workflow DSL or a replacement tracker.",
+    "blocked_by": [
+      "APPROVAL",
+      "KERNEL"
+    ],
+    "area": "map",
+    "phase": "3"
+  },
+  {
+    "key": "FABLE",
+    "title": "Run Fable through typed Helm control-plane tools",
+    "body": "Outcome: Establish Fable as strategic orchestrator, not terminal automation.\nBrief sections: 4, 6, 7, 14, 37.\nAcceptance checklist:\n- [ ] Fable reads Brief, Map, Log and resource view.\n- [ ] Typed tools cover worker, gate, review, lease, log and escalation actions.\n- [ ] Fable proposes Brief changes rather than silently applying them.\n- [ ] Tool effects create validated commands.\nEvidence: small-feature orchestration trace.\nBoundary: Fable does not routinely poll or bypass authority.",
+    "blocked_by": [
+      "APPROVAL",
+      "KERNEL",
+      "AUTHORITY",
+      "ECONOMY",
+      "MAP-TRACKER",
+      "PI-SLICE",
+      "ACCESS"
+    ],
+    "area": "orchestrator",
+    "phase": "3"
+  },
+  {
+    "key": "SUPERVISOR",
+    "title": "Reconcile deterministically and coalesce judgement wakes",
+    "body": "Outcome: Recover mechanics without a model loop.\nBrief sections: 11, 12, 25, 28, 38.\nAcceptance checklist:\n- [ ] Safe retries occur only within lease bounds.\n- [ ] Provider blocks are recorded without invented recovery.\n- [ ] Multiple related exceptions create one coalesced Fable wake.\n- [ ] Restart compares Log against Pi, Git, worktrees and CI.\nEvidence: death, orphan and restart fault tests.\nBoundary: ambiguous repair goes to Fable, product decisions to humans.",
+    "blocked_by": [
+      "APPROVAL",
+      "AUTHORITY",
+      "PI-SLICE",
+      "MAP-TRACKER"
+    ],
+    "area": "supervisor",
+    "phase": "4"
+  },
+  {
+    "key": "REASONING",
+    "title": "Choose dynamic review and alternative cognitive approaches",
+    "body": "Outcome: Let Fable allocate independent thinking when value warrants it.\nBrief sections: 2, 22, 24, 38.\nAcceptance checklist:\n- [ ] Fable can request independent, compare and adversarial work.\n- [ ] Review provenance detects same-session non-independence.\n- [ ] Alternative approaches return findings to Log and Map.\n- [ ] Depth is selected by judgement rather than fixed pipeline.\nEvidence: review topology fixtures and refusal trace.\nBoundary: multi-model reasoning is available, never mandatory.",
+    "blocked_by": [
+      "APPROVAL",
+      "FABLE",
+      "EXTERNAL",
+      "CONTEXT"
+    ],
+    "area": "review",
+    "phase": "5"
+  },
+  {
+    "key": "QUALITY",
+    "title": "Run gates, independent review and repair against acceptance",
+    "body": "Outcome: Convert model judgement into machine and review evidence.\nBrief sections: 20-22, 35.\nAcceptance checklist:\n- [ ] Gate results attach to exact attempt/head context.\n- [ ] Required independent review is verified before acceptance.\n- [ ] Failed implementation creates an evidence-linked repair path.\n- [ ] Handoff carries tests, decisions, risks and next action.\nEvidence: red/green or equivalent gate and repair trace.\nBoundary: gate selection remains Fable judgement within fixed requirements.\nBasic independent review and repair can ship before advanced REASONING; there is no mandatory multi-model review pipeline.",
+    "blocked_by": [
+      "APPROVAL",
+      "PI-SLICE",
+      "MAP-TRACKER"
+    ],
+    "area": "verification",
+    "phase": "5"
+  },
+  {
+    "key": "INTEGRATION",
+    "title": "Prepare and merge only exact fresh evidence",
+    "body": "Outcome: Make irreversible integration SHA-bound and observable.\nBrief sections: 9, 23, 38.\nAcceptance checklist:\n- [ ] Prepare binds expected head, mergeability, CI and independent approval.\n- [ ] Merge re-reads all required facts immediately before effect.\n- [ ] Changed head invalidates prior preparation.\n- [ ] Result is read back and interrupted merge reconciles.\nEvidence: stale-head rejection and merge readback tests.\nBoundary: workers do not merge their own work.",
+    "blocked_by": [
+      "APPROVAL",
+      "QUALITY",
+      "AUTHORITY"
+    ],
+    "area": "integration",
+    "phase": "5"
+  },
+  {
+    "key": "CLIENTS",
+    "title": "Expose shared API through CLI and local cockpit",
+    "body": "Outcome: Make operator state inspectable without creating a second control plane.\nBrief sections: 26, 27, 38.\nAcceptance checklist:\n- [ ] CLI and web read the same machine-readable API.\n- [ ] Overview shows Map, active work, needs-you and model economy.\n- [ ] Workers, logs and evidence are drill-down state.\n- [ ] UI action re-reads authority rather than trusting projection.\nEvidence: API parity fixtures and local UI run.\nBoundary: commentary is visibly separate from authoritative state.\nStart the thin cockpit/API against core projections; CALIBRATION adds its views later and is verified at full acceptance.",
+    "blocked_by": [
+      "APPROVAL",
+      "KERNEL",
+      "MAP-TRACKER",
+      "ECONOMY"
+    ],
+    "area": "clients",
+    "phase": "7"
+  },
+  {
+    "key": "IMPORT",
+    "title": "Classify and import approved Milestone 1 behaviour",
+    "body": "Outcome: Port useful predecessor behaviour only after immutable handoff.\nBrief sections: 30-34.\nAcceptance checklist:\n- [ ] Import record pins supplied SHA and handoff packet.\n- [ ] Tests are classified behavioural or implementation-specific.\n- [ ] Each retained component maps to Helm 3 contracts.\n- [ ] Retired adapter/Herdr architecture is documented.\nEvidence: SHA-bound import review and selected regression results.\nBoundary: no predecessor material enters before HANDOFF and approval.",
+    "blocked_by": [
+      "APPROVAL",
+      "HANDOFF",
+      "KERNEL"
+    ],
+    "area": "migration",
+    "phase": "reuse"
+  },
+  {
+    "key": "ACCEPTANCE",
+    "title": "Prove the complete autonomous feature scenario",
+    "body": "Outcome: Demonstrate full-brief feature autonomy without human worker shepherding.\nBrief sections: 4, 35-39.\nAcceptance checklist:\n- [ ] Three parallel Pi workers run with Fable model choices.\n- [ ] Failure, independent review and repair complete or correctly escalate.\n- [ ] Fable restart reconstructs state; lease expires or renews correctly.\n- [ ] Exact-evidence merge and Map/UI/repository agreement are recorded.\nEvidence: durable end-to-end Log, handoffs, gates and projections.\nBoundary: mock and live-provider evidence are explicitly distinguished.",
+    "blocked_by": [
+      "APPROVAL",
+      "FABLE",
+      "SUPERVISOR",
+      "QUALITY",
+      "INTEGRATION",
+      "CLIENTS",
+      "CALIBRATION",
+      "PI-EXTENSION",
+      "CONTEXT",
+      "EXTERNAL",
+      "REASONING"
+    ],
+    "area": "acceptance",
+    "phase": "acceptance"
+  },
+  {
+    "key": "LEGACY",
+    "title": "Retire legacy worker path after Pi-native proof",
+    "body": "Outcome: Retire legacy worker execution as default after replacement evidence.\nBrief sections: 31, 34.8.\nAcceptance checklist:\n- [ ] Pi-native acceptance evidence is linked.\n- [ ] Legacy default is disabled only after recovery proof.\n- [ ] Any temporary fallback has explicit justification.\n- [ ] Obsolete adapter dependency is removed or time-bounded.\nEvidence: configuration change and acceptance linkage.\nBoundary: legacy retirement does not gate initial Helm 3 capability.",
+    "blocked_by": [
+      "APPROVAL",
+      "ACCEPTANCE",
+      "IMPORT"
+    ],
+    "area": "migration",
+    "phase": "8"
+  },
+  {
+    "key": "OUTCOME-CLOSURE",
+    "title": "Close Helm 3 outcome against Brief and legacy evidence",
+    "body": "Outcome: Record whether Helm 3 materially achieved the human outcome.\nBrief sections: 3, 23, 35-39.\nAcceptance checklist:\n- [ ] Acceptance evidence matches repository and tracker reality.\n- [ ] Fable records closure rationale against Brief.\n- [ ] Open risks and human rulings are explicit.\n- [ ] Legacy retirement evidence is linked or an explicit exception remains open.\nEvidence: final Map closure record and durable Log query.\nBoundary: a merged PR, dashboard state or elapsed time alone cannot close outcome.",
+    "blocked_by": [
+      "APPROVAL",
+      "ACCEPTANCE",
+      "LEGACY",
+      "IMPORT"
+    ],
+    "area": "map",
+    "phase": "closure"
+  },
+  {
+    "key": "PREP",
+    "title": "Prepare independent private repository, Brief, Map and SDK evidence",
+    "body": "Outcome: Complete the authorised hours 0\u20134 preparation without predecessor access.\nBrief sections: 1-39 and human preparation ruling on 2026-09-15.\nAcceptance checklist:\n- [ ] Private repository and original human design are preserved and verified.\n- [ ] Proposed Map issues have native dependencies, acceptance criteria and complete section coverage.\n- [ ] Proposed protocol fields, recovery semantics and handoff boundary are documented.\n- [ ] Local SDK/sandbox probe evidence is reproducible and clearly distinguished from live model access.\n- [ ] Updated approach is returned for explicit build approval; no product dispatch occurs.\nEvidence: repository commit, preparation CI, local probe results and approval packet.\nBoundary: independent preparation only; no old Helm CLI source or worktrees accessed.",
+    "blocked_by": [],
+    "area": "preparation",
+    "phase": "preparation"
+  }
 ]

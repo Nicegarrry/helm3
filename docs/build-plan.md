@@ -21,9 +21,13 @@ coordination owns contracts, cross-cutting decisions and acceptance. Limit to
 three active workers plus coordinator until machine and provider capacity is
 observed. Verify every dispatched brief against the accepted design and ticket.
 
-After approval, start with broad interfaces and the Pi vertical slice, then fan
-out across kernel/authority/economy, runtime/context/external cognition, and
-Map/Fable/client work. The first six hours of the build are an observational
+After approval, run ACCESS first: one finite, authorised native Pi model request and one Fable SDK request. This chat's Terra/Luna availability is not proof those models are usable from Pi. Freeze [protocol revision 0](protocol.md) after those findings, then fan out across three lanes:
+
+1. Terra: Pi native sessions, tool policy, context and isolation.
+2. Terra: command/lease/recovery spine, then Fable and quality integration.
+3. Luna/Terra as complexity requires: early Map/API/cockpit; SHA-pinned predecessor reuse when the handoff arrives.
+
+Keep stable predecessor behaviour behind proposed interfaces rather than speculatively rebuilding it while Opus works. New command durability and Pi semantics can proceed independently. The first six hours of the build are an observational
 checkpoint: report discovered interfaces, provider/authentication/isolation
 blockers and revised sequencing; it is not a guaranteed completion gate.
 
@@ -41,7 +45,7 @@ Opus supplies an explicit Milestone 1 handoff with immutable SHA. Receipt of
 that handoff is independent of build approval. The later approved import lane
 classifies predecessor tests as behavioural or implementation-specific, pins
 the SHA in the Log, and ports only verified behaviours behind Helm 3 interfaces.
-It never blocks greenfield product slices.
+It does not block independent Pi/Fable/client preparation or new control-plane slices. Full outcome closure remains blocked on the handoff/import/transition evidence; do not claim the entire migration complete without it.
 
 ## Freeze checklist
 
@@ -61,3 +65,7 @@ mid-run with reconstruction; lease expiry or renewal; durable handoffs; final
 Map state matching repository reality; and CLI/Cockpit projection agreement.
 The run must clearly distinguish mock/provider-free evidence from live-provider
 evidence.
+
+## Approval boundary
+
+Approve the approach and native runtime choices first. Record permitted provider routes, pool bounds/reserve, max concurrency, execution expiry and merge scope in the approval issue before issuing an autonomous run lease. The proposed initial topology is three workers plus coordinator, with no purchases or automatic top-ups. The 24–48-hour target starts at build approval, assumes live access and timely predecessor handoff, and must be revised from actual accepted output at the six-hour checkpoint. Preparation time is already spent and is not scheduled again.

@@ -1,0 +1,158 @@
+{
+  "MAP": {
+    "number": 1,
+    "id": 5453055024,
+    "url": "https://github.com/Nicegarrry/helm3/issues/1",
+    "title": "[MAP] Outcome: Helm 3 durable autonomous development control plane"
+  },
+  "APPROVAL": {
+    "number": 2,
+    "id": 5453055190,
+    "url": "https://github.com/Nicegarrry/helm3/issues/2",
+    "title": "[APPROVAL] Record human approval of Brief and proposed Map"
+  },
+  "HANDOFF": {
+    "number": 3,
+    "id": 5453055332,
+    "url": "https://github.com/Nicegarrry/helm3/issues/3",
+    "title": "[HANDOFF] Receive immutable Helm CLI Milestone 1 handoff"
+  },
+  "FREEZE": {
+    "number": 4,
+    "id": 5453055501,
+    "url": "https://github.com/Nicegarrry/helm3/issues/4",
+    "title": "[FREEZE] Freeze current-spec contracts and build deltas"
+  },
+  "ACCESS": {
+    "number": 5,
+    "id": 5453055663,
+    "url": "https://github.com/Nicegarrry/helm3/issues/5",
+    "title": "[ACCESS] Prove bounded live Pi and Fable model access"
+  },
+  "KERNEL": {
+    "number": 6,
+    "id": 5453055810,
+    "url": "https://github.com/Nicegarrry/helm3/issues/6",
+    "title": "[KERNEL] Persist commands, events, attempts and uncertain effects"
+  },
+  "AUTHORITY": {
+    "number": 7,
+    "id": 5453056049,
+    "url": "https://github.com/Nicegarrry/helm3/issues/7",
+    "title": "[AUTHORITY] Enforce leases, reserve and refusal classes"
+  },
+  "ECONOMY": {
+    "number": 8,
+    "id": 5453056207,
+    "url": "https://github.com/Nicegarrry/helm3/issues/8",
+    "title": "[ECONOMY] Expose model registry, pools and honest resource reality"
+  },
+  "CALIBRATION": {
+    "number": 9,
+    "id": 5453056371,
+    "url": "https://github.com/Nicegarrry/helm3/issues/9",
+    "title": "[CALIBRATION] Measure calibration and accepted-outcome metrics"
+  },
+  "WORKSPACE": {
+    "number": 10,
+    "id": 5453056565,
+    "url": "https://github.com/Nicegarrry/helm3/issues/10",
+    "title": "[WORKSPACE] Isolate worktrees and enforce writer ownership"
+  },
+  "PI-SLICE": {
+    "number": 11,
+    "id": 5453056743,
+    "url": "https://github.com/Nicegarrry/helm3/issues/11",
+    "title": "[PI-SLICE] Prove Pi-native worker lifecycle vertical slice"
+  },
+  "PI-EXTENSION": {
+    "number": 12,
+    "id": 5453056890,
+    "url": "https://github.com/Nicegarrry/helm3/issues/12",
+    "title": "[PI-EXTENSION] Control Pi tools and native session operations"
+  },
+  "CONTEXT": {
+    "number": 13,
+    "id": 5453057040,
+    "url": "https://github.com/Nicegarrry/helm3/issues/13",
+    "title": "[CONTEXT] Manage context lifecycle, compaction and model change"
+  },
+  "EXTERNAL": {
+    "number": 14,
+    "id": 5453057184,
+    "url": "https://github.com/Nicegarrry/helm3/issues/14",
+    "title": "[EXTERNAL] Track narrow external cognition contracts"
+  },
+  "MAP-TRACKER": {
+    "number": 15,
+    "id": 5453057348,
+    "url": "https://github.com/Nicegarrry/helm3/issues/15",
+    "title": "[MAP-TRACKER] Operate a GitHub-backed fluid Map and closure predicate"
+  },
+  "FABLE": {
+    "number": 16,
+    "id": 5453057489,
+    "url": "https://github.com/Nicegarrry/helm3/issues/16",
+    "title": "[FABLE] Run Fable through typed Helm control-plane tools"
+  },
+  "SUPERVISOR": {
+    "number": 17,
+    "id": 5453057664,
+    "url": "https://github.com/Nicegarrry/helm3/issues/17",
+    "title": "[SUPERVISOR] Reconcile deterministically and coalesce judgement wakes"
+  },
+  "REASONING": {
+    "number": 18,
+    "id": 5453057805,
+    "url": "https://github.com/Nicegarrry/helm3/issues/18",
+    "title": "[REASONING] Choose dynamic review and alternative cognitive approaches"
+  },
+  "QUALITY": {
+    "number": 19,
+    "id": 5453057951,
+    "url": "https://github.com/Nicegarrry/helm3/issues/19",
+    "title": "[QUALITY] Run gates, independent review and repair against acceptance"
+  },
+  "INTEGRATION": {
+    "number": 20,
+    "id": 5453058090,
+    "url": "https://github.com/Nicegarrry/helm3/issues/20",
+    "title": "[INTEGRATION] Prepare and merge only exact fresh evidence"
+  },
+  "CLIENTS": {
+    "number": 21,
+    "id": 5453058247,
+    "url": "https://github.com/Nicegarrry/helm3/issues/21",
+    "title": "[CLIENTS] Expose shared API through CLI and local cockpit"
+  },
+  "IMPORT": {
+    "number": 22,
+    "id": 5453058395,
+    "url": "https://github.com/Nicegarrry/helm3/issues/22",
+    "title": "[IMPORT] Classify and import approved Milestone 1 behaviour"
+  },
+  "ACCEPTANCE": {
+    "number": 23,
+    "id": 5453058551,
+    "url": "https://github.com/Nicegarrry/helm3/issues/23",
+    "title": "[ACCEPTANCE] Prove the complete autonomous feature scenario"
+  },
+  "LEGACY": {
+    "number": 24,
+    "id": 5453058689,
+    "url": "https://github.com/Nicegarrry/helm3/issues/24",
+    "title": "[LEGACY] Retire legacy worker path after Pi-native proof"
+  },
+  "OUTCOME-CLOSURE": {
+    "number": 25,
+    "id": 5453058812,
+    "url": "https://github.com/Nicegarrry/helm3/issues/25",
+    "title": "[OUTCOME-CLOSURE] Close Helm 3 outcome against Brief and legacy evidence"
+  },
+  "PREP": {
+    "number": 26,
+    "id": 5453058960,
+    "url": "https://github.com/Nicegarrry/helm3/issues/26",
+    "title": "[PREP] Prepare independent private repository, Brief, Map and SDK evidence"
+  }
+}

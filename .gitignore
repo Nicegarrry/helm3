@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.firecrawl/
+.codebase-memory/
+.helm/
+coverage/
+dist/
+*.log
+.DS_Store
+*.db
+*.db-shm
+*.db-wal

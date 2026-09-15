@@ -114,6 +114,21 @@ test('pagination reaches a terminating second page before declaring the native g
   assert(calls.some((path) => path.includes('/issues/1/sub_issues') && path.endsWith('&page=2')), 'the observer did not silently assume a full first page was complete');
 });
 
+test('snapshot bounds concurrent independent reads while retaining a 34-node star', async () => {
+  const children = Array.from({ length: 34 }, (_, index) => issue(index + 2)); let active = 0, maximum = 0;
+  const transport: TrackerCommandTransport = async (argv) => {
+    const path = argv[3]!; active += 1; maximum = Math.max(maximum, active); await new Promise(resolve => setTimeout(resolve, 2)); active -= 1;
+    const match = path.match(/^repos\/owner\/repo\/issues\/(\d+)(?:\/([^?]+))?/); if (!match) return { ok: false, stdout: '', stderr: 'bad path' };
+    const number = Number(match[1]), relation = match[2];
+    if (relation === 'sub_issues') return { ok: true, stdout: JSON.stringify(number === 1 ? children : []), stderr: '' };
+    if (relation === 'dependencies/blocked_by') return { ok: true, stdout: '[]', stderr: '' };
+    return { ok: true, stdout: JSON.stringify(issue(number)), stderr: '' };
+  };
+  const snapshot = await new GitHubMapTracker({ repo: 'owner/repo', parentIssue: 1, transport, now: () => timestamp, concurrency: 8 }).snapshot();
+  assert.equal(snapshot.completeness, 'complete'); assert.equal(snapshot.nodes.length, 35);
+  assert.ok(maximum > 1); assert.ok(maximum <= 8);
+});
+
 test('default gh transport bounds runaway subprocess output with a single termination sequence', { concurrency: false }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'helm3-tracker-output-')); const gh = join(root, 'gh'); const marker = join(root, 'terms');
   await writeFile(gh, `#!/usr/bin/env node

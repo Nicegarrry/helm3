@@ -44,6 +44,8 @@ export type GitHubMapTrackerOptions = Readonly<{
   pageLimit?: number;
   nodeLimit?: number;
   requestLimit?: number;
+  /** Per-snapshot transport concurrency. Direct issue observations are never reused after snapshot(). */
+  concurrency?: number;
   timeoutMs?: number;
   outputByteLimit?: number;
 }>;
@@ -146,6 +148,7 @@ export class GitHubMapTracker {
   readonly #pageLimit: number;
   readonly #nodeLimit: number;
   readonly #requestLimit: number;
+  readonly #concurrency: number;
   readonly #limits: Readonly<{ timeoutMs: number; outputByteLimit: number }>;
 
   constructor(options: GitHubMapTrackerOptions) {
@@ -157,6 +160,7 @@ export class GitHubMapTracker {
     this.#pageLimit = boundedPositiveInteger(options.pageLimit ?? 20, 'pageLimit', 50);
     this.#nodeLimit = boundedPositiveInteger(options.nodeLimit ?? 500, 'nodeLimit', 1_000);
     this.#requestLimit = boundedPositiveInteger(options.requestLimit ?? 2_500, 'requestLimit', 10_000);
+    this.#concurrency = boundedPositiveInteger(options.concurrency ?? 8, 'concurrency', 16);
     this.#limits = Object.freeze({ timeoutMs: boundedPositiveInteger(options.timeoutMs ?? 10_000, 'timeoutMs', 60_000), outputByteLimit: boundedPositiveInteger(options.outputByteLimit ?? 1_000_000, 'outputByteLimit', 4_000_000) });
   }
 
@@ -164,18 +168,30 @@ export class GitHubMapTracker {
     const reasons: MapIncompleteReason[] = [];
     const nodes = new Map<number, MutableNode>();
     const collecting = new Set<number>();
+    const issueReads = new Map<string, Promise<RemoteIssue | null>>();
     let requests = 0;
+    let active = 0;
+    const waiting: Array<() => void> = [];
+    const dispatch = async <T>(action: () => Promise<T>): Promise<T> => {
+      if (active >= this.#concurrency) await new Promise<void>(resolve => waiting.push(resolve));
+      active += 1;
+      try { return await action(); }
+      finally { active -= 1; waiting.shift()?.(); }
+    };
     const incomplete = (code: MapIncompleteReason['code'], subject: string): void => {
       if (!reasons.some((reason) => reason.code === code && reason.subject === subject)) reasons.push({ code, subject });
     };
     const read = async (path: string): Promise<unknown | null> => {
       if (requests >= this.#requestLimit) { incomplete('request_limit', this.#repo); return null; }
       requests += 1;
-      const result = await this.#transport(['api', '-X', 'GET', path, ...apiHeaders], this.#limits);
+      const result = await dispatch(() => this.#transport(['api', '-X', 'GET', path, ...apiHeaders], this.#limits));
       if (!result.ok) { incomplete(result.outputTruncated ? 'output_bound' : 'transport_failed', path); return null; }
       try { return JSON.parse(result.stdout); } catch { incomplete('invalid_response', path); return null; }
     };
-    const readIssue = async (repository: string, number: number): Promise<RemoteIssue | null> => {
+    const readIssue = (repository: string, number: number): Promise<RemoteIssue | null> => {
+      const key = `${repository}#${number}`;
+      const cached = issueReads.get(key); if (cached) return cached;
+      const pending = (async (): Promise<RemoteIssue | null> => {
       const body = await read(`repos/${repository}/issues/${number}`);
       const parsed = body === null ? null : issueFrom(body);
       if (parsed === null || parsed.repository !== repository || parsed.number !== number) {
@@ -183,6 +199,8 @@ export class GitHubMapTracker {
         return null;
       }
       return parsed;
+      })();
+      issueReads.set(key, pending); return pending;
     };
     const readPages = async <T>(path: string, parse: (value: unknown) => T | null): Promise<T[] | null> => {
       const values: T[] = [];
@@ -216,10 +234,8 @@ export class GitHubMapTracker {
         nodes.set(number, node);
         const blockers = await readPages(`repos/${this.#repo}/issues/${number}/dependencies/blocked_by`, blockerFrom);
         if (blockers !== null) {
-          for (const listed of blockers) {
-            const blocker = await readIssue(listed.repository, listed.number);
-            if (blocker !== null) node.blockedBy.push({ repository: blocker.repository, number: blocker.number, state: blocker.state, title: blocker.title, url: blocker.url });
-          }
+          const observed = await Promise.all(blockers.map((listed) => readIssue(listed.repository, listed.number)));
+          for (const blocker of observed) if (blocker !== null) node.blockedBy.push({ repository: blocker.repository, number: blocker.number, state: blocker.state, title: blocker.title, url: blocker.url });
         }
         const children = await readPages(`repos/${this.#repo}/issues/${number}/sub_issues`, (entry) => {
           const child = issueFrom(entry);
@@ -227,7 +243,7 @@ export class GitHubMapTracker {
         });
         if (children !== null) {
           node.subIssues.push(...children);
-          for (const child of children) await collect(child, number);
+          await Promise.all([...new Set(children)].map((child) => collect(child, number)));
         }
       }
       collecting.delete(number);

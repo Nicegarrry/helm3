@@ -53,8 +53,32 @@
   },
   "preservedParallelRun": {
     "source": "/private/tmp/helm3-parallel-wave12-preserved.log",
-    "enteredAt": ["2026-09-15T21:00:27.129Z", "2026-09-15T21:00:27.137Z", "2026-09-15T21:00:27.145Z"],
+    "entered": [
+      {
+        "workerId": "worker-cb08f88d-2691-4bd1-b3ee-26bc4a976c14",
+        "attemptId": "attempt-worker-cb08f88d-2691-4bd1-b3ee-26bc4a976c14",
+        "sessionId": "01a0a6de-fd8a-754f-8aed-435e6acf7a24",
+        "at": "2026-09-15T21:00:27.129Z",
+        "state": "terminal"
+      },
+      {
+        "workerId": "worker-6f74e890-d66a-4c0c-8628-f1a4a406bb88",
+        "attemptId": "attempt-worker-6f74e890-d66a-4c0c-8628-f1a4a406bb88",
+        "sessionId": "01a0a6de-fd70-754f-8aed-435b4592e51b",
+        "at": "2026-09-15T21:00:27.137Z",
+        "state": "terminal"
+      },
+      {
+        "workerId": "worker-6d592bcd-53e0-4450-8bad-c670e5d1c206",
+        "attemptId": "attempt-worker-6d592bcd-53e0-4450-8bad-c670e5d1c206",
+        "sessionId": "01a0a6de-fd75-754f-8aed-435d5624c298",
+        "at": "2026-09-15T21:00:27.145Z",
+        "state": "unknown"
+      }
+    ],
     "releasedAt": "2026-09-15T21:00:27.145Z",
+    "safeReceiptSha256": "cba499889ecf8ebd0282686331d3ddc2b6eba953a437722a57d577c10c0f3fec",
+    "privateOperationalStatePreserved": true,
     "terminalWorkers": 2,
     "unknownWorkers": 1,
     "retainedFixtureReservations": 1,

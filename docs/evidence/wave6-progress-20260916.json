@@ -58,6 +58,17 @@
     "typecheckArtifact": "raw:sha256:1ad084df6bb4ed5628864ba835b464c226ca435820c1671042f4c75fec0cb38d",
     "qualification": "runGate primitive; not full SDK-orchestrator autonomy"
   },
+  "mapDogfood": {
+    "issue": 1,
+    "commandId": "map-wave4-904d9980-4770-4b19-8806-aafa958ea51f",
+    "state": "succeeded",
+    "observedState": "OPEN",
+    "revision": "2026-09-15T14:43:59Z",
+    "observedAt": "2026-09-15T14:44:00.093Z",
+    "commandHash": "sha256:55185b64dfe86e5709e7e49cd0af81517f700cb21d4ca6dc4e525ad37dab2d27",
+    "concurrency": "read_before_write_not_atomic",
+    "issuesClosed": 0
+  },
   "savedPiReport": {
     "classification": "advisory normalised report",
     "providerRequestsAdded": 0,

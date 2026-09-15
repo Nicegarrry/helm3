@@ -10,6 +10,7 @@ import test from 'node:test';
 import { z } from 'zod/v3';
 import type { Attempt, Command } from '../../src/contracts/index.js';
 import { openHost } from '../../src/host/index.js';
+import { createHostGateTool, gateRunPayloadSchema } from '../../src/host/gate-tools.js';
 import { PiWorkerFleet, type WorkerSpawnInput, type WorkerSteerInput } from '../../src/host/worker-fleet.js';
 import type { HelmToolExecutionContext } from '../../src/runtime/orchestrator/index.js';
 import type { PiNativeWorker } from '../../src/runtime/pi/index.js';
@@ -34,10 +35,10 @@ async function setup(options: { successorWait?: Deferred; successorModel?: strin
   const baseSha = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim(); const workspace = new WorkspaceManager({ stateRoot: join(root, 'workspace') });
   const spawnPayload = z.object({ workerId: z.string(), attemptId: z.string(), modelId: z.literal('offline'), modelProvider: z.literal('faux'), modelApi: z.literal('fixture'), role: z.literal('builder'), inputDigest: z.string(), baseSha: z.string(), modelFactVersion: z.literal(1), dataPolicy: z.literal('public-only') }).strict();
   const steerPayload = z.object({ workerId: z.string(), attemptId: z.string(), predecessorWorkerId: z.string(), inputDigest: z.string(), modelId: z.literal('offline'), modelProvider: z.literal('faux'), modelApi: z.literal('fixture'), modelFactVersion: z.literal(1), dataPolicy: z.literal('public-only'), expectedHead: z.string() }).strict();
-  const kinds = { 'worker.spawn': { payloadSchema: spawnPayload, modelSelection: (value: unknown) => ({ modelId: spawnPayload.parse(value).modelId, role: 'builder', requiredCapabilities: ['build'], dataClassification: 'public' as const }) }, 'worker.steer': { payloadSchema: steerPayload, modelSelection: (value: unknown) => ({ modelId: steerPayload.parse(value).modelId, role: 'builder', requiredCapabilities: ['build'], dataClassification: 'public' as const }) } };
+  const kinds = { 'gate.run': { payloadSchema: gateRunPayloadSchema }, 'worker.spawn': { payloadSchema: spawnPayload, modelSelection: (value: unknown) => ({ modelId: spawnPayload.parse(value).modelId, role: 'builder', requiredCapabilities: ['build'], dataClassification: 'public' as const }) }, 'worker.steer': { payloadSchema: steerPayload, modelSelection: (value: unknown) => ({ modelId: steerPayload.parse(value).modelId, role: 'builder', requiredCapabilities: ['build'], dataClassification: 'public' as const }) } };
   let plane = await openHost({ stateDirectory: state, now: () => clock, kinds });
-  plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['worker.spawn', 'worker.steer'], expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
-  plane.recordAutonomyLease({ leaseId: 'auto', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['worker.spawn', 'worker.steer'], issuedAt: stamp, expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
+  plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['worker.spawn', 'worker.steer', 'gate.run'], expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
+  plane.recordAutonomyLease({ leaseId: 'auto', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['worker.spawn', 'worker.steer', 'gate.run'], issuedAt: stamp, expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
   plane.recordModelFact({ modelId: 'offline', provider: options.registryProvider ?? 'faux', poolId: 'none', enabled: true, capabilities: ['build'], roles: ['builder'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: stamp }); plane.acquireOwnership({ runId: 'run', leaseId: 'owner', owner: 'fable', sessionId: 'session', epoch: 1, issuedAt: stamp, expiresAt: later }, 0);
   const context: HelmToolExecutionContext = { runId: 'run', sessionId: 'session', mode: 'primary' }; let rehydrates = 0; let effectFault: 'head' | 'lease' | 'epoch' | undefined;
   const binding = () => ({ host: plane, workspaceManager: workspace, executor: { executorId: 'fleet' }, claimExpiresAt: () => '2200-01-01T00:00:00Z', readFact: async () => {
@@ -75,4 +76,40 @@ test('a continuation whose terminal persistence fails is durably marked unknown'
 
 test('registered provider mismatch refuses spawn before native execution', async () => {
   await assert.rejects(() => setup({ registryProvider: 'different-provider' }), /provenance.*registered|provider/i);
+});
+
+// These are two real worktrees at the same SHA. A worker label and head alone
+// cannot prove that a gate inspected the worktree being continued.
+test('steer accepts only gate evidence from its own canonical worktree', async () => {
+  for (const foreignWorkspace of [true, false]) {
+    const f = await setup();
+    try {
+      const gate = createHostGateTool({
+        context: f.context, authorize: async () => undefined, host: f.plane,
+        executor: { executorId: 'gate-fixture' }, claimExpiresAt: () => '2200-01-01T00:00:00Z',
+        command: { actorId: 'fable', leaseId: 'auto', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => stamp, notAfter: () => later },
+        catalog: { async resolve() { return {
+          gateId: 'content', workerId: f.started.workerId, repositoryId: 'repo', mapNodeId: 'node',
+          workspaceId: 'opaque-registered-workspace', workspace: foreignWorkspace ? f.repo : join(f.root, 'worker'),
+          expectedHead: f.baseSha, acceptanceVersion: '1', environment: {},
+          checks: [{ name: 'content', executable: process.execPath, args: ['-e', "if(require('fs').readFileSync('README.md','utf8') !== 'base\\n') process.exit(1)"], timeoutMs: 5000 }],
+        }; } },
+      });
+      const gateResult = await gate.execute({ gateId: 'content', workerId: f.started.workerId, expectedHead: f.baseSha }, f.context);
+      assert.equal(gateResult.state, 'succeeded');
+      if (gateResult.state !== 'succeeded') throw new Error('fixture gate must complete');
+      const evidence = gateResult.value as { commandId: string; gateState: string; evidenceRefs: string[] };
+      assert.equal(evidence.gateState, 'succeeded');
+      const input = { ...steerInput(f), gateCommandId: evidence.commandId, evidenceRefs: evidence.evidenceRefs };
+      if (foreignWorkspace) {
+        await assert.rejects(f.fleet.steer(f.context, input), /gate evidence/);
+        assert.equal(f.rehydrates(), 0);
+      } else {
+        const next = await f.fleet.steer(f.context, input);
+        await f.fleet.waitForTerminal(next.workerId);
+        assert.equal(f.rehydrates(), 1);
+        assert.equal((await f.fleet.inspect(f.context, next.workerId)).state, 'terminal');
+      }
+    } finally { await f.cleanup(); }
+  }
 });

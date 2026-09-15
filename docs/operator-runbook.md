@@ -30,3 +30,14 @@ Receive the immutable packet without altering the source checkout. After authori
 ## Stop conditions
 
 Lease expiry/revocation blocks further spending/effects while observation continues. Unknown external outcomes are reconciled before retry. Missing enforceable bounds, unmet model/role/policy floors, stale integration evidence or an ownership conflict refuse the operation. Engineering ambiguity wakes the active orchestrator; only product/authority/high-impact decisions reach the human. A human pause stops dispatch/build/publish activity and preserves WIP.
+
+## Historical saved projection viewer
+
+To inspect an already-exported cockpit API response without opening its original Helm state, save the explicit JSON response and serve it locally:
+
+```sh
+curl --fail http://127.0.0.1:PORT/api/operator/snapshot > preserved-snapshot.json
+node --import tsx src/operator/saved-viewer.ts --snapshot preserved-snapshot.json
+```
+
+The viewer accepts one bounded regular JSON file, validates the existing snapshot schema, and exposes the existing GET-only loopback cockpit/API. It does not open a host, kernel, journal, credentials, or provider. Its UI, startup output, and `X-Helm-Projection: historical-untrusted` API header mark the result as an untrusted historical projection that cannot authorize actions. The displayed snapshot keeps its original timestamps and source/evidence fields. `src/operator/cli.ts --url http://127.0.0.1:PORT --json` preserves the existing bare snapshot JSON for live views; for this historical viewer it returns `{ "snapshot": ..., "projection": { "mode": "historical-untrusted", "actionAuthority": "none" } }`, so machine users cannot miss the boundary.

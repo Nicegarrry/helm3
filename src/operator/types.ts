@@ -44,4 +44,6 @@ export type OperatorSnapshot = Readonly<{
 
 export type SnapshotSource = Readonly<{
   read: () => Promise<OperatorSnapshot>;
+  /** Presentation-only: this projection cannot grant authority. */
+  presentation?: Readonly<{ mode: 'historical-untrusted' }>;
 }>;

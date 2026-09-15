@@ -8,7 +8,7 @@ const toolResultSchema = z.union([
 ]);
 
 /** CLI reads the same loopback API as the cockpit; it has no host authority. */
-export async function readOperatorApi(origin: string) {
+export async function readOperatorApiWithMetadata(origin: string): Promise<{ snapshot: ReturnType<typeof validateOperatorSnapshot>; historical: boolean }> {
   const url = new URL(origin);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
     throw new Error('Expected an explicit http://127.0.0.1:PORT origin');
@@ -23,9 +23,11 @@ export async function readOperatorApi(origin: string) {
       if (bytes > 1024 * 1024) throw new Error('Operator snapshot exceeds the CLI read bound');
       chunks.push(value);
     }
-    return validateOperatorSnapshot(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    return { snapshot: validateOperatorSnapshot(JSON.parse(Buffer.concat(chunks).toString('utf8'))), historical: response.headers.get('x-helm-projection') === 'historical-untrusted' };
   } finally { await reader.cancel().catch(() => undefined); }
 }
+
+export async function readOperatorApi(origin: string) { return (await readOperatorApiWithMetadata(origin)).snapshot; }
 
 export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'map.get' | 'log.query' | 'models.get' | 'budget.get' | 'worker.inspect', limit?: number, workerId?: string): Promise<HelmToolResult> {
   const url = new URL(origin);
@@ -73,8 +75,9 @@ export async function operatorCli(args: readonly string[]): Promise<string> {
   if (args.length < 2 || args.length > 3 || args[0] !== '--url' || (args.length === 3 && args[2] !== '--json')) {
     throw new Error('Usage: tsx src/operator/cli.ts --url http://127.0.0.1:PORT [--json] | --url http://127.0.0.1:PORT --read TOOL [--limit 1..100]');
   }
-  const snapshot = await readOperatorApi(args[1]);
-  return args[2] === '--json' ? formatOperatorJson(snapshot) : formatOperatorCli(snapshot);
+  const { snapshot, historical } = await readOperatorApiWithMetadata(args[1]);
+  if (args[2] === '--json') return historical ? `${JSON.stringify({ snapshot, projection: { mode: 'historical-untrusted', actionAuthority: 'none' } })}\n` : formatOperatorJson(snapshot);
+  return `${historical ? 'Projection: historical-untrusted (cannot authorize actions)\n' : ''}${formatOperatorCli(snapshot)}`;
 }
 
 if (require.main === module) {

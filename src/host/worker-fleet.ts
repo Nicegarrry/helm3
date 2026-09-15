@@ -12,9 +12,11 @@ export type ReviewSpawnConstraint = Readonly<{ repository: string; expectedHead:
 export type WorkerSpawnInput = Readonly<{ objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[]; modelId: string; role: string; label?: string; reviewConstraint?: ReviewSpawnConstraint }>;
 /** A bounded, orchestrator-selected follow-up; all paths and authority remain host configured. */
 export type WorkerSteerInput = Readonly<{ workerId: string; objectiveRef: string; evidenceRefs: readonly string[]; /** When gate output is used, this immutable command identity binds its raw refs to the predecessor and exact head. */ gateCommandId?: string; expectedSessionId: string; expectedHead: string }>;
+/** Clone an idle terminal Pi branch; the resulting child is `fork_ready`, not completed. */
+export type WorkerForkInput = Readonly<{ workerId: string; expectedSessionId: string; expectedHead: string }>;
 export type WorkerInspect = Readonly<{
   workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string;
-  state: 'ready' | 'running' | 'terminal' | 'unknown'; live: 'known' | 'unknown';
+  state: 'ready' | 'running' | 'fork_ready' | 'terminal' | 'unknown'; live: 'known' | 'unknown';
   activeRequests?: number; contextOccupancy?: unknown; eventCursor?: string;
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
@@ -41,13 +43,13 @@ function storedWorker(value: unknown): StoredWorker | undefined {
     || typeof item.sessionId !== 'string' || typeof item.workspace !== 'string' || typeof item.inputDigest !== 'string'
     || (item.modelId !== undefined && typeof item.modelId !== 'string') || (item.modelProvider !== undefined && typeof item.modelProvider !== 'string') || (item.modelApi !== undefined && typeof item.modelApi !== 'string') || (item.modelFactVersion !== undefined && (!Number.isInteger(item.modelFactVersion) || item.modelFactVersion < 1)) || (item.dataPolicy !== undefined && typeof item.dataPolicy !== 'string') || (item.reviewBeforeRef !== undefined && typeof item.reviewBeforeRef !== 'string')
     || (item.owner !== undefined && (typeof item.owner.attemptId !== 'string' || !Number.isInteger(item.owner.generation) || typeof item.owner.expiresAt !== 'string'))
-    || (item.state !== 'ready' && item.state !== 'running' && item.state !== 'terminal' && item.state !== 'unknown')
+    || (item.state !== 'ready' && item.state !== 'running' && item.state !== 'fork_ready' && item.state !== 'terminal' && item.state !== 'unknown')
     || !Array.isArray(item.evidenceRefs) || !item.evidenceRefs.every((ref) => typeof ref === 'string') || typeof item.cancellationRequested !== 'boolean') return undefined;
   if (item.persistedSession && (typeof item.persistedSession.sessionId !== 'string' || typeof item.persistedSession.sessionFile !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.historyHash) || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.branchDigest))) return undefined;
   return Object.freeze({ ...item, ...(item.owner ? { owner: Object.freeze({ ...item.owner }) } : {}), evidenceRefs: Object.freeze([...item.evidenceRefs]), ...(item.persistedSession ? { persistedSession: Object.freeze({ ...item.persistedSession }) } : {}) }) as StoredWorker;
 }
 function continuationWorker(record: StoredWorker | undefined): record is ContinuationWorker {
-  return Boolean(record && record.state === 'terminal' && !record.cancellationRequested && record.persistedSession
+  return Boolean(record && (record.state === 'terminal' || record.state === 'fork_ready') && !record.cancellationRequested && record.persistedSession
     && record.owner && record.modelId && record.modelProvider && record.modelApi && Number.isInteger(record.modelFactVersion) && (record.modelFactVersion ?? 0) > 0 && record.dataPolicy);
 }
 function spawnProvenance(command: Command): SpawnProvenance {
@@ -76,6 +78,7 @@ export type WorkerFleetBinding = Readonly<{
   spawnCommand(input: WorkerSpawnInput, workerId: string, attemptId: string, context: HelmToolExecutionContext): Command;
   /** The generated successor identity is host-owned and must be bound by the immutable command payload. */
   steerCommand?(input: WorkerSteerInput, workerId: string, record: StoredWorker, attemptId: string, context: HelmToolExecutionContext): Command;
+  forkCommand?(input: WorkerForkInput, workerId: string, record: StoredWorker, attemptId: string, context: HelmToolExecutionContext): Command;
   /** Extract the host-configured immutable input digest from the command payload. */
   inputDigest(command: Command): string;
   stopCommand(record: StoredWorker, context: HelmToolExecutionContext): Command;
@@ -83,6 +86,7 @@ export type WorkerFleetBinding = Readonly<{
   workspace(command: Command, workerId: string, attempt: Attempt): Readonly<{ repository: string; destination: string; branch: string; baseSha: string; owner: WorktreeOwner; policy: { writableRoots: readonly string[]; readableRoots?: readonly string[]; protectedRoots?: readonly string[] } }>;
   start(command: Command, workspace: WorktreeReservation): Promise<PiNativeWorker>;
   rehydrate?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession): Promise<PiNativeWorker>;
+  fork?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession): Promise<{ worker: PiNativeWorker; successor: PiPersistedSession; leafId: string }>;
   /** Host-built prompt bytes may be read from the immutable artifact refs captured at spawn. */
   prompt(command: Command): string | Promise<string>;
   correction(command: Command): string;
@@ -181,7 +185,7 @@ export class PiWorkerFleet {
     const validated = Object.freeze({ ...input, evidenceRefs: Object.freeze([...input.evidenceRefs]) });
     const predecessor = await this.durableRecord(context.runId, validated.workerId) ?? this.#records.get(validated.workerId);
     if (!continuationWorker(predecessor)) throw new Error('worker is not a recoverable idle same-session continuation');
-    if (this.#live.has(validated.workerId) || predecessor.sessionId !== validated.expectedSessionId || predecessor.persistedSession.sessionId !== validated.expectedSessionId) throw new Error('worker is active or session identity changed');
+    if ((this.#live.has(validated.workerId) && predecessor.state !== 'fork_ready') || predecessor.sessionId !== validated.expectedSessionId || predecessor.persistedSession.sessionId !== validated.expectedSessionId) throw new Error('worker is active or session identity changed');
     if (validated.gateCommandId) await this.binding.host.assertGateEvidence(context.runId, validated.gateCommandId, predecessor.spawnCommandId, predecessor.workerId, predecessor.workspace, validated.expectedHead, validated.evidenceRefs);
     const artifacts = this.binding.host.artifactsFor(context);
     await Promise.all([artifacts.readText(validated.objectiveRef), ...(validated.gateCommandId ? [] : validated.evidenceRefs.map((ref) => artifacts.readText(ref)))]);
@@ -208,6 +212,9 @@ export class PiWorkerFleet {
         this.binding.host.recordAttempt(attempt);
         const config = this.binding.workspace(admitted.command, workerId, attempt);
         if (config.destination !== predecessor.workspace || config.baseSha !== validated.expectedHead || attempt.baseSha !== validated.expectedHead) throw new Error('continuation does not preserve the verified workspace head');
+        // A fork-ready child is an idle live wrapper. Its transcript is already
+        // durable; dispose it before reopening under the fresh continuation.
+        if (predecessor.state === 'fork_ready') { this.#live.get(predecessor.workerId)?.worker.dispose(); this.#live.delete(predecessor.workerId); }
         const workspace = this.binding.workspaceManager.transfer(oldWorkspace, oldWorkspace.owner.generation, config.owner);
         const worker = await this.binding.rehydrate!(admitted.command, workspace, predecessor.persistedSession!);
         if (worker.sessionId !== predecessor.sessionId || worker.modelIdentity.modelId !== predecessor.modelId || worker.modelIdentity.provider !== predecessor.modelProvider || worker.modelIdentity.api !== predecessor.modelApi) { worker.dispose(); throw new Error('continuation native identity changed'); }
@@ -230,6 +237,51 @@ export class PiWorkerFleet {
     if (observed.state !== 'succeeded' || !record) throw new Error('worker continuation was not durably observed');
     const live = this.#live.get(workerId)!; const run = this.run(workerId, live).catch(async () => { await this.persistUnknown(workerId, live); }); this.#runs.set(workerId, run);
     return { workerId, attemptId: record.attemptId, sessionId: record.sessionId, state: 'ready', predecessorWorkerId: predecessor.workerId };
+  }
+
+  /** Create a distinct, durable, idle Pi branch in a new worktree. */
+  async fork(context: HelmToolExecutionContext, input: WorkerForkInput): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'fork_ready'; predecessorWorkerId: string }> {
+    if (!this.binding.forkCommand || !this.binding.fork) throw new Error('native session fork is not configured by this host');
+    const validated = Object.freeze({ ...input });
+    const predecessor = await this.durableRecord(context.runId, validated.workerId) ?? this.#records.get(validated.workerId);
+    if (!continuationWorker(predecessor) || predecessor.state !== 'terminal') throw new Error('worker is not a durable terminal Pi fork source');
+    if (this.#live.has(validated.workerId) || predecessor.sessionId !== validated.expectedSessionId || predecessor.persistedSession.sessionId !== validated.expectedSessionId) throw new Error('worker is active or session identity changed');
+    const sourceWorkspace = this.binding.workspaceManager.reservation(predecessor.workspace);
+    if (sourceWorkspace.owner.attemptId !== predecessor.owner.attemptId || sourceWorkspace.owner.generation !== predecessor.owner.generation) throw new Error('predecessor worktree generation is no longer current');
+    await this.binding.workspaceManager.assertExactHead(sourceWorkspace, validated.expectedHead);
+    const workerId = `worker-${randomUUID()}`; const attemptId = `attempt-${workerId}`;
+    const command = this.binding.forkCommand(validated, workerId, predecessor, attemptId, context);
+    const payload = command.payload as { workerId?: unknown; attemptId?: unknown; predecessorWorkerId?: unknown; inputDigest?: unknown; modelId?: unknown; modelProvider?: unknown; modelApi?: unknown; modelFactVersion?: unknown; dataPolicy?: unknown };
+    if (payload.workerId !== workerId || payload.attemptId !== attemptId || payload.predecessorWorkerId !== predecessor.workerId || payload.inputDigest !== digest(validated)
+      || payload.modelId !== predecessor.modelId || payload.modelProvider !== predecessor.modelProvider || payload.modelApi !== predecessor.modelApi || payload.modelFactVersion !== predecessor.modelFactVersion || payload.dataPolicy !== predecessor.dataPolicy) throw new Error('worker fork command does not bind successor, predecessor, and immutable validated inputs');
+    const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId, attemptId); const attempt = this.binding.attempt(admitted.command, workerId);
+    let record: StoredWorker | undefined;
+    const effect: KernelEffect = { effectId: `host:worker-fork:${workerId}`,
+      execute: async () => {
+        await this.binding.workspaceManager.assertExactHead(sourceWorkspace, validated.expectedHead);
+        this.binding.host.assertEffectAuthority(admitted.command.commandId, context);
+        this.binding.host.assertModelProvenance(predecessor.modelId, predecessor.modelProvider, predecessor.modelFactVersion);
+        this.binding.host.recordAttempt(attempt);
+        const config = this.binding.workspace(admitted.command, workerId, attempt);
+        if (config.destination === predecessor.workspace || config.baseSha !== validated.expectedHead || attempt.baseSha !== validated.expectedHead) throw new Error('fork must use a new worktree at the verified source head');
+        const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
+        const forked = await this.binding.fork!(admitted.command, workspace, predecessor.persistedSession!);
+        if (forked.worker.sessionId === predecessor.sessionId || forked.successor.sessionId !== forked.worker.sessionId || forked.successor.branchDigest !== predecessor.persistedSession!.branchDigest) { forked.worker.dispose(); throw new Error('fork native identity changed'); }
+        record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: forked.worker.sessionId, workspace: workspace.root, owner: workspace.owner, modelId: predecessor.modelId, modelProvider: predecessor.modelProvider, modelApi: predecessor.modelApi, modelFactVersion: predecessor.modelFactVersion, dataPolicy: predecessor.dataPolicy, state: 'fork_ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false, persistedSession: forked.successor });
+        this.#records.set(workerId, record); this.#live.set(workerId, Object.freeze({ worker: forked.worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
+      },
+      observe: async () => {
+        if (!record) return { commandId: admitted.command.commandId, effectId: `host:worker-fork:${workerId}`, state: 'unknown' as const, source: 'host.worker_fleet', observedAt: now(), evidenceRefs: [`worker:${workerId}:fork-missing`] };
+        const ref = await this.binding.host.artifactsFor(context).writeEffect('host.worker_fleet.fork', JSON.stringify({ ...record, predecessorWorkerId: predecessor.workerId, predecessorAttemptId: predecessor.attemptId, expectedHead: validated.expectedHead }));
+        const persisted = Object.freeze({ ...record, evidenceRefs: Object.freeze([ref]) }); this.#records.set(workerId, persisted);
+        const live = this.#live.get(workerId); if (live) this.#live.set(workerId, Object.freeze({ ...live, record: persisted }));
+        this.binding.host.appendFleetEvent(event('worker.forked', persisted, context.runId, { predecessorWorkerId: predecessor.workerId, predecessorAttemptId: predecessor.attemptId, expectedHead: validated.expectedHead, leafId: (record.persistedSession?.branchDigest ?? '') }));
+        return { commandId: admitted.command.commandId, effectId: `host:worker-fork:${workerId}`, state: 'succeeded' as const, source: 'host.worker_fleet', observedAt: now(), evidenceRefs: [ref] };
+      } };
+    const observed = await this.binding.host.performAdmitted(admitted.command.commandId, this.binding.executor, this.binding.claimExpiresAt(), this.binding.readFact, effect);
+    if (observed.state === 'unknown') throw new WorkerSteerUnknownError(admitted.command.commandId);
+    if (observed.state !== 'succeeded' || !record) throw new Error('worker fork was not durably observed');
+    return { workerId, attemptId: record.attemptId, sessionId: record.sessionId, state: 'fork_ready', predecessorWorkerId: predecessor.workerId };
   }
 
   /** Test/controlled-host hook; normal orchestration must use inspect/events. */

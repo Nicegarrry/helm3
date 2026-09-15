@@ -82,6 +82,16 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     assert.equal(persistedEvents.filter(entry => entry.event.type === 'message_update' && entry.event.assistantMessageEvent?.type === 'thinking_delta').map(entry => entry.event.assistantMessageEvent?.delta).join(''), 'r'.repeat(1400), 'one-character reasoning deltas reconstruct exactly from durable JSON batches');
     assert.equal(worker.contextOccupancy.state, 'known', 'the native SDK exposes estimated current occupancy');
     const originalSession = worker.sessionId;
+    const persisted = await worker.persistedSession();
+    const sourceBytes = await readFile(persisted.sessionFile);
+    const forkOwner = { attemptId: 'attempt-fork', generation: 1, expiresAt: '2099-01-01T00:00:00Z' };
+    const forkWorkspace = await manager.create(repo, join(root, 'fork-worker'), 'pi-attempt-fork', base, forkOwner);
+    const forked = await PiNativeWorker.forkAtCurrentTip({ commandId: 'fork-command', attemptId: 'attempt-fork', workspace: forkWorkspace, owner: forkOwner, workspaceManager: manager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel(), thinking: { level: 'low' } }, persisted);
+    assert.notEqual(forked.successor.sessionId, persisted.sessionId, 'native fork allocates a distinct Pi session');
+    assert.equal(forked.successor.branchDigest, persisted.branchDigest, 'native fork retains exactly the current source branch');
+    assert.deepEqual(await readFile(persisted.sessionFile), sourceBytes, 'native fork does not rewrite source session bytes');
+    assert.equal(modelEffects, 3, 'forking a session makes no provider request');
+    forked.worker.dispose();
     const reopened = await worker.reopen(); assert.equal(reopened.sessionId, originalSession);
     assert.equal(reopened.contextOccupancy.state, 'known', 'reopen retains read-only occupancy inspection');
     assert.deepEqual(reopened.thinkingConfiguration, { requested: 'low', nativeSelected: 'off', providerEffective: 'unknown' });

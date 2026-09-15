@@ -39,7 +39,20 @@ predecessor and exact head; arbitrary host notes cannot substitute for gate
 evidence. A persisted transcript is not session discovery: missing or changed
 history remains unrecoverable.
 
-This slice does not implement Pi session discovery, pause/resume/fork/model
+`worker.fork` is an idle-only, host-owned native Pi branch copy. It accepts
+only a durable terminal source with the exact native session ID, session-file
+hash, branch digest, clean verified Git head and current ownership/lease
+epoch. The host creates a fresh attempt and a separate owned worktree, then
+uses Pi's persisted-session branch operation to create a new session file at
+the current tip. The resulting child is persisted as `fork_ready`: it is
+inspectable and locally stoppable, but has no WorkerResult and has made no
+model request. A subsequent `worker.steer` may activate that child only after
+the same identity, head and authority checks; it transfers the child's own
+worktree generation once. Fork inherits context and therefore cannot be used
+as independent review. Any uncertain creation or evidence observation remains
+unknown and is never replayed.
+
+This slice does not implement Pi session discovery, pause/resume/model
 change, automatic retry, live provider/OAuth acceptance, frontier wake
 delivery, or OS shell containment. A provider-free faux run proves
 control-plane plumbing only; worker claims remain claims until a gate or review

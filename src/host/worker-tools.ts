@@ -1,12 +1,13 @@
 import { z } from 'zod/v3';
 import { HelmToolRegistry, type HelmTool } from '../runtime/orchestrator/index.js';
 import { createHostReadToolRegistry, type HostReadToolsOptions } from './tools.js';
-import { PiWorkerFleet, WorkerSteerUnknownError, type WorkerSpawnInput, type WorkerSteerInput } from './worker-fleet.js';
+import { PiWorkerFleet, WorkerSteerUnknownError, type WorkerForkInput, type WorkerSpawnInput, type WorkerSteerInput } from './worker-fleet.js';
 
 const ref = z.string().min(1).max(512);
 const spawn = z.object({ objectiveRef: ref, acceptanceRef: ref, contextRefs: z.array(ref).max(32), modelId: z.string().min(1).max(128), role: z.string().min(1).max(64), label: z.string().min(1).max(128).optional() }).strict();
 const inspect = z.object({ workerId: z.string().min(1).max(128) }).strict();
 const steer = z.object({ workerId: z.string().min(1).max(128), objectiveRef: ref, evidenceRefs: z.array(ref).min(1).max(32), gateCommandId: z.string().min(1).max(128).optional(), expectedSessionId: z.string().min(1).max(256), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+const fork = z.object({ workerId: z.string().min(1).max(128), expectedSessionId: z.string().min(1).max(256), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
 
 /** Compose one registry for driver transports, operator reads and local CLI. */
 export function createHostWorkerToolRegistry(reads: HostReadToolsOptions, fleet: PiWorkerFleet): HelmToolRegistry {
@@ -31,6 +32,15 @@ export function createHostWorkerToolRegistry(reads: HostReadToolsOptions, fleet:
         catch (error) {
           if (error instanceof WorkerSteerUnknownError) return { state: 'unknown', reason: error.message };
           return { state: 'refused', reason: 'worker steer was refused by trusted host authority' };
+        }
+      } },
+    { name: 'worker.fork', description: 'Create one fenced, idle native Pi branch in a new worktree. The child is not completed or independently reviewed.', input: fork.shape,
+      async execute(input, actual) {
+        if (actual.runId !== context.runId || actual.sessionId !== context.sessionId || actual.mode !== 'primary') return { state: 'refused', reason: 'tool context is outside the trusted host binding' };
+        try { await reads.authorize?.(actual); return { state: 'succeeded', value: await fleet.fork(actual, fork.parse(input) as WorkerForkInput) }; }
+        catch (error) {
+          if (error instanceof WorkerSteerUnknownError) return { state: 'unknown', reason: error.message };
+          return { state: 'refused', reason: 'worker fork was refused by trusted host authority' };
         }
       } },
     { name: 'worker.stop', description: 'Request a distinct, observed stop for a host-owned live Pi worker.', input: inspect.shape,

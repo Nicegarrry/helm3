@@ -39,7 +39,14 @@ node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory 
 node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory /private/tmp/helm3-dogfood-astra
 ```
 
-Use a fresh empty state directory for each run. These direct observations complete and close the fixture before printing JSON; they do not require `--serve`. Current runs report a succeeded command and gates, successful Map update/close, four faux model requests, two workspace writes, prior-context visibility and lease-specific expiry refusal. The CLI does not open the authority database or dispatch workers. The fixture is local evidence, not provider usage or live-account access.
+Use a fresh empty state directory for each run. These direct observations complete and close the fixture before printing JSON; they do not require `--serve`. Current runs report a succeeded command and gates, successful Map update/close, four faux model requests, two workspace writes, prior-context visibility and lease-specific expiry refusal. The separate read-only operator CLI does not open the authority database or dispatch workers; the fixture command itself runs the provider-free worker path. The fixture is local evidence, not provider usage or live-account access.
+
+To open the read-only loopback cockpit, append `--serve` to one fixture command, then query the announced port:
+
+```sh
+node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory /private/tmp/helm3-dogfood-astra --serve
+node --import tsx src/operator/cli.ts --url http://127.0.0.1:PORT --json
+```
 
 ## Historical Wave 3 work
 

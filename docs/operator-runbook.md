@@ -11,7 +11,7 @@ Wave 4 and onward are approved for bounded execution under [overnight authority]
 3. Verify repository status and worktree ownership. Do not overwrite an existing worker's WIP.
 4. Run `python3 scripts/check-preparation.py`; use Node 22.22.2 for focused checks and provider-free fixture observations. Do not confuse fixture success with authenticated model access.
 
-For a morning smoke check, run both `node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory <new-empty-path>` and the equivalent `astra` command. The current fixture executes six turns: red gate, same-session repair, green gate, Map update and Map close, and should report four faux model requests, two workspace writes and an autonomy-lease expiry refusal.
+For a morning smoke check, run both `node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory <new-empty-path>` and the equivalent `astra` command. The current fixture executes six turns: initial worker spawn, red gate, same-session repair, green gate, Map update and Map close, and should report four faux model requests, two workspace writes and an autonomy-lease expiry refusal.
 
 ## Historical approval gate
 
@@ -19,7 +19,7 @@ The context-clean and explicit first-wave approval gate is complete. Its foundat
 
 ## After explicit build approval
 
-Record the exact approved contract revision and concrete delegation: repositories, allowed actions, run expiry, provider/pool limits, reserve, max attempts/concurrency and merge scope. Start any live request only under current bounded authority and verified route facts. Do not infer auth interoperability from an installed CLI or this chat's model selector; the provider-free Fable/Astra fixture needs no account access.
+Record the exact approved contract revision and concrete delegation: repositories, allowed actions, run expiry, provider/pool limits, reserve, max attempts/concurrency and merge scope. Bounded real Pi/OpenCode attempts have occurred under the overnight authority, but live frontier/OAuth access and full acceptance remain open. Start any further live request only under current bounded authority and verified route facts. Do not infer auth interoperability from an installed CLI or this chat's model selector; the provider-free Fable/Astra fixture needs no account access.
 
 Freeze the agreed contracts, then dispatch brief-checked isolated worktrees. Preserve one writer per worktree. Keep a frontier reserve; workers use Terra/Luna where appropriate. Report accepted outcomes and hard blockers at the six-hour checkpoint. The target is the complete brief, not just a unit-test count or the number of open worker sessions.
 

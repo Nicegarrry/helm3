@@ -159,6 +159,48 @@ test('resource-free worker attempts cannot bypass the parent node attempt cap', 
   host.close();
 });
 
+test('an explicitly observed stopped attempt recovers quarantined capacity only after every command is terminal', async () => {
+  const { host } = opened({ 'test.effect': plainWorkerKind }, grant({ maxConcurrency: 1 }));
+  host.issueAutonomyLease(lease({ maxConcurrency: 1, poolLimits: [] }));
+  host.admit(command({ commandId: 'done', idempotencyKey: 'done', payload: { value: 'a' } }), caller('attempt-a'));
+  const claim = host.claim('done', { executorId: 'worker-a' }, '2026-09-15T00:10:00Z');
+  await host.perform('done', claim, { executorId: 'worker-a' }, async () => ({ value: true, state: 'known', source: 'test', observedAt: now }), {
+    effectId: 'done-effect', execute: async () => undefined, observe: async () => observedSuccess('done', 'done-effect'),
+  });
+  host.reportAttemptStop('attempt-a', 'unknown');
+  host.reportAttemptStop('attempt-a', 'stopped');
+  host.admit(command({ commandId: 'after-recovery', idempotencyKey: 'after-recovery', payload: { value: 'b' } }), caller('attempt-b'));
+  assert.equal(host.claim('after-recovery', { executorId: 'worker-b' }, '2026-09-15T00:20:00Z').commandId, 'after-recovery');
+  host.close();
+});
+
+test('an active attempt joining a narrower lease is counted against that lease exactly once', () => {
+  const { host } = opened({ 'test.effect': plainWorkerKind }, grant({ maxConcurrency: 2, maxAttemptsPerNode: 3 }));
+  host.issueAutonomyLease(lease({ maxConcurrency: 2, maxAttemptsPerNode: 3, poolLimits: [] }));
+  host.issueAutonomyLease(lease({ leaseId: 'narrow', maxConcurrency: 1, maxAttemptsPerNode: 3, poolLimits: [] }));
+  host.admit(command({ commandId: 'broad', idempotencyKey: 'broad', payload: { value: 'a' } }), caller('attempt-a'));
+  assert.equal(host.claim('broad', { executorId: 'worker-a' }, '2026-09-15T00:10:00Z').commandId, 'broad');
+  host.admit(command({ commandId: 'narrow-active', idempotencyKey: 'narrow-active', leaseId: 'narrow', payload: { value: 'b' } }), caller('attempt-b'));
+  assert.equal(host.claim('narrow-active', { executorId: 'worker-b' }, '2026-09-15T00:10:00Z').commandId, 'narrow-active');
+  host.admit(command({ commandId: 'join-narrow', idempotencyKey: 'join-narrow', leaseId: 'narrow', payload: { value: 'c' } }), caller('attempt-a'));
+  assert.throws(() => host.claim('join-narrow', { executorId: 'worker-a' }, '2026-09-15T00:20:00Z'), /concurrency/);
+  host.close();
+});
+
+test('lease attempt caps are per node and reject a new lease membership already filled by another attempt', () => {
+  const scopedGrant = grant({ mapNodeIds: ['node-1', 'node-2'], maxAttemptsPerNode: 3 });
+  const { host } = opened({ 'test.effect': plainWorkerKind }, scopedGrant);
+  host.issueAutonomyLease(lease({ scope: { repositoryId: 'repo-1', mapNodeIds: ['node-1', 'node-2'] }, maxAttemptsPerNode: 1, poolLimits: [] }));
+  host.admit(command({ commandId: 'node-one', idempotencyKey: 'node-one', payload: { value: 'a' } }), caller('attempt-node-one'));
+  host.admit(command({ commandId: 'node-two', idempotencyKey: 'node-two', scope: { repositoryId: 'repo-1', mapNodeId: 'node-2' }, payload: { value: 'b' } }), caller('attempt-node-two'));
+  host.issueAutonomyLease(lease({ leaseId: 'wide', scope: { repositoryId: 'repo-1', mapNodeIds: ['node-1', 'node-2'] }, maxAttemptsPerNode: 3, poolLimits: [] }));
+  host.issueAutonomyLease(lease({ leaseId: 'filled', scope: { repositoryId: 'repo-1', mapNodeIds: ['node-1', 'node-2'] }, maxAttemptsPerNode: 1, poolLimits: [] }));
+  host.admit(command({ commandId: 'occupy-filled', idempotencyKey: 'occupy-filled', leaseId: 'filled', payload: { value: 'c' } }), caller('attempt-filled'));
+  host.admit(command({ commandId: 'source-wide', idempotencyKey: 'source-wide', leaseId: 'wide', payload: { value: 'd' } }), caller('attempt-source'));
+  assert.throws(() => host.admit(command({ commandId: 'join-filled', idempotencyKey: 'join-filled', leaseId: 'filled', payload: { value: 'e' } }), caller('attempt-source')), /attempt cap/);
+  host.close();
+});
+
 test('current versioned model facts are rechecked after awaited facts and must match the charged pool', async () => {
   const { host } = opened({ 'test.effect': modelResourceKind });
   host.issueAutonomyLease(lease());

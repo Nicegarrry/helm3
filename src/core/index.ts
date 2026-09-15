@@ -446,7 +446,9 @@ class Kernel {
       if (observed === 'stopped') {
         const unsettled = this.db.prepare(`SELECT COUNT(*) AS count FROM commands WHERE attempt_id = ? AND status IN ('claimed', 'effect_started', 'observing', 'unknown')`).get(attemptId) as { count: number };
         if (unsettled.count) throw new Error('worker attempt cannot finish before its commands are observed');
-        this.db.prepare(`UPDATE attempt_lifecycle SET state = 'finished' WHERE attempt_id = ? AND state IN ('ready', 'active')`).run(attemptId);
+        // A host's explicit terminal observation may resolve a previously quarantined
+        // attempt, but never substitutes for observing the commands it could have spent.
+        this.db.prepare(`UPDATE attempt_lifecycle SET state = 'finished' WHERE attempt_id = ? AND state IN ('ready', 'active', 'unknown')`).run(attemptId);
       } else {
         this.db.prepare(`UPDATE attempt_lifecycle SET state = 'unknown' WHERE attempt_id = ? AND state IN ('ready', 'active')`).run(attemptId);
       }
@@ -528,11 +530,21 @@ class Kernel {
       const grant = this.loadGrant(lease.parentAuthorityId);
       const parentCount = this.attemptCount(`parent_authority_id = ? AND repository_id = ? AND map_node_id = ?`, [lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId]);
       if (parentCount >= grant.maxAttemptsPerNode) throw new Error('human attempt cap refuses command');
-      const leaseCount = this.attemptCount(`attempt_id IN (SELECT attempt_id FROM attempt_leases WHERE lease_id = ?)`, [lease.leaseId]);
-      if (leaseCount >= lease.maxAttemptsPerNode) throw new Error('autonomy lease attempt cap refuses command');
       this.db.prepare(`INSERT INTO attempt_lifecycle (attempt_id, parent_authority_id, repository_id, map_node_id, state) VALUES (?, ?, ?, ?, 'ready')`).run(attemptId, lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId);
     }
-    this.db.prepare(`INSERT OR IGNORE INTO attempt_leases (attempt_id, lease_id) VALUES (?, ?)`).run(attemptId, lease.leaseId);
+    const membership = this.db.prepare(`SELECT 1 FROM attempt_leases WHERE attempt_id = ? AND lease_id = ?`).get(attemptId, lease.leaseId);
+    if (!membership) {
+      const leaseCount = this.attemptCount(
+        `attempt_id IN (
+          SELECT al.attempt_id FROM attempt_lifecycle al
+          JOIN attempt_leases memberships ON memberships.attempt_id = al.attempt_id
+          WHERE memberships.lease_id = ? AND al.parent_authority_id = ? AND al.repository_id = ? AND al.map_node_id = ?
+        )`,
+        [lease.leaseId, lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId],
+      );
+      if (leaseCount >= lease.maxAttemptsPerNode) throw new Error('autonomy lease attempt cap refuses command');
+      this.db.prepare(`INSERT INTO attempt_leases (attempt_id, lease_id) VALUES (?, ?)`).run(attemptId, lease.leaseId);
+    }
   }
 
   private attemptCount(where: string, values: unknown[]): number {
@@ -607,7 +619,9 @@ class Kernel {
     const attempt = this.attemptStateForCommand(command.commandId);
     if (attempt?.state === 'unknown' || attempt?.state === 'finished') throw new Error('worker attempt is no longer active');
     const activeForLease = this.activeAttemptCount('al.attempt_id IN (SELECT attempt_id FROM attempt_leases WHERE lease_id = ?)', [command.leaseId]);
-    if (attempt?.state !== 'active' && activeForLease >= lease.maxConcurrency) throw new Error('autonomy lease concurrency cap refuses command');
+    // A continuing active attempt consumes one slot in every lease it joins. It
+    // may reuse its own existing slot, but cannot enlarge a narrower lease.
+    if (activeForLease > lease.maxConcurrency || (attempt?.state !== 'active' && activeForLease >= lease.maxConcurrency)) throw new Error('autonomy lease concurrency cap refuses command');
     const activeForAuthority = this.activeAttemptCount('al.parent_authority_id = ?', [lease.parentAuthorityId]);
     if (attempt?.state !== 'active' && activeForAuthority >= grant.maxConcurrency) throw new Error('human authority concurrency cap refuses command');
   }

@@ -255,16 +255,19 @@ export class PiNativeWorker {
     const before = this.contextOccupancy;
     const branch = this.session.sessionManager.getBranch();
     const provenance = Object.freeze({ attemptId: this.input.attemptId, workerCommandId: this.input.commandId, compactCommandId: request.commandId, sessionId: this.sessionId, owner: this.input.owner, branchEntries: branch.length, branchDigest: `sha256:${createHash('sha256').update(JSON.stringify(branch)).digest('hex')}` });
-    const checkpointRef = await this.input.journal.append({ source: 'pi.checkpoint', sourceIdentity: `pi-checkpoint:${this.input.attemptId}:${request.commandId}`,
-      mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'prepared', provenance, checkpoint: validated, model: { provider: this.input.model.provider, id: this.input.model.id, api: this.input.model.api }, thinking: this.thinking, occupancy: before })) });
-    this.artifacts.push(checkpointRef);
+    let checkpointRef: RawArtifactRef | undefined;
     let result: Awaited<ReturnType<AgentSession['compact']>> | undefined;
     if (!this.input.authority.performCompact) throw new Error('Pi compaction requires a distinct admitted host command binding');
-    await this.input.authority.performCompact({ effectId: request.effectId, commandId: request.commandId }, async () => { this.assertActive(); result = await this.session.compact(); });
+    await this.input.authority.performCompact({ effectId: request.effectId, commandId: request.commandId }, async () => {
+      this.assertActive(); checkpointRef = await this.input.journal.append({ source: 'pi.checkpoint', sourceIdentity: `pi-checkpoint:${this.input.attemptId}:${request.commandId}`,
+        mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'prepared', provenance, checkpoint: validated, model: { provider: this.input.model.provider, id: this.input.model.id, api: this.input.model.api }, thinking: this.thinking, occupancy: before })) });
+      this.artifacts.push(checkpointRef); result = await this.session.compact();
+    });
     await this.flushEvents(); this.assertActive();
     const outcome = await this.input.journal.append({ source: 'pi.compaction', sourceIdentity: `pi-compaction:${this.input.attemptId}:${request.commandId}`,
       mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'succeeded', provenance, checkpointRef, result, occupancy: this.contextOccupancy })) });
     this.artifacts.push(outcome);
+    if (!checkpointRef) throw new Error('Pi compaction completed without a prepared checkpoint');
     return Object.freeze([checkpointRef, outcome]);
   }
   async cancel(timeoutMs = 5_000): Promise<'stopped' | 'unknown'> {

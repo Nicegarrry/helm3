@@ -26,6 +26,8 @@ export type RegisteredMapTarget = Readonly<{ node: string; repositoryId: string;
 export type MapTargetCatalog = Readonly<{ resolve(node: string): Promise<RegisteredMapTarget> }>;
 export type MapCommandBinding = Readonly<{ actorId: string; leaseId: string; leaseRevision: number; orchestratorLeaseId: string; orchestratorEpoch: number; plannedAt(): string; notAfter(): string }>;
 export type ClosureEvidenceValidator = Readonly<{ validate(input: Readonly<{ context: HelmToolExecutionContext; target: RegisteredMapTarget; evidenceRefs: readonly string[] }>): Promise<void> }>;
+export type RegisteredGateClosureProof = Readonly<{ evidenceRef: string; runId: string; repositoryId: string; mapNodeId: string; gateCommandId: string; predecessorCommandId: string; workerId: string; workspace: string; expectedHead: string }>;
+type GateEvidenceHost = Readonly<{ assertGateEvidence(runId: string, gateCommandId: string, predecessorCommandId: string, workerId: string, workspace: string, expectedHead: string, evidenceRefs: readonly string[]): Promise<void> }>;
 export type MapToolHost = Readonly<{
   artifactsFor(context: HelmToolExecutionContext): HostArtifactStore;
   snapshot(runId: string): Promise<HostSnapshot>;
@@ -34,6 +36,24 @@ export type MapToolHost = Readonly<{
   assertEffectAuthority(commandId: string, context: HelmToolExecutionContext): void;
 }>;
 export type HostMapToolOptions = Readonly<{ context: HelmToolExecutionContext; authorize(context: HelmToolExecutionContext): Promise<void>; host: MapToolHost; catalog: MapTargetCatalog; transport: TrackerCommandTransport; command: MapCommandBinding; executor: TrustedExecutor; claimExpiresAt(): string; closureEvidence: ClosureEvidenceValidator }>;
+
+/**
+ * Production closure policy for registered gate evidence. The registry is
+ * host configuration, never tool input: a model can present a ref but cannot
+ * attach it to another worker, workspace, target, or gate command.
+ */
+export function createRegisteredGateClosureValidator(input: Readonly<{ host: GateEvidenceHost; proofs: readonly RegisteredGateClosureProof[] }>): ClosureEvidenceValidator {
+  const proofs = new Map(input.proofs.map((proof) => [proof.evidenceRef, Object.freeze({ ...proof })]));
+  if (proofs.size !== input.proofs.length) throw new Error('registered gate evidence refs must be unique');
+  return Object.freeze({ async validate(value) {
+    if (!value.evidenceRefs.length) throw new Error('closure requires registered gate evidence');
+    for (const ref of value.evidenceRefs) {
+      const proof = proofs.get(ref);
+      if (!proof || proof.runId !== value.context.runId || proof.repositoryId !== value.target.repositoryId || proof.mapNodeId !== String(value.target.issueNumber)) throw new Error('gate proof is outside the current Map target');
+      await input.host.assertGateEvidence(proof.runId, proof.gateCommandId, proof.predecessorCommandId, proof.workerId, proof.workspace, proof.expectedHead, [proof.evidenceRef]);
+    }
+  } });
+}
 
 type Intent = Readonly<{ action: 'update'; node: string; expectedRevision: string; title?: string; body?: string }> | Readonly<{ action: 'close'; node: string; expectedRevision: string; rationale: string; evidenceRefs: readonly string[]; resolvedDependencies: readonly string[] }>;
 type StoredReceipt = Readonly<{ command: Command; receipt: MapMutationReceipt }>;

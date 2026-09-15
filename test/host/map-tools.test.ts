@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { mkdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { openHost } from '../../src/host/index.js';
-import { appendHostMapTools, mapClosePayloadSchema, mapUpdatePayloadSchema } from '../../src/host/map-tools.js';
+import { appendHostMapTools, createRegisteredGateClosureValidator, mapClosePayloadSchema, mapUpdatePayloadSchema } from '../../src/host/map-tools.js';
+import { gateRunPayloadSchema } from '../../src/host/gate-tools.js';
 import { AstraLoopbackMcpTransport, FableDriver, HelmToolRegistry, type HelmToolExecutionContext, type OrchestratorArtifacts } from '../../src/runtime/orchestrator/index.js';
 import type { TrackerCommandTransport } from '../../src/tracker/index.js';
 
@@ -34,15 +36,24 @@ function transport(input: { failPatch?: boolean } = {}) {
 
 async function fixture(input: { failPatch?: boolean; evidenceFails?: boolean } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'helm3-map-tools-'));
-  const plane = await openHost({ stateDirectory: directory, now: () => before, kinds: { 'map.update': { payloadSchema: mapUpdatePayloadSchema }, 'map.close': { payloadSchema: mapClosePayloadSchema } } });
-  plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'owner/repo', mapNodeIds: ['2'], allowedActions: ['map.update', 'map.close'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
-  plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'owner/repo', mapNodeIds: ['2'] }, allowedActions: ['map.update', 'map.close'], issuedAt: before, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
+  const plane = await openHost({ stateDirectory: directory, now: () => before, kinds: { 'map.update': { payloadSchema: mapUpdatePayloadSchema }, 'map.close': { payloadSchema: mapClosePayloadSchema }, 'gate.run': { payloadSchema: gateRunPayloadSchema } } });
+  plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'owner/repo', mapNodeIds: ['2'], allowedActions: ['map.update', 'map.close', 'gate.run'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
+  plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'owner/repo', mapNodeIds: ['2'] }, allowedActions: ['map.update', 'map.close', 'gate.run'], issuedAt: before, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
   plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'fable', sessionId: context.sessionId, epoch: 1, issuedAt: before, expiresAt: later }, 0);
+  const workspace = await mkdir(join(directory, 'proof-workspace'), { recursive: true }).then(() => realpath(join(directory, 'proof-workspace')));
+  const common = { schemaVersion: 1 as const, scope: { repositoryId: 'owner/repo', mapNodeId: '2' }, actorId: 'fable', runId: context.runId, origin: 'orchestrator' as const, leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: before, notAfter: later, expected: [] };
+  const predecessor = plane.admitOrchestrator({ ...common, commandId: 'proof-predecessor', kind: 'map.update', idempotencyKey: 'proof-predecessor', payloadHash: `sha256:${createHash('sha256').update(JSON.stringify({ issueNumber: 2, expectedRevision: before, title: 'proof' })).digest('hex')}`, payload: { issueNumber: 2, expectedRevision: before, title: 'proof' }, requiredEvidence: [] }, context, 'fable');
+  const workspaceDigest = `sha256:${createHash('sha256').update(workspace).digest('hex')}`;
+  const proofHead = 'a'.repeat(40);
+  const gate = plane.admitOrchestrator({ ...common, commandId: 'proof-gate', kind: 'gate.run', idempotencyKey: 'proof-gate', payloadHash: `sha256:${createHash('sha256').update(JSON.stringify({ gateId: 'proof', workerId: 'proof-worker', workspaceId: 'proof-workspace', workspaceDigest, expectedHead: proofHead, acceptanceVersion: 'proof-v1', gateConfigDigest: 'proof-digest', trustedDefinitionRef: 'proof-definition' })).digest('hex')}`, payload: { gateId: 'proof', workerId: 'proof-worker', workspaceId: 'proof-workspace', workspaceDigest, expectedHead: proofHead, acceptanceVersion: 'proof-v1', gateConfigDigest: 'proof-digest', trustedDefinitionRef: 'proof-definition' }, requiredEvidence: ['proof-definition'] }, context, 'fable');
+  const gateEvidenceRef = (await plane.artifactsFor(context).journalForTrustedPi().append({ source: 'proof.gate', sourceIdentity: 'proof-gate-evidence', mediaType: 'text/plain', bytes: Buffer.from('actual gate evidence'), classification: 'sensitive' }, { permitSensitive: true })).ref;
+  await plane.performAdmitted(gate.command.commandId, { executorId: 'proof-gate' }, later, async () => ({ state: 'known', value: true, source: 'proof', observedAt: before }), { effectId: 'proof-gate-effect', async execute() {}, async observe() { return { commandId: gate.command.commandId, effectId: 'proof-gate-effect', state: 'succeeded' as const, source: 'proof', observedAt: before, evidenceRefs: [gateEvidenceRef] }; } });
   const fake = transport(input); let validation = 0;
-  const registryFor = (actual: HelmToolExecutionContext, epoch = 1) => appendHostMapTools(new HelmToolRegistry([]), { context: actual, authorize: async (value) => { plane.artifactsFor(value); }, host: plane, catalog: { async resolve(node) { if (node !== 'node-2') throw new Error('foreign'); return { node, repositoryId: 'owner/repo', parentIssue: 1, issueNumber: 2 }; } }, transport: fake.value, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: epoch, plannedAt: () => before, notAfter: () => later }, executor: { executorId: 'host-map' }, claimExpiresAt: () => later, closureEvidence: { async validate(value) { validation += 1; if (input.evidenceFails || value.target.issueNumber !== 2 || value.evidenceRefs.some((ref) => ref !== 'gate:accepted')) throw new Error('untrusted evidence'); } } });
+  const validator = createRegisteredGateClosureValidator({ host: plane, proofs: input.evidenceFails ? [] : [{ evidenceRef: gateEvidenceRef, runId: context.runId, repositoryId: 'owner/repo', mapNodeId: '2', gateCommandId: gate.command.commandId, predecessorCommandId: predecessor.command.commandId, workerId: 'proof-worker', workspace, expectedHead: proofHead }] });
+  const registryFor = (actual: HelmToolExecutionContext, epoch = 1) => appendHostMapTools(new HelmToolRegistry([]), { context: actual, authorize: async (value) => { plane.artifactsFor(value); }, host: plane, catalog: { async resolve(node) { if (node !== 'node-2') throw new Error('foreign'); return { node, repositoryId: 'owner/repo', parentIssue: 1, issueNumber: 2 }; } }, transport: fake.value, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: epoch, plannedAt: () => before, notAfter: () => later }, executor: { executorId: 'host-map' }, claimExpiresAt: () => later, closureEvidence: { async validate(value) { validation += 1; await validator.validate(value); } } });
   const tools = registryFor(context);
   const driverTools = new HelmToolRegistry(tools.all().map((entry) => ({ ...entry, async execute(value, actual) { const owner = (await plane.snapshot(actual.runId)).ownership; return registryFor(actual, owner?.epoch ?? 0).invoke(entry.name, value, actual); } })));
-  return { directory, plane, tools, driverTools, fake, validations: () => validation };
+  return { directory, plane, tools, driverTools, fake, gateEvidenceRef, validations: () => validation };
 }
 
 test('map.update uses Core admission, mutator readback receipt, and stable durable idempotency', async () => {
@@ -52,7 +63,7 @@ test('map.update uses Core admission, mutator readback receipt, and stable durab
     assert.equal(first.state, 'succeeded', JSON.stringify(first)); assert.equal(value.fake.patches(), 1);
     const second = await value.tools.invoke('map.update', { node: 'node-2', expectedRevision: before, title: 'Renamed' }, context);
     assert.equal(second.state, 'succeeded'); assert.equal(value.fake.patches(), 1, 'a replay reads the durable receipt and cannot PATCH twice');
-    const snapshot = await value.plane.snapshot(context.runId); assert.equal(snapshot.commands.length, 1); assert.equal(snapshot.commands[0]?.status, 'succeeded'); assert.equal(snapshot.commands[0]?.observations[0]?.evidenceRefs.length, 1);
+    const snapshot = await value.plane.snapshot(context.runId); const command = snapshot.commands.find((item) => item.command.kind === 'map.update' && item.command.commandId !== 'proof-predecessor'); assert.equal(command?.status, 'succeeded'); assert.equal(command?.observations[0]?.evidenceRefs.length, 1);
   } finally { value.plane.close(); await rm(value.directory, { recursive: true, force: true }); }
 });
 
@@ -67,7 +78,7 @@ test('map.close binds only verified evidence while invalid input and uncertain w
     assert.equal(result.state, 'unknown', JSON.stringify(result)); assert.equal(unknown.fake.patches(), 1);
     const replay = await unknown.tools.invoke('map.update', { node: 'node-2', expectedRevision: before, title: 'Maybe' }, context);
     assert.equal(replay.state, 'unknown'); assert.equal(unknown.fake.patches(), 1);
-    const success = await closed.tools.invoke('map.close', { node: 'node-2', expectedRevision: before, rationale: 'Verified gate passed.', evidenceRefs: ['gate:accepted'], resolvedDependencies: ['owner/repo#9'] }, context);
+    const success = await closed.tools.invoke('map.close', { node: 'node-2', expectedRevision: before, rationale: 'Verified gate passed.', evidenceRefs: [closed.gateEvidenceRef], resolvedDependencies: ['owner/repo#9'] }, context);
     assert.equal(success.state, 'succeeded', JSON.stringify(success)); assert.equal(closed.fake.patches(), 1); assert.equal(closed.validations(), 2, 'closure evidence is checked before admission and again at effect time');
   } finally { for (const value of [evidence, unknown, closed]) { value.plane.close(); await rm(value.directory, { recursive: true, force: true }); } }
 });
@@ -78,7 +89,7 @@ test('real Fable callbacks and Astra loopback invoke the same HostCore Map tools
   try {
     const claude = await import('@anthropic-ai/claude-agent-sdk'); let definitions: Array<{ name: string; handler(value: Record<string, unknown>, extra: unknown): Promise<unknown> }> = []; const fableResults: unknown[] = [];
     const fable = new FableDriver(artifacts, fableFixture.driverTools, { async assertCurrent() {} }, { async capture() { return { recoveryStateRef: 'recovery' }; }, async restore() { return 'recovery'; } }, { env: { PATH: process.env.PATH ?? '' } }, {
-      ...claude, createSdkMcpServer(value) { definitions = value.tools as typeof definitions; return claude.createSdkMcpServer(value); }, query: (() => (async function* () { fableResults.push(await definitions.find((item) => item.name === 'map.update')!.handler({ node: 'node-2', expectedRevision: before, title: 'Fable update' }, {})); fableResults.push(await definitions.find((item) => item.name === 'map.close')!.handler({ node: 'node-2', expectedRevision: after, rationale: 'Fable evidence verified.', evidenceRefs: ['gate:accepted'], resolvedDependencies: ['owner/repo#9'] }, {})); yield { type: 'result', subtype: 'success', is_error: false }; })()) as never,
+      ...claude, createSdkMcpServer(value) { definitions = value.tools as typeof definitions; return claude.createSdkMcpServer(value); }, query: (() => (async function* () { fableResults.push(await definitions.find((item) => item.name === 'map.update')!.handler({ node: 'node-2', expectedRevision: before, title: 'Fable update' }, {})); fableResults.push(await definitions.find((item) => item.name === 'map.close')!.handler({ node: 'node-2', expectedRevision: after, rationale: 'Fable evidence verified.', evidenceRefs: [fableFixture.gateEvidenceRef], resolvedDependencies: ['owner/repo#9'] }, {})); yield { type: 'result', subtype: 'success', is_error: false }; })()) as never,
     });
     const started = await fable.start({ runId: context.runId, contextRefs: [], mode: 'primary' });
     fableFixture.plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'fable', sessionId: started.sessionId, epoch: 2, issuedAt: before, expiresAt: later }, 1);
@@ -93,7 +104,7 @@ test('real Fable callbacks and Astra loopback invoke the same HostCore Map tools
       const [, token] = Object.entries(bridge.env)[0]!; const clientTransport = new StreamableHTTPClientTransport(new URL(bridge.config.mcp_servers.helm.url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }); const client = new Client({ name: 'map-tools', version: '1' }); await client.connect(clientTransport);
       try {
         const update = await client.callTool({ name: 'map.update', arguments: { node: 'node-2', expectedRevision: before, title: 'Astra update' } }, CallToolResultSchema);
-        const close = await client.callTool({ name: 'map.close', arguments: { node: 'node-2', expectedRevision: after, rationale: 'Astra evidence verified.', evidenceRefs: ['gate:accepted'], resolvedDependencies: ['owner/repo#9'] } }, CallToolResultSchema);
+        const close = await client.callTool({ name: 'map.close', arguments: { node: 'node-2', expectedRevision: after, rationale: 'Astra evidence verified.', evidenceRefs: [astraFixture.gateEvidenceRef], resolvedDependencies: ['owner/repo#9'] } }, CallToolResultSchema);
         assert.equal(update.isError, false); assert.equal(close.isError, false); assert.equal(astraFixture.fake.patches(), 2);
       } finally { await clientTransport.close(); }
     } finally { await bridge.close(); }

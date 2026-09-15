@@ -8,11 +8,12 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { z } from 'zod/v3';
+import { BoundedPiAccess } from '../../src/access/index.js';
+import { createBoundedPiWorkerBinding } from '../../src/access/live.js';
 import { type Command } from '../../src/contracts/index.js';
 import { type KernelEffect } from '../../src/core/index.js';
 import { openHost, PiNativeRuntime, type HostRuntime } from '../../src/host/index.js';
 import { HelmToolRegistry, FableDriver } from '../../src/runtime/orchestrator/index.js';
-import { PiNativeWorker } from '../../src/runtime/pi/index.js';
 import { WorkspaceManager } from '../../src/workspace/index.js';
 
 const now = '2026-09-15T00:00:00Z';
@@ -202,36 +203,49 @@ test('PiNativeRuntime runs the packaged Pi faux provider through host resource e
     const ai = await import('@earendil-works/pi-ai');
     const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
     const faux = ai.fauxProvider({ provider: 'host-native-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('host-native-faux', 'offline');
+    const fauxModel = faux.getModel();
+    const access = new BoundedPiAccess({ poolId: 'overnight-api-usd', provider: fauxModel.provider, model: fauxModel.id, api: fauxModel.api, baseUrl: fauxModel.baseUrl,
+      contextWindow: fauxModel.contextWindow, maxOutputTokens: 32, maxBilledOutputTokens: fauxModel.maxTokens, maxPacketBytes: 8_000, maxRequests: 1, maxToolCalls: 0, timeoutMs: 1_000,
+      inputUsdPerMillion: 1, outputUsdPerMillion: 1, cacheReadUsdPerMillion: 1, cacheWriteUsdPerMillion: 1 });
     faux.setResponses([ai.fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: [], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' }))]);
     const payloadSchema = z.object({ effectId: z.string(), kind: z.enum(['model.request', 'workspace.write']) }).strict();
-    const poolLimits = [{ poolId: 'offline-requests', unit: 'requests', limit: 1 }];
+    const poolLimits = [{ poolId: 'overnight-api-usd', unit: 'usd', limit: 10 }];
     const commandForPiEffect = (effect: { effectId: string; kind: 'model.request' | 'workspace.write' }) => {
       const payload = { effectId: effect.effectId, kind: effect.kind };
       return { schemaVersion: 1, commandId: effect.effectId, kind: effect.kind === 'model.request' ? 'pi.model' : 'pi.write', idempotencyKey: effect.effectId, payloadHash: hash(payload), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'untrusted-pi', runId: 'run-1', origin: 'worker', leaseId: 'autonomy-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] };
     };
-    const observedSettlement = (effect: { kind: 'model.request' | 'workspace.write' }) => effect.kind === 'model.request' ? { state: 'known' as const, amount: 1 } : undefined;
-    const nativeRuntime = new PiNativeRuntime({
+    const observedSettlement = (effect: { effectId: string; kind: 'model.request' | 'workspace.write' }) => {
+      if (effect.kind !== 'model.request') return undefined;
+      const settlement = access.settlement(effect.effectId);
+      return settlement?.state === 'known' ? settlement : settlement ? { state: 'unknown' as const } : undefined;
+    };
+    const nativeRuntime = new PiNativeRuntime(createBoundedPiWorkerBinding({
+      access,
       authority: () => plane!.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }),
-      start: async ({ command: input, journal, authority }) => PiNativeWorker.start({ commandId: input.commandId, attemptId: 'native-attempt', workspace, owner, workspaceManager: manager!, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel() }),
+      workerFor: (input) => ({ commandId: input.commandId, attemptId: 'native-attempt', workspace, owner, workspaceManager: manager!, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: fauxModel }),
       prompt: () => 'Return the worker result JSON.', correction: () => 'Return valid worker result JSON.',
-    });
+    }));
     plane = await openHost({ stateDirectory: join(root, 'host-state'), now: () => now, runtime: nativeRuntime, kinds: {
       'host.effect': { payloadSchema: z.object({ value: z.string() }).strict() },
-      'pi.model': { payloadSchema, resourceRequest: () => ({ poolId: 'offline-requests', unit: 'requests', upperBound: 1, consumer: 'worker' as const }) },
+      'pi.model': { payloadSchema, resourceRequest: (payload) => {
+        const parsed = payloadSchema.parse(payload);
+        const reservation = access.reservation(parsed.effectId);
+        return { poolId: reservation.poolId, unit: reservation.unit, upperBound: reservation.upperBound, consumer: 'worker' as const };
+      } },
       'pi.write': { payloadSchema },
     } });
     plane.recordHumanAuthority({ authorityId: 'human-1', repositoryId: 'repo-1', mapNodeIds: ['node-1'], allowedActions: ['host.effect', 'pi.model', 'pi.write'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits, protectedReserves: [] });
     plane.recordAutonomyLease({ ...lease(), allowedActions: ['host.effect', 'pi.model', 'pi.write'], poolLimits });
-    plane.recordAttempt({ attemptId: 'native-attempt', mapNodeId: 'node-1', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'host-native-faux', capability: 'build', poolId: 'offline-requests', workspace: workspace.root, baseSha: base, contextManifestHash: 'sha256:host-native-context', leaseId: 'autonomy-1', sessionIds: [], commandIds: [], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] });
+    plane.recordAttempt({ attemptId: 'native-attempt', mapNodeId: 'node-1', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'host-native-faux', capability: 'build', poolId: 'overnight-api-usd', workspace: workspace.root, baseSha: base, contextManifestHash: 'sha256:host-native-context', leaseId: 'autonomy-1', sessionIds: [], commandIds: [], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] });
     plane.acquireOwnership({ runId: 'run-1', leaseId: 'orchestrator-1', owner: 'fable', sessionId: 'fable-host-session', epoch: 1, issuedAt: now, expiresAt: later }, 0);
     plane.admitOrchestrator(command('fable-host-session'), { runId: 'run-1', sessionId: 'fable-host-session', mode: 'primary' }, 'trusted-fable');
     assert.equal((await plane.perform('command-1', { executorId: 'host-pi' }, '2026-09-15T00:10:00Z', async () => ({ value: true, state: 'known', source: 'fixture', observedAt: now }))).state, 'succeeded');
     assert.equal(faux.state.callCount, 1);
     const nativeSnapshot = await plane.snapshot('run-1');
-    assert.equal(nativeSnapshot.reservations[0]?.settledActual, 1);
+    assert.ok((nativeSnapshot.reservations[0]?.settledActual ?? 0) > 0, 'validated faux usage settles through the same host ledger');
     assert.equal(nativeSnapshot.attempts[0]?.attemptId, 'native-attempt');
     assert.equal(nativeSnapshot.attemptLifecycles[0]?.state, 'active');
-    await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'command-1' }, async () => undefined), /cap|budget/);
+    await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'command-1' }, async () => undefined), /reservation is absent/);
     await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'unobserved-write', kind: 'workspace.write', commandId: 'command-1' }, async () => { throw new Error('worker lost its observation'); }), /not successfully observed/);
     await plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect }).reportWorkerStop('command-1', 'unknown');
     assert.equal((await plane.snapshot('run-1')).attemptLifecycles[0]?.state, 'unknown');

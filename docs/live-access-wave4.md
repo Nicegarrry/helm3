@@ -48,9 +48,13 @@ boundary.
 
 Before every stream is consumed, the access gate:
 
-- serializes the complete Pi context including tool schemas and uses its UTF-8
-  byte count as a pessimistic input-token upper bound;
-- refuses if that upper bound exceeds the configured input or context cap;
+- pins provider, model, API family, base URL, and context window to declared
+  policy facts, refusing a catalogue mismatch;
+- serializes the complete Pi context including tool schemas and applies a UTF-8
+  packet-byte cap. This is a payload-size guard, not a token estimate;
+- reserves the complete pinned context window plus the declared worst-case
+  billed output before every request, because local JSON byte counts cannot
+  prove provider tokenisation;
 - overwrites `maxTokens`, `maxRetries`, and the abort signal with fixed policy
   values;
 - requires a fresh effect ID, allowing the host to persist a separate
@@ -60,12 +64,15 @@ Before every stream is consumed, the access gate:
 - records only provider, model, caps, reservation, and final usage status. It
   never records an API key or request headers.
 
-The host's `commandForEffect` must resolve each model effect through the access
-gate and use one shared `overnight-api-usd`/`usd` resource pool for every
-provider. The existing kernel persists reservations transactionally. Known final
-cost settles the reservation; failed, timed-out, aborted, or unusable telemetry
-is `unknown` and leaves the full upper bound charged. There is no retry,
-fallback, compaction, or provider/model discovery in this path.
+The host's `commandForEffect` must resolve only each **model** effect through
+the access gate and use one shared `overnight-api-usd`/`usd` resource pool for
+every provider. Workspace writes do not have a model reservation. The existing
+kernel persists reservations transactionally. Settlement recomputes cost only
+from validated native input/output/cache token fields and the frozen price
+table; the SDK's reported dollar total is never trusted. Failed, timed-out,
+aborted, or unusable telemetry is `unknown` and leaves the full upper bound
+charged. There is no retry, fallback, compaction, or provider/model discovery
+in this path.
 
 ## Binding recipe
 
@@ -75,11 +82,19 @@ and the host settlement callback:
 ```ts
 const access = new BoundedPiAccess({
   poolId: 'overnight-api-usd',
+  provider: 'opencode-go',
+  model: 'kimi-k2.7-code',
+  api: 'openai-completions',
+  baseUrl: 'https://opencode.ai/zen/go/v1',
+  contextWindow: 262_144,
   inputUsdPerMillion: 0.95,
   outputUsdPerMillion: 4.00,
-  maxInputTokens: 8_000,
+  cacheReadUsdPerMillion: 0.19,
+  cacheWriteUsdPerMillion: 0,
+  maxPacketBytes: 32_000,
   maxOutputTokens: 1_200,
-  maxContextTokens: 9_200,
+  maxBilledOutputTokens: 262_144,
+  maxRequests: 2,
   maxToolCalls: 2,
   timeoutMs: 30_000,
 });
@@ -87,6 +102,7 @@ const access = new BoundedPiAccess({
 const authority = host.piAuthority({
   attemptId, actorId, executorId,
   commandForEffect(effect) {
+    if (effect.kind !== 'model.request') return workspaceWriteCommand(effect);
     const reservation = access.reservation(effect.effectId);
     return modelRequestCommand(effect, reservation); // resourceRequest => reservation
   },
@@ -98,7 +114,12 @@ const authority = host.piAuthority({
   },
 });
 
-await PiNativeWorker.start({ ...trustedWorkerInput, authority, access });
+const binding = createBoundedPiWorkerBinding({
+  access, authority: () => authority,
+  workerFor: (command) => ({ ...trustedWorkerBase, commandId: command.commandId }),
+  prompt, correction,
+});
+const runtime = new PiNativeRuntime(binding);
 ```
 
 The human authority and autonomy lease must both declare the same

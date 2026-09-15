@@ -11,18 +11,33 @@ export type MonetaryReservation = Readonly<{
   upperBound: number;
   provider: string;
   model: string;
-  inputTokens: number;
-  outputTokens: number;
+  api: Api;
+  baseUrl: string;
+  packetBytes: number;
+  billedInputTokens: number;
+  billedOutputTokens: number;
 }>;
 
 export type BoundedPiAccessPolicy = Readonly<{
   poolId: string;
+  /** Frozen identity and endpoint facts; a model catalog change refuses the request. */
+  provider: string;
+  model: string;
+  api: Api;
+  baseUrl: string;
+  contextWindow: number;
+  /** Hard request output cap sent to Pi. */
+  maxOutputTokens: number;
+  /** Worst-case output charge, including hidden reasoning when applicable. */
+  maxBilledOutputTokens: number;
+  /** A separate packet-size guard, not a claim about provider tokenisation. */
+  maxPacketBytes: number;
+  maxRequests: number;
   /** Prices are USD per one million tokens and must be declared, never fetched at runtime. */
   inputUsdPerMillion: number;
   outputUsdPerMillion: number;
-  maxInputTokens: number;
-  maxOutputTokens: number;
-  maxContextTokens: number;
+  cacheReadUsdPerMillion: number;
+  cacheWriteUsdPerMillion: number;
   maxToolCalls: number;
   timeoutMs: number;
   /** Live access defaults to no automatic envelope-repair follow-up. */
@@ -40,6 +55,7 @@ function nonNegativeFinite(value: number, name: string): void {
 function byteUpperBound(value: unknown): number {
   try { return Buffer.byteLength(JSON.stringify(value), 'utf8'); } catch { throw new Error('model request cannot be safely serialized for an input bound'); }
 }
+function safeToken(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
 function combinedSignal(timeoutMs: number, signal: AbortSignal | undefined): AbortSignal {
   const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([timeout, signal]) : timeout;
@@ -54,29 +70,40 @@ export class BoundedPiAccess {
   private readonly reservations = new Map<string, MonetaryReservation>();
   private readonly settlements = new Map<string, RequestSettlement>();
   private toolCalls = 0;
+  private requestCount = 0;
 
   constructor(readonly policy: BoundedPiAccessPolicy) {
-    positiveInteger(policy.maxInputTokens, 'maxInputTokens');
     positiveInteger(policy.maxOutputTokens, 'maxOutputTokens');
-    positiveInteger(policy.maxContextTokens, 'maxContextTokens');
-    positiveInteger(policy.maxToolCalls, 'maxToolCalls');
+    positiveInteger(policy.maxBilledOutputTokens, 'maxBilledOutputTokens');
+    positiveInteger(policy.contextWindow, 'contextWindow');
+    positiveInteger(policy.maxPacketBytes, 'maxPacketBytes');
+    positiveInteger(policy.maxRequests, 'maxRequests');
+    if (!Number.isSafeInteger(policy.maxToolCalls) || policy.maxToolCalls < 0) throw new Error('maxToolCalls must be a non-negative safe integer');
     positiveInteger(policy.timeoutMs, 'timeoutMs');
     nonNegativeFinite(policy.inputUsdPerMillion, 'inputUsdPerMillion');
     nonNegativeFinite(policy.outputUsdPerMillion, 'outputUsdPerMillion');
-    if (!policy.poolId) throw new Error('poolId is required');
+    nonNegativeFinite(policy.cacheReadUsdPerMillion, 'cacheReadUsdPerMillion');
+    nonNegativeFinite(policy.cacheWriteUsdPerMillion, 'cacheWriteUsdPerMillion');
+    if (!policy.poolId || !policy.provider || !policy.model || !policy.baseUrl) throw new Error('pool and frozen provider facts are required');
+    if (policy.maxOutputTokens > policy.maxBilledOutputTokens) throw new Error('hard output cap cannot exceed billed output bound');
   }
 
   prepare(effectId: string, model: Model<Api>, context: unknown, options: ModelsSimpleStreamOptions | undefined): Readonly<{ options: ModelsSimpleStreamOptions; reservation: MonetaryReservation }> {
     if (!effectId || this.reservations.has(effectId)) throw new Error('model request effect identity must be fresh');
-    const inputTokens = byteUpperBound({ context, tools: (context as { tools?: unknown }).tools, toolChoice: options?.toolChoice });
-    if (inputTokens > this.policy.maxInputTokens) throw new Error('model request input cap refuses request');
-    if (inputTokens + this.policy.maxOutputTokens > this.policy.maxContextTokens || inputTokens + this.policy.maxOutputTokens > model.contextWindow) {
-      throw new Error('model request context cap refuses request');
+    if (this.requestCount >= this.policy.maxRequests) throw new Error('model request count cap refuses request');
+    if (model.provider !== this.policy.provider || model.id !== this.policy.model || model.api !== this.policy.api || model.baseUrl !== this.policy.baseUrl || model.contextWindow !== this.policy.contextWindow || model.maxTokens < this.policy.maxBilledOutputTokens) {
+      throw new Error('model request does not match frozen provider facts');
     }
-    const upperBound = (inputTokens * this.policy.inputUsdPerMillion + this.policy.maxOutputTokens * this.policy.outputUsdPerMillion) / 1_000_000;
+    const packetBytes = byteUpperBound({ context, toolChoice: options?.toolChoice });
+    if (packetBytes > this.policy.maxPacketBytes) throw new Error('model request packet cap refuses request');
+    // Provider tokenisation is not locally provable. Reserve the pinned full
+    // context window and declared worst-case output rather than inferring them
+    // from JSON bytes.
+    const upperBound = (this.policy.contextWindow * (this.policy.inputUsdPerMillion + this.policy.cacheReadUsdPerMillion + this.policy.cacheWriteUsdPerMillion) + this.policy.maxBilledOutputTokens * this.policy.outputUsdPerMillion) / 1_000_000;
     if (!Number.isFinite(upperBound)) throw new Error('model request monetary bound is invalid');
-    const reservation: MonetaryReservation = Object.freeze({ poolId: this.policy.poolId, unit: 'usd', upperBound, provider: model.provider, model: model.id, inputTokens, outputTokens: this.policy.maxOutputTokens });
+    const reservation: MonetaryReservation = Object.freeze({ poolId: this.policy.poolId, unit: 'usd', upperBound, provider: model.provider, model: model.id, api: model.api, baseUrl: model.baseUrl, packetBytes, billedInputTokens: this.policy.contextWindow, billedOutputTokens: this.policy.maxBilledOutputTokens });
     this.reservations.set(effectId, reservation);
+    this.requestCount += 1;
     return Object.freeze({
       reservation,
       options: { ...options, maxRetries: 0, maxTokens: this.policy.maxOutputTokens, signal: combinedSignal(this.policy.timeoutMs, options?.signal) },
@@ -91,9 +118,16 @@ export class BoundedPiAccess {
 
   settle(effectId: string, message: AssistantMessage): void {
     const reservation = this.reservation(effectId);
-    const amount = message.usage?.cost?.total;
-    if (!Number.isFinite(amount) || amount < 0 || amount > reservation.upperBound) {
-      this.settlements.set(effectId, { state: 'unknown', reason: 'provider usage is absent, invalid, or exceeds the pre-reserved bound' });
+    const usage = message.usage;
+    if (message.provider !== reservation.provider || message.model !== reservation.model || message.api !== reservation.api
+      || !safeToken(usage?.input) || !safeToken(usage?.output) || !safeToken(usage?.cacheRead) || !safeToken(usage?.cacheWrite)
+      || !safeToken(usage?.totalTokens) || (usage.reasoning !== undefined && (!safeToken(usage.reasoning) || usage.reasoning > usage.output))) {
+      this.settlements.set(effectId, { state: 'unknown', reason: 'provider identity or token telemetry is not validated' });
+      return;
+    }
+    const amount = (usage.input * this.policy.inputUsdPerMillion + usage.output * this.policy.outputUsdPerMillion + usage.cacheRead * this.policy.cacheReadUsdPerMillion + usage.cacheWrite * this.policy.cacheWriteUsdPerMillion) / 1_000_000;
+    if (!Number.isFinite(amount) || amount > reservation.upperBound) {
+      this.settlements.set(effectId, { state: 'unknown', reason: 'priced token telemetry exceeds the pre-reserved bound' });
       return;
     }
     this.settlements.set(effectId, { state: 'known', amount });

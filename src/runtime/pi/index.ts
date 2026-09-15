@@ -35,9 +35,10 @@ function noResources(runtime: ExtensionRuntime): ResourceLoader {
 function parseEnvelope(text: string): WorkerResult | undefined {
   try { return workerResultSchema.parse(JSON.parse(text)); } catch { return undefined; }
 }
-function errorMessage(model: Model<Api>, error: unknown): AssistantMessage {
+/** Provider error bodies can echo request data. Never put them in Pi events or the journal. */
+function errorMessage(model: Model<Api>): AssistantMessage {
   return { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
-    stopReason: 'error', errorMessage: error instanceof Error ? error.message : 'Helm model request failed', timestamp: Date.now(),
+    stopReason: 'error', errorMessage: 'Helm model request failed', timestamp: Date.now(),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
@@ -102,7 +103,7 @@ export class PiNativeWorker {
             output.push({ type: 'done', reason: terminal.stopReason as 'stop' | 'length' | 'toolUse', message: terminal });
           } catch (error) {
             if (input.access?.hasReservation(effectId)) input.access.unknown(effectId, error instanceof Error ? error.message : 'provider request did not complete');
-            output.push({ type: 'error', reason: 'error', error: terminal ?? errorMessage(model, error) });
+            output.push({ type: 'error', reason: 'error', error: errorMessage(model) });
           }
           finally { output.end(); }
         });

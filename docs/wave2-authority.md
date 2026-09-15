@@ -18,3 +18,9 @@ No purchase, top-up, incremental paid API fallback, unattended Helm run lease or
 The principal next proof is one real native Pi worker linked to its worktree, session, commands and raw evidence, with repair and cancellation/authority behavior. Provider-free tests support this proof but cannot replace its live receipt. If the intended auth route is absent, record that concrete gap while completing independent implementation. Do not mark live-access or full-runtime issues complete from mocks.
 
 Record each accepted slice and its exact review/test evidence on the Map. Preserve the original Brief and addendum unchanged. Full driver interchange, consultations, automatic failover, cockpit and the three-worker feature acceptance remain independently evidenced outcomes; this scope creates no fixed workflow in Helm.
+
+## OAuth deferred; independent construction continues
+
+The human subsequently said: “I won’t be at my computer for interactive oauth until tomorrow so need to manage around that”. Interactive Pi login is deferred until the human is available (expected 2026-09-16); this is not scheduled consent or an automatic login instruction.
+
+Continue already-approved work without provider calls: implement both orchestrator drivers and the shared typed tool seam, exercise local SDK fixtures, and test checkpoint/recovery and authority boundaries. Live access and real native-worker/interchange acceptance remain open. The earlier proving order does not block independent implementation. No substitute credentials, paid API route or predecessor access is introduced. When the human returns, resolve the login step and perform the bounded live proofs against the already-tested implementation.

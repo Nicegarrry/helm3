@@ -21,8 +21,9 @@ coordination owns contracts, cross-cutting decisions and acceptance. Limit to
 three active workers plus coordinator until machine and provider capacity is
 observed. Verify every dispatched brief against the accepted design and ticket.
 
-After approval, run ACCESS first: finite, authorised native Pi and selected
-orchestrator-route requests. This chat's Terra/Luna availability is not proof
+ACCESS remains the live acceptance gate: finite, authorised native Pi and selected
+orchestrator-route requests. The human has deferred interactive OAuth until tomorrow;
+continue driver implementation and local conformance while that gate waits. This chat's Terra/Luna availability is not proof
 those routes are usable. The Claude route has prior narrow SDK evidence; Codex
 SDK lifecycle/tool feasibility, including actual parity, remains unprobed. Freeze
 [protocol revision 1](protocol.md) after findings, then fan out across three lanes:
@@ -82,6 +83,6 @@ evidence.
 
 ## Current approval boundary
 
-The human's wave-two go-ahead is recorded in [wave-two authority](wave2-authority.md). Continue supervised native-runtime/authority work and independently reviewed PR integration with at most three workers plus coordinator. [Wave-two progress](wave2-progress.md) records accepted slices and the live-access dependency before driver proof.
+The human's wave-two go-ahead is recorded in [wave-two authority](wave2-authority.md). Continue supervised native-runtime/authority work and independently reviewed PR integration with at most three workers plus coordinator. [Wave-two progress](wave2-progress.md) records accepted slices and the deferred live-access dependency and independent driver construction.
 
 Before issuing any unattended Helm run lease, separately record actual provider routes, resource caps/reserves, concurrency, expiry and merge scope. No purchases or automatic top-ups are authorised. Live ACCESS must demonstrate bounded intended subscription routes; provider-free code and tests can progress while that evidence remains incomplete. The 48–72-hour estimate remains a planning target for the expanded build, not a granted continuous execution lease or promise. Re-estimate at six hours from accepted output.

@@ -8,6 +8,8 @@ The human explicitly approved the first implementation wave after context clean 
 
 Do not read, modify, fetch, build, test, index, dispatch into, or otherwise interfere with `/Users/sa/code/other/helm-cli` or its worktrees until an explicit immutable handoff. Opus is finishing Milestone 1 there. Do not infer completion from historic state. Await an explicit handoff and immutable commit SHA.
 
+Interactive Pi OAuth is deferred until the human returns, expected 2026-09-16. Continue approved provider-free driver/tool/recovery implementation; live acceptance remains open. See the sequencing update in [wave-two authority](docs/wave2-authority.md). Elapsed time does not grant login consent.
+
 ## Durable contract
 
 - The human owns the Brief. Proposals must not silently change fixed requirements. The full original design and its addendum are authoritative together.

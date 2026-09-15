@@ -2,6 +2,9 @@
 
 ## Current authority
 
+Wave 4 and onward are now explicitly approved for overnight execution on 2026-09-15. The user asked to continue fairly autonomously, dogfood Helm with native Pi workers including available open models, and supplied temporary OpenCode/Gemini credentials separately. The user explicitly chose a **US$10 combined incremental API spending ceiling for the entire overnight run**. See [overnight authority](docs/overnight-authority.md). This supersedes older wave-only and no-live-probe restrictions within these bounds. Stop new autonomous work at 08:00 Australia/Sydney on 2026-09-16; monitor and preserve evidence thereafter. No purchases, top-ups, unrelated deployment or interactive account changes are authorised.
+
+
 Wave 3 is explicitly approved: “Go for next wave - explain ‘imports remain open’”. Execute the supervised connected-control-plane wave in [wave-three scope and acceptance](docs/wave3-plan.md), including authorised predecessor reuse and provider-free dogfooding. This supersedes wave-two-only scope. Spending, login, source preservation and isolation boundaries below remain applicable.
 
 The human explicitly approved the first implementation wave after context clean on 2026-09-15: “pick up the handoff and review map and the first wave. Let’s get working using mostly Luna/terra workers and reviewers please”. The scoped decision is recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235) and [wave-one authority](docs/wave1-authority.md). Implement and review that foundation in isolated worktrees and integrate reviewed PRs. No purchases, top-ups, incremental paid API fallback or unattended Helm run lease are authorised. Predecessor reuse is now authorised as recorded below. Public SDK/package reads and local provider-free tests remain permitted.

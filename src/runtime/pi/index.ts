@@ -5,6 +5,7 @@ import { workerResultSchema, type RawArtifactRef, type WorkerResult } from '../.
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
 
+
 export type PiEffect = Readonly<{ effectId: string; kind: 'model.request' | 'workspace.write'; commandId: string }>;
 
 /** Implemented by the trusted authority host. It must run the effect through its
@@ -67,9 +68,8 @@ export class PiNativeWorker {
     await Promise.all([mkdir(sessionDir, { recursive: true, mode: 0o700 }), mkdir(agentDir, { recursive: true, mode: 0o700 })]);
     const events: RawArtifactRef[] = [];
     let eventFlush = Promise.resolve();
-    const [{ createAgentSession, SessionManager }, { Type }, loader] = await Promise.all([
+    const [{ createAgentSession, SessionManager, createExtensionRuntime }, { Type }] = await Promise.all([
       import('@earendil-works/pi-coding-agent'), import('typebox'),
-      import(join(process.cwd(), 'node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js')),
     ]);
     const writeTool: any = {
       name: 'helm_write', label: 'Helm write', description: 'Write a new UTF-8 file inside the assigned worktree.',
@@ -86,7 +86,7 @@ export class PiNativeWorker {
     const created = await createAgentSession({
       cwd: input.workspace.root, agentDir, modelRuntime: input.modelRuntime as any, model: input.model as any,
       sessionManager: SessionManager.create(input.workspace.root, sessionDir),
-      noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(loader.createExtensionRuntime()) as any,
+      noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()) as any,
     });
     const sessionId = created.session.getSessionStats().sessionId;
     const unsubscribe = created.session.subscribe((event) => {
@@ -117,7 +117,9 @@ export class PiNativeWorker {
       throw new Error('WorkerResult changed_files claim does not match post-attempt Git diff');
     }
     await this.waitForEvents();
-    const envelope = await this.input.journal.append({ source: 'pi.envelope', sourceIdentity: `pi-envelope:${this.input.attemptId}`, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(result)) });
+    // Retain the exact terminal assistant text; parsing a claim must never replace
+    // the worker's raw bytes in the evidence journal.
+    const envelope = await this.input.journal.append({ source: 'pi.envelope', sourceIdentity: `pi-envelope:${this.input.attemptId}`, mediaType: 'text/plain; charset=utf-8', bytes: Buffer.from(this.lastAssistantText()) });
     const stats = this.session.getSessionStats();
     const usage = await this.input.journal.append({ source: 'pi.usage', sourceIdentity: `pi-usage:${this.input.attemptId}`, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId, observedTokens: stats.tokens, contextOccupancy: { state: 'unknown', reason: 'Pi SDK does not provide an authoritative context window or compaction count in this slice' }, cost: { state: 'unknown', reason: 'local faux provider has no billable cost' } })) });
     return { result, artifacts: [...this.artifacts, envelope, usage], repaired };
@@ -126,16 +128,29 @@ export class PiNativeWorker {
   async cancel(): Promise<void> {
     await this.input.authority.requestCancellation(this.input.commandId);
     this.session.abort();
-    await this.input.authority.reportWorkerStop(this.input.commandId, 'stopped');
+    const settled = await Promise.race([
+      new Promise<void>((resolve) => { const unsubscribe = this.session.subscribe((event: { type: string }) => { if (event.type === 'agent_settled') { unsubscribe(); resolve(); } }); }),
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 5_000)),
+    ]);
+    await this.input.authority.reportWorkerStop(this.input.commandId, settled === 'timeout' ? 'unknown' : 'stopped');
   }
 
   async reopen(): Promise<PiNativeWorker> {
     const stats = this.session.getSessionStats();
     if (!stats.sessionFile) throw new Error('Pi has not persisted this session yet');
     this.unsubscribe(); this.session.dispose();
-    const [{ createAgentSession, SessionManager }, loader] = await Promise.all([import('@earendil-works/pi-coding-agent'), import(join(process.cwd(), 'node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js'))]);
+    const [{ createAgentSession, SessionManager, createExtensionRuntime }, { Type }] = await Promise.all([import('@earendil-works/pi-coding-agent'), import('typebox')]);
+    this.input.workspaceManager.assertOwner(this.input.workspace, this.input.owner);
+    const writeTool: any = {
+      name: 'helm_write', label: 'Helm write', description: 'Write a UTF-8 file inside the assigned worktree.',
+      parameters: Type.Object({ path: Type.String({ minLength: 1 }), contents: Type.String() }), executionMode: 'sequential',
+      execute: async (toolCallId: string, params: { path: string; contents: string }) => {
+        try { await this.input.authority.perform({ effectId: `tool:${toolCallId}`, kind: 'workspace.write', commandId: this.input.commandId }, async () => this.input.workspaceManager.write(this.input.workspace, this.input.owner, params.path, params.contents)); return toolResult(`wrote ${params.path}`); }
+        catch (error) { return toolResult(`refused: ${(error as Error).message}`, true); }
+      },
+    };
     const reopened = await createAgentSession({ cwd: this.input.workspace.root, modelRuntime: this.input.modelRuntime as any, model: this.input.model as any,
-      sessionManager: SessionManager.open(stats.sessionFile, join(this.input.stateRoot, 'sessions'), this.input.workspace.root), noTools: 'all', resourceLoader: noResources(loader.createExtensionRuntime()) as any });
+      sessionManager: SessionManager.open(stats.sessionFile, join(this.input.stateRoot, 'sessions'), this.input.workspace.root), noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()) as any });
     const id = reopened.session.getSessionStats().sessionId;
     if (id !== this.sessionId) throw new Error('reopened Pi session identity changed');
     return new PiNativeWorker(this.input, reopened.session, id, () => undefined, this.artifacts, async () => undefined);

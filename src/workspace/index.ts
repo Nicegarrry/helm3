@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
@@ -77,7 +77,14 @@ export class WorkspaceManager {
     const existing = await stat(target).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? undefined : Promise.reject(error));
     if (existing && existing.nlink > 1) throw new WorkspaceRefusal('hard-linked target is refused');
     await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    // Publish a complete replacement, rather than making existing tracked files unwritable.
+    // Re-check ownership after every await before the externally visible rename.
+    const temporary = `${target}.helm-${owner.attemptId}-${owner.generation}.tmp`;
+    try {
+      await writeFile(temporary, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      this.assertOwner(reservation, owner);
+      await rename(temporary, target);
+    } finally { await unlink(temporary).catch(() => undefined); }
   }
 
   async changedFiles(reservation: WorktreeReservation): Promise<string[]> {
@@ -86,10 +93,14 @@ export class WorkspaceManager {
   }
 
   private async safePath(reservation: WorktreeReservation, path: string, writing: boolean): Promise<string> {
-    if (path === '.git' || path.startsWith('.git/')) throw new WorkspaceRefusal('Git metadata is protected');
-    if (path.startsWith('.github/') || path.startsWith('src/core/') || path.startsWith('docs/protocol')) throw new WorkspaceRefusal('control path is protected');
+    const lexical = relative(reservation.root, resolve(reservation.root, path)).split(sep).join('/');
+    if (lexical === '.git' || lexical.startsWith('.git/')) throw new WorkspaceRefusal('Git metadata is protected');
+    if (lexical === '.github' || lexical.startsWith('.github/') || lexical === 'src/core' || lexical.startsWith('src/core/') || lexical === 'docs/protocol.md' || lexical.startsWith('docs/protocol/')) throw new WorkspaceRefusal('control path is protected');
     const target = await canonicalPath(reservation.root, path);
     if (!inside(reservation.root, target)) throw new WorkspaceRefusal('path is outside assigned worktree');
+    const relativeTarget = relative(reservation.root, target).split(sep).join('/');
+    if (relativeTarget === '.git' || relativeTarget.startsWith('.git/')) throw new WorkspaceRefusal('Git metadata is protected');
+    if (relativeTarget === '.github' || relativeTarget.startsWith('.github/') || relativeTarget === 'src/core' || relativeTarget.startsWith('src/core/') || relativeTarget === 'docs/protocol.md' || relativeTarget.startsWith('docs/protocol/')) throw new WorkspaceRefusal('control path is protected');
     if (!writing) return target;
     return target;
   }

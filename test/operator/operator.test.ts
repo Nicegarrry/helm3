@@ -20,6 +20,16 @@ test("CLI JSON and HTML use the same injected snapshot and escape fields", () =>
   assert.equal(JSON.parse(formatOperatorJson(snapshot)).needsYou[0].summary, "choose <route>");
   const html = renderOperatorHtml(snapshot);
   assert.match(html, /choose/); assert.doesNotMatch(html, /choose <route>/); assert.match(html, /choose &lt;route&gt;/);
+  for (const id of ["overview", "map", "needs-you", "workers", "models", "log"]) assert.match(html, new RegExp(`id=\"${id}\"`));
+  for (const label of ["Overview", "Map", "Needs You", "Workers", "Models", "Log"]) assert.match(html, new RegExp(`>${label}<`));
+  assert.match(html, /availability unknown/); assert.match(html, /Log entries are unavailable in this snapshot/);
+});
+
+test("HTML keeps unavailable and known-empty views distinct", () => {
+  const unknown = renderOperatorHtml({ ...snapshot, map: null, needsYou: null, attempts: [], resources: { ...snapshot.resources, units: [], context: [] }, unknowns: [] });
+  assert.match(unknown, />(unknown|unknown queue state)</); assert.match(unknown, /Log entries are unavailable in this snapshot/); assert.match(unknown, /no observed model identities/);
+  const empty = renderOperatorHtml({ ...snapshot, needsYou: [], attempts: [], map: { ...snapshot.map!, state: "known", summary: "empty Map" } });
+  assert.match(empty, /empty Map/); assert.doesNotMatch(empty, /unknown queue state/); assert.match(empty, /no observed model identities/);
 });
 
 test("runtime validation rejects fields outside the public projection", () => {

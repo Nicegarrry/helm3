@@ -4,6 +4,7 @@ import { join, relative, isAbsolute } from 'node:path';
 import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
 import { BoundedPiAccess } from '../../access/index.js';
+import { observePiContext } from '../../context/index.js';
 import { workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
@@ -182,9 +183,10 @@ export class PiNativeWorker {
       if (JSON.stringify([...result.changed_files].sort()) !== JSON.stringify(changed)) throw new Error('WorkerResult changed_files claim does not match observed changes');
       await this.eventFlush;
       if (this.eventError) throw new Error('Pi evidence persistence failed');
+      const contextOccupancy = observePiContext(this.session);
       this.artifacts.push(await this.input.journal.append({ source: 'pi.usage', sourceIdentity: `pi-usage:${this.input.attemptId}:${invocation}`, mediaType: 'application/json',
         bytes: Buffer.from(JSON.stringify({ commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId,
-          observedTokens: this.session.getSessionStats().tokens, contextOccupancy: { state: 'unknown' }, cost: { state: 'unknown' } })) }));
+          observedTokens: this.session.getSessionStats().tokens, contextOccupancy, cost: { state: 'unknown' } })) }));
       return { result, artifacts: [...this.artifacts], repaired };
     } catch (error) {
       if (!saved) await this.saveTerminal(invocation, 'interrupted');

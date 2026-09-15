@@ -16,7 +16,7 @@ import {
   type OrchestratorLease,
   type Precondition,
 } from '../contracts/index.js';
-import { z, type ZodType } from 'zod';
+import { z, type ZodType } from 'zod/v3';
 
 type Statement = { run(...values: unknown[]): { changes?: number }; get(...values: unknown[]): unknown; all(...values: unknown[]): unknown[] };
 type Database = { exec(sql: string): void; prepare(sql: string): Statement; close(): void };

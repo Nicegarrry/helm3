@@ -1,4 +1,4 @@
-import { z, type ZodType } from 'zod';
+import { z, type ZodType } from 'zod/v3';
 
 /** UTC RFC3339 timestamps are strings at the domain boundary. */
 export const utcTimestampSchema = z.string().datetime({ offset: false });

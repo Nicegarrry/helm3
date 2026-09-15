@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { openKernel, type KernelOptions } from '../../src/core/index.js';
 
 const now = '2026-09-15T00:00:00Z';

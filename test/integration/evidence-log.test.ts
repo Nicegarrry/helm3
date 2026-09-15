@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { RawArtifactRef } from '../../src/contracts/index.js';
 import { openKernel } from '../../src/core/index.js';
 import { ArtifactJournal } from '../../src/journal/index.js';

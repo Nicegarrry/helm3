@@ -195,6 +195,8 @@ const args = process.argv.join(' '); const resumed = args.includes('resume'); co
   if (!workspace) throw new Error('worker setup did not create a worktree');
   await workspaceManager.write(workspace, workspace.owner, 'README.md', 'forbidden').then(() => { throw new Error('protected path write was allowed'); }, () => undefined);
   const snapshot = await plane.snapshot(runId);
+  const completedAttempt = snapshot.attemptLifecycles.find((entry) => entry.attemptId === activeAttemptId);
+  if (completedAttempt?.state !== 'finished') throw new Error('provider-free native worker did not durably finish its Core attempt after model/write effects');
   const resultPath = join(workspace.root, 'result.txt');
   clock = later;
   let expiredRefusal = false;

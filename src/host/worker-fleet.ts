@@ -178,12 +178,23 @@ export class PiWorkerFleet {
     const snapshot = await this.binding.host.snapshot(runId);
     const command = snapshot.commands.find((entry) => (entry.command.payload as { workerId?: unknown }).workerId === workerId);
     const attemptId = (command?.command.payload as { attemptId?: unknown } | undefined)?.attemptId;
-    const terminal = typeof attemptId === 'string'
-      ? await this.binding.host.readFleetEffectByIdentity(runId, `host-worker-terminal:${runId}:${attemptId}`)
-        ?? await this.binding.host.readFleetEffectByIdentity(runId, `host-worker-stop:${runId}:${attemptId}`)
-      : undefined;
-    if (terminal) {
-      try { return JSON.parse(terminal) as StoredWorker; } catch { return undefined; }
+    if (typeof attemptId === 'string') {
+      const [terminalText, stopText] = await Promise.all([
+        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-terminal:${runId}:${attemptId}`),
+        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-stop:${runId}:${attemptId}`),
+      ]);
+      try {
+        const terminal = terminalText ? JSON.parse(terminalText) as StoredWorker : undefined;
+        const stopped = stopText ? JSON.parse(stopText) as StoredWorker : undefined;
+        // A confirmed stop or completed run is a stronger durable observation
+        // than an earlier runner-failure unknown.  Keep both evidence chains
+        // and cancellation intent; neither record is overwritten.
+        const winner = terminal?.state === 'terminal' ? terminal : stopped?.state === 'terminal' ? stopped : terminal ?? stopped;
+        if (winner) return Object.freeze({ ...winner,
+          evidenceRefs: Object.freeze([...new Set([...(terminal?.evidenceRefs ?? []), ...(stopped?.evidenceRefs ?? [])])]),
+          cancellationRequested: Boolean(terminal?.cancellationRequested || stopped?.cancellationRequested),
+        });
+      } catch { return undefined; }
     }
     const ref = command?.observations.flatMap((entry) => entry.evidenceRefs).find((entry) => entry.includes('"kind":"effect"'));
     if (!ref) return undefined;

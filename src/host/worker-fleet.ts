@@ -6,7 +6,9 @@ import type { PiNativeWorker, PiPersistedSession } from '../runtime/pi/index.js'
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../workspace/index.js';
 import type { HostControlPlane } from './index.js';
 
-export type WorkerSpawnInput = Readonly<{ objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[]; modelId: string; role: string; label?: string }>;
+/** Private host constraint used only by independent review; it is never a public tool field. */
+export type ReviewSpawnConstraint = Readonly<{ repository: string; expectedHead: string; mode: 'review-readonly' }>;
+export type WorkerSpawnInput = Readonly<{ objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[]; modelId: string; role: string; label?: string; reviewConstraint?: ReviewSpawnConstraint }>;
 /** A bounded, orchestrator-selected follow-up; all paths and authority remain host configured. */
 export type WorkerSteerInput = Readonly<{ workerId: string; objectiveRef: string; evidenceRefs: readonly string[]; /** When gate output is used, this immutable command identity binds its raw refs to the predecessor and exact head. */ gateCommandId?: string; expectedSessionId: string; expectedHead: string }>;
 export type WorkerInspect = Readonly<{
@@ -91,7 +93,7 @@ export class PiWorkerFleet {
   constructor(private readonly binding: WorkerFleetBinding) {}
 
   async spawn(context: HelmToolExecutionContext, input: WorkerSpawnInput): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'ready' }> {
-    const validated = Object.freeze({ ...input, contextRefs: Object.freeze([...input.contextRefs]) });
+    const validated = Object.freeze({ ...input, contextRefs: Object.freeze([...input.contextRefs]), ...(input.reviewConstraint ? { reviewConstraint: Object.freeze({ ...input.reviewConstraint }) } : {}) });
     const artifacts = this.binding.host.artifactsFor(context);
     await Promise.all([artifacts.readText(validated.objectiveRef), artifacts.readText(validated.acceptanceRef), ...validated.contextRefs.map((ref) => artifacts.readText(ref))]);
     const workerId = `worker-${randomUUID()}`;
@@ -111,6 +113,12 @@ export class PiWorkerFleet {
         const config = this.binding.workspace(admitted.command, workerId, attempt);
         if (config.baseSha !== provenance.baseSha || attempt.baseSha !== provenance.baseSha || attempt.model !== provenance.modelId) {
           throw new Error('worker spawn provenance does not match its worktree or attempt');
+        }
+        const review = validated.reviewConstraint;
+        if (review && (review.mode !== 'review-readonly' || !/^[0-9a-f]{40}$/.test(review.expectedHead)
+          || config.repository !== review.repository || config.baseSha !== review.expectedHead
+          || config.policy.writableRoots.length !== 0 || (admitted.command.payload as { mode?: unknown }).mode !== 'review-readonly')) {
+          throw new Error('independent review spawn does not bind its readonly repository head');
         }
         const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
         this.binding.host.assertModelProvenance(provenance.modelId, provenance.modelProvider, provenance.modelFactVersion);

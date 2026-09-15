@@ -27,12 +27,15 @@ export async function readOperatorApi(origin: string) {
   } finally { await reader.cancel().catch(() => undefined); }
 }
 
-export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'map.get' | 'log.query' | 'models.get' | 'budget.get' | 'worker.inspect', limit?: number): Promise<HelmToolResult> {
+export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'map.get' | 'log.query' | 'models.get' | 'budget.get' | 'worker.inspect', limit?: number, workerId?: string): Promise<HelmToolResult> {
   const url = new URL(origin);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Expected an explicit http://127.0.0.1:PORT origin');
   if (name !== 'log.query' && limit !== undefined) throw new Error('Only log.query accepts --limit');
+  if (name === 'worker.inspect' && (!workerId || workerId.length > 128)) throw new Error('worker.inspect requires a bounded worker ID');
+  if (name !== 'worker.inspect' && workerId !== undefined) throw new Error('Only worker.inspect accepts --worker');
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) throw new Error('--limit must be between 1 and 100');
-  const path = `/api/operator/read/${name}${limit === undefined ? '' : `?limit=${limit}`}`;
+  const query = limit === undefined ? (workerId === undefined ? '' : `?workerId=${encodeURIComponent(workerId)}`) : `?limit=${limit}`;
+  const path = `/api/operator/read/${name}${query}`;
   const response = await fetch(new URL(path, url), { signal: AbortSignal.timeout(5_000), redirect: 'error' });
   if (!response.ok || !response.body) throw new Error(`Operator read API unavailable (${response.status})`);
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
@@ -55,7 +58,11 @@ export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'm
 export async function operatorCli(args: readonly string[]): Promise<string> {
   if (args.length >= 4 && args.length <= 6 && args[0] === '--url' && args[2] === '--read') {
     const name = args[3];
-    if (!['brief.get', 'map.get', 'log.query', 'models.get', 'budget.get'].includes(name)) throw new Error('Unknown read tool');
+    if (!['brief.get', 'map.get', 'log.query', 'models.get', 'budget.get', 'worker.inspect'].includes(name)) throw new Error('Unknown read tool');
+    if (name === 'worker.inspect') {
+      if (args.length !== 6 || args[4] !== '--worker' || !args[5] || args[5].length > 128) throw new Error('Usage: tsx src/operator/cli.ts --url http://127.0.0.1:PORT --read worker.inspect --worker ID');
+      return `${JSON.stringify(await readOperatorToolApi(args[1], 'worker.inspect', undefined, args[5]))}\n`;
+    }
     let limit: number | undefined;
     if (args.length > 4) {
       if (args.length !== 6 || args[4] !== '--limit' || !/^[1-9][0-9]{0,2}$/.test(args[5]!)) throw new Error('Usage: tsx src/operator/cli.ts --url http://127.0.0.1:PORT --read TOOL [--limit 1..100]');

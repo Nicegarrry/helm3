@@ -57,6 +57,8 @@ export class PiNativeWorker {
   private constructor(private readonly input: PiWorkerInput) {}
   get sessionId(): string { return this.session.getSessionStats().sessionId; }
   get isActive(): boolean { return this.running || this.activeRequests.size > 0; }
+  /** Read-only observation; missing Pi SDK usage remains explicitly unknown. */
+  get contextOccupancy() { return observePiContext(this.session); }
 
   static async start(input: PiWorkerInput): Promise<PiNativeWorker> {
     input.workspaceManager.assertOwner(input.workspace, input.owner);

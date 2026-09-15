@@ -16,6 +16,7 @@ import {
   type TrustedExecutor,
 } from '../core/index.js';
 import { ArtifactJournal, type ArtifactMetadata } from '../journal/index.js';
+import { JournalReviewContextStore } from './review-context.js';
 import {
   EventDrivenSupervisor,
   EventSupervisor,
@@ -272,6 +273,7 @@ export class HostControlPlane {
   revokeAutonomyLease(leaseId: string): void { this.kernel.host.revokeAutonomyLease(leaseId); }
   /** Trusted runtime records immutable worker-attempt provenance before Pi begins effects. */
   recordAttempt(attempt: Attempt): void { this.kernel.host.appendAttempt(attempt); }
+  reviewContextFor(context: HelmToolExecutionContext): JournalReviewContextStore { this.assertSession(context); return new JournalReviewContextStore(this.journal, context.runId); }
 
   piAuthority(options: PiEffectAuthorityOptions): PiAuthority {
     const binding = Object.freeze({ ...options });

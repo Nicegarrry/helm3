@@ -10,6 +10,7 @@ function fixture(overrides: Partial<ConstructorParameters<typeof IndependentRevi
   const records = new Map<string, DurableReviewRecord>();
   const source = { workerId: 'builder-1', attemptId: 'attempt-builder', sessionId: 'session-builder', modelId: 'builder', family: 'fable', provider: 'faux', api: 'responses', repository: 'fixture/repo', workspace: '/fixture/workspace', runId: 'run-1', head, clean: true, contextRefs: ['builder-transcript-forbidden'] };
   const service = new IndependentReviewService({
+    assertReviewContext: async () => undefined,
     source: async () => source,
     readArtifact: async (ref) => `immutable:${ref}`,
     inspectSource: async () => ({ head, clean: true }),

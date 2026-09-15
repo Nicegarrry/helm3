@@ -11,7 +11,7 @@ function valid(record: DurableReviewRecord): void {
   if (record.schemaVersion !== 1 || !record.reviewId.startsWith('review-') || !record.idempotencyKey.startsWith('sha256:')
     || !record.source.runId || !record.requestedHead.match(/^[0-9a-f]{40}$/) || record.source.head !== record.requestedHead
     || !record.manifest.digest.startsWith('sha256:') || record.manifest.entries.length < 2
-    || !record.manifest.entries.every(entry => entry.ref.length > 0 && entry.hash.startsWith('sha256:'))
+    || !record.manifest.entries.every(entry => entry.ref.length > 0 && entry.hash.startsWith('sha256:') && ['objective', 'acceptance', 'factual-context'].includes(entry.purpose))
     || !record.reviewer.requestedModelId) throw new Error('invalid durable review record');
   const reviewerLaunched = nonempty(record.reviewer.workerId) && nonempty(record.reviewer.attemptId) && nonempty(record.reviewer.sessionId);
   const terminalEvidence = nonempty(record.outcome?.resultRef) && record.outcome.rawEventRefs.length > 0

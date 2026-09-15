@@ -4,6 +4,7 @@ import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js'
 import type { HostControlPlane } from './index.js';
 import { PiWorkerFleet } from './worker-fleet.js';
 import type { WorkspaceManager } from '../workspace/index.js';
+import type { ReviewContextPurpose } from './review-context.js';
 
 export type ReviewRequest = Readonly<{
   sourceWorkerId: string;
@@ -17,7 +18,7 @@ export type ReviewSource = Readonly<{
   workerId: string; attemptId: string; sessionId: string; modelId: string; family: string; provider: string; api: string;
   repository: string; workspace: string; runId: string; head: string; clean: boolean; contextRefs: readonly string[];
 }>;
-export type ReviewManifest = Readonly<{ digest: string; entries: readonly Readonly<{ ref: string; hash: string }>[] }>;
+export type ReviewManifest = Readonly<{ digest: string; entries: readonly Readonly<{ ref: string; hash: string; purpose: ReviewContextPurpose }>[] }>;
 export type ReviewState = 'planned' | 'launched' | 'terminal' | 'unknown';
 export type ReviewerProvenance = Readonly<{
   requestedModelId: string; workerId?: string; attemptId?: string; sessionId?: string; spawnCommandId?: string;
@@ -61,6 +62,7 @@ export type ReviewServiceBinding = Readonly<{
   source(workerId: string): Promise<ReviewSource | undefined>;
   /** Reads immutable host artifact bytes before any model/session/worktree effect. */
   readArtifact(ref: string): Promise<string>;
+  assertReviewContext(ref: string, purpose: ReviewContextPurpose): Promise<void>;
   /** Re-read source checkout identity immediately before launch. */
   inspectSource(source: ReviewSource): Promise<Readonly<{ head: string; clean: boolean }>>;
   /** Host-owned policy check: role, provider/API identity, data policy, authority and cross-family floor. */
@@ -102,12 +104,12 @@ export class IndependentReviewService {
     const fresh = await this.binding.inspectSource(source);
     if (!fresh.clean || fresh.head !== request.expectedHead) throw new Error('source checkout changed before review launch');
     await this.binding.authorize(source, request.reviewerModelId);
-    const refs = [ref(request.objectiveRef), ref(request.acceptanceRef), ...request.contextRefs.map(ref)];
+    const refs: ReadonlyArray<Readonly<{ ref: string; purpose: ReviewContextPurpose }>> = [{ ref: ref(request.objectiveRef), purpose: 'objective' }, { ref: ref(request.acceptanceRef), purpose: 'acceptance' }, ...request.contextRefs.map(item => ({ ref: ref(item), purpose: 'factual-context' as const }))];
     // Copy the bytes and derive the digest before the async spawn effect.
     // HostArtifactStore rejects effect and invocation refs structurally; the
     // trusted caller remains responsible for selecting text refs that do not
     // contain a builder transcript or primary conclusion.
-    const entries = await Promise.all(refs.map(async (item) => Object.freeze({ ref: item, hash: digest(await this.binding.readArtifact(item)) })));
+    const entries = await Promise.all(refs.map(async (item) => { await this.binding.assertReviewContext(item.ref, item.purpose); return Object.freeze({ ref: item.ref, purpose: item.purpose, hash: digest(await this.binding.readArtifact(item.ref)) }); }));
     const manifest = Object.freeze({ digest: digest(entries), entries: Object.freeze(entries) });
     const idempotencyKey = reviewKey(source, request);
     const planned = frozenRecord({ schemaVersion: 1, reviewId: stableReviewId(idempotencyKey), idempotencyKey, state: 'planned', source, requestedHead: request.expectedHead, manifest, reviewer: { requestedModelId: request.reviewerModelId } });
@@ -172,7 +174,7 @@ export function createFleetIndependentReviewService(input: Readonly<{
     cached = Object.freeze({ workerId, attemptId: attempt.attemptId, sessionId: inspected.sessionId, modelId: payload.modelId, family: attempt.family, provider: payload.modelProvider, api: payload.modelApi, repository: reservation.repository, workspace: inspected.workspace, runId: input.context.runId, head: git.head, clean: git.clean, contextRefs: Object.freeze([]) });
     return cached;
   };
-  return new IndependentReviewService({ source, readArtifact: (ref) => input.host.artifactsFor(input.context).readText(ref),
+  return new IndependentReviewService({ source, readArtifact: (ref) => input.host.artifactsFor(input.context).readText(ref), assertReviewContext: (ref, purpose) => input.host.reviewContextFor(input.context).assertApproved(ref, purpose),
     inspectSource: async (value) => { const reservation = input.workspaceManager.reservation(value.workspace); await input.workspaceManager.assertExactHead(reservation, value.head); return { head: value.head, clean: true }; },
     authorize: input.authorize, durability: input.durability,
     spawn: async request => {

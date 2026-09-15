@@ -9,7 +9,7 @@ import { JournalReviewDurabilityStore } from '../../src/host/review-store.js';
 
 const head = 'a'.repeat(40);
 function planned(): DurableReviewRecord {
-  return { schemaVersion: 1, reviewId: 'review-1234567890abcdef', idempotencyKey: `sha256:${'b'.repeat(64)}`, state: 'planned', source: { workerId: 'builder', attemptId: 'attempt-builder', sessionId: 'session-builder', modelId: 'builder', family: 'fable', provider: 'faux', api: 'fixture', repository: 'repo', workspace: 'workspace', runId: 'run', head, clean: true, contextRefs: [] }, requestedHead: head, manifest: { digest: `sha256:${'c'.repeat(64)}`, entries: [{ ref: 'objective', hash: `sha256:${'d'.repeat(64)}` }, { ref: 'acceptance', hash: `sha256:${'e'.repeat(64)}` }] }, reviewer: { requestedModelId: 'reviewer' } };
+  return { schemaVersion: 1, reviewId: 'review-1234567890abcdef', idempotencyKey: `sha256:${'b'.repeat(64)}`, state: 'planned', source: { workerId: 'builder', attemptId: 'attempt-builder', sessionId: 'session-builder', modelId: 'builder', family: 'fable', provider: 'faux', api: 'fixture', repository: 'repo', workspace: 'workspace', runId: 'run', head, clean: true, contextRefs: [] }, requestedHead: head, manifest: { digest: `sha256:${'c'.repeat(64)}`, entries: [{ ref: 'objective', purpose: 'objective', hash: `sha256:${'d'.repeat(64)}` }, { ref: 'acceptance', purpose: 'acceptance', hash: `sha256:${'e'.repeat(64)}` }] }, reviewer: { requestedModelId: 'reviewer' } };
 }
 
 test('journal review store persists immutable intent and append-only provenance across reopen', async () => {
@@ -54,6 +54,7 @@ test('separate journal instances grant one durable pre-spawn claim and launch on
     const source = planned().source;
     const input: ReviewRequest = { sourceWorkerId: source.workerId, expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' };
     const service = (durability: JournalReviewDurabilityStore) => new IndependentReviewService({
+      assertReviewContext: async () => undefined,
       source: async () => source, inspectSource: async () => ({ head, clean: true }), authorize: async () => undefined,
       readArtifact: async value => value, durability,
       spawn: async () => ({ workerId: `reviewer-${++spawns}`, attemptId: `attempt-reviewer-${spawns}`, sessionId: `session-reviewer-${spawns}` }),

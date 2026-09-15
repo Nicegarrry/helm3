@@ -1,6 +1,6 @@
 # Full-brief acceptance protocol
 
-Status: proposed executable evidence contract; the following scenario is required by source section 35. Implementation is not yet authorised.
+Status: proposed executable evidence contract; the following scenario is required by source section 35. Selected implementation work is authorised under current bounded authority; full-brief acceptance remains unfulfilled.
 
 ## Controlled real-feature run
 

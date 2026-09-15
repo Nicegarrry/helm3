@@ -2,7 +2,7 @@
 
 A durable control plane for autonomous software development.
 
-Status: Wave 3 provider-free foundations are merged. The connected Astra/Fable fixture demo is recorded at exact head `fa049ee6ad3497312bb49a268dbe7c4364a9b1c9`; PR #59 is merged. The accepted work covers bounded tracker observation, exact-head gate evidence, durable host ownership/recovery, native Pi fixture execution, lifecycle projection, and a shared operator API/CLI view. Live Pi OAuth, provider model access, autonomous supervision and the full quality loop remain open; see [Wave 3 progress](docs/wave3-progress.md).
+Status: Wave 10 is merged through PR #91 at main `4970c0c0951f34bc289b77e7443bc938a5fcfa9f`. The accepted provider-free fleet slice requires an intact status-matching terminal envelope, preserves quiet success, requests judgement for valid failed/partial results, and keeps missing, corrupt or ambiguous completion evidence unsignalled. The local connected Fable/Astra fixture exercises six bounded turns from red gate through same-session repair to green gate and Map update/close. Live provider access, physical process discovery, retries, frontier wake delivery and full Brief acceptance remain open; see [Wave 4 progress](docs/wave4-progress.md), [overnight authority](docs/overnight-authority.md), and [predecessor M1 receipt](docs/predecessor-m1.md).
 
 Helm 3 preserves the original Brief and addendum. GitHub remains authoritative for the Map and PR state. The predecessor reuse baseline is explicitly pinned at [`Nicegarrry/helm-cli@ae5c3ff18ef8c0e12d57973ecb21c928b020b5c7`](docs/predecessor-m1.md); selected behaviours are being adapted behind Helm 3 authority and Pi-native boundaries rather than importing the old runtime wholesale.
 
@@ -10,7 +10,8 @@ Helm 3 preserves the original Brief and addendum. GitHub remains authoritative f
 
 - [Brief](docs/brief.md), [original human design](docs/design-source.md), and [addendum](docs/design-addendum.md)
 - [Live Map](https://github.com/Nicegarrry/helm3/issues/1), [build approval](https://github.com/Nicegarrry/helm3/issues/2), and [predecessor handoff](https://github.com/Nicegarrry/helm3/issues/3)
-- [Wave 3 progress](docs/wave3-progress.md), [Wave 3 dogfood evidence](docs/wave3-dogfood-evidence.md), and [Wave 4 proposal](docs/wave4-plan.md)
+- [Current Wave 4+ progress](docs/wave4-progress.md), [overnight authority](docs/overnight-authority.md), and [predecessor M1 receipt](docs/predecessor-m1.md)
+- [Historical Wave 3 progress](docs/wave3-progress.md), [historical dogfood evidence](docs/wave3-dogfood-evidence.md), and [Wave 4 plan](docs/wave4-plan.md)
 - [Proposed build plan](docs/build-plan.md), [Map snapshot](docs/map.md), and [39-section coverage](docs/coverage.md)
 - [Control-plane contracts](docs/contracts.md) and [minimum protocol](docs/protocol.md)
 - [Full acceptance protocol](docs/acceptance.md) and [migration handoff requirements](docs/migration-handoff.md)
@@ -33,16 +34,21 @@ The Python check verifies original design provenance, Map dependencies and local
 The fixture-backed operator view reads a durable host snapshot through the same read-only JSON API used by the local cockpit:
 
 ```sh
-# Start the provider-free Astra fixture server with a fresh empty state directory.
-node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory /tmp/helm3-demo-state --serve
+# Run provider-free observations with newly created empty state directories.
+node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory /private/tmp/helm3-dogfood-fable
+node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory /private/tmp/helm3-dogfood-astra
+```
 
-# In another terminal, read the same loopback snapshot as JSON.
+Use a fresh empty state directory for each run. These direct observations complete and close the fixture before printing JSON; they do not require `--serve`. Current runs report a succeeded command and gates, successful Map update/close, four faux model requests, two workspace writes, prior-context visibility and lease-specific expiry refusal. The separate read-only operator CLI does not open the authority database or dispatch workers; the fixture command itself runs the provider-free worker path. The fixture is local evidence, not provider usage or live-account access.
+
+To open the read-only loopback cockpit, append `--serve` to one fixture command, then query the announced port:
+
+```sh
+node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory /private/tmp/helm3-dogfood-astra --serve
 node --import tsx src/operator/cli.ts --url http://127.0.0.1:PORT --json
 ```
 
-Use a fresh empty state directory and the explicit loopback port printed by the server. The CLI does not open the authority database or dispatch workers. The human-readable formatter and JSON output consume the same snapshot; remote origins, redirects and oversized responses are refused. The frozen demo receipt records three faux model requests, one workspace write, a succeeded command, lease-specific expiry refusal and scoped recovery evidence. PR #59 is merged.
-
-## Accepted Wave 3 work
+## Historical Wave 3 work
 
 - [PR #52](https://github.com/Nicegarrry/helm3/pull/52): read-only operator projection, API and cockpit foundation.
 - [PR #53](https://github.com/Nicegarrry/helm3/pull/53): bounded local gate/CI classification and exact evidence.

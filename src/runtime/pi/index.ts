@@ -43,8 +43,11 @@ function noResources(runtime: ExtensionRuntime): ResourceLoader {
     extendResources: () => undefined, reload: async () => undefined,
   };
 }
-function parseEnvelope(text: string): WorkerResult | undefined {
-  try { return workerResultSchema.parse(JSON.parse(text)); } catch { return undefined; }
+/** Accept only direct JSON or one whole JSON fence; raw terminal bytes are journaled unchanged. */
+export function parseEnvelope(text: string): WorkerResult | undefined {
+  const fenced = text.match(/^```json\r?\n([\s\S]*)\r?\n```$/);
+  const candidate = fenced ? fenced[1] : text;
+  try { return workerResultSchema.parse(JSON.parse(candidate)); } catch { return undefined; }
 }
 /** Provider error bodies can echo request data. Never put them in Pi events or the journal. */
 function errorMessage(model: Model<Api>): AssistantMessage {

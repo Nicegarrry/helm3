@@ -187,7 +187,7 @@ test('recover(runId) leaves another run\'s active effect untouched', async () =>
   } finally { plane.close(); }
 });
 
-type NativeFixtureCase = 'success' | 'provider-error' | 'timeout';
+type NativeFixtureCase = 'success' | 'provider-error' | 'timeout' | 'iterator-error';
 
 async function runNativeFixture(testCase: NativeFixtureCase): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'helm3-host-native-pi-'));
@@ -205,6 +205,10 @@ async function runNativeFixture(testCase: NativeFixtureCase): Promise<void> {
     const ai = await import('@earendil-works/pi-ai');
     const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
     const faux = ai.fauxProvider({ provider: 'host-native-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('host-native-faux', 'offline');
+    if (testCase === 'iterator-error') runtime.streamSimple = (() => ({
+      async *[Symbol.asyncIterator]() { throw new Error('provider-body-must-not-escape'); },
+      result: async () => { throw new Error('provider-body-must-not-escape'); },
+    })) as unknown as typeof runtime.streamSimple;
     const fauxModel = faux.getModel();
     const access = new BoundedPiAccess({ poolId: 'overnight-api-usd', provider: fauxModel.provider, model: fauxModel.id, api: fauxModel.api, baseUrl: fauxModel.baseUrl, authEnvironment: 'TEST_ONLY_NO_KEY',
       contextWindow: fauxModel.contextWindow, maxOutputTokens: 32, maxBilledOutputTokens: fauxModel.maxTokens, maxPacketBytes: 8_000, maxRequests: 1, maxToolCalls: 0, timeoutMs: testCase === 'timeout' ? 20 : 1_000,
@@ -242,7 +246,7 @@ async function runNativeFixture(testCase: NativeFixtureCase): Promise<void> {
     plane.admitOrchestrator(command('fable-host-session'), { runId: 'run-1', sessionId: 'fable-host-session', mode: 'primary' }, 'trusted-fable');
     const outcome = await plane.perform('command-1', { executorId: 'host-pi' }, '2026-09-15T00:10:00Z', async () => ({ value: true, state: 'known', source: 'fixture', observedAt: now }));
     assert.equal(outcome.state, testCase === 'success' ? 'succeeded' : 'unknown');
-    assert.equal(faux.state.callCount, 1);
+    assert.equal(faux.state.callCount, testCase === 'iterator-error' ? 0 : 1);
     const nativeSnapshot = await plane.snapshot('run-1');
     if (testCase === 'success') {
       assert.ok((nativeSnapshot.reservations[0]?.settledActual ?? 0) > 0, 'validated faux usage settles through the same host ledger');
@@ -259,7 +263,7 @@ async function runNativeFixture(testCase: NativeFixtureCase): Promise<void> {
     } else {
       assert.equal(nativeSnapshot.attemptLifecycles[0]?.state, 'unknown', 'the failed native session must not remain active after its provider stream has ended');
       assert.equal(nativeSnapshot.commands[0]?.observations[0]?.detail, 'Pi worker invocation failed');
-      if (testCase === 'provider-error') assert.ok(!JSON.stringify(nativeSnapshot).includes('provider-body-must-not-escape'));
+      if (testCase === 'provider-error' || testCase === 'iterator-error') assert.ok(!JSON.stringify(nativeSnapshot).includes('provider-body-must-not-escape'));
     }
   } finally { plane?.close(); manager?.close(); await rm(root, { recursive: true, force: true }); }
 }
@@ -267,3 +271,5 @@ async function runNativeFixture(testCase: NativeFixtureCase): Promise<void> {
 test('PiNativeRuntime runs the packaged Pi faux provider through host resource enforcement', async () => runNativeFixture('success'));
 test('PiNativeRuntime fails closed after a native Pi provider error and quarantines the attempt', async () => runNativeFixture('provider-error'));
 test('PiNativeRuntime quarantines a partial stream timeout without issuing a second request', async () => runNativeFixture('timeout'));
+
+test('PiNativeRuntime redacts thrown stream exceptions before Core observation', async () => runNativeFixture('iterator-error'));

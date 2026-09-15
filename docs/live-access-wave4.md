@@ -138,3 +138,8 @@ separate provider pool would not enforce the combined ceiling. The live probe
 should start with a minimal synthetic prompt and the smallest requested caps;
 only after its receipt is observed may a scoped coding task use the remaining
 authority.
+
+
+### Thrown stream exception regression
+
+A separate injected async-iterator failure proved that raw provider exception text could reach a Core observation even though native provider error events were redacted. Pi now catches stream creation, iteration, terminal-result and settlement failures inside the guarded effect, before Core records the error. The test checks the whole host snapshot for a synthetic provider-body marker and preserves unknown accounting and attempt quarantine. No live credential disclosure was observed by this test; it uses a local injected exception only.

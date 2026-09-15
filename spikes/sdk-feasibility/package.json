@@ -8,7 +8,9 @@
     "probe": "node probe.mjs",
     "sandbox-smoke": "node sandbox-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json",
-    "codex-conformance": "node codex-sdk-conformance.mjs"
+    "codex-conformance": "node codex-sdk-conformance.mjs",
+    "pi-access-probe": "node pi-access-probe.mjs",
+    "pi-access-probe-test": "node pi-access-probe.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.270",

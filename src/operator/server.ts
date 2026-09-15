@@ -26,13 +26,18 @@ export type OperatorReadApi = Readonly<{ registry: HelmToolRegistry; context: He
 function readRequest(url: string | undefined): { name: string; input: Record<string, unknown> } | undefined {
   if (!url) return undefined;
   const parsed = new URL(url, 'http://127.0.0.1');
-  const match = parsed.pathname.match(/^\/api\/operator\/read\/(brief\.get|map\.get|log\.query|models\.get|budget\.get)$/);
+  const match = parsed.pathname.match(/^\/api\/operator\/read\/(brief\.get|map\.get|log\.query|models\.get|budget\.get|worker\.inspect)$/);
   if (!match) return undefined;
-  if (match[1] !== 'log.query' && [...parsed.searchParams.keys()].length) throw new Error('read tool does not accept query parameters');
+  if (match[1] !== 'log.query' && match[1] !== 'worker.inspect' && [...parsed.searchParams.keys()].length) throw new Error('read tool does not accept query parameters');
   if (match[1] === 'log.query') {
     const values = [...parsed.searchParams.entries()];
     if (values.length > 1 || (values[0] && values[0][0] !== 'limit') || (values[0] && !/^[1-9][0-9]{0,2}$/.test(values[0][1]))) throw new Error('invalid log query limit');
     return { name: match[1], input: values[0] ? { limit: Number(values[0][1]) } : {} };
+  }
+  if (match[1] === 'worker.inspect') {
+    const values = [...parsed.searchParams.entries()];
+    if (values.length !== 1 || values[0]![0] !== 'workerId' || values[0]![1].length === 0 || values[0]![1].length > 128) throw new Error('invalid worker inspection request');
+    return { name: match[1], input: { workerId: values[0]![1] } };
   }
   return { name: match[1], input: {} };
 }

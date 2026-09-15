@@ -310,6 +310,21 @@ export class PiNativeWorker {
     return result;
   }
   /**
+   * A host-admitted worker.stop owns cancellation intent.  Unlike `cancel`,
+   * this method never marks the already-observed spawn command cancelled.
+   */
+  async stopLocal(timeoutMs = 5_000): Promise<'stopped' | 'unknown'> {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5_000) throw new Error('invalid cancellation deadline');
+    this.cancelled = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      this.session.abort().then(async () => { await Promise.all([...this.activeRequests]); return !this.session.isStreaming && this.activeRequests.size === 0 ? 'stopped' as const : 'unknown' as const; }).catch(() => 'unknown' as const),
+      new Promise<'unknown'>((resolve) => { timer = setTimeout(() => resolve('unknown'), timeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    return result;
+  }
+  /**
    * A failed invocation has no trustworthy terminal effect observation yet.
    * Stop the local session, but quarantine the parent attempt rather than
    * claiming it stopped cleanly while its outer host effect is still unknown.

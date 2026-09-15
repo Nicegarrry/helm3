@@ -11,6 +11,7 @@ import {
   type HumanAuthorityGrant,
   type KernelKind,
   type KernelRunProjection,
+  type ModelFact,
   type TrustedExecutor,
 } from '../core/index.js';
 import { ArtifactJournal, type ArtifactMetadata } from '../journal/index.js';
@@ -209,6 +210,8 @@ export class HostArtifactStore implements OrchestratorArtifacts {
   journalForTrustedPi(): ArtifactJournal { return this.journal; }
 
   async readText(ref: string): Promise<string> { return this.read(ref, 'text'); }
+  /** Trusted host-only consumers may read an effect envelope after a restart. */
+  async readEffect(ref: string): Promise<string> { return this.read(ref, 'effect'); }
 
   async saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; outcome: InvocationOutcome; text: string }): Promise<string> {
     if (input.sessionId !== this.currentScope().sessionId) throw new Error('invocation session does not match trusted artifact scope');
@@ -262,6 +265,8 @@ export class HostControlPlane {
   recordHumanAuthority(grant: HumanAuthorityGrant): void { this.kernel.host.declareHumanAuthority(grant); }
   /** Records an externally authorised autonomy lease; this method never creates or renews one. */
   recordAutonomyLease(lease: AutonomyLease): void { this.kernel.host.issueAutonomyLease(lease); }
+  /** Trusted model-registry ingestion; orchestration JSON only selects an existing fact. */
+  recordModelFact(fact: ModelFact): void { this.kernel.host.putModelFact(fact); }
   revokeAutonomyLease(leaseId: string): void { this.kernel.host.revokeAutonomyLease(leaseId); }
   /** Trusted runtime records immutable worker-attempt provenance before Pi begins effects. */
   recordAttempt(attempt: Attempt): void { this.kernel.host.appendAttempt(attempt); }
@@ -473,6 +478,42 @@ export class HostControlPlane {
     const effect = await this.runtime.createEffect({ command: record.command, artifacts: new HostArtifactStore(this.journal, () => ({ runId: record.command.runId, sessionId: ownership.sessionId })) });
     const claim = this.kernel.host.claim(commandId, executor, claimExpiresAt);
     return this.kernel.host.perform(commandId, claim, executor, readFact, effect);
+  }
+
+  /**
+   * Execute a narrowly supplied host effect for an already admitted command.
+   * This is deliberately not an alternate command path: admission, claim,
+   * fresh preconditions and observation remain in the Kernel.
+   */
+  async performAdmitted(commandId: string, executor: TrustedExecutor, claimExpiresAt: string, readFact: (precondition: Precondition) => Promise<Observation<boolean>>, effect: KernelEffect): Promise<EffectObservation> {
+    const record = this.kernel.kernel.getCommand(commandId);
+    if (!record) throw new Error('unknown command');
+    const ownership = this.kernel.host.readRun(record.command.runId).ownership;
+    if (!ownership) throw new Error('command run has no current orchestrator owner');
+    this.kernel.host.assertCurrentOwner(ownership);
+    const claim = this.kernel.host.claim(commandId, executor, claimExpiresAt);
+    return this.kernel.host.perform(commandId, claim, executor, readFact, effect);
+  }
+
+  /** A fleet reports an observed attempt disposition; it never edits spawn status. */
+  reportAttemptStop(attemptId: string, observed: 'stopped' | 'pending' | 'unknown'): void {
+    this.kernel.host.reportAttemptStop(attemptId, observed);
+  }
+
+  /** Durable, payload-bearing fleet events never cross the public Log projection. */
+  appendFleetEvent(event: Event): void { this.kernel.host.appendEvent(event); }
+
+  /**
+   * Recovery-only read for fleet launch records.  It is scoped to a run but
+   * intentionally not to a now-dead driver session, so a replacement owner
+   * can report the honest `live: unknown` state after process loss.
+   */
+  async readFleetEffect(runId: string, ref: string): Promise<string> {
+    const stored = decodeRef(ref);
+    if (stored.kind !== 'effect' || stored.runId !== runId) throw new Error('fleet record is outside the requested run');
+    const parsed = decodeEnvelope(JSON.parse((await this.journal.read(stored.raw, stored.sourceIdentity, { permitSensitive: true })).toString('utf8')));
+    if (parsed.kind !== 'effect' || parsed.runId !== runId) throw new Error('fleet record does not match durable bytes');
+    return parsed.text;
   }
 
   async snapshot(runId: string): Promise<HostSnapshot> {

@@ -27,7 +27,7 @@ export async function readOperatorApi(origin: string) {
   } finally { await reader.cancel().catch(() => undefined); }
 }
 
-export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'map.get' | 'log.query' | 'models.get' | 'budget.get', limit?: number): Promise<HelmToolResult> {
+export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'map.get' | 'log.query' | 'models.get' | 'budget.get' | 'worker.inspect', limit?: number): Promise<HelmToolResult> {
   const url = new URL(origin);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Expected an explicit http://127.0.0.1:PORT origin');
   if (name !== 'log.query' && limit !== undefined) throw new Error('Only log.query accepts --limit');

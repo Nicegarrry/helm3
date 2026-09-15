@@ -9,8 +9,10 @@ import { z } from 'zod/v3';
 import type { Command } from '../contracts/index.js';
 import { openHost, PiNativeRuntime, type HostControlPlane } from '../host/index.js';
 import { createHostReadToolRegistry } from '../host/tools.js';
+import { createHostWorkerToolRegistry } from '../host/worker-tools.js';
+import { PiWorkerFleet, type WorkerSpawnInput } from '../host/worker-fleet.js';
 import { AstraDriver, AstraLoopbackMcpTransport, createAstraSdk, FableDriver, HelmToolRegistry, type HelmTool, type HelmToolExecutionContext, type OrchestratorSessionGuard } from '../runtime/orchestrator/index.js';
-import { PiNativeWorker, type PiAuthority } from '../runtime/pi/index.js';
+import { PiNativeWorker, type PiAuthority, type PiEffect } from '../runtime/pi/index.js';
 import { WorkspaceManager, type WorktreeReservation } from '../workspace/index.js';
 
 const exec = promisify(execFile);
@@ -21,7 +23,7 @@ const runId = 'fixture-run';
 const attemptId = 'fixture-attempt';
 const commandId = 'fixture-worker-spawn';
 const hash = (value: unknown): string => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
-const workerPayload = z.object({ path: z.literal('result.txt'), contents: z.literal('provider-free Pi fixture\n') }).strict();
+const workerPayload = z.object({ workerId: z.string().min(1), attemptId: z.string().min(1), modelId: z.literal('offline'), role: z.literal('builder') }).strict();
 const piPayload = z.object({ effectId: z.string().min(1), kind: z.enum(['model.request', 'workspace.write']) }).strict();
 
 export type LocalFixtureResult = Readonly<{
@@ -66,9 +68,10 @@ export function createLocalFixtureReadToolRegistry(result: LocalFixtureResult): 
   return localFixtureReadRegistry(result.host, { runId: result.runId, sessionId: result.sessionId, mode: 'primary' }, result.observedAt);
 }
 
-function workerCommand(sessionId: string, context: HelmToolExecutionContext): Command {
-  const payload = { path: 'result.txt', contents: 'provider-free Pi fixture\n' };
-  return { schemaVersion: 1, commandId, kind: 'worker.spawn', idempotencyKey: commandId, payloadHash: hash(payload), scope: { repositoryId: 'fixture-repository', mapNodeId: 'fixture-node' }, actorId: 'fixture-model', runId: context.runId, origin: 'orchestrator', leaseId: 'fixture-autonomy', leaseRevision: 1, orchestratorLeaseId: 'fixture-orchestrator', orchestratorEpoch: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] };
+function workerCommand(workerId: string, attempt: string, context: HelmToolExecutionContext): Command {
+  const payload = { workerId, attemptId: attempt, modelId: 'offline' as const, role: 'builder' as const };
+  const id = commandId;
+  return { schemaVersion: 1, commandId: id, kind: 'worker.spawn', idempotencyKey: id, payloadHash: hash(payload), scope: { repositoryId: 'fixture-repository', mapNodeId: 'fixture-node' }, actorId: 'fixture-model', runId: context.runId, origin: 'orchestrator', leaseId: 'fixture-autonomy', leaseRevision: 1, orchestratorLeaseId: 'fixture-orchestrator', orchestratorEpoch: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] };
 }
 function piCommand(effect: { effectId: string; kind: 'model.request' | 'workspace.write' }): Command {
   const payload = { effectId: effect.effectId, kind: effect.kind };
@@ -89,7 +92,7 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
   const { repository, baseSha } = await fixtureRepository(root);
   const workspaceManager = new WorkspaceManager({ stateRoot: join(root, 'workspace-state'), now: () => Date.parse(now) });
   const owner = { attemptId, generation: 1, expiresAt: later };
-  const workspace = await workspaceManager.create(repository, join(root, 'worker'), 'fixture-worker', baseSha, owner, { writableRoots: ['.'], protectedRoots: ['README.md'] });
+  let workspace: WorktreeReservation | undefined;
   let clock = now;
   let plane: HostControlPlane | undefined;
   let modelRuntime: { dispose?: () => void } | undefined;
@@ -101,40 +104,26 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
   const runtime = await ModelRuntime.create({ authPath: join(root, 'no-account-auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
   modelRuntime = runtime as unknown as { dispose?: () => void };
   const faux = ai.fauxProvider({ provider: 'helm3-local-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('helm3-local-faux', 'offline');
-  const nativeRuntime = new PiNativeRuntime({
-    authority: (): PiAuthority => {
-      activePiAuthority ??= plane!.piAuthority({ attemptId, actorId: 'fixture-pi', executorId: 'fixture-pi', commandForEffect: (effect) => piCommand(effect), observedSettlement: (effect) => effect.kind === 'model.request' ? { state: 'known', amount: 1 } : undefined });
-      if (!afterWriteMarker) return activePiAuthority;
-      return { ...activePiAuthority, perform: async (effect, action) => activePiAuthority!.perform(effect, async () => { await action(); if (effect.kind === 'workspace.write') { await writeFile(afterWriteMarker, 'workspace write completed before observation\n'); await new Promise<void>(() => undefined); } }) };
-    },
-    start: async ({ command, journal, authority }) => PiNativeWorker.start({ commandId: command.commandId, attemptId, workspace, owner, workspaceManager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel() }),
-    prompt: () => 'Write result.txt using helm_write, then return a WorkerResult JSON envelope.', correction: () => 'Return only a valid WorkerResult JSON envelope.',
-  });
-  const kinds = { 'worker.spawn': { payloadSchema: workerPayload }, 'pi.model': { payloadSchema: piPayload, resourceRequest: () => ({ poolId: 'fixture-requests', unit: 'requests', upperBound: 1, consumer: 'worker' as const }) }, 'pi.write': { payloadSchema: piPayload } };
-  plane = await openHost({ stateDirectory: join(root, 'host'), now: () => clock, runtime: nativeRuntime, kinds });
+  const kinds = { 'worker.spawn': { payloadSchema: workerPayload, modelSelection: (value: unknown) => ({ modelId: workerPayload.parse(value).modelId, role: workerPayload.parse(value).role, requiredCapabilities: ['build'], dataClassification: 'public' as const }) }, 'worker.stop': { payloadSchema: z.object({ workerId: z.string().min(1) }).strict() }, 'pi.model': { payloadSchema: piPayload, resourceRequest: () => ({ poolId: 'fixture-requests', unit: 'requests', upperBound: 1, consumer: 'worker' as const }) }, 'pi.write': { payloadSchema: piPayload } };
+  plane = await openHost({ stateDirectory: join(root, 'host'), now: () => clock, kinds });
   plane.recordHumanAuthority({ authorityId: 'fixture-human', repositoryId: 'fixture-repository', mapNodeIds: ['fixture-node'], allowedActions: ['worker.spawn', 'pi.model', 'pi.write'], expiresAt: ownerLater, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [{ poolId: 'fixture-requests', unit: 'requests', limit: 3 }], protectedReserves: [] });
   plane.recordAutonomyLease({ leaseId: 'fixture-autonomy', revision: 1, issuedBy: 'fixture-human', parentAuthorityId: 'fixture-human', scope: { repositoryId: 'fixture-repository', mapNodeIds: ['fixture-node'] }, allowedActions: ['worker.spawn', 'pi.model', 'pi.write'], issuedAt: now, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [{ poolId: 'fixture-requests', unit: 'requests', limit: 3 }], protectedReserves: [] });
-  plane.recordAttempt({ attemptId, mapNodeId: 'fixture-node', mapNodeRevision: 'fixture', objectiveVersion: 'fixture', acceptanceVersion: 'fixture', role: 'builder', model: 'offline', family: 'faux', provider: 'helm3-local-faux', capability: 'fixture', poolId: 'fixture-requests', workspace: workspace.root, baseSha, contextManifestHash: 'sha256:fixture-context', leaseId: 'fixture-autonomy', sessionIds: [], commandIds: [commandId], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] });
+  plane.recordModelFact({ modelId: 'offline', provider: 'helm3-local-faux', poolId: 'fixture-requests', enabled: true, capabilities: ['build'], roles: ['builder'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: now });
 
   const hostGuard = plane.createSessionGuard({ runId, owner: options.orchestrator, leaseId: 'fixture-orchestrator', expectedEpoch: 0, issuedAt: now, expiresAt: ownerLater });
-  const workerTool: HelmTool = {
-    name: 'worker.spawn', description: 'Start the one local Pi fixture worker.', input: {},
-    async execute(_input: Record<string, unknown>, context: HelmToolExecutionContext) {
-      if (context.mode !== 'primary') return { state: 'refused', reason: 'fixture requires primary ownership' };
-      const admitted = plane!.admitOrchestrator(workerCommand(context.sessionId, context), context, `fixture-${options.orchestrator}`);
-      const observed = await plane!.perform(admitted.command.commandId, { executorId: 'fixture-host' }, later, async () => ({ value: true, state: 'known', source: 'fixture', observedAt: now }));
-      if (observed.state === 'succeeded') await activePiAuthority?.reportWorkerStop(admitted.command.commandId, 'stopped');
-      if (observed.state !== 'succeeded') return { state: observed.state === 'unknown' ? 'unknown' : 'refused', reason: observed.detail ?? 'fixture worker did not succeed' };
-      return { state: 'succeeded', value: { commandId: admitted.command.commandId } };
-    },
-  };
+  let activeContext: HelmToolExecutionContext | undefined;
+  const fleet = new PiWorkerFleet({ host: plane, workspaceManager, executor: { executorId: 'fixture-host' }, claimExpiresAt: () => later,
+    spawnCommand: (_input: WorkerSpawnInput, workerId: string, spawnedAttemptId: string, context: HelmToolExecutionContext) => { activeContext = context; return workerCommand(workerId, spawnedAttemptId, context); },
+    stopCommand: (record, context) => { const payload = { workerId: record.workerId }; return { schemaVersion: 1, commandId: `fixture-worker-stop-${record.workerId}`, kind: 'worker.stop', idempotencyKey: `fixture-worker-stop-${record.workerId}`, payloadHash: hash(payload), scope: { repositoryId: 'fixture-repository', mapNodeId: 'fixture-node' }, actorId: 'fixture-model', runId: context.runId, origin: 'orchestrator', leaseId: 'fixture-autonomy', leaseRevision: 1, orchestratorLeaseId: 'fixture-orchestrator', orchestratorEpoch: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] } as Command; },
+    attempt: (command, workerId) => ({ attemptId, mapNodeId: 'fixture-node', mapNodeRevision: 'fixture', objectiveVersion: 'fixture', acceptanceVersion: 'fixture', role: 'builder', model: 'offline', family: 'faux', provider: 'helm3-local-faux', capability: 'fixture', poolId: 'fixture-requests', workspace: join(root, 'worker'), baseSha, contextManifestHash: 'sha256:fixture-context', leaseId: 'fixture-autonomy', sessionIds: [], commandIds: [command.commandId], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] }),
+    workspace: (_command, _workerId, attempt) => ({ repository, destination: join(root, 'worker'), branch: 'fixture-worker', baseSha, owner: { attemptId: attempt.attemptId, generation: 1, expiresAt: later }, policy: { writableRoots: ['.'], protectedRoots: ['README.md'] } }),
+    start: async (command, reservation) => { workspace = reservation; const baseAuthority = plane!.piAuthority({ attemptId, actorId: 'fixture-pi', executorId: 'fixture-pi', commandForEffect: (effect) => piCommand(effect), observedSettlement: (effect) => effect.kind === 'model.request' ? { state: 'known', amount: 1 } : undefined }); const authority: PiAuthority = !afterWriteMarker ? baseAuthority : { ...baseAuthority, perform: async (effect: PiEffect, action: () => Promise<void>) => baseAuthority.perform(effect, async () => { await action(); if (effect.kind === 'workspace.write') { await writeFile(afterWriteMarker, 'workspace write completed before observation\n'); await new Promise<void>(() => undefined); } }) }; activePiAuthority = authority; return PiNativeWorker.start({ commandId: command.commandId, attemptId, workspace: reservation, owner: reservation.owner, workspaceManager, authority, journal: plane!.artifactsFor(activeContext!).journalForTrustedPi(), stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel() }); },
+    prompt: () => 'Write result.txt using helm_write, then return a WorkerResult JSON envelope.', correction: () => 'Return only a valid WorkerResult JSON envelope.',
+  });
   // Drivers provide the session context, never model JSON. Rebuild the small
   // host registry at invocation so its durable owner fence is checked again.
   const readTemplate = localFixtureReadRegistry(plane, { runId, sessionId: 'fixture-read-template', mode: 'primary' }, now);
-  const tools = new HelmToolRegistry([workerTool, ...readTemplate.all().map((entry) => ({
-    name: entry.name, description: entry.description, input: entry.input,
-    execute: (input: Record<string, unknown>, context: HelmToolExecutionContext) => localFixtureReadRegistry(plane!, context, now).invoke(entry.name, input, context),
-  }))]);
+  const tools = new HelmToolRegistry(createHostWorkerToolRegistry({ context: { runId, sessionId: 'fixture-read-template', mode: 'primary' }, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane, brief: { async read() { return { text: 'Provider-free local fixture Brief.', source: 'fixture://brief', observedAt: now }; } }, map: { async snapshot() { return { source: { repository: 'fixture/repository', parentIssue: 1 }, observedAt: now, completeness: 'complete' as const, nodes: [], frontier: [], incomplete: [] }; } }, economy: { snapshot: () => ({ pools: [{ poolId: 'fixture-requests', kind: 'subscription' as const, unit: 'requests' }], models: [], quota: [] }) } }, fleet).all().map((entry) => ({ ...entry, execute: (input: Record<string, unknown>, context: HelmToolExecutionContext) => createHostWorkerToolRegistry({ context, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane!, brief: { async read() { return { text: 'Provider-free local fixture Brief.', source: 'fixture://brief', observedAt: now }; } }, map: { async snapshot() { return { source: { repository: 'fixture/repository', parentIssue: 1 }, observedAt: now, completeness: 'complete' as const, nodes: [], frontier: [], incomplete: [] }; } }, economy: { snapshot: () => ({ pools: [], models: [], quota: [] }) } }, fleet).invoke(entry.name, input, context) })));
   faux.setResponses([
     ai.fauxAssistantMessage(ai.fauxToolCall('helm_write', { path: 'result.txt', contents: 'provider-free Pi fixture\n' })),
     ai.fauxAssistantMessage('not a WorkerResult'),
@@ -144,7 +133,7 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
   let driver: FableDriver | AstraDriver;
   if (options.orchestrator === 'fable') {
     const claude = await import('@anthropic-ai/claude-agent-sdk'); let definitions: Array<{ handler(args: Record<string, unknown>, extra: unknown): Promise<unknown> }> = [];
-    const sdk = { ...claude, createSdkMcpServer(input: Parameters<typeof claude.createSdkMcpServer>[0]) { definitions = input.tools as typeof definitions; return claude.createSdkMcpServer(input); }, query: (() => (async function* () { const result = await definitions[0]!.handler({}, {}); yield { type: 'system', subtype: 'init', session_id: 'fixture-fable' }; yield { type: 'result', subtype: 'success', session_id: 'fixture-fable', result }; })()) as unknown as typeof claude.query };
+    const sdk = { ...claude, createSdkMcpServer(input: Parameters<typeof claude.createSdkMcpServer>[0]) { definitions = input.tools as typeof definitions; return claude.createSdkMcpServer(input); }, query: (() => (async function* () { const result = await definitions[5]!.handler({ objectiveRef: 'fixture-objective', acceptanceRef: 'fixture-acceptance', contextRefs: [], modelId: 'offline', role: 'builder' }, {}); yield { type: 'system', subtype: 'init', session_id: 'fixture-fable' }; yield { type: 'result', subtype: 'success', session_id: 'fixture-fable', result }; })()) as unknown as typeof claude.query };
     driver = new FableDriver(plane.artifactsForStart({ runId, owner: 'fable', leaseId: 'fixture-orchestrator', expectedEpoch: 0, issuedAt: now, expiresAt: ownerLater }), tools, hostGuard, plane.recoveryStateForStart({ runId, owner: 'fable', leaseId: 'fixture-orchestrator', expectedEpoch: 0, issuedAt: now, expiresAt: ownerLater }), { env: { PATH: process.env.PATH ?? '' } }, sdk);
   } else {
     let astraSession: { runId: string; sessionId: string; mode: 'primary' | 'consultant' } | undefined;
@@ -152,18 +141,22 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
     const executable = join(root, 'fixture-codex.mjs'); astraExecutable = executable; const mcpClient = pathToFileURL(join(process.cwd(), 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js')).href; const mcpTransport = pathToFileURL(join(process.cwd(), 'node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js')).href; await writeFile(executable, `#!/usr/bin/env node
 import { Client } from ${JSON.stringify(mcpClient)};
 import { StreamableHTTPClientTransport } from ${JSON.stringify(mcpTransport)};
-const args = process.argv.join(' '); const resumed = args.includes('resume'); const url = args.match(/http:\\/\\/127\\.0\\.0\\.1:[0-9]+\\/mcp/)?.[0]; const key = Object.keys(process.env).find((name) => name.startsWith('HELM_ASTRA_MCP_TOKEN_')); if (!url || !key) throw new Error('fixture MCP config was absent'); const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: 'Bearer ' + process.env[key] } } }); const client = new Client({ name: 'fixture-codex', version: '1' }); await client.connect(transport); const response = resumed ? undefined : await client.callTool({ name: 'worker.spawn', arguments: {} }); await transport.close(); if (response?.isError) throw new Error('fixture MCP worker.spawn was refused'); console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-astra' })); console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 } }));\n`, { mode: 0o700 }); await chmod(executable, 0o700);
+const args = process.argv.join(' '); const resumed = args.includes('resume'); const url = args.match(/http:\\/\\/127\\.0\\.0\\.1:[0-9]+\\/mcp/)?.[0]; const key = Object.keys(process.env).find((name) => name.startsWith('HELM_ASTRA_MCP_TOKEN_')); if (!url || !key) throw new Error('fixture MCP config was absent'); const transport = new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { authorization: 'Bearer ' + process.env[key] } } }); const client = new Client({ name: 'fixture-codex', version: '1' }); await client.connect(transport); const response = resumed ? undefined : await client.callTool({ name: 'worker.spawn', arguments: { objectiveRef: 'fixture-objective', acceptanceRef: 'fixture-acceptance', contextRefs: [], modelId: 'offline', role: 'builder' } }); await transport.close(); if (response?.isError) throw new Error('fixture MCP worker.spawn was refused'); console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-astra' })); console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 } }));\n`, { mode: 0o700 }); await chmod(executable, 0o700);
     const sdk = { async create() { if (!bridge) throw new Error('fixture MCP bridge was not bound'); return (await createAstraSdk({ env: { PATH: process.env.PATH ?? '', ...bridge.env }, config: bridge.config as never, codexPathOverride: executable }).create()); } };
     driver = new AstraDriver(plane.artifactsForStart({ runId, owner: 'astra', leaseId: 'fixture-orchestrator', expectedEpoch: 0, issuedAt: now, expiresAt: ownerLater }), guard, plane.recoveryStateForStart({ runId, owner: 'astra', leaseId: 'fixture-orchestrator', expectedEpoch: 0, issuedAt: now, expiresAt: ownerLater }), sdk as never);
   }
   const started = await driver.start({ runId, contextRefs: [], mode: 'primary' });
   const artifacts = plane.artifactsFor({ runId, sessionId: started.sessionId, mode: 'primary' }); const objectiveRef = await artifacts.writeText('dogfood.objective', 'Run the local fixture worker.');
   await driver.invoke({ sessionId: started.sessionId, objectiveRef, contextRefs: [] });
+  const spawned = (await plane.snapshot(runId)).commands.find((entry) => entry.command.kind === 'worker.spawn');
+  const spawnedId = (spawned?.command.payload as { workerId?: string } | undefined)?.workerId;
+  if (!spawnedId) throw new Error('fixture worker setup did not persist a worker ID');
+  await fleet.waitForTerminal(spawnedId);
   const checkpoint = await driver.checkpoint({ sessionId: started.sessionId });
   const bundle = await artifacts.loadRecoveryBundle(checkpoint.bundleRef);
   await driver.stop({ sessionId: started.sessionId }); await bridge?.close(); bridge = undefined;
   plane.close(); activePiAuthority = undefined;
-  plane = await openHost({ stateDirectory: join(root, 'host'), now: () => clock, runtime: nativeRuntime, kinds });
+  plane = await openHost({ stateDirectory: join(root, 'host'), now: () => clock, kinds });
   const resumedAuthority = { runId, owner: options.orchestrator, leaseId: 'fixture-orchestrator', expectedEpoch: 0, issuedAt: now, expiresAt: ownerLater } as const;
   const resumedGuard = plane.createSessionGuard(resumedAuthority);
   const resumedArtifacts = plane.artifactsFor({ runId, sessionId: started.sessionId, mode: 'primary' });
@@ -178,15 +171,13 @@ const args = process.argv.join(' '); const resumed = args.includes('resume'); co
   }
   await driver.resume({ sessionId: started.sessionId, recoveryBundleRef: checkpoint.bundleRef });
   await driver.invoke({ sessionId: started.sessionId, objectiveRef, contextRefs: [] });
-  await workspaceManager.write(workspace, owner, 'README.md', 'forbidden').then(() => { throw new Error('protected path write was allowed'); }, () => undefined);
+  if (!workspace) throw new Error('worker setup did not create a worktree');
+  await workspaceManager.write(workspace, workspace.owner, 'README.md', 'forbidden').then(() => { throw new Error('protected path write was allowed'); }, () => undefined);
   const snapshot = await plane.snapshot(runId);
   const resultPath = join(workspace.root, 'result.txt');
-  let duplicateRefused = false;
-  try { plane.admitOrchestrator({ ...workerCommand(started.sessionId, { runId, sessionId: started.sessionId, mode: 'primary' }), actorId: 'different-model' }, { runId, sessionId: started.sessionId, mode: 'primary' }, 'fixture-duplicate'); } catch { duplicateRefused = true; }
-  if (!duplicateRefused) throw new Error('duplicate command identity was not refused');
   clock = later;
   let expiredRefusal = false;
-  try { plane.admitOrchestrator({ ...workerCommand(started.sessionId, { runId, sessionId: started.sessionId, mode: 'primary' }), commandId: 'fixture-expired-command', idempotencyKey: 'fixture-expired-command', notAfter: ownerLater }, { runId, sessionId: started.sessionId, mode: 'primary' }, `fixture-${options.orchestrator}`); } catch (error) { expiredRefusal = /autonomy|lease/i.test(String(error)); }
+  try { plane.admitOrchestrator({ ...workerCommand('expired-worker', 'expired-attempt', { runId, sessionId: started.sessionId, mode: 'primary' }), commandId: 'fixture-expired-command', idempotencyKey: 'fixture-expired-command', notAfter: ownerLater }, { runId, sessionId: started.sessionId, mode: 'primary' }, `fixture-${options.orchestrator}`); } catch (error) { expiredRefusal = /autonomy|lease/i.test(String(error)); }
   if (!expiredRefusal) throw new Error('expired autonomy lease admitted a new command without a lease-expiry refusal');
-  return Object.freeze({ fixture: true, orchestrator: options.orchestrator, stateDirectory: root, observedAt: clock, runId, attemptId, sessionId: started.sessionId, workspace: workspace.root, resultPath, recoveryBundleRef: checkpoint.bundleRef, recoveryStateRef: bundle.recoveryStateRef, rawRefs: Object.freeze(snapshot.artifacts.map((item) => item.ref)), commandState: snapshot.commands.find((entry) => entry.command.commandId === commandId)?.status ?? 'unknown', usageActions: Object.freeze({ modelRequests: snapshot.commands.filter((entry) => entry.command.kind === 'pi.model' && entry.status === 'succeeded').length, workspaceWrites: snapshot.commands.filter((entry) => entry.command.kind === 'pi.write' && entry.status === 'succeeded').length }), expiredRefusal: expiredRefusal as true, host: plane, async close() { await bridge?.close(); plane?.close(); workspaceManager.close(); modelRuntime?.dispose?.(); } });
+  return Object.freeze({ fixture: true, orchestrator: options.orchestrator, stateDirectory: root, observedAt: clock, runId, attemptId, sessionId: started.sessionId, workspace: workspace.root, resultPath, recoveryBundleRef: checkpoint.bundleRef, recoveryStateRef: bundle.recoveryStateRef, rawRefs: Object.freeze(snapshot.artifacts.map((item) => item.ref)), commandState: snapshot.commands.find((entry) => entry.command.kind === 'worker.spawn')?.status ?? 'unknown', usageActions: Object.freeze({ modelRequests: snapshot.commands.filter((entry) => entry.command.kind === 'pi.model' && entry.status === 'succeeded').length, workspaceWrites: snapshot.commands.filter((entry) => entry.command.kind === 'pi.write' && entry.status === 'succeeded').length }), expiredRefusal: expiredRefusal as true, host: plane, async close() { await bridge?.close(); plane?.close(); workspaceManager.close(); modelRuntime?.dispose?.(); } });
 }

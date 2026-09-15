@@ -79,6 +79,18 @@ test('reopen continues edits and semantic evidence; malformed and exact terminal
   } finally { await f.cleanup(); }
 });
 
+test('native Pi accepts one fenced terminal result without a correction and retains raw fence bytes', async () => {
+  const f = await setup();
+  try {
+    const terminal = `\`\`\`json\n${envelope([])}\n\`\`\``;
+    f.faux.setResponses([f.ai.fauxAssistantMessage(terminal)]);
+    const result = await f.worker.run('finish', 'unused correction');
+    assert.equal(result.repaired, false); assert.equal(result.result.status, 'succeeded');
+    assert.equal(f.faux.state.callCount, 1); assert.equal(f.effects.filter((kind) => kind === 'model.request').length, 1);
+    assert.ok((await f.artifacts()).some((entry) => entry.metadata.source === 'pi.envelope' && entry.text === terminal));
+  } finally { await f.cleanup(); }
+});
+
 test('expiry after a tool prevents the automatic next model request and preserves missing-envelope evidence', async () => {
   const f = await setup();
   try {

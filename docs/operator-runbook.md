@@ -1,23 +1,25 @@
-# Preparation handoff to the next build turn
+# Operator entrypoint — current through Wave 10
 
 ## Current boundary
 
-Wave two is approved for supervised implementation; [current status](wave2-progress.md) and [wave-two authority](wave2-authority.md) are the operator entrypoints. The active predecessor belongs to Opus until its Milestone 1 handoff. This repository has not inspected or modified it. Do not resume a historical Helm CLI task based on memory or this repository's existence.
+Wave 4 and onward are approved for bounded execution under [overnight authority](overnight-authority.md), including provider-free dogfood, scoped worker dispatch, independent review and useful Map updates. Accepted main is `4970c0c0951f34bc289b77e7443bc938a5fcfa9f` after PR #91. The predecessor M1 is complete and reuse is authorised only from the pinned source recorded in [predecessor-m1.md](predecessor-m1.md). Historical Wave 2/3 handoffs are context, not the current boundary.
 
 ## Orient
 
-1. Read `AGENTS.md`, the [Brief](brief.md), [original design](design-source.md), [addendum](design-addendum.md), [protocol](protocol.md), [build plan](build-plan.md), and [coverage table](coverage.md).
+1. Read `AGENTS.md`, the [Brief](brief.md), [original design](design-source.md), [addendum](design-addendum.md), [protocol](protocol.md), [overnight authority](overnight-authority.md), and [predecessor M1 receipt](predecessor-m1.md).
 2. Read current GitHub [approval](https://github.com/Nicegarrry/helm3/issues/2), [handoff](https://github.com/Nicegarrry/helm3/issues/3) and [Map](https://github.com/Nicegarrry/helm3/issues/1) state. Cached documents never establish authority.
 3. Verify repository status and worktree ownership. Do not overwrite an existing worker's WIP.
-4. Run `python3 scripts/check-preparation.py`. Reproduce the pinned SDK probes if package/runtime changes or reported evidence needs refreshing; do not confuse a mock success with authenticated model access.
+4. Run `python3 scripts/check-preparation.py`; use Node 22.22.2 for focused checks and provider-free fixture observations. Do not confuse fixture success with authenticated model access.
+
+For a morning smoke check, run both `node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory <new-empty-path>` and the equivalent `astra` command. The current fixture executes six turns: red gate, same-session repair, green gate, Map update and Map close, and should report four faux model requests, two workspace writes and an autonomy-lease expiry refusal.
 
 ## Historical approval gate
 
-The context-clean and explicit first-wave approval gate is complete. The first wave remains contract/journal/epoch-fencing/SDK-feasibility foundation only; automatic failover comes later. Do not claim a Codex SDK probe or subscription entitlement from unrelated evidence.
+The context-clean and explicit first-wave approval gate is complete. Its foundation-only description is historical; current authority and bounds are in [overnight-authority.md](overnight-authority.md). Do not claim a Codex SDK probe or subscription entitlement from unrelated evidence.
 
 ## After explicit build approval
 
-Record the exact approved contract revision and concrete delegation: repositories, allowed actions, run expiry, provider/pool limits, reserve, max attempts/concurrency and merge scope. Start ACCESS with finite live requests against actual Pi and selected Fable/Astra routes. Do not infer auth interoperability from an installed CLI or this chat's model selector.
+Record the exact approved contract revision and concrete delegation: repositories, allowed actions, run expiry, provider/pool limits, reserve, max attempts/concurrency and merge scope. Start any live request only under current bounded authority and verified route facts. Do not infer auth interoperability from an installed CLI or this chat's model selector; the provider-free Fable/Astra fixture needs no account access.
 
 Freeze the agreed contracts, then dispatch brief-checked isolated worktrees. Preserve one writer per worktree. Keep a frontier reserve; workers use Terra/Luna where appropriate. Report accepted outcomes and hard blockers at the six-hour checkpoint. The target is the complete brief, not just a unit-test count or the number of open worker sessions.
 

@@ -12,6 +12,16 @@ const now = '2026-09-15T00:00:00Z';
 const later = '2026-09-15T01:00:00Z';
 const hash = (value: unknown) => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 const kinds = { 'test.effect': { payloadSchema: z.object({ value: z.string() }).strict() } };
+const resourceKinds = {
+  'test.effect': {
+    payloadSchema: z.object({ value: z.string(), upper: z.number().nonnegative(), humanOverrideId: z.string().optional() }).strict(),
+    requiresResourceEnforcement: true,
+    resourceRequest: (payload: unknown) => {
+      const input = payload as { upper: number; humanOverrideId?: string };
+      return { poolId: 'chatgpt-subscription', unit: 'requests', upperBound: input.upper, consumer: 'worker' as const, attemptId: 'attempt', humanOverrideId: input.humanOverrideId };
+    },
+  },
+};
 
 function databasePath(): string { return join(mkdtempSync(join(tmpdir(), 'helm3-core-')), 'kernel.sqlite'); }
 function lease(overrides: Partial<Record<string, unknown>> = {}) {
@@ -33,6 +43,13 @@ function command(overrides: Partial<Record<string, unknown>> = {}) {
 function opened(path = databasePath(), options: Partial<KernelOptions> = {}) {
   let clock = now;
   const result = openKernel({ databasePath: path, kinds, now: () => clock, ...options });
+  const resource = options.kinds === resourceKinds;
+  result.host.declareHumanAuthority({
+    authorityId: 'authority-1', repositoryId: 'repo-1', mapNodeIds: ['node-1'], allowedActions: ['test.effect'], expiresAt: later,
+    maxConcurrency: 2, maxAttemptsPerNode: 2,
+    poolLimits: resource ? [{ poolId: 'chatgpt-subscription', unit: 'requests', limit: 10 }] : [],
+    protectedReserves: resource ? [{ poolId: 'chatgpt-subscription', unit: 'requests', amount: 2 }] : [],
+  });
   return { ...result, path, setNow: (value: string) => { clock = value; } };
 }
 function allowed() { return { actorId: 'trusted-runtime-actor', allowedOrigins: ['worker'] as const }; }
@@ -61,8 +78,7 @@ test('leases fail closed for expiry, revocation, and wrong scope', () => {
   setNow(now);
   host.revokeAutonomyLease('lease-1');
   assert.throws(() => host.admit(command(), allowed()), /revoked/);
-  host.issueAutonomyLease(lease({ leaseId: 'lease-2', scope: { repositoryId: 'repo-2', mapNodeIds: [] } }));
-  assert.throws(() => host.admit(command({ leaseId: 'lease-2' }), allowed()), /scope/);
+  assert.throws(() => host.issueAutonomyLease(lease({ leaseId: 'lease-2', scope: { repositoryId: 'repo-2', mapNodeIds: [] } })), /scope/);
   assert.throws(() => host.issueAutonomyLease(lease({ leaseId: 'future-lease', issuedAt: later, expiresAt: '2026-09-15T02:00:00Z' })), /future/);
   assert.throws(() => host.claim('command-1', { executorId: 'bad-expiry' }, 'not-a-timestamp'), /datetime/);
   host.close();
@@ -145,6 +161,36 @@ test('a real child-process interruption leaves an unknown effect that cannot be 
   reopened.host.recordObservation('command-1', { commandId: 'command-1', effectId: 'effect-1', state: 'succeeded', source: 'external-readback', observedAt: now, evidenceRefs: ['artifact:external-id'], detail: 'read external identity' });
   assert.equal(reopened.kernel.getCommand('command-1')?.status, 'succeeded');
   reopened.host.close();
+});
+
+test('resource reservations are transactional, preserve human reserve, and retain unknown use across restart', () => {
+  const path = databasePath();
+  const first = opened(path, { kinds: resourceKinds });
+  const second = opened(path, { kinds: resourceKinds });
+  const resourceLease = lease({ poolLimits: [{ poolId: 'chatgpt-subscription', unit: 'requests', limit: 10 }], protectedReserves: [{ poolId: 'chatgpt-subscription', unit: 'requests', amount: 2 }] });
+  first.host.issueAutonomyLease(resourceLease);
+  first.host.admit(command({ commandId: 'reserve-1', idempotencyKey: 'reserve-1', payload: { value: 'a', upper: 6 } }), allowed());
+  assert.throws(() => second.host.admit(command({ commandId: 'reserve-2', idempotencyKey: 'reserve-2', payload: { value: 'b', upper: 3 } }), allowed()), /protected orchestrator reserve/);
+  first.host.issueHumanReserveException({ exceptionId: 'human-exception-1', authorityId: 'authority-1', repositoryId: 'repo-1', leaseId: 'lease-1', poolId: 'chatgpt-subscription', unit: 'requests', maxAmount: 3, expiresAt: later });
+  second.host.admit(command({ commandId: 'reserve-2', idempotencyKey: 'reserve-2', payload: { value: 'b', upper: 3, humanOverrideId: 'human-exception-1' } }), allowed());
+  assert.throws(() => first.host.admit(command({ commandId: 'reserve-3', idempotencyKey: 'reserve-3', payload: { value: 'c', upper: 1, humanOverrideId: 'human-exception-1' } }), allowed()), /already consumed/);
+  first.host.settleResource('reserve-1', { state: 'unknown' });
+  first.host.close(); second.host.close();
+  const restarted = opened(path, { kinds: resourceKinds });
+  assert.throws(() => restarted.host.admit(command({ commandId: 'reserve-4', idempotencyKey: 'reserve-4', payload: { value: 'd', upper: 2 } }), allowed()), /protected orchestrator reserve/);
+  restarted.host.close();
+});
+
+test('cancellation is intent while an unconfirmed stop is quarantined as unknown', async () => {
+  const { kernel, host } = opened();
+  host.issueAutonomyLease(lease());
+  host.admit(command(), allowed());
+  const claim = host.claim('command-1', { executorId: 'worker' }, '2026-09-15T00:10:00Z');
+  host.requestCancellation('command-1');
+  host.reportWorkerStop('command-1', 'pending');
+  assert.equal(kernel.getCommand('command-1')?.status, 'unknown');
+  await assert.rejects(host.perform('command-1', claim, { executorId: 'worker' }, trueFact, successfulEffect), /stale/);
+  host.close();
 });
 
 test('a terminal observation cannot be overwritten and clock rollback refuses new authority', async () => {

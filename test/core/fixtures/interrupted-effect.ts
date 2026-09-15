@@ -9,6 +9,7 @@ const later = '2026-09-15T01:00:00Z';
 const payload = { value: 'safe' };
 const payloadHash = `sha256:${createHash('sha256').update(JSON.stringify(payload)).digest('hex')}`;
 const { kernel, host } = openKernel({ databasePath, kinds: { 'test.effect': { payloadSchema: z.object({ value: z.string() }).strict() } }, now: () => now });
+host.declareHumanAuthority({ authorityId: 'authority-1', repositoryId: 'repo-1', mapNodeIds: ['node-1'], allowedActions: ['test.effect'], expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 2, poolLimits: [], protectedReserves: [] });
 host.issueAutonomyLease({ leaseId: 'lease-1', revision: 1, issuedBy: 'human', parentAuthorityId: 'authority-1', scope: { repositoryId: 'repo-1', mapNodeIds: ['node-1'] }, allowedActions: ['test.effect'], issuedAt: now, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
 host.admit({ schemaVersion: 1, commandId: 'command-1', kind: 'test.effect', idempotencyKey: 'idempotency-1', payloadHash, scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'forged', runId: 'run-1', origin: 'worker', leaseId: 'lease-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] }, { actorId: 'trusted', allowedOrigins: ['worker'] });
 const claim = host.claim('command-1', { executorId: 'worker' }, '2026-09-15T00:10:00Z');

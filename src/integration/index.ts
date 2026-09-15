@@ -98,6 +98,7 @@ export async function mergeIntegration(prepared: IntegrationPreparation, input: 
     const refusal = validFacts(facts, payload.requiredChecks); if (refusal) throw new Error(refusal);
     const currentEvidence = facts.acceptanceEvidence.map(item => item.ref), currentReceipts = facts.reviewReceipts.map(item => item.receiptId);
     if (currentEvidence.length !== payload.acceptanceEvidence.length || !payload.acceptanceEvidence.every(ref => currentEvidence.includes(ref)) || currentReceipts.length !== payload.reviewReceiptIds.length || !payload.reviewReceiptIds.every(id => currentReceipts.includes(id))) throw new Error('Prepared acceptance evidence or review receipt set changed');
+    if (facts.acceptanceEvidence.some(item => item.acceptanceVersion !== payload.acceptanceVersion) || facts.reviewReceipts.some(item => item.acceptanceVersion !== payload.acceptanceVersion)) throw new Error('Current evidence acceptance version changed');
     return facts;
   };
   const readFact = async (precondition: Precondition) => {

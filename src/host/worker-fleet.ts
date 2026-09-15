@@ -98,6 +98,7 @@ export class PiWorkerFleet {
     const command = this.binding.spawnCommand(validated, workerId, attemptId, context);
     const provenance = spawnProvenance(command);
     if (provenance.modelId !== validated.modelId || this.binding.inputDigest(command) !== digest(validated)) throw new Error('worker spawn command does not bind the validated input references');
+    this.binding.host.assertModelProvenance(provenance.modelId, provenance.modelProvider, provenance.modelFactVersion);
     const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId, attemptId);
     const attempt = this.binding.attempt(admitted.command, workerId);
     let record: StoredWorker | undefined;
@@ -111,6 +112,7 @@ export class PiWorkerFleet {
           throw new Error('worker spawn provenance does not match its worktree or attempt');
         }
         const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
+        this.binding.host.assertModelProvenance(provenance.modelId, provenance.modelProvider, provenance.modelFactVersion);
         const worker = await this.binding.start(admitted.command, workspace);
         if (worker.modelIdentity.modelId !== provenance.modelId || worker.modelIdentity.provider !== provenance.modelProvider || worker.modelIdentity.api !== provenance.modelApi) {
           worker.dispose();
@@ -177,6 +179,7 @@ export class PiWorkerFleet {
       execute: async () => {
         await this.binding.workspaceManager.assertExactHead(oldWorkspace, validated.expectedHead);
         this.binding.host.assertEffectAuthority(admitted.command.commandId, context);
+        this.binding.host.assertModelProvenance(predecessor.modelId, predecessor.modelProvider, predecessor.modelFactVersion);
         this.binding.host.recordAttempt(attempt);
         const config = this.binding.workspace(admitted.command, workerId, attempt);
         if (config.destination !== predecessor.workspace || config.baseSha !== validated.expectedHead || attempt.baseSha !== validated.expectedHead) throw new Error('continuation does not preserve the verified workspace head');

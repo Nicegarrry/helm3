@@ -28,7 +28,7 @@ function worker(id: string, wait?: Deferred, modelId = 'offline', failPersistenc
   return value as unknown as PiNativeWorker;
 }
 
-async function setup(options: { successorWait?: Deferred; successorModel?: string; successorPersistenceFailure?: boolean } = {}) {
+async function setup(options: { successorWait?: Deferred; successorModel?: string; successorPersistenceFailure?: boolean; registryProvider?: string } = {}) {
   const createdRoot = mkdtempSync(join(tmpdir(), 'helm3-worker-steer-')); const root = await realpath(createdRoot); const repo = join(root, 'repo'); const state = join(root, 'host'); let clock = stamp;
   await mkdir(repo); await exec('git', ['init', repo]); await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']); await exec('git', ['-C', repo, 'config', 'user.name', 'Test']); await writeFile(join(repo, 'README.md'), 'base\n'); await exec('git', ['-C', repo, 'add', '.']); await exec('git', ['-C', repo, 'commit', '-m', 'base']);
   const baseSha = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim(); const workspace = new WorkspaceManager({ stateRoot: join(root, 'workspace') });
@@ -38,7 +38,7 @@ async function setup(options: { successorWait?: Deferred; successorModel?: strin
   let plane = await openHost({ stateDirectory: state, now: () => clock, kinds });
   plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['worker.spawn', 'worker.steer'], expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
   plane.recordAutonomyLease({ leaseId: 'auto', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['worker.spawn', 'worker.steer'], issuedAt: stamp, expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
-  plane.recordModelFact({ modelId: 'offline', provider: 'faux', poolId: 'none', enabled: true, capabilities: ['build'], roles: ['builder'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: stamp }); plane.acquireOwnership({ runId: 'run', leaseId: 'owner', owner: 'fable', sessionId: 'session', epoch: 1, issuedAt: stamp, expiresAt: later }, 0);
+  plane.recordModelFact({ modelId: 'offline', provider: options.registryProvider ?? 'faux', poolId: 'none', enabled: true, capabilities: ['build'], roles: ['builder'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: stamp }); plane.acquireOwnership({ runId: 'run', leaseId: 'owner', owner: 'fable', sessionId: 'session', epoch: 1, issuedAt: stamp, expiresAt: later }, 0);
   const context: HelmToolExecutionContext = { runId: 'run', sessionId: 'session', mode: 'primary' }; let rehydrates = 0; let effectFault: 'head' | 'lease' | 'epoch' | undefined;
   const binding = () => ({ host: plane, workspaceManager: workspace, executor: { executorId: 'fleet' }, claimExpiresAt: () => '2200-01-01T00:00:00Z', readFact: async () => {
     const fault = effectFault; effectFault = undefined;
@@ -72,3 +72,7 @@ test('a mismatched native continuation model records unknown rather than startin
 test('at-effect Git, lease, and epoch rechecks prevent a successor from rehydrating', async () => { for (const fault of ['head', 'lease', 'epoch'] as const) { const f = await setup(); try { f.armEffectFault(fault); await assert.rejects(f.fleet.steer(f.context, steerInput(f)), /unknown.*reconcile|lease|owner|epoch/); const record = (await f.plane.snapshot('run')).commands.find((item) => item.command.kind === 'worker.steer'); assert.equal(f.rehydrates(), 0, `${fault} must not reach Pi rehydrate`); assert.equal(record?.status, fault === 'head' ? 'unknown' : 'refused'); } finally { await f.cleanup(); } } });
 
 test('a continuation whose terminal persistence fails is durably marked unknown', async () => { const f = await setup({ successorPersistenceFailure: true }); try { const next = await f.fleet.steer(f.context, steerInput(f)); await f.fleet.waitForTerminal(next.workerId); assert.equal((await new PiWorkerFleet(f.binding()).inspect(f.context, next.workerId)).state, 'unknown'); const lifecycle = (await f.plane.snapshot('run')).attemptLifecycles.find((item) => item.attemptId === next.attemptId); assert.equal(lifecycle?.state, 'unknown'); } finally { await f.cleanup(); } });
+
+test('registered provider mismatch refuses spawn before native execution', async () => {
+  await assert.rejects(() => setup({ registryProvider: 'different-provider' }), /provenance.*registered|provider/i);
+});

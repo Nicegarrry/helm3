@@ -206,6 +206,8 @@ export class KernelHost {
   }
 
   putModelFact(fact: ModelFact): void { this.core.putModelFact(fact); }
+  /** Host-only binding from immutable worker provenance to the current registry fact. */
+  assertModelProvenance(modelId: string, provider: string, factVersion: number): void { this.core.assertModelProvenance(modelId, provider, factVersion); }
   requestCancellation(commandId: string): void { this.core.requestCancellation(commandId); }
   /** A pending/unknown stop quarantines the command and keeps any reservation. */
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): void { this.core.reportWorkerStop(commandId, observed); }
@@ -782,6 +784,14 @@ class Kernel {
     const selection = kind.modelSelection?.(payload);
     if (!selection) return;
     this.assertLegalModel(selection, kind.resourceRequest?.(payload));
+  }
+
+  assertModelProvenance(modelId: string, provider: string, factVersion: number): void {
+    if (!z.string().min(1).safeParse(modelId).success || !z.string().min(1).safeParse(provider).success || !Number.isInteger(factVersion) || factVersion < 1) throw new Error('model provenance is invalid');
+    const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(modelId) as { bytes: string } | undefined;
+    if (!row) throw new Error('model provenance has no registered facts');
+    const fact = modelFactSchema.parse(JSON.parse(row.bytes));
+    if (fact.provider !== provider || fact.factVersion !== factVersion) throw new Error('model provenance does not match current registered facts');
   }
 
   private assertLegalModel(selection: { modelId: string; provider?: string; factVersion?: number; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' }, request?: ResourceRequest): void {

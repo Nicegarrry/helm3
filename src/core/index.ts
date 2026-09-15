@@ -211,6 +211,8 @@ export class KernelHost {
   perform(commandId: string, claim: Claim, executor: TrustedExecutor, readFact: (precondition: Precondition) => Promise<Observation<boolean>>, effect: KernelEffect): Promise<EffectObservation> { return this.core.perform(commandId, claim, executor, readFact, effect); }
   recordObservation(commandId: string, observation: EffectObservation): void { this.core.recordObservation(commandId, observation); }
   appendEvent(event: Event): void { this.core.appendEvent(event); }
+  readEvents(correlationId: string): Event[] { return this.core.readEvents(correlationId); }
+  appendOwnedEvent(event: Event, owner: OrchestratorLease): void { this.core.appendOwnedEvent(event, owner); }
   appendAttempt(attempt: Attempt): void { this.core.appendAttempt(attempt); }
 }
 
@@ -369,6 +371,25 @@ class Kernel {
   recordObservation(commandId: string, observation: EffectObservation): void {
     this.requireCommand(commandId);
     this.setTerminal(commandId, observation);
+  }
+
+  /** Atomic owner fence and Log append for judgement acknowledgements. */
+  appendOwnedEvent(event: Event, owner: OrchestratorLease): void {
+    const parsed = eventSchema.parse(event);
+    const lease = orchestratorLeaseSchema.parse(owner);
+    if (parsed.sessionId !== lease.sessionId) throw new Error('event session does not match owner');
+    this.transaction(() => {
+      this.assertCurrentOwner(lease);
+      this.insertEvent(parsed, JSON.stringify(parsed));
+    });
+  }
+
+  /** Bounded trusted Log query; overflow refuses rather than silently losing wake causes. */
+  readEvents(correlationId: string): Event[] {
+    z.string().min(1).max(1024).parse(correlationId);
+    const rows = this.db.prepare(`SELECT bytes FROM events WHERE json_extract(bytes, '$.correlationId') = ? ORDER BY rowid LIMIT 10001`).all(correlationId) as Array<{ bytes: string }>;
+    if (rows.length > 10000) throw new Error('event query exceeds bounded supervisor history');
+    return rows.map((row) => eventSchema.parse(JSON.parse(row.bytes)));
   }
 
   appendEvent(event: Event): void {

@@ -227,3 +227,80 @@ test('rejects path-like refs and requires trusted host policy for sensitive arti
     await assert.rejects(journal.read(ordinary, 'pi:ordinary:1'), ArtifactAccessError);
   }, { root: '', hostPolicy: { allowSensitiveWrites: true } });
 });
+
+test('fails closed on a missing or corrupt per-hash authority, then backfills it from validated sidecars at open', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helm3-journal-authority-'));
+  const options = { root, hostPolicy: { allowSensitiveWrites: true } };
+  const first = await ArtifactJournal.open(options);
+  try {
+    const ordinary = await first.append(event(Buffer.from('shared-secret'), 'pi:ordinary:authority'));
+    await first.append({ ...event(Buffer.from('shared-secret'), 'pi:sensitive:authority'), classification: 'sensitive' }, { permitSensitive: true });
+    const authority = join(root, 'authority', 'sha256', `${ordinary.hash.slice('sha256:'.length)}.json`);
+    await unlink(authority);
+    await assert.rejects(first.read(ordinary, 'pi:ordinary:authority'), /metadata authority is missing/);
+    await assert.rejects(first.append(event(Buffer.from('shared-secret'), 'pi:ordinary:authority')), /metadata authority is missing/);
+    await writeFile(authority, '{"classification":"ordinary"}', { mode: 0o600 });
+    await assert.rejects(first.read(ordinary, 'pi:ordinary:authority'), /invalid artifact metadata authority/);
+    await unlink(authority);
+  } finally {
+    first.close();
+  }
+  const recovered = await ArtifactJournal.open(options);
+  try {
+    const ordinary = { ref: `raw:sha256:${sha256(Buffer.from('shared-secret'))}`, hash: `sha256:${sha256(Buffer.from('shared-secret'))}`, mediaType: 'application/json' };
+    await assert.rejects(recovered.read(ordinary, 'pi:ordinary:authority'), ArtifactAccessError);
+    assert.deepEqual(await recovered.read(ordinary, 'pi:ordinary:authority', { permitSensitive: true }), Buffer.from('shared-secret'));
+  } finally {
+    recovered.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('two open current-format journals share a durable sensitivity elevation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helm3-journal-authority-race-'));
+  const options = { root, hostPolicy: { allowSensitiveWrites: true } };
+  const seed = await ArtifactJournal.open(options);
+  let ordinary: Awaited<ReturnType<ArtifactJournal['append']>>;
+  try {
+    ordinary = await seed.append(event(Buffer.from('cross-instance'), 'pi:ordinary:cross-instance'));
+  } finally {
+    seed.close();
+  }
+  const reader = await ArtifactJournal.open(options);
+  const writer = await ArtifactJournal.open(options);
+  try {
+    await writer.append({ ...event(Buffer.from('cross-instance'), 'pi:sensitive:cross-instance'), classification: 'sensitive' }, { permitSensitive: true });
+    await assert.rejects(reader.read(ordinary!, 'pi:ordinary:cross-instance'), ArtifactAccessError);
+
+    const concurrent = await Promise.allSettled([
+      reader.append(event(Buffer.from('concurrent-alias'), 'pi:ordinary:concurrent-alias')),
+      writer.append({ ...event(Buffer.from('concurrent-alias'), 'pi:sensitive:concurrent-alias'), classification: 'sensitive' }, { permitSensitive: true }),
+    ]);
+    const sensitive = concurrent[1];
+    assert.equal(sensitive.status, 'fulfilled');
+    const ordinaryConcurrent = concurrent[0];
+    if (ordinaryConcurrent.status === 'fulfilled') {
+      await assert.rejects(reader.read(ordinaryConcurrent.value, 'pi:ordinary:concurrent-alias'), ArtifactAccessError);
+    } else {
+      assert.ok(ordinaryConcurrent.reason instanceof ArtifactAccessError);
+    }
+  } finally {
+    reader.close();
+    writer.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('streams more than one thousand events without rescanning durable metadata on append or read', async () => {
+  let metadataScans = 0;
+  await withJournal(async (journal) => {
+    for (let index = 0; index < 1100; index += 1) {
+      await journal.append(event(Buffer.from(`event-${index}`), `pi:scale:${index}`));
+    }
+    const raw = await journal.append(event(Buffer.from('after-scale'), 'pi:scale:after'));
+    assert.deepEqual(await journal.read(raw, 'pi:scale:after'), Buffer.from('after-scale'));
+    assert.equal(metadataScans, 1, 'only open may scan metadata during streaming append/read');
+    await journal.reconcile();
+    assert.equal(metadataScans, 2, 'reconcile retains the full durable validation scan');
+  }, { root: '', hooks: { onMetadataScan: () => { metadataScans += 1; } } });
+});

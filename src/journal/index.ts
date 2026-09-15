@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, link, mkdir, open, readdir, readFile, unlink, lstat } from 'node:fs/promises';
+import { chmod, link, mkdir, open, readdir, readFile, rename, unlink, lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { RawArtifactRef } from '../contracts/index.js';
 import { SQLiteArtifactIndex } from './sqlite-index.js';
@@ -55,6 +55,7 @@ export type ArtifactJournalOptions = Readonly<{
   hooks?: Readonly<{
     afterRawPublished?: () => Promise<void>;
     afterMetadataPublishedBeforeIndex?: () => Promise<void>;
+    onMetadataScan?: () => void;
   }>;
 }>;
 
@@ -142,6 +143,27 @@ async function atomicFile(path: string, bytes: Uint8Array): Promise<void> {
   await syncDirectory(directory);
 }
 
+async function replaceFile(path: string, bytes: Uint8Array): Promise<void> {
+  const directory = dirname(path);
+  const temporary = join(directory, `.${randomUUID()}.tmp`);
+  const handle = await open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(temporary, path);
+    await syncDirectory(directory);
+  } catch (error) {
+    await unlink(temporary).catch((unlinkError: NodeJS.ErrnoException) => {
+      if (unlinkError.code !== 'ENOENT') throw unlinkError;
+    });
+    throw error;
+  }
+}
+
 /**
  * Raw bytes plus durable per-source metadata. The supplied SQLite index is a
  * rebuildable projection; it never creates Helm Log facts.
@@ -160,10 +182,16 @@ export class ArtifactJournal {
       privateDirectory(join(options.root, 'raw')),
       privateDirectory(join(options.root, 'raw', 'sha256')),
       privateDirectory(join(options.root, 'metadata')),
+      privateDirectory(join(options.root, 'authority')),
+      privateDirectory(join(options.root, 'authority', 'sha256')),
       privateDirectory(join(options.root, 'index')),
     ]);
     const index = options.index ?? await SQLiteArtifactIndex.open(options.indexPath ?? join(options.root, 'index', 'artifact-index.sqlite'));
-    return new ArtifactJournal(options.root, index, options.hostPolicy ?? { allowSensitiveWrites: false }, options.hooks ?? {});
+    const journal = new ArtifactJournal(options.root, index, options.hostPolicy ?? { allowSensitiveWrites: false }, options.hooks ?? {});
+    // The sidecars remain the durable record. This full validation/backfill is
+    // deliberately at the lifecycle boundary, not on each streaming event.
+    await journal.syncMetadataAuthority(await journal.allMetadata());
+    return journal;
   }
 
   async append(input: ArtifactAppend, access: ArtifactAccessContext = { permitSensitive: false }): Promise<RawArtifactRef> {
@@ -185,8 +213,7 @@ export class ArtifactJournal {
 
     const hash = hashBytes(bytes);
     const raw = refFor(hash, mediaType);
-    const sensitiveAlias = (await this.allMetadata()).some((entry) => entry.raw.hash === raw.hash && entry.classification === 'sensitive');
-    if (sensitiveAlias && classification !== 'sensitive') throw new ArtifactAccessError('ordinary artifact cannot alias existing sensitive bytes');
+    await this.ensureMetadataAuthority(hash, classification);
     const metadataWithoutId: Omit<ArtifactMetadata, 'recordId'> = {
       schemaVersion: 1,
       source,
@@ -229,9 +256,9 @@ export class ArtifactJournal {
     if (!metadata || metadata.raw.ref !== raw.ref || metadata.raw.hash !== raw.hash || metadata.raw.mediaType !== raw.mediaType) {
       throw new ArtifactIntegrityError('artifact source identity does not match durable metadata');
     }
-    const aliasIsSensitive = (await this.allMetadata()).some((entry) => entry.raw.hash === metadata.raw.hash && entry.classification === 'sensitive');
-    if ((metadata.classification === 'sensitive' || aliasIsSensitive) && !access.permitSensitive) throw new ArtifactAccessError('sensitive artifact read requires trusted access context');
     const hash = hashFromRef(raw);
+    const authority = await this.metadataAuthority(hash);
+    if ((metadata.classification === 'sensitive' || authority === 'sensitive') && !access.permitSensitive) throw new ArtifactAccessError('sensitive artifact read requires trusted access context');
     const path = this.rawPath(hash);
     try {
       await regularFile(path);
@@ -246,6 +273,7 @@ export class ArtifactJournal {
 
   async reconcile(): Promise<ArtifactIssue[]> {
     const metadata = await this.allMetadata();
+    await this.syncMetadataAuthority(metadata);
     const indexed = new Set<string>();
     const issues: ArtifactIssue[] = [];
     for (const entry of metadata) {
@@ -286,8 +314,10 @@ export class ArtifactJournal {
   private metadataPath(sourceIdentity: string): string {
     return join(this.root, 'metadata', `${metadataPathId(sourceIdentity)}.json`);
   }
+  private authorityPath(hash: string): string { return join(this.root, 'authority', 'sha256', `${hash}.json`); }
 
   private async allMetadata(): Promise<ArtifactMetadata[]> {
+    this.hooks.onMetadataScan?.();
     const files = await readdir(join(this.root, 'metadata'));
     const entries: ArtifactMetadata[] = [];
     const identities = new Map<string, ArtifactMetadata>();
@@ -305,7 +335,86 @@ export class ArtifactJournal {
   }
 
   private async findMetadata(sourceIdentity: string): Promise<ArtifactMetadata | undefined> {
-    return (await this.allMetadata()).find((entry) => entry.sourceIdentity === sourceIdentity);
+    const file = `${metadataPathId(sourceIdentity)}.json`;
+    const path = join(this.root, 'metadata', file);
+    try {
+      await regularFile(path);
+      return this.parseMetadata(JSON.parse(await readFile(path, 'utf8')), file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+
+  private authorityBytes(hash: string, classification: ArtifactClassification): Buffer {
+    return Buffer.from(JSON.stringify({ schemaVersion: 1, hash: `sha256:${hash}`, classification }));
+  }
+
+  private async metadataAuthority(hash: string): Promise<ArtifactClassification> {
+    const path = this.authorityPath(hash);
+    try {
+      await regularFile(path);
+      const input = JSON.parse(await readFile(path, 'utf8')) as Partial<{ schemaVersion: number; hash: string; classification: string }>;
+      if (input.schemaVersion !== 1 || input.hash !== `sha256:${hash}` || (input.classification !== 'ordinary' && input.classification !== 'sensitive')) {
+        throw new ArtifactIntegrityError(`invalid artifact metadata authority: ${hash}`);
+      }
+      return input.classification;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new ArtifactIntegrityError(`artifact metadata authority is missing: ${hash}`);
+      throw error;
+    }
+  }
+
+  private async ensureMetadataAuthority(hash: string, classification: ArtifactClassification, allowBackfill = false): Promise<void> {
+    const path = this.authorityPath(hash);
+    if (classification === 'sensitive') {
+      await replaceFile(path, this.authorityBytes(hash, 'sensitive'));
+      return;
+    }
+    try {
+      const existing = await this.metadataAuthority(hash);
+      if (existing === 'sensitive') throw new ArtifactAccessError('ordinary artifact cannot alias existing sensitive bytes');
+      return;
+    } catch (error) {
+      if (!(error instanceof ArtifactIntegrityError) || !error.message.startsWith('artifact metadata authority is missing:')) throw error;
+    }
+    if (!allowBackfill) {
+      try {
+        await regularFile(this.rawPath(hash));
+        throw new ArtifactIntegrityError(`artifact metadata authority is missing: ${hash}`);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    try {
+      await atomicFile(path, this.authorityBytes(hash, 'ordinary'));
+    } catch (error) {
+      if (!(error instanceof ArtifactConflictError) || await this.metadataAuthority(hash) !== 'sensitive') throw error;
+      throw new ArtifactAccessError('ordinary artifact cannot alias existing sensitive bytes');
+    }
+    if (await this.metadataAuthority(hash) === 'sensitive') {
+      throw new ArtifactAccessError('ordinary artifact cannot alias existing sensitive bytes');
+    }
+  }
+
+  private async syncMetadataAuthority(metadata: readonly ArtifactMetadata[]): Promise<void> {
+    const classifications = new Map<string, ArtifactClassification>();
+    for (const entry of metadata) {
+      const hash = hashFromRef(entry.raw);
+      if (entry.classification === 'sensitive') classifications.set(hash, 'sensitive');
+      else if (!classifications.has(hash)) classifications.set(hash, 'ordinary');
+    }
+    for (const [hash, classification] of classifications) {
+      if (classification === 'sensitive') await this.ensureMetadataAuthority(hash, 'sensitive');
+      else {
+        try {
+          await this.metadataAuthority(hash);
+        } catch (error) {
+          if (!(error instanceof ArtifactIntegrityError) || !error.message.startsWith('artifact metadata authority is missing:')) throw error;
+          await this.ensureMetadataAuthority(hash, 'ordinary', true);
+        }
+      }
+    }
   }
 
   private parseMetadata(input: unknown, file: string): ArtifactMetadata {

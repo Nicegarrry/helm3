@@ -434,7 +434,7 @@ export class HostControlPlane {
    * it.  It is an append-only evidence capability: it cannot admit, claim or
    * perform a command, so an expired or replaced owner gains no new effects.
    */
-  async writeFleetEffect(input: Readonly<{ runId: string; attemptId: string; spawnCommandId: string; phase: 'terminal' | 'stop'; text: string }>): Promise<string> {
+  async writeFleetEffect(input: Readonly<{ runId: string; attemptId: string; spawnCommandId: string; phase: 'terminal-known' | 'terminal-unknown' | 'stop-confirmed' | 'stop-unknown'; text: string }>): Promise<string> {
     const snapshot = this.kernel.host.readRun(input.runId);
     const spawn = snapshot.commands.find((entry) => entry.command.commandId === input.spawnCommandId);
     const payload = spawn?.command.payload as { attemptId?: unknown } | undefined;

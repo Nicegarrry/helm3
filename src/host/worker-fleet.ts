@@ -170,7 +170,10 @@ export class PiWorkerFleet {
   }
 
   private async persistRecord(context: HelmToolExecutionContext, record: StoredWorker, phase: 'terminal' | 'stop'): Promise<StoredWorker> {
-    const ref = await this.binding.host.writeFleetEffect({ runId: context.runId, attemptId: record.attemptId, spawnCommandId: record.spawnCommandId, phase, text: JSON.stringify(record) });
+    const evidencePhase = phase === 'terminal'
+      ? record.state === 'terminal' ? 'terminal-known' as const : 'terminal-unknown' as const
+      : record.state === 'terminal' ? 'stop-confirmed' as const : 'stop-unknown' as const;
+    const ref = await this.binding.host.writeFleetEffect({ runId: context.runId, attemptId: record.attemptId, spawnCommandId: record.spawnCommandId, phase: evidencePhase, text: JSON.stringify(record) });
     return Object.freeze({ ...record, evidenceRefs: Object.freeze([...record.evidenceRefs, ref]) });
   }
 
@@ -179,20 +182,24 @@ export class PiWorkerFleet {
     const command = snapshot.commands.find((entry) => (entry.command.payload as { workerId?: unknown }).workerId === workerId);
     const attemptId = (command?.command.payload as { attemptId?: unknown } | undefined)?.attemptId;
     if (typeof attemptId === 'string') {
-      const [terminalText, stopText] = await Promise.all([
-        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-terminal:${runId}:${attemptId}`),
-        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-stop:${runId}:${attemptId}`),
+      const [terminalKnownText, terminalUnknownText, stopConfirmedText, stopUnknownText] = await Promise.all([
+        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-terminal-known:${runId}:${attemptId}`),
+        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-terminal-unknown:${runId}:${attemptId}`),
+        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-stop-confirmed:${runId}:${attemptId}`),
+        this.binding.host.readFleetEffectByIdentity(runId, `host-worker-stop-unknown:${runId}:${attemptId}`),
       ]);
       try {
-        const terminal = terminalText ? JSON.parse(terminalText) as StoredWorker : undefined;
-        const stopped = stopText ? JSON.parse(stopText) as StoredWorker : undefined;
+        const terminalKnown = terminalKnownText ? JSON.parse(terminalKnownText) as StoredWorker : undefined;
+        const terminalUnknown = terminalUnknownText ? JSON.parse(terminalUnknownText) as StoredWorker : undefined;
+        const stopConfirmed = stopConfirmedText ? JSON.parse(stopConfirmedText) as StoredWorker : undefined;
+        const stopUnknown = stopUnknownText ? JSON.parse(stopUnknownText) as StoredWorker : undefined;
         // A confirmed stop or completed run is a stronger durable observation
         // than an earlier runner-failure unknown.  Keep both evidence chains
         // and cancellation intent; neither record is overwritten.
-        const winner = terminal?.state === 'terminal' ? terminal : stopped?.state === 'terminal' ? stopped : terminal ?? stopped;
+        const winner = terminalKnown ?? stopConfirmed ?? terminalUnknown ?? stopUnknown;
         if (winner) return Object.freeze({ ...winner,
-          evidenceRefs: Object.freeze([...new Set([...(terminal?.evidenceRefs ?? []), ...(stopped?.evidenceRefs ?? [])])]),
-          cancellationRequested: Boolean(terminal?.cancellationRequested || stopped?.cancellationRequested),
+          evidenceRefs: Object.freeze([...new Set([...(terminalKnown?.evidenceRefs ?? []), ...(terminalUnknown?.evidenceRefs ?? []), ...(stopConfirmed?.evidenceRefs ?? []), ...(stopUnknown?.evidenceRefs ?? [])])]),
+          cancellationRequested: Boolean(terminalKnown?.cancellationRequested || terminalUnknown?.cancellationRequested || stopConfirmed?.cancellationRequested || stopUnknown?.cancellationRequested),
         });
       } catch { return undefined; }
     }

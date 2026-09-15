@@ -31,7 +31,7 @@ import type {
   OrchestratorSessionGuard,
   RecoveryBundle,
 } from '../runtime/orchestrator/index.js';
-import type { PiAuthority, PiEffect, PiNativeWorker } from '../runtime/pi/index.js';
+import type { PiAuthority, PiCompactEffect, PiEffect, PiNativeWorker } from '../runtime/pi/index.js';
 
 type ArtifactKind = 'text' | 'invocation' | 'recovery_bundle' | 'recovery_state' | 'effect';
 type ArtifactScope = Readonly<{ runId: string; sessionId: string }>;
@@ -92,6 +92,8 @@ export type PiEffectAuthorityOptions = Readonly<{
   actorId: string;
   executorId: string;
   commandForEffect(effect: PiEffect): unknown;
+  /** Required only by the host API that exposes manual compaction. */
+  compactCommandForEffect?(effect: PiCompactEffect): unknown;
   /** A trusted runtime may settle an actually observed amount; the host never invents one. */
   observedSettlement?(effect: PiEffect): { state: 'known'; amount: number } | { state: 'unknown' | 'unavailable' } | undefined;
 }>;
@@ -278,6 +280,20 @@ export class HostControlPlane {
         const settlement = binding.observedSettlement?.(effect);
         if (settlement) this.kernel.host.settleResource(effect.effectId, settlement);
       },
+      performCompact: binding.compactCommandForEffect ? async (effect, action) => {
+        this.kernel.host.admit(binding.compactCommandForEffect!(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
+        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.now() + 60_000).toISOString());
+        let evidenceRefs: readonly string[] | undefined;
+        const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: binding.executorId }, async () => { throw new Error('Pi compact effect has no external precondition'); }, {
+          effectId: `host:${effect.effectId}`,
+          execute: async () => { evidenceRefs = (await action()).map((ref) => ref.ref); },
+          observe: () => {
+            if (!evidenceRefs || evidenceRefs.length === 0) throw new Error('Pi compaction completed without durable evidence references');
+            return { commandId: effect.effectId, effectId: `host:${effect.effectId}`, state: 'succeeded' as const, source: 'host.pi_compaction', observedAt: new Date().toISOString(), evidenceRefs: [...evidenceRefs] };
+          },
+        });
+        if (observation.state !== 'succeeded') throw new Error(`Pi compaction was not successfully observed: ${observation.state}`);
+      } : undefined,
       requestCancellation: async (commandId) => this.kernel.host.requestCancellation(commandId),
       reportWorkerStop: async (_commandId, observed) => this.kernel.host.reportAttemptStop(binding.attemptId, observed),
     };

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,7 @@ import { createBoundedPiWorkerBinding, settlementForBoundedPiEffect } from '../.
 import { type Command } from '../../src/contracts/index.js';
 import { type KernelEffect } from '../../src/core/index.js';
 import { openHost, PiNativeRuntime, type HostRuntime } from '../../src/host/index.js';
+import { ArtifactJournal } from '../../src/journal/index.js';
 import { HelmToolRegistry, FableDriver } from '../../src/runtime/orchestrator/index.js';
 import { WorkspaceManager } from '../../src/workspace/index.js';
 
@@ -273,3 +274,153 @@ test('PiNativeRuntime fails closed after a native Pi provider error and quaranti
 test('PiNativeRuntime quarantines a partial stream timeout without issuing a second request', async () => runNativeFixture('timeout'));
 
 test('PiNativeRuntime redacts thrown stream exceptions before Core observation', async () => runNativeFixture('iterator-error'));
+
+async function nativeCompactionFixture() {
+  const root = await mkdtemp(join(tmpdir(), 'helm3-host-native-compaction-'));
+  const journal = await ArtifactJournal.open({ root: join(root, 'journal') });
+  let plane: Awaited<ReturnType<typeof openHost>> | undefined;
+  let manager: WorkspaceManager | undefined;
+  let worker: Awaited<ReturnType<ReturnType<typeof createBoundedPiWorkerBinding>['start']>> | undefined;
+  let clock = now;
+  try {
+    const repo = join(root, 'repo'); await mkdir(repo); await exec('git', ['init', repo]);
+    await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']); await exec('git', ['-C', repo, 'config', 'user.name', 'Test']);
+    await writeFile(join(repo, 'README.md'), 'base\n'); await exec('git', ['-C', repo, 'add', '.']); await exec('git', ['-C', repo, 'commit', '-m', 'base']);
+    const base = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
+    manager = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
+    const owner = { attemptId: 'compact-attempt', generation: 1, expiresAt: '2099-01-01T00:00:00Z' };
+    const workspace = await manager.create(repo, join(root, 'worker'), 'compact-attempt', base, owner);
+    const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
+    const ai = await import('@earendil-works/pi-ai');
+    const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
+    const faux = ai.fauxProvider({ provider: 'host-native-compact-faux', models: [{ id: 'offline' }] });
+    runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('host-native-compact-faux', 'offline');
+    const model = faux.getModel();
+    const access = new BoundedPiAccess({ poolId: 'overnight-api-usd', provider: model.provider, model: model.id, api: model.api, baseUrl: model.baseUrl, authEnvironment: 'TEST_ONLY_NO_KEY',
+      contextWindow: model.contextWindow, maxOutputTokens: 32, maxBilledOutputTokens: model.maxTokens, maxPacketBytes: 200_000, maxRequests: 1, maxToolCalls: 0, timeoutMs: 1_000,
+      inputUsdPerMillion: 1, outputUsdPerMillion: 1, cacheReadUsdPerMillion: 1, cacheWriteUsdPerMillion: 1 });
+    const modelPayload = z.object({ effectId: z.string(), kind: z.literal('model.request') }).strict();
+    const compactPayload = z.object({ effectId: z.string(), commandId: z.string() }).strict();
+    const piCommand = (effectId: string, kind: 'pi.model' | 'pi.compact', payload: unknown): Command => ({
+      schemaVersion: 1, commandId: effectId, kind, idempotencyKey: effectId, payloadHash: hash(payload), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'trusted-pi',
+      runId: 'run-1', origin: 'worker', leaseId: 'autonomy-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [],
+    });
+    const binding = createBoundedPiWorkerBinding({
+      access,
+      authority: () => plane!.piAuthority({
+        attemptId: 'compact-attempt', actorId: 'trusted-pi', executorId: 'native-pi',
+        commandForEffect: (effect) => piCommand(effect.effectId, 'pi.model', { effectId: effect.effectId, kind: effect.kind }),
+        compactCommandForEffect: (effect) => piCommand(effect.effectId, 'pi.compact', { effectId: effect.effectId, commandId: effect.commandId }),
+        observedSettlement: (effect) => settlementForBoundedPiEffect(access, effect),
+      }),
+      workerFor: (input) => ({ commandId: input.commandId, attemptId: 'compact-attempt', workspace, owner, workspaceManager: manager!, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model }),
+      prompt: () => 'unused', correction: () => 'unused',
+    });
+    plane = await openHost({ stateDirectory: join(root, 'host-state'), now: () => clock, kinds: {
+      'pi.model': { payloadSchema: modelPayload, resourceRequest: (payload) => {
+        const parsed = modelPayload.parse(payload); const reservation = access.reservation(parsed.effectId);
+        return { poolId: reservation.poolId, unit: reservation.unit, upperBound: reservation.upperBound, consumer: 'worker' as const };
+      } },
+      'pi.compact': { payloadSchema: compactPayload },
+    } });
+    const poolLimits = [{ poolId: 'overnight-api-usd', unit: 'usd' as const, limit: 10 }];
+    plane.recordHumanAuthority({ authorityId: 'human-1', repositoryId: 'repo-1', mapNodeIds: ['node-1'], allowedActions: ['pi.model', 'pi.compact'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits, protectedReserves: [] });
+    plane.recordAutonomyLease({ ...lease(), allowedActions: ['pi.model', 'pi.compact'], poolLimits });
+    plane.recordAttempt({ attemptId: 'compact-attempt', mapNodeId: 'node-1', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: model.id, family: 'faux', provider: model.provider, capability: 'build', poolId: 'overnight-api-usd', workspace: workspace.root, baseSha: base, contextManifestHash: 'sha256:native-compact-context', leaseId: 'autonomy-1', sessionIds: [], commandIds: [], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] });
+    plane.acquireOwnership({ runId: 'run-1', leaseId: 'orchestrator-1', owner: 'fable', sessionId: 'fable-host-session', epoch: 1, issuedAt: now, expiresAt: later }, 0);
+    worker = await binding.start({ command: command('fable-host-session', 'compact-parent-command'), journal, authority: binding.authority() });
+    const artifact = async (sourceIdentity: string) => ({ sourceIdentity, raw: await journal.append({ source: 'host.native.compact.fixture', sourceIdentity, mediaType: 'application/json', bytes: Buffer.from('{}') }) });
+    const checkpoint = async () => ({ objective: await artifact('objective'), acceptance: await artifact('acceptance'), brief: await artifact('brief'), map: await artifact('map'), decisions: [], handoffs: [await artifact('handoff')] });
+    const seedCompactionContext = () => {
+      const session = worker as unknown as { session: { sessionManager: { appendMessage(message: { role: 'user'; content: string; timestamp: number }): string } } };
+      session.session.sessionManager.appendMessage({ role: 'user', content: 'context '.repeat(8_000), timestamp: Date.now() });
+      session.session.sessionManager.appendMessage({ role: 'user', content: 'continued context '.repeat(8_000), timestamp: Date.now() });
+    };
+    const checkpointArtifactCount = async () => {
+      const files = await readdir(join(root, 'journal', 'metadata'));
+      const metadata = await Promise.all(files.map(async (file) => JSON.parse(await readFile(join(root, 'journal', 'metadata', file), 'utf8')) as { source: string }));
+      return metadata.filter((entry) => entry.source === 'pi.checkpoint').length;
+    };
+    return { root, journal, plane, manager, worker, faux, ai, access, checkpoint, seedCompactionContext, checkpointArtifactCount, expire: () => { clock = later; }, async cleanup() { worker?.dispose(); manager?.close(); plane?.close(); await journal.close(); await rm(root, { recursive: true, force: true }); } };
+  } catch (error) {
+    worker?.dispose(); manager?.close(); plane?.close(); await journal.close(); await rm(root, { recursive: true, force: true }); throw error;
+  }
+}
+
+test('manual Pi compaction binds a Core control command to one bounded native summary and durable checkpoint evidence', async () => {
+  const fixture = await nativeCompactionFixture();
+  try {
+    fixture.faux.setResponses([fixture.ai.fauxAssistantMessage('summary')]);
+    fixture.seedCompactionContext();
+    const checkpoint = await fixture.checkpoint();
+    const refs = await fixture.worker.manualCompact({ commandId: 'compact-command', effectId: 'compact-effect', checkpoint });
+    assert.equal(fixture.faux.state.callCount, 1, 'the compact summary is the only provider request');
+    assert.equal(refs.length, 2);
+    const snapshot = await fixture.plane.snapshot('run-1');
+    const control = snapshot.commands.find((entry) => entry.command.kind === 'pi.compact');
+    const model = snapshot.commands.find((entry) => entry.command.kind === 'pi.model');
+    assert.equal(control?.status, 'succeeded'); assert.equal(model?.status, 'succeeded');
+    assert.deepEqual(control?.observations[0]?.evidenceRefs, refs.map((ref) => ref.ref), 'Core records the actual durable checkpoint and completion evidence, not a placeholder');
+    assert.equal(snapshot.reservations.length, 1); assert.ok((snapshot.reservations[0]?.settledActual ?? 0) > 0, 'the one native summary settled its Core reservation');
+    const outcome = JSON.parse((await fixture.journal.read(refs[1]!, 'pi-compaction:compact-attempt:compact-command')).toString());
+    assert.deepEqual(outcome.checkpointRef, refs[0], 'compaction evidence links to the prepared immutable checkpoint');
+  } finally { await fixture.cleanup(); }
+});
+
+test('a failed terminal compaction write leaves the admitted Core control command unknown', async () => {
+  const fixture = await nativeCompactionFixture();
+  const append = fixture.journal.append.bind(fixture.journal);
+  try {
+    fixture.faux.setResponses([fixture.ai.fauxAssistantMessage('summary')]);
+    fixture.seedCompactionContext();
+    fixture.journal.append = async (input) => {
+      if (input.source === 'pi.compaction') throw new Error('fixture terminal evidence write failed');
+      return append(input);
+    };
+    await assert.rejects(fixture.worker.manualCompact({ commandId: 'compact-write-failure', effectId: 'compact-write-failure-effect', checkpoint: await fixture.checkpoint() }), /not successfully observed: unknown/);
+    fixture.journal.append = append;
+    const control = (await fixture.plane.snapshot('run-1')).commands.find((entry) => entry.command.kind === 'pi.compact');
+    assert.equal(control?.status, 'unknown', 'Core cannot report a successful control action without its terminal durable evidence');
+  } finally { fixture.journal.append = append; await fixture.cleanup(); }
+});
+
+test('manual Pi compaction holds the worker operation slot across native summary and rejects concurrent run, reopen and compact calls', async () => {
+  const fixture = await nativeCompactionFixture();
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  try {
+    fixture.seedCompactionContext();
+    fixture.faux.setResponses([async () => { entered(); await gate; return fixture.ai.fauxAssistantMessage('summary'); }]);
+    const pending = fixture.worker.manualCompact({ commandId: 'compact-first', effectId: 'compact-first-effect', checkpoint: await fixture.checkpoint() });
+    await started;
+    await assert.rejects(fixture.worker.run('nope', 'nope'), /active invocation/);
+    await assert.rejects(fixture.worker.reopen(), /active Pi session/);
+    await assert.rejects(fixture.worker.manualCompact({ commandId: 'compact-second', effectId: 'compact-second-effect', checkpoint: await fixture.checkpoint() }), /idle owned worker/);
+    assert.equal((await fixture.plane.snapshot('run-1')).commands.filter((entry) => entry.command.kind === 'pi.compact').length, 1);
+    release(); await pending;
+  } finally { release?.(); await fixture.cleanup(); }
+});
+
+test('manual Pi compaction refuses incomplete checkpoint evidence before Core admission or provider fetch', async () => {
+  const fixture = await nativeCompactionFixture();
+  try {
+    const entry = await fixture.checkpoint();
+    await assert.rejects(fixture.worker.manualCompact({ commandId: 'compact-refused', effectId: 'compact-refused-effect', checkpoint: { ...entry, handoffs: [] } }), /handoff/);
+    assert.equal(fixture.faux.state.callCount, 0);
+    assert.equal((await fixture.plane.snapshot('run-1')).commands.length, 0);
+    assert.equal(await fixture.checkpointArtifactCount(), 0, 'invalid checkpoint input cannot be persisted before Core admission');
+  } finally { await fixture.cleanup(); }
+});
+
+test('an expired manual Pi compaction binding admits neither control nor checkpoint and makes no provider fetch', async () => {
+  const fixture = await nativeCompactionFixture();
+  try {
+    fixture.faux.setResponses([fixture.ai.fauxAssistantMessage('summary')]);
+    fixture.expire();
+    await assert.rejects(fixture.worker.manualCompact({ commandId: 'compact-expired', effectId: 'compact-expired-effect', checkpoint: await fixture.checkpoint() }), /inactive|expired|outside/);
+    assert.equal(fixture.faux.state.callCount, 0);
+    assert.equal((await fixture.plane.snapshot('run-1')).commands.length, 0);
+    assert.equal(await fixture.checkpointArtifactCount(), 0, 'an expired Core control binding cannot persist a checkpoint');
+  } finally { await fixture.cleanup(); }
+});

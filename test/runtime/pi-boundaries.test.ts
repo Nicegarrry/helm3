@@ -37,6 +37,7 @@ async function setup() {
       try { await action(); } finally { active--; }
       if (expireAfterWrite && effect.kind === 'workspace.write') revoked = true;
     },
+    async performCompact(effect, action) { if (revoked) throw new Error('lease expired'); effects.push(`pi.compact:${effect.commandId}`); await action(); },
     async requestCancellation() { revoked = true; },
     async reportWorkerStop(_id, result) { stops.push(result); },
   };
@@ -48,9 +49,15 @@ async function setup() {
       return { metadata, text: (await journal.read(metadata.raw, metadata.sourceIdentity)).toString() };
     }));
   }
-  return { root, worker, manager, workspace, owner, faux, ai, effects, stops, active: () => active,
+  return { root, worker, manager, workspace, owner, faux, ai, journal, effects, stops, active: () => active,
     expireAfterWrite: () => { expireAfterWrite = true; }, artifacts,
     async cleanup() { worker.dispose(); manager.close(); await journal.close(); await rm(root, { recursive: true, force: true }); } };
+}
+
+function seedManualCompactionContext(worker: PiNativeWorker): void {
+  const session = worker as unknown as { session: { sessionManager: { appendMessage(message: { role: 'user'; content: string; timestamp: number }): string } } };
+  session.session.sessionManager.appendMessage({ role: 'user', content: 'manual compaction context '.repeat(8_000), timestamp: Date.now() });
+  session.session.sessionManager.appendMessage({ role: 'user', content: 'continued manual compaction context '.repeat(8_000), timestamp: Date.now() });
 }
 
 test('reopen continues edits and semantic evidence; malformed and exact terminal bytes survive', async () => {
@@ -131,4 +138,89 @@ test('provider error text is not forwarded into Pi output or journal artifacts',
     assert.ok(artifacts.length > 0);
     assert.ok(artifacts.every((entry) => !entry.text.includes('provider-body-must-not-be-journalled')));
   } finally { await f.cleanup(); }
+});
+
+test('manual compaction checkpoints immutable handoff facts, runs as a distinct control effect, and leaves post-compaction occupancy unknown', async () => {
+  const f = await setup();
+  try {
+    f.faux.setResponses([f.ai.fauxAssistantMessage(envelope([])), f.ai.fauxAssistantMessage('summary')]);
+    await f.worker.run('context '.repeat(8_000), 'repair');
+    seedManualCompactionContext(f.worker);
+    const make = async (name: string) => ({ sourceIdentity: name, raw: await f.journal.append({ source: 'fixture', sourceIdentity: name, mediaType: 'application/json', bytes: Buffer.from('{}') }) });
+    const checkpoint = { objective: await make('objective'), acceptance: await make('acceptance'), brief: await make('brief'), map: await make('map'), decisions: [], handoffs: [await make('handoff')] };
+    const refs = await f.worker.manualCompact({ commandId: 'compact-command', effectId: 'compact-effect', checkpoint });
+    assert.equal(refs.length, 2); assert.ok(f.effects.includes('pi.compact:compact-command')); assert.equal(f.faux.state.callCount, 2);
+    const checkpointArtifact = (await f.artifacts()).find((entry) => entry.metadata.source === 'pi.checkpoint')!;
+    const persisted = JSON.parse(checkpointArtifact.text); assert.equal(persisted.provenance.compactCommandId, 'compact-command'); assert.equal(persisted.checkpoint.handoffs.length, 1);
+    assert.equal(f.worker.contextOccupancy.state, 'unknown');
+  } finally { await f.cleanup(); }
+});
+
+test('manual compaction refuses missing or invalid durable handoff evidence before any provider request', async () => {
+  const f = await setup();
+  try {
+    const raw = await f.journal.append({ source: 'fixture', sourceIdentity: 'one', mediaType: 'application/json', bytes: Buffer.from('{}') });
+    const entry = { sourceIdentity: 'one', raw };
+    await assert.rejects(f.worker.manualCompact({ commandId: 'compact-refuse', effectId: 'compact-refuse-effect', checkpoint: { objective: entry, acceptance: entry, brief: entry, map: entry, decisions: [], handoffs: [] } }), /handoff/);
+    await assert.rejects(f.worker.manualCompact({ commandId: 'compact-bad-ref', effectId: 'compact-bad-ref-effect', checkpoint: { objective: entry, acceptance: entry, brief: entry, map: entry, decisions: [], handoffs: [{ sourceIdentity: 'wrong', raw }] } }), /duplicate|metadata/);
+    assert.equal(f.faux.state.callCount, 0); assert.equal(f.effects.filter((x) => x.startsWith('pi.compact')).length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('a failed summary leaves a prepared checkpoint but no successful compaction artifact', async () => {
+  const f = await setup();
+  try {
+    f.faux.setResponses([f.ai.fauxAssistantMessage(envelope([])), async () => { throw new Error('fixture summary failure'); }]);
+    await f.worker.run('context '.repeat(8_000), 'repair');
+    seedManualCompactionContext(f.worker);
+    const make = async (name: string) => ({ sourceIdentity: name, raw: await f.journal.append({ source: 'fixture', sourceIdentity: name, mediaType: 'application/json', bytes: Buffer.from('{}') }) });
+    const checkpoint = { objective: await make('failure-objective'), acceptance: await make('failure-acceptance'), brief: await make('failure-brief'), map: await make('failure-map'), decisions: [], handoffs: [await make('failure-handoff')] };
+    await assert.rejects(f.worker.manualCompact({ commandId: 'compact-failure', effectId: 'compact-failure-effect', checkpoint }));
+    const artifacts = await f.artifacts(); assert.ok(artifacts.some((entry) => entry.metadata.source === 'pi.checkpoint'));
+    assert.equal(artifacts.some((entry) => entry.metadata.source === 'pi.compaction'), false);
+  } finally { await f.cleanup(); }
+});
+
+test('manual compaction freezes checkpoint references before asynchronous validation', async () => {
+  const f = await setup();
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const read = f.journal.read.bind(f.journal);
+  let delayed = false;
+  try {
+    f.faux.setResponses([f.ai.fauxAssistantMessage('summary')]);
+    seedManualCompactionContext(f.worker);
+    const make = async (name: string) => ({ sourceIdentity: name, raw: await f.journal.append({ source: 'fixture', sourceIdentity: name, mediaType: 'application/json', bytes: Buffer.from('{}') }) });
+    const checkpoint = { objective: await make('frozen-objective'), acceptance: await make('frozen-acceptance'), brief: await make('frozen-brief'), map: await make('frozen-map'), decisions: [], handoffs: [await make('frozen-handoff')] };
+    f.journal.read = async (raw, sourceIdentity) => {
+      if (!delayed) { delayed = true; entered(); await gate; }
+      return read(raw, sourceIdentity);
+    };
+    const pending = f.worker.manualCompact({ commandId: 'compact-frozen', effectId: 'compact-frozen-effect', checkpoint });
+    await started;
+    const mutable = checkpoint.objective as { sourceIdentity: string; raw: { ref: string; hash: string; mediaType: string } };
+    mutable.sourceIdentity = 'mutated-after-validation-start'; mutable.raw.ref = 'raw:tampered';
+    release(); await pending;
+    f.journal.read = read;
+    const persisted = (await f.artifacts()).find((entry) => entry.metadata.source === 'pi.checkpoint')!;
+    assert.equal(JSON.parse(persisted.text).checkpoint.objective.sourceIdentity, 'frozen-objective');
+  } finally { f.journal.read = read; release?.(); await f.cleanup(); }
+});
+
+test('manual compaction revalidates the selected Pi branch at the admitted effect boundary', async () => {
+  const f = await setup();
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  try {
+    const internals = f.worker as unknown as { input: { authority: PiAuthority }; session: { sessionManager: { appendMessage(message: { role: 'user'; content: string; timestamp: number }): string } } };
+    internals.input.authority.performCompact = async (_effect, action) => { entered(); await gate; await action(); };
+    const make = async (name: string) => ({ sourceIdentity: name, raw: await f.journal.append({ source: 'fixture', sourceIdentity: name, mediaType: 'application/json', bytes: Buffer.from('{}') }) });
+    const checkpoint = { objective: await make('branch-objective'), acceptance: await make('branch-acceptance'), brief: await make('branch-brief'), map: await make('branch-map'), decisions: [], handoffs: [await make('branch-handoff')] };
+    const pending = f.worker.manualCompact({ commandId: 'compact-branch', effectId: 'compact-branch-effect', checkpoint });
+    await started;
+    internals.session.sessionManager.appendMessage({ role: 'user', content: 'unexpected concurrent context', timestamp: Date.now() });
+    release(); await assert.rejects(pending, /context changed/);
+  } finally { release?.(); await f.cleanup(); }
 });

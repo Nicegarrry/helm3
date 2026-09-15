@@ -16,7 +16,9 @@ export type WorkerInspect = Readonly<{
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
 type SpawnProvenance = Readonly<{ modelId: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
-type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner: WorktreeOwner; modelId: string; modelFactVersion: number; dataPolicy: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
+/** v1 launch/terminal records predate continuation provenance. They remain readable, but cannot be steered. */
+type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; modelId?: string; modelFactVersion?: number; dataPolicy?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
+type ContinuationWorker = StoredWorker & Readonly<{ owner: WorktreeOwner; modelId: string; modelFactVersion: number; dataPolicy: string; persistedSession: PiPersistedSession }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
 
 function digest(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
@@ -25,12 +27,16 @@ function storedWorker(value: unknown): StoredWorker | undefined {
   const item = value as Partial<StoredWorker>;
   if (item.schemaVersion !== 1 || typeof item.workerId !== 'string' || typeof item.attemptId !== 'string' || typeof item.spawnCommandId !== 'string'
     || typeof item.sessionId !== 'string' || typeof item.workspace !== 'string' || typeof item.inputDigest !== 'string'
-    || typeof item.modelId !== 'string' || !Number.isInteger(item.modelFactVersion) || (item.modelFactVersion ?? 0) < 1 || typeof item.dataPolicy !== 'string'
-    || !item.owner || typeof item.owner.attemptId !== 'string' || !Number.isInteger(item.owner.generation) || typeof item.owner.expiresAt !== 'string'
+    || (item.modelId !== undefined && typeof item.modelId !== 'string') || (item.modelFactVersion !== undefined && (!Number.isInteger(item.modelFactVersion) || item.modelFactVersion < 1)) || (item.dataPolicy !== undefined && typeof item.dataPolicy !== 'string')
+    || (item.owner !== undefined && (typeof item.owner.attemptId !== 'string' || !Number.isInteger(item.owner.generation) || typeof item.owner.expiresAt !== 'string'))
     || (item.state !== 'ready' && item.state !== 'running' && item.state !== 'terminal' && item.state !== 'unknown')
     || !Array.isArray(item.evidenceRefs) || !item.evidenceRefs.every((ref) => typeof ref === 'string') || typeof item.cancellationRequested !== 'boolean') return undefined;
   if (item.persistedSession && (typeof item.persistedSession.sessionId !== 'string' || typeof item.persistedSession.sessionFile !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.historyHash) || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.branchDigest))) return undefined;
-  return Object.freeze({ ...item, owner: Object.freeze({ ...item.owner }), evidenceRefs: Object.freeze([...item.evidenceRefs]), ...(item.persistedSession ? { persistedSession: Object.freeze({ ...item.persistedSession }) } : {}) }) as StoredWorker;
+  return Object.freeze({ ...item, ...(item.owner ? { owner: Object.freeze({ ...item.owner }) } : {}), evidenceRefs: Object.freeze([...item.evidenceRefs]), ...(item.persistedSession ? { persistedSession: Object.freeze({ ...item.persistedSession }) } : {}) }) as StoredWorker;
+}
+function continuationWorker(record: StoredWorker | undefined): record is ContinuationWorker {
+  return Boolean(record && record.state === 'terminal' && !record.cancellationRequested && record.persistedSession
+    && record.owner && record.modelId && Number.isInteger(record.modelFactVersion) && (record.modelFactVersion ?? 0) > 0 && record.dataPolicy);
 }
 function spawnProvenance(command: Command): SpawnProvenance {
   const value = command.payload as Partial<SpawnProvenance>;
@@ -144,7 +150,7 @@ export class PiWorkerFleet {
     // admitted continuation while the host awaits artifact/Git observations.
     const validated = Object.freeze({ ...input, evidenceRefs: Object.freeze([...input.evidenceRefs]) });
     const predecessor = await this.durableRecord(context.runId, validated.workerId) ?? this.#records.get(validated.workerId);
-    if (!predecessor || predecessor.state !== 'terminal' || predecessor.cancellationRequested || !predecessor.persistedSession) throw new Error('worker is not a recoverable idle same-session continuation');
+    if (!continuationWorker(predecessor)) throw new Error('worker is not a recoverable idle same-session continuation');
     if (this.#live.has(validated.workerId) || predecessor.sessionId !== validated.expectedSessionId || predecessor.persistedSession.sessionId !== validated.expectedSessionId) throw new Error('worker is active or session identity changed');
     if (validated.gateCommandId) await this.binding.host.assertGateEvidence(context.runId, validated.gateCommandId, predecessor.workerId, validated.expectedHead, validated.evidenceRefs);
     const artifacts = this.binding.host.artifactsFor(context);

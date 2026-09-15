@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-15T21:28:53Z",
+  "checkpointDate": "2026-09-16",
+  "scope": "Accepted PR #99 saved historical projection viewer and overnight Wave 13 checkpoint",
+  "repository": {
+    "repository": "Nicegarrry/helm3",
+    "acceptedMain": "6ce2f92a4c5f5dfa2d92f70119b62188d82ec84c"
+  },
+  "acceptedPullRequest": {
+    "number": 99,
+    "reviewedHead": "a644223f70e921f92a8c4debdb7bcfb08930d1a3",
+    "mergeCommit": "6ce2f92a4c5f5dfa2d92f70119b62188d82ec84c",
+    "mergedAt": "2026-09-15T21:28:53Z",
+    "spec": "passed",
+    "standards": "passed",
+    "reviewEvidence": [
+      "/private/tmp/helm3-pr99-spec.md",
+      "/private/tmp/helm3-pr99-standards.md"
+    ],
+    "ciChecks": 6,
+    "scope": "Bounded saved OperatorSnapshot reader and existing loopback GET-only cockpit/API; historical-untrusted presentation metadata; no host opening, mutation, provider call or new state truth."
+  },
+  "rootGate": {
+    "expectedHead": "a644223f70e921f92a8c4debdb7bcfb08930d1a3",
+    "observedHead": "a644223f70e921f92a8c4debdb7bcfb08930d1a3",
+    "startedAt": "2026-09-15T21:26:54.834Z",
+    "completedAt": "2026-09-15T21:27:49.379Z",
+    "state": "passed",
+    "tests": "236/236",
+    "checks": [
+      { "name": "typecheck", "command": ["npm", "run", "typecheck"], "exitCode": 0 },
+      { "name": "full-tests", "command": ["npm", "test"], "exitCode": 0 }
+    ],
+    "evidenceSource": "/private/tmp/helm3-pr99-accepted-root-gate.log",
+    "evidenceSha256": "sha256:30b0ca640887735c162c0478514d356ea4991d14e227e5af42925671fa669e88"
+  },
+  "savedViewerAudit": {
+    "source": "/private/tmp/helm3-wave13-saved-viewer-audit.md",
+    "validatedAgainst": "preserved Astra fork OperatorSnapshot",
+    "apiCliSnapshotEqual": true,
+    "historicalHeader": "historical-untrusted",
+    "cliProjection": { "mode": "historical-untrusted", "actionAuthority": "none" },
+    "sourceSha256": "f3361e337e28bdedc72979e2a43d190c8ecd93a0732fd1457753dd66d84f8d3f",
+    "observedAt": "2026-09-15T21:15:08.315Z",
+    "sourceEvidenceMode": "fixture",
+    "runId": "fixture-run",
+    "attempts": 2,
+    "browserInspection": "headless Chrome screenshot inspected; no live cockpit or full Map/UI acceptance claim",
+    "serverStoppedGracefully": true,
+    "limits": [
+      "No host database was reopened and no provider was called.",
+      "Synthetic lease times remain fixture facts, not current authority.",
+      "The audit covers this saved projection seam only."
+    ]
+  },
+  "mapUpdate": {
+    "source": "/private/tmp/helm3-wave13-map-tool-update.log",
+    "toolRunId": "map-tool-wave13-7753fe51-10ed-4f32-a9f2-e807784878f3",
+    "commandId": "map-23f077475867ca05ee31e4ce88083979655cbf0ea321dcbd886339bb5da4a973",
+    "commandHash": "sha256:f5b043a4aec95a2c903265ee615f436411845cd17d3124e66bf39e02caafe78b",
+    "observedAt": "2026-09-15T21:17:42.866Z",
+    "state": "succeeded",
+    "targetState": "OPEN",
+    "issuesClosed": 0,
+    "concurrency": "read_before_write_not_atomic",
+    "purpose": "fork acceptance checkpoint"
+  },
+  "followupMapUpdate": {
+    "source": "/private/tmp/helm3-viewer-map-tool-update.log",
+    "toolRunId": "map-tool-viewer-682b8481-4b6d-475f-9c8c-3ab83eb8d1d2",
+    "commandId": "map-a9cdc8ac6426f6a41e1fb1d794cecb15cd9cac6d58038cb0da34bf806c67324c",
+    "commandHash": "sha256:72386e81d1ce3489f7b6d926b69b638f6da9b6e482b5f8fe23367c99ec596ef6",
+    "observedAt": "2026-09-15T21:30:15.637Z",
+    "revision": "2026-09-15T21:30:14Z",
+    "state": "succeeded",
+    "targetState": "OPEN",
+    "issuesClosed": 0,
+    "concurrency": "read_before_write_not_atomic",
+    "purpose": "PR #99 saved-viewer acceptance follow-up"
+  },
+  "economy": {
+    "observedAt": "2026-09-15T21:19:00Z",
+    "newPaidApiCalls": 0,
+    "combinedGuardUsd": 5.42051699,
+    "combinedLimitUsd": 10,
+    "unknownPaidReservations": 4,
+    "settledNominalUsd": 0.03083635,
+    "actualIncrementalBilling": "unknown",
+    "providerHeadroom": "unknown"
+  },
+  "authority": {
+    "originalStopAt": "2026-09-15T22:00:00Z",
+    "heartbeatVerifiedActiveUntil": "2026-09-15T22:00:00Z",
+    "checkpointDoesNotClaimStopOccurred": true,
+    "noNewProductCodeOrPaidCalls": true
+  },
+  "remaining": {
+    "fullBriefAcceptance": "incomplete",
+    "openAreas": [
+      "OAuth and live frontier interchange/failover",
+      "production exact integration path",
+      "full real feature acceptance",
+      "remaining context operations and calibration",
+      "live cockpit acceptance"
+    ],
+    "nextPriorities": [
+      "When the human returns, obtain explicit bounded live-auth proof.",
+      "Complete end-to-end acceptance with real review, repair, merge, restart and Map UI evidence.",
+      "Finish the remaining read-only projection seam while preserving dated evidence boundaries."
+    ],
+    "testCountsAreEvidence": true,
+    "testCountsAreCompletionPercentages": false
+  }
+}

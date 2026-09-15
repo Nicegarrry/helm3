@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "observedAt": "2026-09-16T20:18:58Z",
+  "observedAt": "2026-09-15T20:18:58Z",
   "scope": "Accepted PR 91 and bounded paid peer attempt",
   "repository": {
     "repository": "Nicegarrry/helm3",
@@ -10,7 +10,7 @@
     "number": 91,
     "reviewedHead": "c222c02c3b79980584d968e7db5b34f71d221e0f",
     "mergedHead": "4970c0c0951f34bc289b77e7443bc938a5fcfa9f",
-    "mergedAt": "2026-09-16T20:18:58Z",
+    "mergedAt": "2026-09-15T20:18:58Z",
     "independentReviews": {
       "spec": "passed",
       "standards": "passed",
@@ -21,8 +21,8 @@
       "state": "passed",
       "tests": "225/225",
       "typecheck": "passed",
-      "startedAt": "2026-09-16T20:08:53.674Z",
-      "completedAt": "2026-09-16T20:10:02.175Z",
+      "startedAt": "2026-09-15T20:08:53.674Z",
+      "completedAt": "2026-09-15T20:10:02.175Z",
       "resultSha256": "fc8eae584df5e9a32d6759bf68d1d77455e8070f3efc49b45e59cfebcfea9f70",
       "testsSha256": "282b2d3361e841f5ec62a21954a0792da9fe408a88383ec918c8b022aaa3b05d"
     },
@@ -30,7 +30,7 @@
     "claim": "Provider-free actual HostCore/PiWorkerFleet close-and-reopen replay keeps success quiet, requests judgement for valid failed/partial results, and emits no completion signal for missing, corrupt or ambiguous terminal evidence.",
     "limits": [
       "Does not prove physical process discovery, retries, live frontier wakes or full issue 17 closure.",
-      "The prior seven-root-startup-failure environment finding is recorded in the PR body."
+      "An earlier coordinator gate at 7a4db71366c09d4868cb36c47b528621924e0592 hit two child-process startup deadlines under concurrent test load; isolated 17 tests and the final 225-test gate passed."
     ]
   },
   "paidPeerAttempt": {
@@ -39,8 +39,12 @@
     "model": "kimi-k2.7-code",
     "requests": 1,
     "bound": "one bounded request",
-    "endedAt": "2026-09-16T20:14:26Z",
+    "endedAt": "2026-09-15T20:14:26Z",
     "terminalObservation": "empty terminal envelope with assistant stop error",
+    "elapsedSeconds": 120.064,
+    "upstreamCause": "unknown",
+    "reasoningPrefixIsNotResult": true,
+    "forensicsEvidence": "/private/tmp/helm3-wave10-peer-forensics.md",
     "outcome": "unknown",
     "verifiedWorkerResult": false,
     "findings": false,
@@ -60,7 +64,17 @@
     "newPaidCallsAfterAttempt": 0
   },
   "externalEffects": {
-    "githubMapMutations": 0,
+    "githubMapMutations": 1,
+    "mapUpdate": {
+      "toolRunId": "map-tool-wave10-a2beb068-dd68-489b-aa30-392b9ff12909",
+      "commandId": "map-1118c6f160153905fc7ebbce7151dfab21c9330b0355039eddccbcfab23e3dad",
+      "commandHash": "sha256:f9352b997460ea82482ea7dd6f66cbe42f1d5483ab0368fc15900d12c0cae369",
+      "state": "succeeded",
+      "observedState": "OPEN",
+      "observedAt": "2026-09-15T20:21:50.176Z",
+      "issuesClosed": 0,
+      "rawReceipt": "raw:sha256:16df03ed3d2d94ed251a0ce06ea9c7559760be8382e605e17426aaedc6114cc1"
+    },
     "userStopAt": "2026-09-15T22:00:00Z",
     "credentialsRawTranscriptsOrPrivateSdkArtifactsRecorded": false
   }

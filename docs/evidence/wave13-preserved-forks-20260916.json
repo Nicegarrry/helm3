@@ -77,7 +77,7 @@
   "limits": [
     "This is provider-free local SDK fixture evidence, not live frontier or production integration.",
     "It does not establish model change, pause/resume, full Brief acceptance or production merge automation.",
-    "Fixture Map closure is local fixture state; no Wave 13 GitHub Map update was performed."
+    "Fixture Map closure is local fixture state; as of this receipt observation at 21:15:08.315Z, no Wave 13 GitHub Map update had been performed."
   ],
   "economy": {
     "newPaidApiCalls": 0,

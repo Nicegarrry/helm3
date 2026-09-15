@@ -59,3 +59,19 @@ test('Pi event spool snapshots an event at observation and preserves a buffered 
   const overflow = JSON.parse(entries.find(entry => entry.source === 'pi.event.overflow')!.bytes.toString('utf8'));
   assert.equal(overflow.firstUnpersistedSequence, 2);
 });
+
+test('Pi event spool reserves space for a buffered prefix and its unknown-tail marker', async () => {
+  const entries: Entry[] = []; let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
+  const journal = { append: async (input: { source: string; sourceIdentity: string; bytes: Uint8Array }) => { await blocked; entries.push({ source: input.source, sourceIdentity: input.sourceIdentity, bytes: Buffer.from(input.bytes) }); return { ref: `raw:sha256:${entries.length}`, hash: `sha256:${entries.length}`, mediaType: 'application/json' }; } };
+  const spool = new PiEventSpool(journal as never, { commandId: 'command', attemptId: 'attempt', sessionId: 'session' }, { maxBytes: 4096, maxEvents: 2, maxQueuedBatches: 3 });
+  spool.record(update('a') as never); assert.ok(spool.state.queuedBatches <= 3);
+  spool.record(update('b') as never); assert.ok(spool.state.queuedBatches <= 3);
+  spool.record(update('c') as never); assert.ok(spool.state.queuedBatches <= 3);
+  spool.record({ type: 'message_end', message: { role: 'assistant', content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } } } as never); assert.ok(spool.state.queuedBatches <= 3);
+  release(); await assert.rejects(spool.drain(), /durable batch limit/);
+  assert.ok(entries.every((_, index) => index < 3));
+  const events = entries.filter(entry => entry.source === 'pi.event').flatMap(entry => JSON.parse(entry.bytes.toString('utf8')).events);
+  assert.deepEqual(events.map((entry: { sequence: number }) => entry.sequence), [1, 2, 3]);
+  const marker = JSON.parse(entries.find(entry => entry.source === 'pi.event.overflow')!.bytes.toString('utf8'));
+  assert.equal(marker.firstUnpersistedSequence, 4);
+});

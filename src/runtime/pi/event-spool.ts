@@ -55,13 +55,17 @@ export class PiEventSpool {
     const entry = { sequence, event: JSON.parse(observed) as unknown };
     const bytes = Buffer.byteLength(JSON.stringify(entry));
     if (bytes > PI_EVENT_MAX_BYTES) return this.failClosed(sequence, 'Pi event exceeds the durable single-event byte limit');
-    if ((this.batch.length > 0 && (this.batch.length >= this.limits.maxEvents || this.batchBytes + bytes > this.limits.maxBytes)) || boundary(event)) this.flush();
-    if (this.queued >= this.limits.maxQueuedBatches && this.batch.length === 0) return this.failClosed(sequence, 'Pi event spool queue reached its durable batch limit');
+    const flushBefore = this.batch.length > 0 && (this.batch.length >= this.limits.maxEvents || this.batchBytes + bytes > this.limits.maxBytes || boundary(event));
+    // Keep two slots when a prefix is buffered: one for that prefix and one for
+    // the explicit marker whose first unpersisted sequence is this event.
+    if (flushBefore && this.queued >= this.limits.maxQueuedBatches - 2) return this.failClosed(sequence, 'Pi event spool queue reached its durable batch limit');
+    if (flushBefore) this.flush();
     this.batch.push(entry); this.batchBytes += bytes;
     if (boundary(event) || this.batch.length >= this.limits.maxEvents || this.batchBytes >= this.limits.maxBytes) this.flush();
   }
   private failClosed(sequence: number, reason: string): void {
-    this.flushPrefix();
+    if (this.batch.length && this.queued <= this.limits.maxQueuedBatches - 2) this.flushPrefix();
+    else if (this.batch.length) sequence = this.batch[0].sequence;
     this.overflow = Object.freeze({ firstUnpersistedSequence: sequence, reason });
     this.failure = new Error(reason);
     const marker = Buffer.from(JSON.stringify({ schemaVersion: 1, ...this.lineage, state: 'unknown', firstUnpersistedSequence: sequence, reason }));

@@ -4,6 +4,7 @@ import type { RawArtifactRef } from '../../contracts/index.js';
 import type { ArtifactJournal } from '../../journal/index.js';
 
 export const PI_EVENT_BATCH_SCHEMA_VERSION = 1;
+export const PI_EVENT_MAX_BYTES = 1024 * 1024;
 export type PiEventBatch = Readonly<{ schemaVersion: 1; commandId: string; attemptId: string; sessionId: string; firstSequence: number; events: readonly Readonly<{ sequence: number; event: unknown }>[] }>;
 export type PiEventSpoolLimits = Readonly<{ maxBytes: number; maxEvents: number; maxQueuedBatches: number }>;
 
@@ -23,6 +24,7 @@ export function serializePiEvent(event: AgentSessionEvent): unknown {
 
 function valid(limits: PiEventSpoolLimits): PiEventSpoolLimits {
   for (const [name, value] of Object.entries(limits)) if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be a positive safe integer`);
+  if (limits.maxQueuedBatches < 2) throw new Error('maxQueuedBatches must reserve space for an unknown-tail marker');
   return Object.freeze({ ...limits });
 }
 function boundary(event: AgentSessionEvent): boolean { return event.type === 'message_end' || event.type === 'tool_execution_end' || event.type === 'turn_end' || event.type === 'agent_end'; }
@@ -48,15 +50,18 @@ export class PiEventSpool {
   record(event: AgentSessionEvent): void {
     const sequence = ++this.sequence;
     if (this.overflow) return;
-    const entry = { sequence, event: serializePiEvent(event) };
+    if (this.queued >= this.limits.maxQueuedBatches - 1) return this.failClosed(sequence, 'Pi event spool queue reached its durable batch limit');
+    const observed = JSON.stringify(serializePiEvent(event));
+    const entry = { sequence, event: JSON.parse(observed) as unknown };
     const bytes = Buffer.byteLength(JSON.stringify(entry));
-    if (bytes > this.limits.maxBytes) return this.failClosed(sequence, 'Pi event exceeds the durable batch byte limit');
+    if (bytes > PI_EVENT_MAX_BYTES) return this.failClosed(sequence, 'Pi event exceeds the durable single-event byte limit');
     if ((this.batch.length > 0 && (this.batch.length >= this.limits.maxEvents || this.batchBytes + bytes > this.limits.maxBytes)) || boundary(event)) this.flush();
     if (this.queued >= this.limits.maxQueuedBatches && this.batch.length === 0) return this.failClosed(sequence, 'Pi event spool queue reached its durable batch limit');
     this.batch.push(entry); this.batchBytes += bytes;
     if (boundary(event) || this.batch.length >= this.limits.maxEvents || this.batchBytes >= this.limits.maxBytes) this.flush();
   }
   private failClosed(sequence: number, reason: string): void {
+    this.flushPrefix();
     this.overflow = Object.freeze({ firstUnpersistedSequence: sequence, reason });
     this.failure = new Error(reason);
     const marker = Buffer.from(JSON.stringify({ schemaVersion: 1, ...this.lineage, state: 'unknown', firstUnpersistedSequence: sequence, reason }));
@@ -64,7 +69,11 @@ export class PiEventSpool {
   }
   private flush(): void {
     if (!this.batch.length || this.overflow) return;
-    if (this.queued >= this.limits.maxQueuedBatches) return this.failClosed(this.batch[0].sequence, 'Pi event spool queue reached its durable batch limit');
+    if (this.queued >= this.limits.maxQueuedBatches - 1) return this.failClosed(this.batch[0].sequence, 'Pi event spool queue reached its durable batch limit');
+    this.flushPrefix();
+  }
+  private flushPrefix(): void {
+    if (!this.batch.length) return;
     const events = this.batch; this.batch = []; this.batchBytes = 0;
     const payload: PiEventBatch = { schemaVersion: PI_EVENT_BATCH_SCHEMA_VERSION, ...this.lineage, firstSequence: events[0].sequence, events };
     this.enqueue('pi.event', `pi-event-batch:${this.lineage.sessionId}:${this.streamId}:${payload.firstSequence}-${events.at(-1)!.sequence}`, Buffer.from(JSON.stringify(payload)));

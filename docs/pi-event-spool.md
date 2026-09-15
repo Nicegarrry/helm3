@@ -10,7 +10,9 @@ retain the initial and final messages.
 The Pi subscriber API is synchronous, so it provides no awaitable upstream
 backpressure. Helm therefore does not claim it can slow an active provider
 stream. The spool bounds retained work to 64 KiB or 64 events per batch and at
-most 1,024 queued batches. It flushes message, tool, turn and agent boundaries and
+most 1,024 queued batches. A single complete Pi event, including a terminal
+message, has a separate 1 MiB hard limit; a single event may therefore occupy
+a batch larger than 64 KiB without truncation. It flushes message, tool, turn and agent boundaries and
 waits for durability before a later model or workspace effect. If its queue is
 full, it writes an explicit `pi.event.overflow` unknown-tail artifact and the
 worker fails closed; it never presents omitted events as a complete stream.

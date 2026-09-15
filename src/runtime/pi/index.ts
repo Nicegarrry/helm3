@@ -156,7 +156,10 @@ export class PiNativeWorker {
     this.session = created.session;
     this.eventSpool = new PiEventSpool(this.input.journal, { commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId });
     this.unsubscribe = this.session.subscribe((event: AgentSessionEvent) => {
-      try { this.eventSpool!.record(event); }
+      try {
+        this.eventSpool!.record(event);
+        if (this.eventSpool!.state.overflow) throw new Error('Pi event evidence has an unknown tail');
+      }
       catch (error) { this.eventError ??= error; void this.session.abort(); }
     });
   }

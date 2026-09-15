@@ -33,9 +33,13 @@ export type ReviewOutcome = Readonly<{ resultRef?: string; rawEventRefs: readonl
 export type DurableReviewRecord = Readonly<{
   schemaVersion: 1; reviewId: string; idempotencyKey: string; state: ReviewState;
   source: ReviewSource; requestedHead: string; manifest: ReviewManifest; reviewer: ReviewerProvenance;
-  outcome?: ReviewOutcome; failure?: Readonly<{ commandId?: string; effectId?: string; reason: 'spawn-unknown' | 'persistence-unknown' | 'postspawn-failure' }>;
+  outcome?: ReviewOutcome; failure?: Readonly<{ commandId?: string; effectId?: string; reason: 'spawn-unknown' | 'persistence-unknown' | 'postspawn-failure' | 'preflight-refused' }>;
 }>;
 export type ReviewLaunch = DurableReviewRecord;
+type IndependentReviewSpawnInput = WorkerSpawnInput & Readonly<{
+  /** Private host constraint; it is deliberately absent from model tool JSON. */
+  reviewConstraint?: Readonly<{ repository: string; expectedHead: string; mode: 'review-readonly' }>;
+}>;
 
 /**
  * Durable projection supplied by the host registry/journal, never by model
@@ -44,7 +48,12 @@ export type ReviewLaunch = DurableReviewRecord;
  */
 export interface ReviewDurabilityStore {
   reopen(idempotencyKey: string): Promise<DurableReviewRecord | undefined>;
-  prepare(record: DurableReviewRecord): Promise<void>;
+  /**
+   * Atomically creates the pre-effect claim.  Only the caller receiving
+   * `created: true` owns the right to start a native reviewer; a contender
+   * must return the durable record and reconcile it instead.
+   */
+  prepare(record: DurableReviewRecord): Promise<Readonly<{ record: DurableReviewRecord; created: boolean }>>;
   append(record: DurableReviewRecord): Promise<void>;
 }
 
@@ -57,7 +66,7 @@ export type ReviewServiceBinding = Readonly<{
   /** Host-owned policy check: role, provider/API identity, data policy, authority and cross-family floor. */
   authorize(source: ReviewSource, modelId: string): Promise<void>;
   /** Existing fleet spawn; it owns Core admission, accounting, native session and worktree. */
-  spawn(input: WorkerSpawnInput): Promise<Readonly<{ workerId: string; attemptId: string; sessionId: string; spawnCommandId?: string; modelId?: string; family?: string; poolId?: string }>>;
+  spawn(input: IndependentReviewSpawnInput): Promise<Readonly<{ workerId: string; attemptId: string; sessionId: string; spawnCommandId?: string; modelId?: string; family?: string; poolId?: string }>>;
   /** Durable registry projection. `prepare` completes before any native spawn. */
   durability: ReviewDurabilityStore;
 }>;
@@ -70,6 +79,12 @@ function stableReviewId(key: string): string { return `review-${key.slice('sha25
 function frozenRecord(value: DurableReviewRecord): DurableReviewRecord {
   return Object.freeze({ ...value, source: Object.freeze({ ...value.source, contextRefs: Object.freeze([...value.source.contextRefs]) }), manifest: Object.freeze({ ...value.manifest, entries: Object.freeze(value.manifest.entries.map(entry => Object.freeze({ ...entry }))) }), reviewer: Object.freeze({ ...value.reviewer }), ...(value.outcome ? { outcome: Object.freeze({ ...value.outcome, rawEventRefs: Object.freeze([...value.outcome.rawEventRefs]), readonlyObservation: Object.freeze({ ...value.outcome.readonlyObservation }) }) } : {}), ...(value.failure ? { failure: Object.freeze({ ...value.failure }) } : {}) });
 }
+function frozenRequest(value: ReviewRequest): ReviewRequest {
+  return Object.freeze({ ...value, contextRefs: Object.freeze([...value.contextRefs]) });
+}
+function frozenSource(value: ReviewSource): ReviewSource {
+  return Object.freeze({ ...value, contextRefs: Object.freeze([...value.contextRefs]) });
+}
 
 /**
  * Host-only review request boundary. It accepts identities and artifact refs,
@@ -79,35 +94,45 @@ export class IndependentReviewService {
   constructor(private readonly binding: ReviewServiceBinding) {}
 
   async request(input: ReviewRequest): Promise<ReviewLaunch> {
-    if (!sha.test(input.expectedHead) || !input.sourceWorkerId.trim() || !input.reviewerModelId.trim() || input.contextRefs.length > 32) throw new Error('review request identity is invalid');
-    const source = await this.binding.source(input.sourceWorkerId);
-    if (!source || source.workerId !== input.sourceWorkerId || source.head !== input.expectedHead || !source.clean || source.runId.trim() === '') throw new Error('source worker is not a fresh clean exact-head result');
+    const request = frozenRequest(input);
+    if (!sha.test(request.expectedHead) || !request.sourceWorkerId.trim() || !request.reviewerModelId.trim() || request.contextRefs.length > 32) throw new Error('review request identity is invalid');
+    const found = await this.binding.source(request.sourceWorkerId);
+    if (!found || found.workerId !== request.sourceWorkerId || found.head !== request.expectedHead || !found.clean || found.runId.trim() === '') throw new Error('source worker is not a fresh clean exact-head result');
+    const source = frozenSource(found);
     const fresh = await this.binding.inspectSource(source);
-    if (!fresh.clean || fresh.head !== input.expectedHead) throw new Error('source checkout changed before review launch');
-    await this.binding.authorize(source, input.reviewerModelId);
-    const refs = [ref(input.objectiveRef), ref(input.acceptanceRef), ...input.contextRefs.map(ref)];
-    // Copy the bytes and derive the digest before the async spawn effect. The
-    // builder transcript and conclusions are never selected by this interface.
+    if (!fresh.clean || fresh.head !== request.expectedHead) throw new Error('source checkout changed before review launch');
+    await this.binding.authorize(source, request.reviewerModelId);
+    const refs = [ref(request.objectiveRef), ref(request.acceptanceRef), ...request.contextRefs.map(ref)];
+    // Copy the bytes and derive the digest before the async spawn effect.
+    // HostArtifactStore rejects effect and invocation refs structurally; the
+    // trusted caller remains responsible for selecting text refs that do not
+    // contain a builder transcript or primary conclusion.
     const entries = await Promise.all(refs.map(async (item) => Object.freeze({ ref: item, hash: digest(await this.binding.readArtifact(item)) })));
     const manifest = Object.freeze({ digest: digest(entries), entries: Object.freeze(entries) });
-    const idempotencyKey = reviewKey(source, input);
-    const existing = await this.binding.durability.reopen(idempotencyKey);
-    if (existing) return existing;
-    const planned = frozenRecord({ schemaVersion: 1, reviewId: stableReviewId(idempotencyKey), idempotencyKey, state: 'planned', source, requestedHead: input.expectedHead, manifest, reviewer: { requestedModelId: input.reviewerModelId } });
+    const idempotencyKey = reviewKey(source, request);
+    const planned = frozenRecord({ schemaVersion: 1, reviewId: stableReviewId(idempotencyKey), idempotencyKey, state: 'planned', source, requestedHead: request.expectedHead, manifest, reviewer: { requestedModelId: request.reviewerModelId } });
     // This is the durable point of no blind retry.  The manifest binds the
     // immutable artifact refs/hash observations before a session is created.
-    await this.binding.durability.prepare(planned);
+    const claim = await this.binding.durability.prepare(planned);
+    if (!claim.created) return claim.record;
+    const atEffect = await this.binding.inspectSource(source);
+    if (!atEffect.clean || atEffect.head !== request.expectedHead) {
+      const refused = frozenRecord({ ...planned, state: 'unknown', failure: { reason: 'preflight-refused' } });
+      await this.binding.durability.append(refused);
+      throw new Error(`source checkout changed before review effect; reconcile ${planned.reviewId}`);
+    }
+    let launched: DurableReviewRecord | undefined;
     try {
       // These refs are the captured authorized manifest, not source-provided
       // context. The fleet re-reads hash-checked HostArtifactStore bytes when
       // constructing the actual native worker request.
-      const spawned = await this.binding.spawn(Object.freeze({ objectiveRef: manifest.entries[0]!.ref, acceptanceRef: manifest.entries[1]!.ref, contextRefs: Object.freeze(manifest.entries.slice(2).map(entry => entry.ref)), modelId: input.reviewerModelId, role: 'reviewer', label: `independent-review:${planned.reviewId}:${planned.idempotencyKey}` }));
+      const spawned = await this.binding.spawn(Object.freeze({ objectiveRef: manifest.entries[0]!.ref, acceptanceRef: manifest.entries[1]!.ref, contextRefs: Object.freeze(manifest.entries.slice(2).map(entry => entry.ref)), modelId: request.reviewerModelId, role: 'reviewer', label: `independent-review:${planned.reviewId}:${planned.idempotencyKey}`, reviewConstraint: Object.freeze({ repository: source.repository, expectedHead: request.expectedHead, mode: 'review-readonly' }) }));
       if (!spawned.workerId || !spawned.attemptId || !spawned.sessionId || spawned.attemptId === source.attemptId || spawned.sessionId === source.sessionId) throw new Error('reviewer did not receive distinct native provenance');
-      const launched = frozenRecord({ ...planned, state: 'launched', reviewer: { requestedModelId: input.reviewerModelId, workerId: spawned.workerId, attemptId: spawned.attemptId, sessionId: spawned.sessionId, ...(spawned.spawnCommandId ? { spawnCommandId: spawned.spawnCommandId } : {}), modelId: spawned.modelId ?? input.reviewerModelId, ...(spawned.family ? { family: spawned.family } : {}), ...(spawned.poolId ? { poolId: spawned.poolId } : {}) } });
+      launched = frozenRecord({ ...planned, state: 'launched', reviewer: { requestedModelId: request.reviewerModelId, workerId: spawned.workerId, attemptId: spawned.attemptId, sessionId: spawned.sessionId, ...(spawned.spawnCommandId ? { spawnCommandId: spawned.spawnCommandId } : {}), modelId: spawned.modelId ?? request.reviewerModelId, ...(spawned.family ? { family: spawned.family } : {}), ...(spawned.poolId ? { poolId: spawned.poolId } : {}) } });
       await this.binding.durability.append(launched);
       return launched;
     } catch {
-      const unknown = frozenRecord({ ...planned, state: 'unknown', failure: { reason: 'spawn-unknown' } });
+      const unknown = frozenRecord({ ...(launched ?? planned), state: 'unknown', failure: { reason: launched ? 'persistence-unknown' : 'spawn-unknown' } });
       try { await this.binding.durability.append(unknown); } catch { /* The planned record remains the reconciliation identity. */ }
       throw new Error(`review launch outcome is unknown; reconcile ${planned.reviewId}`);
     }

@@ -15,7 +15,7 @@ function fixture(overrides: Partial<ConstructorParameters<typeof IndependentRevi
     inspectSource: async () => ({ head, clean: true }),
     authorize: async (actual, model) => { assert.equal(actual.family, 'fable'); assert.equal(model, 'reviewer'); },
     spawn: async input => { spawns++; assert.equal(input.role, 'reviewer'); assert.equal(input.modelId, 'reviewer'); assert.match(input.label ?? '', /^independent-review:review-[0-9a-f]+:sha256:/); return { workerId: 'reviewer-1', attemptId: 'attempt-reviewer', sessionId: 'session-reviewer' }; },
-    durability: { reopen: async key => records.get(key), prepare: async record => { if (records.has(record.idempotencyKey)) throw new Error('duplicate intent'); records.set(record.idempotencyKey, record); }, append: async record => { records.set(record.idempotencyKey, record); } },
+    durability: { reopen: async key => records.get(key), prepare: async record => { const existing = records.get(record.idempotencyKey); if (existing) return { record: existing, created: false }; records.set(record.idempotencyKey, record); return { record, created: true }; }, append: async record => { records.set(record.idempotencyKey, record); } },
     ...overrides,
   });
   return { service, count: () => spawns, records };
@@ -36,6 +36,31 @@ test('review persists a stable pre-spawn intent and reopens it without a duplica
   assert.equal(count(), 1); assert.equal(first.reviewId, second.reviewId); assert.equal(first.idempotencyKey, second.idempotencyKey);
   assert.equal(records.get(first.idempotencyKey)?.state, 'launched');
   assert.equal(first.manifest.entries[0]?.ref, 'objective');
+});
+
+test('review snapshots caller input before artifact reads can mutate it', async () => {
+  let requestedModel = '';
+  const input = { sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: ['brief'], reviewerModelId: 'reviewer' };
+  const { service } = fixture({
+    readArtifact: async () => { input.reviewerModelId = 'mutated-model'; input.contextRefs.push('mutated-ref'); return 'immutable'; },
+    spawn: async value => { requestedModel = value.modelId; return { workerId: 'reviewer-1', attemptId: 'attempt-reviewer', sessionId: 'session-reviewer' }; },
+  });
+  const launch = await service.request(input);
+  assert.equal(requestedModel, 'reviewer');
+  assert.equal(launch.reviewer.requestedModelId, 'reviewer');
+  assert.deepEqual(launch.manifest.entries.map(entry => entry.ref), ['objective', 'acceptance', 'brief']);
+});
+
+test('review records a preflight refusal when source head drifts after the durable claim', async () => {
+  const live = { head, clean: true };
+  const { service, count, records } = fixture({
+    readArtifact: async () => { live.head = 'b'.repeat(40); return 'immutable'; },
+    inspectSource: async () => live,
+  });
+  await assert.rejects(service.request({ sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' }), /changed before review effect/);
+  assert.equal(count(), 0);
+  assert.equal([...records.values()][0]?.state, 'unknown');
+  assert.equal([...records.values()][0]?.failure?.reason, 'preflight-refused');
 });
 
 test('review keeps a reconciliation identity after a post-spawn uncertainty and never blind-retries', async () => {

@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ArtifactJournal, ArtifactMetadata } from '../journal/index.js';
 import type { DurableReviewRecord, ReviewDurabilityStore } from './review.js';
 
 const prefix = 'host.review.durability';
 const hash = (value: unknown): string => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 const id = (runId: string, key: string, suffix: string): string => `${prefix}:${runId}:${key}:${suffix}`;
+const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 
 function valid(record: DurableReviewRecord): void {
   if (record.schemaVersion !== 1 || !record.reviewId.startsWith('review-') || !record.idempotencyKey.startsWith('sha256:')
@@ -12,13 +13,20 @@ function valid(record: DurableReviewRecord): void {
     || !record.manifest.digest.startsWith('sha256:') || record.manifest.entries.length < 2
     || !record.manifest.entries.every(entry => entry.ref.length > 0 && entry.hash.startsWith('sha256:'))
     || !record.reviewer.requestedModelId) throw new Error('invalid durable review record');
+  const reviewerLaunched = nonempty(record.reviewer.workerId) && nonempty(record.reviewer.attemptId) && nonempty(record.reviewer.sessionId);
+  const terminalEvidence = nonempty(record.outcome?.resultRef) && record.outcome.rawEventRefs.length > 0
+    && record.outcome.rawEventRefs.every(nonempty)
+    && nonempty(record.outcome.readonlyObservation.beforeRef) && nonempty(record.outcome.readonlyObservation.afterRef);
+  if (record.state === 'planned' && (record.outcome || record.failure || reviewerLaunched)) throw new Error('planned review must contain only immutable intent');
+  if (record.state === 'launched' && (!reviewerLaunched || record.outcome || record.failure)) throw new Error('launched review requires native provenance and no outcome');
+  if (record.state === 'terminal' && (!reviewerLaunched || !terminalEvidence || record.failure)) throw new Error('terminal review requires native result, raw events, and readonly observation evidence');
+  if (record.state === 'unknown' && (!record.failure || record.outcome || !['spawn-unknown', 'persistence-unknown', 'postspawn-failure', 'preflight-refused'].includes(record.failure.reason))) throw new Error('unknown review requires durable failure provenance');
 }
 
 function sameIntent(left: DurableReviewRecord, right: DurableReviewRecord): boolean {
   return left.reviewId === right.reviewId && left.idempotencyKey === right.idempotencyKey
-    && left.source.runId === right.source.runId && left.source.attemptId === right.source.attemptId
-    && left.source.sessionId === right.source.sessionId && left.requestedHead === right.requestedHead
-    && left.manifest.digest === right.manifest.digest && left.reviewer.requestedModelId === right.reviewer.requestedModelId;
+    && JSON.stringify(left.source) === JSON.stringify(right.source) && left.requestedHead === right.requestedHead
+    && JSON.stringify(left.manifest) === JSON.stringify(right.manifest) && left.reviewer.requestedModelId === right.reviewer.requestedModelId;
 }
 function canFollow(previous: DurableReviewRecord, next: DurableReviewRecord): boolean {
   if (!sameIntent(previous, next)) return false;
@@ -32,6 +40,16 @@ function parse(bytes: Buffer, runId: string, key: string): DurableReviewRecord {
   const record = value as DurableReviewRecord; valid(record);
   if (record.source.runId !== runId || record.idempotencyKey !== key) throw new Error('durable review record is outside its run or idempotency scope');
   return record;
+}
+
+type IntentClaim = Readonly<{ schemaVersion: 1; claimToken: string; record: DurableReviewRecord }>;
+function parseIntent(bytes: Buffer, runId: string, key: string): DurableReviewRecord {
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('durable review intent bytes are malformed'); }
+  if (typeof value !== 'object' || value === null) throw new Error('durable review intent bytes are malformed');
+  const claim = value as IntentClaim;
+  if (claim.schemaVersion !== 1 || typeof claim.claimToken !== 'string' || !claim.claimToken || !claim.record) throw new Error('durable review intent claim is malformed');
+  return parse(Buffer.from(JSON.stringify(claim.record)), runId, key);
 }
 
 /**
@@ -51,7 +69,8 @@ export class JournalReviewDurabilityStore implements ReviewDurabilityStore {
       const suffix = entry.sourceIdentity.slice(escaped.length);
       const version = suffix === 'intent' ? 0 : Number(suffix.slice(1));
       if (!Number.isSafeInteger(version) || version < 0) throw new Error('durable review version identity is invalid');
-      return { version, metadata: entry, record: parse(await this.journal.read(entry.raw, entry.sourceIdentity, { permitSensitive: true }), this.runId, key) };
+      const bytes = await this.journal.read(entry.raw, entry.sourceIdentity, { permitSensitive: true });
+      return { version, metadata: entry, record: suffix === 'intent' ? parseIntent(bytes, this.runId, key) : parse(bytes, this.runId, key) };
     }));
     return values.sort((a, b) => a.version - b.version);
   }
@@ -66,13 +85,27 @@ export class JournalReviewDurabilityStore implements ReviewDurabilityStore {
     return values.at(-1)!.record;
   }
 
-  async prepare(record: DurableReviewRecord): Promise<void> {
+  async prepare(record: DurableReviewRecord): Promise<Readonly<{ record: DurableReviewRecord; created: boolean }>> {
     valid(record);
     if (record.source.runId !== this.runId || record.state !== 'planned') throw new Error('review intent must be planned and bound to this run');
     const identity = id(this.runId, record.idempotencyKey, 'intent');
-    // Append is idempotent only for the same immutable bytes. A competing
-    // different intent gets ArtifactConflictError rather than an overwrite.
-    await this.journal.append({ source: prefix, sourceIdentity: identity, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(record)), classification: 'sensitive' }, { permitSensitive: true });
+    const existing = await this.reopen(record.idempotencyKey);
+    if (existing) {
+      if (JSON.stringify(existing) !== JSON.stringify(record)) throw new Error('review intent claim conflicts with existing intent');
+      return Object.freeze({ record: existing, created: false });
+    }
+    // ArtifactJournal intentionally treats identical immutable appends as
+    // idempotent. A random durable claimant token makes this create-if-absent
+    // observable: exactly one concurrent caller wins the immutable identity.
+    const claim: IntentClaim = { schemaVersion: 1, claimToken: randomUUID(), record };
+    try {
+      await this.journal.append({ source: prefix, sourceIdentity: identity, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(claim)), classification: 'sensitive' }, { permitSensitive: true });
+      return Object.freeze({ record, created: true });
+    } catch (error) {
+      const winner = await this.reopen(record.idempotencyKey);
+      if (!winner || JSON.stringify(winner) !== JSON.stringify(record)) throw error;
+      return Object.freeze({ record: winner, created: false });
+    }
   }
 
   async append(record: DurableReviewRecord): Promise<void> {

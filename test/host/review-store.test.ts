@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ArtifactJournal } from '../../src/journal/index.js';
-import type { DurableReviewRecord } from '../../src/host/review.js';
+import { IndependentReviewService, type DurableReviewRecord, type ReviewRequest } from '../../src/host/review.js';
 import { JournalReviewDurabilityStore } from '../../src/host/review-store.js';
 
 const head = 'a'.repeat(40);
@@ -41,6 +41,44 @@ test('journal review store atomically fences concurrent intents and rejects sile
     const results = await Promise.allSettled([left.append(launched), right.append(unknown)]);
     assert.equal(results.filter(item => item.status === 'fulfilled').length, 1);
     assert.ok(['launched', 'unknown'].includes((await left.reopen(intent.idempotencyKey))!.state));
+    journal.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('separate journal instances grant one durable pre-spawn claim and launch once', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helm3-review-store-service-race-'));
+  try {
+    const leftJournal = await ArtifactJournal.open({ root, hostPolicy: { allowSensitiveWrites: true } });
+    const rightJournal = await ArtifactJournal.open({ root, hostPolicy: { allowSensitiveWrites: true } });
+    let spawns = 0;
+    const source = planned().source;
+    const input: ReviewRequest = { sourceWorkerId: source.workerId, expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' };
+    const service = (durability: JournalReviewDurabilityStore) => new IndependentReviewService({
+      source: async () => source, inspectSource: async () => ({ head, clean: true }), authorize: async () => undefined,
+      readArtifact: async value => value, durability,
+      spawn: async () => ({ workerId: `reviewer-${++spawns}`, attemptId: `attempt-reviewer-${spawns}`, sessionId: `session-reviewer-${spawns}` }),
+    });
+    const outcomes = await Promise.all([
+      service(new JournalReviewDurabilityStore(leftJournal, 'run')).request(input),
+      service(new JournalReviewDurabilityStore(rightJournal, 'run')).request(input),
+    ]);
+    assert.equal(spawns, 1);
+    assert.equal(outcomes[0].reviewId, outcomes[1].reviewId);
+    assert.ok(outcomes.some(outcome => outcome.state === 'launched'));
+    leftJournal.close(); rightJournal.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('journal review store rejects a terminal record without result, raw event, and readonly evidence', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helm3-review-store-terminal-'));
+  try {
+    const journal = await ArtifactJournal.open({ root, hostPolicy: { allowSensitiveWrites: true } });
+    const store = new JournalReviewDurabilityStore(journal, 'run'); const intent = planned();
+    await store.prepare(intent);
+    const launched: DurableReviewRecord = { ...intent, state: 'launched', reviewer: { requestedModelId: 'reviewer', workerId: 'reviewer-worker', attemptId: 'attempt-reviewer', sessionId: 'session-reviewer' } };
+    await store.append(launched);
+    await assert.rejects(store.append({ ...launched, state: 'terminal' }), /terminal review requires/);
+    await assert.rejects(store.append({ ...launched, state: 'terminal', outcome: { resultRef: 'result', rawEventRefs: [], readonlyObservation: { beforeRef: 'before', afterRef: 'after' } } }), /terminal review requires/);
     journal.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

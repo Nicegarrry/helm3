@@ -55,7 +55,7 @@ test('map.update uses Core admission, mutator readback receipt, and stable durab
 });
 
 test('map.close binds only verified evidence while invalid input and uncertain writes never become success', async () => {
-  const evidence = await fixture({ evidenceFails: true }); const unknown = await fixture({ failPatch: true });
+  const evidence = await fixture({ evidenceFails: true }); const unknown = await fixture({ failPatch: true }); const closed = await fixture();
   try {
     const refused = await evidence.tools.invoke('map.close', { node: 'node-2', expectedRevision: before, rationale: 'Done.', evidenceRefs: ['foreign:claim'], resolvedDependencies: ['owner/repo#9'] }, context);
     assert.equal(refused.state, 'refused'); assert.equal(evidence.fake.patches(), 0);
@@ -65,5 +65,7 @@ test('map.close binds only verified evidence while invalid input and uncertain w
     assert.equal(result.state, 'unknown', JSON.stringify(result)); assert.equal(unknown.fake.patches(), 1);
     const replay = await unknown.tools.invoke('map.update', { node: 'node-2', expectedRevision: before, title: 'Maybe' }, context);
     assert.equal(replay.state, 'unknown'); assert.equal(unknown.fake.patches(), 1);
-  } finally { for (const value of [evidence, unknown]) { value.plane.close(); await rm(value.directory, { recursive: true, force: true }); } }
+    const success = await closed.tools.invoke('map.close', { node: 'node-2', expectedRevision: before, rationale: 'Verified gate passed.', evidenceRefs: ['gate:accepted'], resolvedDependencies: ['owner/repo#9'] }, context);
+    assert.equal(success.state, 'succeeded', JSON.stringify(success)); assert.equal(closed.fake.patches(), 1); assert.equal(closed.validations(), 2, 'closure evidence is checked before admission and again at effect time');
+  } finally { for (const value of [evidence, unknown, closed]) { value.plane.close(); await rm(value.directory, { recursive: true, force: true }); } }
 });

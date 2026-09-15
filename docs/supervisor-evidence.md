@@ -21,7 +21,9 @@ completed-worker fact but requests judgement; this is distinct from a
 `worker.failed` terminal-unknown infrastructure observation, which also
 requests judgement. The result status is used only when exactly one
 hash-checked Pi terminal envelope in the immutable evidence chain matches the
-fleet event. Expired or replaced
+fleet event. A missing status, invalid or corrupt envelope, or multiple valid
+envelopes emits no completion signal; the durable fleet event remains available
+for later evidence/reconciliation without being guessed as success. Expired or replaced
 owners leave the cause durable; a later active owner may record its own wake.
 The bridge never treats an unknown native outcome as a physical-death fact,
 never retries, and never starts a Pi worker or provider request.

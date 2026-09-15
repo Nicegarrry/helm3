@@ -338,7 +338,7 @@ export class PiWorkerFleet {
       const reported = typeof (fleetEvent.payload as { result?: unknown } | null)?.result === 'string'
         ? (fleetEvent.payload as { result: string }).result : undefined;
       const result = await this.binding.host.readFleetTerminalResult({ attemptId: record.attemptId, evidenceRefs: record.evidenceRefs });
-      if (reported && result?.status !== reported) throw new Error('fleet completion result is not bound to its immutable terminal envelope');
+      if (!reported || !result || result.status !== reported) throw new Error('fleet completion result is not bound to its immutable terminal envelope');
       // A valid native failure is distinct from an infrastructure-unknown
       // event. It remains a completed worker fact, but requires judgement.
       needsJudgement = result?.status === 'failed' || result?.status === 'partial';

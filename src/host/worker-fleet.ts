@@ -15,10 +15,10 @@ export type WorkerInspect = Readonly<{
   activeRequests?: number; contextOccupancy?: unknown; eventCursor?: string;
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
-type SpawnProvenance = Readonly<{ modelId: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
+type SpawnProvenance = Readonly<{ modelId: string; modelProvider: string; modelApi: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
 /** v1 launch/terminal records predate continuation provenance. They remain readable, but cannot be steered. */
-type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; modelId?: string; modelFactVersion?: number; dataPolicy?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
-type ContinuationWorker = StoredWorker & Readonly<{ owner: WorktreeOwner; modelId: string; modelFactVersion: number; dataPolicy: string; persistedSession: PiPersistedSession }>;
+type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; modelId?: string; modelProvider?: string; modelApi?: string; modelFactVersion?: number; dataPolicy?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
+type ContinuationWorker = StoredWorker & Readonly<{ owner: WorktreeOwner; modelId: string; modelProvider: string; modelApi: string; modelFactVersion: number; dataPolicy: string; persistedSession: PiPersistedSession }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
 
 function digest(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
@@ -27,7 +27,7 @@ function storedWorker(value: unknown): StoredWorker | undefined {
   const item = value as Partial<StoredWorker>;
   if (item.schemaVersion !== 1 || typeof item.workerId !== 'string' || typeof item.attemptId !== 'string' || typeof item.spawnCommandId !== 'string'
     || typeof item.sessionId !== 'string' || typeof item.workspace !== 'string' || typeof item.inputDigest !== 'string'
-    || (item.modelId !== undefined && typeof item.modelId !== 'string') || (item.modelFactVersion !== undefined && (!Number.isInteger(item.modelFactVersion) || item.modelFactVersion < 1)) || (item.dataPolicy !== undefined && typeof item.dataPolicy !== 'string')
+    || (item.modelId !== undefined && typeof item.modelId !== 'string') || (item.modelProvider !== undefined && typeof item.modelProvider !== 'string') || (item.modelApi !== undefined && typeof item.modelApi !== 'string') || (item.modelFactVersion !== undefined && (!Number.isInteger(item.modelFactVersion) || item.modelFactVersion < 1)) || (item.dataPolicy !== undefined && typeof item.dataPolicy !== 'string')
     || (item.owner !== undefined && (typeof item.owner.attemptId !== 'string' || !Number.isInteger(item.owner.generation) || typeof item.owner.expiresAt !== 'string'))
     || (item.state !== 'ready' && item.state !== 'running' && item.state !== 'terminal' && item.state !== 'unknown')
     || !Array.isArray(item.evidenceRefs) || !item.evidenceRefs.every((ref) => typeof ref === 'string') || typeof item.cancellationRequested !== 'boolean') return undefined;
@@ -36,11 +36,11 @@ function storedWorker(value: unknown): StoredWorker | undefined {
 }
 function continuationWorker(record: StoredWorker | undefined): record is ContinuationWorker {
   return Boolean(record && record.state === 'terminal' && !record.cancellationRequested && record.persistedSession
-    && record.owner && record.modelId && Number.isInteger(record.modelFactVersion) && (record.modelFactVersion ?? 0) > 0 && record.dataPolicy);
+    && record.owner && record.modelId && record.modelProvider && record.modelApi && Number.isInteger(record.modelFactVersion) && (record.modelFactVersion ?? 0) > 0 && record.dataPolicy);
 }
 function spawnProvenance(command: Command): SpawnProvenance {
   const value = command.payload as Partial<SpawnProvenance>;
-  if (typeof value.modelId !== 'string' || typeof value.inputDigest !== 'string' || typeof value.baseSha !== 'string'
+  if (typeof value.modelId !== 'string' || typeof value.modelProvider !== 'string' || typeof value.modelApi !== 'string' || typeof value.inputDigest !== 'string' || typeof value.baseSha !== 'string'
     || !Number.isInteger(value.modelFactVersion) || (value.modelFactVersion ?? 0) < 1 || typeof value.dataPolicy !== 'string') {
     throw new Error('worker spawn command omits immutable launch provenance');
   }
@@ -109,12 +109,12 @@ export class PiWorkerFleet {
         }
         const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
         const worker = await this.binding.start(admitted.command, workspace);
-        if (worker.modelIdentity.modelId !== provenance.modelId) {
+        if (worker.modelIdentity.modelId !== provenance.modelId || worker.modelIdentity.provider !== provenance.modelProvider || worker.modelIdentity.api !== provenance.modelApi) {
           worker.dispose();
           throw new Error('Pi runtime model does not match the admitted worker model');
         }
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
-          workspace: workspace.root, owner: workspace.owner, modelId: provenance.modelId, modelFactVersion: provenance.modelFactVersion, dataPolicy: provenance.dataPolicy, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+          workspace: workspace.root, owner: workspace.owner, modelId: provenance.modelId, modelProvider: provenance.modelProvider, modelApi: provenance.modelApi, modelFactVersion: provenance.modelFactVersion, dataPolicy: provenance.dataPolicy, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
         this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },
@@ -161,9 +161,9 @@ export class PiWorkerFleet {
     const workerId = `worker-${randomUUID()}`;
     const attemptId = `attempt-${workerId}`;
     const command = this.binding.steerCommand(validated, workerId, predecessor, attemptId, context);
-    const payload = command.payload as { workerId?: unknown; attemptId?: unknown; predecessorWorkerId?: unknown; inputDigest?: unknown; modelId?: unknown; modelFactVersion?: unknown; dataPolicy?: unknown };
+    const payload = command.payload as { workerId?: unknown; attemptId?: unknown; predecessorWorkerId?: unknown; inputDigest?: unknown; modelId?: unknown; modelProvider?: unknown; modelApi?: unknown; modelFactVersion?: unknown; dataPolicy?: unknown };
     if (payload.workerId !== workerId || payload.attemptId !== attemptId || payload.predecessorWorkerId !== predecessor.workerId || payload.inputDigest !== digest(validated)
-      || payload.modelId !== predecessor.modelId || payload.modelFactVersion !== predecessor.modelFactVersion || payload.dataPolicy !== predecessor.dataPolicy) {
+      || payload.modelId !== predecessor.modelId || payload.modelProvider !== predecessor.modelProvider || payload.modelApi !== predecessor.modelApi || payload.modelFactVersion !== predecessor.modelFactVersion || payload.dataPolicy !== predecessor.dataPolicy) {
       throw new Error('worker steer command does not bind successor, predecessor, and immutable validated inputs');
     }
     const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId, attemptId);
@@ -178,9 +178,9 @@ export class PiWorkerFleet {
         if (config.destination !== predecessor.workspace || config.baseSha !== validated.expectedHead || attempt.baseSha !== validated.expectedHead) throw new Error('continuation does not preserve the verified workspace head');
         const workspace = this.binding.workspaceManager.transfer(oldWorkspace, oldWorkspace.owner.generation, config.owner);
         const worker = await this.binding.rehydrate!(admitted.command, workspace, predecessor.persistedSession!);
-        if (worker.sessionId !== predecessor.sessionId || worker.modelIdentity.modelId !== predecessor.modelId) { worker.dispose(); throw new Error('continuation native identity changed'); }
+        if (worker.sessionId !== predecessor.sessionId || worker.modelIdentity.modelId !== predecessor.modelId || worker.modelIdentity.provider !== predecessor.modelProvider || worker.modelIdentity.api !== predecessor.modelApi) { worker.dispose(); throw new Error('continuation native identity changed'); }
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
-          workspace: workspace.root, owner: workspace.owner, modelId: predecessor.modelId, modelFactVersion: predecessor.modelFactVersion, dataPolicy: predecessor.dataPolicy, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+          workspace: workspace.root, owner: workspace.owner, modelId: predecessor.modelId, modelProvider: predecessor.modelProvider, modelApi: predecessor.modelApi, modelFactVersion: predecessor.modelFactVersion, dataPolicy: predecessor.dataPolicy, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
         this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },
@@ -298,7 +298,7 @@ export class PiWorkerFleet {
     const live = this.#live.get(workerId);
     if (!record) throw new Error('unknown worker');
     this.#records.set(workerId, record);
-    const { persistedSession: _privateSession, owner: _privateOwner, modelId: _privateModelId, modelFactVersion: _privateModelFactVersion, dataPolicy: _privateDataPolicy, ...publicRecord } = record;
+    const { persistedSession: _privateSession, owner: _privateOwner, modelId: _privateModelId, modelProvider: _privateModelProvider, modelApi: _privateModelApi, modelFactVersion: _privateModelFactVersion, dataPolicy: _privateDataPolicy, ...publicRecord } = record;
     if (!live) return { ...publicRecord, live: 'unknown', state: record.state === 'terminal' ? 'terminal' : 'unknown', evidenceRefs: record.evidenceRefs };
     // Liveness is an observation of the local process only; durable outcome,
     // cancellation intent and evidence remain authoritative for the worker.

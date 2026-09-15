@@ -3,6 +3,8 @@ import test from 'node:test';
 import type { HostSnapshot } from '../../src/host/index.js';
 import { createHostSnapshotSource, projectHostSnapshot } from '../../src/operator/host-source.js';
 import type { GitHubMapSnapshot } from '../../src/tracker/index.js';
+import { createOperatorServer, listenOperatorServer } from '../../src/operator/server.js';
+import { operatorCli, readOperatorApi } from '../../src/operator/cli.js';
 
 const now = '2026-09-15T10:00:00.000Z';
 const host: HostSnapshot = {
@@ -44,4 +46,19 @@ test('tracker outage leaves durable host view readable and source refreshes on e
   const source = createHostSnapshotSource({ host: { async snapshot() { reads++; return host; } }, runId: 'run', evidenceMode: 'fixture', now: () => now,
     map: { async snapshot() { throw new Error('offline'); } } });
   assert.equal((await source.read()).map, null); await source.read(); assert.equal(reads, 2);
+});
+
+test('CLI reads identical host projection through loopback API and refuses remote origins', async () => {
+  const snapshot = projectHostSnapshot(host, map, now, 'fixture');
+  const server = createOperatorServer({ read: async () => snapshot });
+  const { port } = await listenOperatorServer(server);
+  try {
+    const origin = `http://127.0.0.1:${port}`;
+    assert.deepEqual(JSON.parse(await operatorCli(['--url', origin, '--json'])), snapshot);
+    const html = await fetch(origin).then((response) => response.text());
+    assert.match(html, /run/); assert.match(html, /expired/); assert.match(html, /fixture/);
+    await assert.rejects(readOperatorApi('https://example.invalid'), /explicit/);
+    await assert.rejects(readOperatorApi(`http://127.0.0.1:${port}/other`), /explicit/);
+    await assert.rejects(operatorCli(['--url', origin, '--write']), /Usage/);
+  } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });

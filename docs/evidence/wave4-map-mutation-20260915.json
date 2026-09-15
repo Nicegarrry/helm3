@@ -1,0 +1,31 @@
+{
+  "receipt": {
+    "commandId": "map-wave4-a7c66762-aed5-4ca4-acf7-36fc38848ada",
+    "commandHash": "sha256:0da2b776cf5c88b7da823121dae067673db6af7a1215491f964615e0aee2c4f1",
+    "action": "update",
+    "state": "succeeded",
+    "target": {
+      "repository": "Nicegarrry/helm3",
+      "number": 1,
+      "revision": "2026-09-15T12:23:32Z",
+      "state": "OPEN",
+      "url": "https://github.com/Nicegarrry/helm3/issues/1"
+    },
+    "observedAt": "2026-09-15T12:23:33.362Z",
+    "concurrency": "read_before_write_not_atomic"
+  },
+  "observation": {
+    "commandId": "map-wave4-a7c66762-aed5-4ca4-acf7-36fc38848ada",
+    "effectId": "map-wave4-a7c66762-aed5-4ca4-acf7-36fc38848ada",
+    "state": "succeeded",
+    "source": "github-map-mutator",
+    "observedAt": "2026-09-15T12:23:33.364Z",
+    "evidenceRefs": [
+      "local:map-receipt:map-wave4-a7c66762-aed5-4ca4-acf7-36fc38848ada"
+    ]
+  },
+  "commandImmutableHash": "sha256:0da2b776cf5c88b7da823121dae067673db6af7a1215491f964615e0aee2c4f1",
+  "bodyHandling": "Preserved pre-existing issue body and appended dated progress record",
+  "scope": "Nicegarrry/helm3#1",
+  "closure": false
+}

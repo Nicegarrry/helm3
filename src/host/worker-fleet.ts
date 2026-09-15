@@ -255,7 +255,11 @@ export class PiWorkerFleet {
       && (item.command.payload as { predecessorWorkerId?: unknown }).predecessorWorkerId === predecessor.workerId);
     if (prior || this.#forkSources.has(predecessor.workerId)) throw new Error('worker already has a durable fork attempt');
     this.#forkSources.add(predecessor.workerId);
-    const workerId = `worker-${randomUUID()}`; const attemptId = `attempt-${workerId}`;
+    // A source has at most one fork identity.  This turns concurrent fleet
+    // instances into Core idempotency of the same durable command, rather
+    // than a check-then-create race between independently random children.
+    const forkIdentity = digest({ runId: context.runId, predecessorWorkerId: predecessor.workerId, sessionId: predecessor.sessionId, expectedHead: validated.expectedHead }).slice('sha256:'.length, 'sha256:'.length + 32);
+    const workerId = `worker-fork-${forkIdentity}`; const attemptId = `attempt-${workerId}`;
     const command = this.binding.forkCommand(validated, workerId, predecessor, attemptId, context);
     const payload = command.payload as { workerId?: unknown; attemptId?: unknown; predecessorWorkerId?: unknown; inputDigest?: unknown; modelId?: unknown; modelProvider?: unknown; modelApi?: unknown; modelFactVersion?: unknown; dataPolicy?: unknown; sourceHistoryHash?: unknown; sourceBranchDigest?: unknown; sourceSessionId?: unknown };
     if (payload.workerId !== workerId || payload.attemptId !== attemptId || payload.predecessorWorkerId !== predecessor.workerId || payload.inputDigest !== digest(validated)
@@ -461,15 +465,21 @@ export class PiWorkerFleet {
         // than an earlier runner-failure unknown.  Keep both evidence chains
         // and cancellation intent; neither record is overwritten.
         const winner = terminalKnown ?? stopConfirmed ?? terminalUnknown ?? stopUnknown;
-        if (winner) return Object.freeze({ ...winner,
+        if (winner) {
+          if (winner.state === 'fork_ready' && command?.status !== 'succeeded') return Object.freeze({ ...winner, state: 'unknown' as const });
+          return Object.freeze({ ...winner,
           evidenceRefs: Object.freeze([...new Set([...(terminalKnown?.evidenceRefs ?? []), ...(terminalUnknown?.evidenceRefs ?? []), ...(stopConfirmed?.evidenceRefs ?? []), ...(stopUnknown?.evidenceRefs ?? [])])]),
           cancellationRequested: Boolean(terminalKnown?.cancellationRequested || terminalUnknown?.cancellationRequested || stopConfirmed?.cancellationRequested || stopUnknown?.cancellationRequested),
         });
+        }
       } catch { return undefined; }
     }
     const ref = command?.observations.flatMap((entry) => entry.evidenceRefs).find((entry) => entry.includes('"kind":"effect"'));
     if (!ref) return undefined;
-    try { return storedWorker(JSON.parse(await this.binding.host.readFleetEffect(runId, ref))); } catch { return undefined; }
+    try {
+      const record = storedWorker(JSON.parse(await this.binding.host.readFleetEffect(runId, ref)));
+      return record?.state === 'fork_ready' && command?.status !== 'succeeded' ? Object.freeze({ ...record, state: 'unknown' as const }) : record;
+    } catch { return undefined; }
   }
 
   async inspect(context: HelmToolExecutionContext, workerId: string): Promise<WorkerInspect> {
@@ -479,7 +489,7 @@ export class PiWorkerFleet {
     if (!record) throw new Error('unknown worker');
     this.#records.set(workerId, record);
     const { persistedSession: _privateSession, owner: _privateOwner, modelId: _privateModelId, modelProvider: _privateModelProvider, modelApi: _privateModelApi, modelFactVersion: _privateModelFactVersion, dataPolicy: _privateDataPolicy, ...publicRecord } = record;
-    if (!live) return { ...publicRecord, live: 'unknown', state: record.state === 'terminal' ? 'terminal' : 'unknown', evidenceRefs: record.evidenceRefs };
+    if (!live) return { ...publicRecord, live: 'unknown', state: record.state === 'terminal' || record.state === 'fork_ready' ? record.state : 'unknown', evidenceRefs: record.evidenceRefs };
     // Liveness is an observation of the local process only; durable outcome,
     // cancellation intent and evidence remain authoritative for the worker.
     return { ...publicRecord, state: record.state === 'ready' && live.worker.isActive ? 'running' : record.state, live: 'known', contextOccupancy: live.worker.contextOccupancy, evidenceRefs: record.evidenceRefs };

@@ -8,8 +8,9 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { z } from 'zod/v3';
 import type { Attempt, Command } from '../../src/contracts/index.js';
+import type { KernelKind } from '../../src/core/index.js';
 import { openHost } from '../../src/host/index.js';
-import { createFleetIndependentReviewService } from '../../src/host/review.js';
+import { createFleetIndependentReviewService, type ReviewDurabilityStore } from '../../src/host/review.js';
 import { JournalReviewDurabilityStore } from '../../src/host/review-store.js';
 import { createHostReviewToolRegistry } from '../../src/host/review-tools.js';
 import { PiWorkerFleet, type WorkerSpawnInput } from '../../src/host/worker-fleet.js';
@@ -39,12 +40,14 @@ test('native fleet builder commits a new head and review.request starts an isola
     const spawnPayload = z.object({ workerId: z.string(), attemptId: z.string(), modelId: z.enum(['builder', 'reviewer']), modelProvider: z.literal('faux'), modelApi: z.string(), role: z.enum(['builder', 'reviewer']), mode: z.enum(['worker', 'review-readonly']).optional(), inputDigest: z.string(), baseSha: z.string(), modelFactVersion: z.literal(1), dataPolicy: z.literal('public-only') }).strict();
     const modelPayload = z.object({ effectId: z.string(), kind: z.literal('model.request'), upperBound: z.number().positive() }).strict();
     const writePayload = z.object({ effectId: z.string(), kind: z.literal('workspace.write') }).strict();
-    plane = await openHost({ stateDirectory: join(root, 'host'), now: () => stamp, kinds: {
+    const hostStateDirectory = join(root, 'host');
+    const hostKinds: Readonly<Record<string, KernelKind>> = {
       'worker.spawn': { payloadSchema: spawnPayload, modelSelection: value => { const payload = spawnPayload.parse(value); return { modelId: payload.modelId, role: payload.role, requiredCapabilities: [payload.role === 'builder' ? 'build' : 'review'], dataClassification: 'public' as const }; } },
       'worker.stop': { payloadSchema: z.object({ workerId: z.string() }).strict() },
       'pi.model': { payloadSchema: modelPayload, resourceRequest: value => ({ poolId: 'offline-usd', unit: 'usd', upperBound: modelPayload.parse(value).upperBound, consumer: 'worker' }) },
       'pi.write': { payloadSchema: writePayload },
-    } });
+    };
+    plane = await openHost({ stateDirectory: hostStateDirectory, now: () => stamp, kinds: hostKinds });
     plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['worker.spawn', 'worker.stop', 'pi.model', 'pi.write'], expiresAt: later, maxConcurrency: 5, maxAttemptsPerNode: 5, poolLimits: [{ poolId: 'offline-usd', unit: 'usd', limit: 10 }], protectedReserves: [] });
     plane.recordAutonomyLease({ leaseId: 'auto', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['worker.spawn', 'worker.stop', 'pi.model', 'pi.write'], issuedAt: stamp, expiresAt: later, maxConcurrency: 5, maxAttemptsPerNode: 5, poolLimits: [{ poolId: 'offline-usd', unit: 'usd', limit: 10 }], protectedReserves: [] });
     plane.recordModelFact({ modelId: 'builder', provider: 'faux', poolId: 'offline-usd', enabled: true, capabilities: ['build'], roles: ['builder'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: stamp });
@@ -86,7 +89,23 @@ test('native fleet builder commits a new head and review.request starts an isola
       await assert.rejects(fleet.spawn(context, { objectiveRef, acceptanceRef, contextRefs: [codeRef], modelId: 'reviewer', role: 'reviewer', reviewConstraint }), /worker setup was not durably observed/);
       assert.equal(faux.state.callCount, callsBeforeRejectedReview, 'a foreign repository or stale review head is refused before native model dispatch');
     }
-    const service = createFleetIndependentReviewService({ host: plane, fleet, workspaceManager: workspace, context, authorize: async (source, modelId) => { assert.equal(source.family, 'fable'); assert.equal(modelId, 'reviewer'); }, durability: new JournalReviewDurabilityStore(artifacts.journalForTrustedPi(), context.runId) });
+    const reviewStore = new JournalReviewDurabilityStore(artifacts.journalForTrustedPi(), context.runId);
+    let releaseTerminalAppend!: () => void;
+    const terminalAppendBarrier = new Promise<void>(resolve => { releaseTerminalAppend = resolve; });
+    let terminalAppendStarted!: () => void;
+    const terminalAppendReached = new Promise<void>(resolve => { terminalAppendStarted = resolve; });
+    const durability: ReviewDurabilityStore = {
+      reopen: key => reviewStore.reopen(key),
+      prepare: record => reviewStore.prepare(record),
+      append: async record => {
+        if (record.state === 'terminal') {
+          terminalAppendStarted();
+          await terminalAppendBarrier;
+        }
+        await reviewStore.append(record);
+      },
+    };
+    const service = createFleetIndependentReviewService({ host: plane, fleet, workspaceManager: workspace, context, authorize: async (source, modelId) => { assert.equal(source.family, 'fable'); assert.equal(modelId, 'reviewer'); }, durability });
     const reviewRegistry = createHostReviewToolRegistry({ context, host: plane, authorize: async () => undefined, brief: { read: async () => ({ text: 'brief', source: 'fixture', observedAt: stamp }) }, map: { snapshot: async () => ({ source: { repository: 'repo', parentIssue: 1 }, observedAt: stamp, completeness: 'complete' as const, nodes: [], frontier: [], incomplete: [] }) }, economy: { snapshot: () => ({ pools: [], models: [], quota: [] }) } }, service);
     const request = { sourceWorkerId: builderLaunch.workerId, expectedHead: currentHead, objectiveRef, acceptanceRef, contextRefs: [codeRef], reviewerModelId: 'reviewer' };
     const reviewTool = reviewRegistry.all().find(tool => tool.name === 'review.request')!;
@@ -97,12 +116,6 @@ test('native fleet builder commits a new head and review.request starts an isola
     const fable = new FableDriver(driverArtifacts, fableBridge, { assertCurrent: async () => undefined }, { capture: async () => ({ recoveryStateRef: 'driver-recovery' }), restore: async () => 'driver-recovery' }, { env: { PATH: process.env.PATH ?? '' } }, { tool: ((_name: string, _description: string, _input: unknown, handler: (input: Record<string, unknown>) => Promise<unknown>) => ({ handler })) as never, createSdkMcpServer: ((input: unknown) => { fableHandler = ((input as { tools?: Array<{ handler(input: Record<string, unknown>): Promise<unknown> }> }).tools)?.[0]?.handler; return {} as never; }) as never, query: (() => (async function* () { await new Promise(resolve => setImmediate(resolve)); fableResult = await fableHandler!(request) as typeof fableResult; yield { type: 'result', subtype: 'success', is_error: false }; })()) as never });
     const fableSession = await fable.start({ runId: context.runId, contextRefs: [], mode: 'primary' }); await fable.invoke({ sessionId: fableSession.sessionId, objectiveRef, contextRefs: [] });
     assert.ok(fableHandler, 'Fable registered the real review request transport'); assert.equal(fableResult?.structuredContent?.state, 'succeeded', JSON.stringify({ fableResult, snapshot: await plane.snapshot('run') })); if (fableResult?.structuredContent?.state !== 'succeeded') throw new Error('Fable review request was refused');
-    const astraBridge = await AstraLoopbackMcpTransport.open({ registry: reviewRegistry, guard: { assertCurrent: async () => undefined }, session: context });
-    try {
-      const [{ Client }, { StreamableHTTPClientTransport }, { CallToolResultSchema }] = await Promise.all([import('@modelcontextprotocol/sdk/client/index.js'), import('@modelcontextprotocol/sdk/client/streamableHttp.js'), import('@modelcontextprotocol/sdk/types.js')]);
-      const [, token] = Object.entries(astraBridge.env)[0]!; const transport = new StreamableHTTPClientTransport(new URL(astraBridge.config.mcp_servers.helm.url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }); const client = new Client({ name: 'native-review', version: '1' }); await client.connect(transport);
-      try { const result = await client.callTool({ name: 'review.request', arguments: request }, CallToolResultSchema); assert.equal((result.structuredContent as { state: string }).state, 'succeeded', 'Astra loopback invokes the same review request registry'); } finally { await transport.close(); }
-    } finally { await astraBridge.close(); }
     const launch = fableResult.structuredContent.value as Awaited<ReturnType<typeof service.request>>;
     assert.notEqual(launch.reviewer.attemptId, builderLaunch.attemptId); assert.notEqual(launch.reviewer.sessionId, builderLaunch.sessionId); assert.ok(launch.reviewer.spawnCommandId); assert.equal(launch.reviewer.modelId, 'reviewer'); assert.equal(launch.reviewer.family, 'terra'); assert.equal(launch.reviewer.poolId, 'offline-usd');
     const constraint = spawnInputs.get(launch.reviewer.workerId!)?.reviewConstraint; assert.equal(await realpath(constraint!.repository), await realpath(repo)); assert.equal(constraint!.expectedHead, currentHead); assert.equal(constraint!.mode, 'review-readonly', 'review adapter passes the source repository and verified head into the private fleet constraint');
@@ -111,6 +124,25 @@ test('native fleet builder commits a new head and review.request starts an isola
     assert.match(prompts.get(launch.reviewer.workerId!)!, /Review the pinned change\./); assert.match(reviewerRequest, /Review the pinned change\./); assert.match(reviewerRequest, /Report a structured finding\./); assert.match(reviewerRequest, /review-target\.ts/); assert.ok(!reviewerRequest.includes(builderResult) && !reviewerRequest.includes('Created the review target.'), 'the actual reviewer request excludes builder session history');
     await assert.rejects(workspace.read(workspace.reservation(reviewed.workspace), 'must-not-write.ts'), /ENOENT/);
     const access = accessByWorker.get(launch.reviewer.workerId!)!; assert.throws(() => access.prepare('fourth-request', reviewer, { messages: [] }, undefined), /count cap/); assert.ok((await plane.snapshot('run')).reservations.every(entry => entry.state === 'settled'));
-    await new Promise(resolve => setImmediate(resolve)); const terminal = await service.request(request); assert.equal(terminal.state, 'terminal'); assert.equal(terminal.requestedHead, currentHead); assert.ok(terminal.outcome?.rawEventRefs.length); assert.ok(terminal.outcome?.resultRef); assert.notEqual(terminal.source.attemptId, terminal.reviewer.attemptId);
+    await terminalAppendReached;
+    const callsBeforeRecovery = faux.state.callCount;
+    const fleetBinding = (fleet as unknown as { binding: ConstructorParameters<typeof PiWorkerFleet>[0] }).binding;
+    plane.close(); workspace.close(); releaseTerminalAppend();
+    plane = await openHost({ stateDirectory: hostStateDirectory, now: () => stamp, kinds: hostKinds });
+    workspace = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
+    const restartedFleet = new PiWorkerFleet({ ...fleetBinding, host: plane, workspaceManager: workspace });
+    const recoveredStore = new JournalReviewDurabilityStore(plane.artifactsFor(context).journalForTrustedPi(), context.runId);
+    const recovered = createFleetIndependentReviewService({ host: plane, fleet: restartedFleet, workspaceManager: workspace, context, authorize: async () => { throw new Error('reconciliation must not require source authorization'); }, durability: recoveredStore });
+    const terminal = await recovered.reconcile(launch.reviewId, launch.idempotencyKey);
+    assert.equal(faux.state.callCount, callsBeforeRecovery, 'reconciliation harvests the terminal journal without a new model request');
+    assert.equal(terminal.state, 'terminal'); assert.equal(terminal.requestedHead, currentHead); assert.ok(terminal.outcome?.rawEventRefs.length); assert.ok(terminal.outcome?.resultRef); assert.ok(terminal.outcome?.readonlyObservation.beforeRef); assert.ok(terminal.outcome?.readonlyObservation.afterRef); assert.notEqual(terminal.source.attemptId, terminal.reviewer.attemptId);
+    const recoveredForTransport = createFleetIndependentReviewService({ host: plane, fleet: restartedFleet, workspaceManager: workspace, context, authorize: async () => undefined, durability: recoveredStore });
+    const recoveredRegistry = createHostReviewToolRegistry({ context, host: plane, authorize: async () => undefined, brief: { read: async () => ({ text: 'brief', source: 'fixture', observedAt: stamp }) }, map: { snapshot: async () => ({ source: { repository: 'repo', parentIssue: 1 }, observedAt: stamp, completeness: 'complete' as const, nodes: [], frontier: [], incomplete: [] }) }, economy: { snapshot: () => ({ pools: [], models: [], quota: [] }) } }, recoveredForTransport);
+    const astraBridge = await AstraLoopbackMcpTransport.open({ registry: recoveredRegistry, guard: { assertCurrent: async () => undefined }, session: context });
+    try {
+      const [{ Client }, { StreamableHTTPClientTransport }, { CallToolResultSchema }] = await Promise.all([import('@modelcontextprotocol/sdk/client/index.js'), import('@modelcontextprotocol/sdk/client/streamableHttp.js'), import('@modelcontextprotocol/sdk/types.js')]);
+      const [, token] = Object.entries(astraBridge.env)[0]!; const transport = new StreamableHTTPClientTransport(new URL(astraBridge.config.mcp_servers.helm.url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }); const client = new Client({ name: 'native-review', version: '1' }); await client.connect(transport);
+      try { const result = await client.callTool({ name: 'review.request', arguments: request }, CallToolResultSchema); assert.equal((result.structuredContent as { state: string }).state, 'succeeded', 'Astra loopback invokes the recovered review request registry'); } finally { await transport.close(); }
+    } finally { await astraBridge.close(); }
   } finally { await Promise.all(workers.map(async worker => { if (worker.isActive) await worker.stopLocal(); await new Promise(resolve => setImmediate(resolve)); if (!worker.isActive) worker.dispose(); })); plane?.close(); workspace?.close(); await rm(root, { recursive: true, force: true }); }
 });

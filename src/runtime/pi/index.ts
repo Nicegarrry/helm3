@@ -36,6 +36,11 @@ export type PiWorkerInput = Readonly<{
   /** Trusted host setting. The explicit default is forwarded to Pi rather than relying on its implicit default. */
   thinking?: PiThinkingPolicy;
 }>;
+/**
+ * Host-only continuation evidence.  A persisted Pi transcript is useful only
+ * when the host can prove that reopening it preserves this exact native ID.
+ */
+export type PiPersistedSession = Readonly<{ sessionId: string; sessionFile: string }>;
 /** Caller-selected immutable evidence only; this API never discovers transcripts or tracker state. */
 export type PiCheckpointEvidence = Readonly<{ sourceIdentity: string; raw: RawArtifactRef }>;
 export type PiManualCheckpoint = Readonly<{ objective: PiCheckpointEvidence; acceptance: PiCheckpointEvidence; brief: PiCheckpointEvidence; map: PiCheckpointEvidence; decisions: readonly PiCheckpointEvidence[]; handoffs: readonly PiCheckpointEvidence[] }>;
@@ -87,6 +92,15 @@ export class PiNativeWorker {
   get modelIdentity(): Readonly<{ modelId: string; provider: string; api: string }> {
     return Object.freeze({ modelId: this.input.model.id, provider: this.input.model.provider, api: this.input.model.api });
   }
+  /**
+   * A durable host record may retain this identity after this wrapper is
+   * disposed.  It is deliberately unavailable until Pi has a session file.
+   */
+  get persistedSession(): PiPersistedSession {
+    const stats = this.session.getSessionStats();
+    if (!stats.sessionFile || !stats.sessionId) throw new Error('Pi has not persisted this session yet');
+    return Object.freeze({ sessionId: stats.sessionId, sessionFile: stats.sessionFile });
+  }
 
   static async start(input: PiWorkerInput): Promise<PiNativeWorker> {
     input.workspaceManager.assertOwner(input.workspace, input.owner);
@@ -95,6 +109,30 @@ export class PiNativeWorker {
     const path = relative(input.workspace.root, stateRoot);
     if (!isAbsolute(path) && path !== '..' && !path.startsWith('../')) throw new Error('Pi state must be outside the writable worktree');
     const worker = new PiNativeWorker({ ...input, stateRoot }); await worker.initialize(); return worker;
+  }
+  /**
+   * Rehydrate a persisted idle Pi session into a new wrapper.  The caller
+   * supplies a fresh command/attempt/authority binding; this method never
+   * carries authority from the earlier wrapper across an invocation boundary.
+   */
+  static async rehydrate(input: PiWorkerInput, persisted: PiPersistedSession): Promise<PiNativeWorker> {
+    if (!persisted.sessionId.trim() || !persisted.sessionFile.trim()) throw new Error('Pi persisted session identity is required');
+    input.workspaceManager.assertOwner(input.workspace, input.owner);
+    await mkdir(input.stateRoot, { recursive: true, mode: 0o700 });
+    const stateRoot = await realpath(input.stateRoot);
+    const statePath = relative(input.workspace.root, stateRoot);
+    if (!isAbsolute(statePath) && statePath !== '..' && !statePath.startsWith('../')) throw new Error('Pi state must be outside the writable worktree');
+    const sessionRoot = await realpath(join(stateRoot, 'sessions'));
+    const sessionFile = await realpath(persisted.sessionFile);
+    const sessionPath = relative(sessionRoot, sessionFile);
+    if (isAbsolute(sessionPath) || sessionPath === '..' || sessionPath.startsWith('../')) throw new Error('Pi persisted session is outside the trusted state root');
+    const worker = new PiNativeWorker({ ...input, stateRoot });
+    await worker.initialize(sessionFile);
+    if (worker.sessionId !== persisted.sessionId) {
+      worker.dispose();
+      throw new Error('reopened Pi session identity changed');
+    }
+    return worker;
   }
   private assertActive(): void {
     if (this.eventError) throw new Error('Pi evidence persistence failed');

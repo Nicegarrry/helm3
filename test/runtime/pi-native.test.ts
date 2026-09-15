@@ -70,7 +70,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     assert.equal(modelEffects, 3, 'every native turn, including the automatic post-tool turn and correction, crosses the authority guard');
     assert.equal(await readFile(join(workspace.root, 'result.txt'), 'utf8'), 'native Pi wrote this\n');
     assert.ok(outcome.artifacts.length >= 2, 'native event stream and envelope are durable artifacts');
-    assert.equal(worker.contextOccupancy.state, 'known', 'faux session stats expose observed occupancy without inventing a window');
+    assert.equal(worker.contextOccupancy.state, 'known', 'the native SDK exposes estimated current occupancy');
     const originalSession = worker.sessionId;
     const reopened = await worker.reopen(); assert.equal(reopened.sessionId, originalSession);
     assert.equal(reopened.contextOccupancy.state, 'known', 'reopen retains read-only occupancy inspection');

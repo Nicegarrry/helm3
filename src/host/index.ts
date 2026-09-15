@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Attempt, AutonomyLease, Command, Observation, OrchestratorLease, Precondition, RawArtifactRef } from '../contracts/index.js';
+import { commandSchema, type Attempt, type AutonomyLease, type Command, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef } from '../contracts/index.js';
 import {
   openKernel,
   type CommandRecord,
@@ -13,6 +13,15 @@ import {
   type TrustedExecutor,
 } from '../core/index.js';
 import { ArtifactJournal, type ArtifactMetadata } from '../journal/index.js';
+import {
+  EventDrivenSupervisor,
+  EventSupervisor,
+  planRecovery,
+  type RecoveryFacts,
+  type SupervisorLog,
+  type SupervisorProcessInput,
+  type SupervisorProcessResult,
+} from '../supervisor/index.js';
 import type {
   HelmToolExecutionContext,
   InvocationOutcome,
@@ -60,6 +69,15 @@ function validRefs(value: unknown): value is readonly string[] {
 export interface HostRuntime {
   createEffect(input: Readonly<{ command: Command; artifacts: HostArtifactStore }>): Promise<KernelEffect> | KernelEffect;
 }
+
+/**
+ * Host-owned recovery observation capability. External event submitters never
+ * supply these reads, so they cannot turn a callback into retry authority.
+ */
+export type SupervisorObservationRuntime = Readonly<{
+  observeRecovery(command: Command): Promise<RecoveryFacts>;
+  readFact(precondition: Precondition): Promise<Observation<boolean>>;
+}>;
 
 /**
  * Structural seam for the existing PiNativeWorker lifecycle. Production code
@@ -136,6 +154,7 @@ export type HostOptions = Readonly<{
   kinds: Readonly<Record<string, KernelKind>>;
   now?: () => string;
   runtime?: HostRuntime;
+  supervisorRuntime?: SupervisorObservationRuntime;
 }>;
 
 export type DriverStartAuthority = Readonly<{
@@ -145,6 +164,14 @@ export type DriverStartAuthority = Readonly<{
   expectedEpoch: number;
   issuedAt: string;
   expiresAt: string;
+}>;
+
+/** Provider-free host entry point for explicit trusted supervisor observations. */
+export type HostSupervisor = Readonly<{
+  /** Narrow Log capability for status projections and trusted delivery adapters. */
+  log(): SupervisorLog;
+  /** Serially records an observation, persists current wakes, and may run one bounded retry. */
+  process(input: SupervisorProcessInput): Promise<SupervisorProcessResult>;
 }>;
 
 export class HostArtifactStore implements OrchestratorArtifacts {
@@ -211,17 +238,21 @@ export class HostArtifactStore implements OrchestratorArtifacts {
 }
 
 export class HostControlPlane {
+  private supervisorService?: HostSupervisor;
   private constructor(
     private readonly kernel: ReturnType<typeof openKernel>,
     private readonly journal: ArtifactJournal,
-    private readonly runtime?: HostRuntime,
+  private readonly runtime?: HostRuntime,
+    private readonly supervisorRuntime?: SupervisorObservationRuntime,
+    private readonly now: () => string = () => new Date().toISOString(),
   ) {}
 
   static async open(options: HostOptions): Promise<HostControlPlane> {
     await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
-    const kernel = openKernel({ databasePath: join(options.stateDirectory, 'kernel.sqlite'), kinds: options.kinds, now: options.now });
+    const now = options.now ?? (() => new Date().toISOString());
+    const kernel = openKernel({ databasePath: join(options.stateDirectory, 'kernel.sqlite'), kinds: options.kinds, now });
     const journal = await ArtifactJournal.open({ root: join(options.stateDirectory, 'journal'), hostPolicy: { allowSensitiveWrites: true } });
-    return new HostControlPlane(kernel, journal, options.runtime);
+    return new HostControlPlane(kernel, journal, options.runtime, options.supervisorRuntime, now);
   }
 
   /** The caller must have already recorded the human grant and autonomy lease. */
@@ -253,6 +284,94 @@ export class HostControlPlane {
 
   acquireOwnership(lease: OrchestratorLease, expectedEpoch: number): OrchestratorLease {
     return this.kernel.host.acquireOwnership(lease, expectedEpoch);
+  }
+
+  /**
+   * Returns the only supervisor-facing Log surface. It intentionally excludes
+   * authority grants, leases, raw SQLite and provider operations.
+   */
+  supervisorLog(): SupervisorLog {
+    return Object.freeze({
+      appendEvent: this.kernel.host.appendEvent.bind(this.kernel.host),
+      appendOwnedEvent: this.kernel.host.appendOwnedEvent.bind(this.kernel.host),
+      readEvents: this.kernel.host.readEvents.bind(this.kernel.host),
+      assertCurrentOwner: this.kernel.host.assertCurrentOwner.bind(this.kernel.host),
+    });
+  }
+
+  /**
+   * No polling or provider adapter is hidden here. Callers feed explicit
+   * trusted observations; retry effects always traverse kernel admission,
+   * claim and at-effect fresh fact reads.
+   */
+  createSupervisor(): HostSupervisor {
+    if (this.supervisorService) return this.supervisorService;
+    const service = new EventDrivenSupervisor(new EventSupervisor(this.supervisorLog(), this.now), {
+      retry: async (input) => {
+        // Kernel's immutable admission is still authoritative for a new
+        // command. On replay, check exact durable bytes before returning the
+        // old command so SQLite NULL representation cannot turn an already
+        // terminal supervisor command into a second admission attempt.
+        const proposed = commandSchema.parse(input.intent);
+        if (proposed.origin !== 'supervisor') throw new Error('trusted supervisor accepts only supervisor-origin retry commands');
+        if (proposed.runId !== input.signal.runId || proposed.scope.mapNodeId !== input.signal.mapNodeId) throw new Error('supervisor signal and retry command must bind the same run and map node');
+        const canonical = { ...proposed, actorId: 'trusted-supervisor' };
+        const existing = this.kernel.kernel.getCommand(proposed.commandId);
+        if (existing) {
+          if (JSON.stringify(existing.command) !== JSON.stringify(canonical)) throw new Error('idempotency collision has different immutable command bytes');
+          if (existing.status === 'queued') return this.executeSupervisorRetry(existing, input.executor, input.claimExpiresAt);
+          if (existing.status === 'claimed' || existing.status === 'effect_started' || existing.status === 'observing' || existing.status === 'unknown') {
+            return { decision: { action: 'wake', reason: `retry command ${existing.status} requires reconciliation` }, status: 'reconcile', record: existing };
+          }
+          return { decision: { action: 'observe', reason: `retry command is already ${existing.status}` }, status: 'terminal', record: existing };
+        }
+        if (!this.supervisorRuntime) throw new Error('host has no trusted supervisor recovery observer');
+        const record = this.kernel.host.admit(proposed, { actorId: 'trusted-supervisor', allowedOrigins: ['supervisor'] });
+        return this.executeSupervisorRetry(record, input.executor, input.claimExpiresAt);
+      },
+    }, this.now);
+    this.supervisorService = Object.freeze({
+      log: () => this.supervisorLog(),
+      process: async (input) => {
+        const owner = this.kernel.host.readRun(input.signal.runId).ownership;
+        return service.process(input, owner);
+      },
+    });
+    return this.supervisorService;
+  }
+
+  private async recoveryFacts(command: Command): Promise<RecoveryFacts> {
+    if (!this.supervisorRuntime) throw new Error('host has no trusted supervisor recovery observer');
+    const observed = await this.supervisorRuntime.observeRecovery(command);
+    const lease = this.kernel.host.readRun(command.runId).autonomyLeases.find((entry) => entry.lease.leaseId === command.leaseId);
+    if (!lease) throw new Error('retry command autonomy lease is absent from the durable Kernel projection');
+    return { ...observed, leaseIssuedAt: lease.lease.issuedAt, leaseExpiresAt: lease.lease.expiresAt, leaseRevoked: lease.revoked, retryAllowed: true };
+  }
+
+  private async executeSupervisorRetry(record: CommandRecord, executor?: TrustedExecutor, claimExpiresAt?: string) {
+    if (record.status !== 'queued') throw new Error('only queued supervisor commands can begin an effect');
+    if (!executor || !claimExpiresAt) throw new Error('queued supervisor retry requires executor and claim expiry');
+    if (!this.runtime) throw new Error('host has no trusted runtime effect binding');
+    const before = planRecovery(await this.recoveryFacts(record.command), this.now());
+    if (before.action !== 'retry') return { decision: before, status: 'reconcile' as const, record };
+    const effect = await this.runtime.createEffect({ command: record.command, artifacts: new HostArtifactStore(this.journal, () => {
+          const ownership = this.kernel.host.readRun(record.command.runId).ownership;
+          return { runId: record.command.runId, sessionId: ownership?.sessionId ?? 'supervisor-no-owner' };
+    }) });
+    const claim = this.kernel.host.claim(record.command.commandId, executor, claimExpiresAt);
+    const guarded = {
+      effectId: effect.effectId,
+      execute: async (command: Command) => {
+        const atEffect = planRecovery(await this.recoveryFacts(command), this.now());
+        if (atEffect.action !== 'retry') throw new Error(`supervisor retry requires reconciliation at effect: ${atEffect.reason}`);
+        await effect.execute(command);
+      },
+      observe: effect.observe,
+    };
+    const observation = await this.kernel.host.perform(record.command.commandId, claim, executor, (precondition) => this.supervisorRuntime!.readFact(precondition), guarded);
+    return observation.state === 'succeeded'
+      ? { decision: { action: 'retry' as const, reason: 'retry effect observed' }, status: 'performed' as const, record: this.kernel.kernel.getCommand(record.command.commandId) ?? record, observation }
+      : { decision: { action: 'wake' as const, reason: 'retry effect is uncertain and requires reconciliation' }, status: 'reconcile' as const, record: this.kernel.kernel.getCommand(record.command.commandId) ?? record, observation };
   }
 
   private assertSession(context: HelmToolExecutionContext): OrchestratorLease {

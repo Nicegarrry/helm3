@@ -10,6 +10,21 @@ Acknowledgement records handled causes, not successful delivery of a model reque
 
 A retry proposal is not authority or execution: the host must construct a new attempt and admit its deterministic command under freshly checked Kernel lease, resource and concurrency rules before any side effect. The full Pi/Git/worktree/CI observer loop and delivery connection remain integration work. No subjective model-quality failover or fixed workflow graph is introduced.
 
+`HostControlPlane.createSupervisor()` is the provider-free integration point. Its
+single serialized processor accepts signal data and an optional immutable
+`supervisor`-origin retry command, while recovery and precondition readers stay
+in the host-owned `supervisorRuntime` capability. A retry binds the signal run
+and Map node to its command, goes through Kernel admission, claim and
+`perform`, and performs a second recovery observation immediately before the
+runtime effect even when the command has no declared preconditions. Unknown,
+stale or present effects become reconciliation work without replay. Existing
+queued, claimed, in-effect, observing and unknown commands are classified
+separately; only a queued command may later be reconsidered with fresh facts.
+Coalesced primary wakes are durable `supervisor.wake` Log events, fenced by the
+current owner epoch. Provider, Git, CI and Pi observers are deliberately not
+implemented by this slice: an adapter must supply their trusted observations
+before any corresponding mechanical action is possible.
+
 The Log query is bounded at 10,000 correlated events and fails explicitly on overflow. A production cursor/archival mechanism is follow-up work; the query never silently truncates unseen wake causes.
 
 Provider-free tests use a real reopened SQLite Kernel to prove deduplication, coalescing, no quiet wake, scoped runs, durable acknowledgement, takeover fencing including at-append transfer, preservation of later causes, conflicting evidence refusal and lease/provider/effect retry classification.

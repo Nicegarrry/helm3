@@ -438,8 +438,8 @@ export class HostControlPlane {
     const snapshot = this.kernel.host.readRun(input.runId);
     const spawn = snapshot.commands.find((entry) => entry.command.commandId === input.spawnCommandId);
     const payload = spawn?.command.payload as { attemptId?: unknown } | undefined;
-    if (!spawn || spawn.command.kind !== 'worker.spawn' || payload?.attemptId !== input.attemptId) {
-      throw new Error('fleet evidence is not bound to an admitted worker spawn');
+    if (!spawn || (spawn.command.kind !== 'worker.spawn' && spawn.command.kind !== 'worker.steer') || payload?.attemptId !== input.attemptId) {
+      throw new Error('fleet evidence is not bound to an admitted worker invocation');
     }
     const artifacts = new HostArtifactStore(this.journal, () => ({ runId: input.runId, sessionId: `fleet:${input.attemptId}` }));
     return artifacts.writeEffect(`host.worker_fleet.${input.phase}`, input.text, `host-worker-${input.phase}:${input.runId}:${input.attemptId}`);

@@ -692,7 +692,7 @@ class Kernel {
     // A host-created spawn is the one orchestrator command that establishes a
     // worker attempt.  No other orchestrator effect may smuggle itself into a
     // worker lifecycle through the trusted caller capability.
-    if (command.kind === 'worker.spawn' && caller.attemptId && z.string().min(1).safeParse(caller.attemptId).success) return caller.attemptId;
+    if ((command.kind === 'worker.spawn' || command.kind === 'worker.steer') && caller.attemptId && z.string().min(1).safeParse(caller.attemptId).success) return caller.attemptId;
     return undefined;
   }
 

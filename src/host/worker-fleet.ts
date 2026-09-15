@@ -16,7 +16,7 @@ export type WorkerInspect = Readonly<{
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
 type SpawnProvenance = Readonly<{ modelId: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
-type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
+type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner: WorktreeOwner; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
 
 function digest(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
@@ -95,7 +95,7 @@ export class PiWorkerFleet {
           throw new Error('Pi runtime model does not match the admitted worker model');
         }
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
-          workspace: workspace.root, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+          workspace: workspace.root, owner: workspace.owner, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
         this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },
@@ -133,6 +133,7 @@ export class PiWorkerFleet {
     const artifacts = this.binding.host.artifactsFor(context);
     await Promise.all([artifacts.readText(input.objectiveRef), ...input.evidenceRefs.map((ref) => artifacts.readText(ref))]);
     const oldWorkspace = this.binding.workspaceManager.reservation(predecessor.workspace);
+    if (oldWorkspace.owner.attemptId !== predecessor.owner.attemptId || oldWorkspace.owner.generation !== predecessor.owner.generation || oldWorkspace.owner.expiresAt !== predecessor.owner.expiresAt) throw new Error('predecessor worktree generation is no longer current');
     await this.binding.workspaceManager.assertExactHead(oldWorkspace, input.expectedHead);
     const workerId = `worker-${randomUUID()}`;
     const attemptId = `attempt-${workerId}`;
@@ -143,6 +144,7 @@ export class PiWorkerFleet {
     const effect: KernelEffect = {
       effectId: `host:worker-steer:${workerId}`,
       execute: async () => {
+        await this.binding.workspaceManager.assertExactHead(oldWorkspace, input.expectedHead);
         this.binding.host.recordAttempt(attempt);
         const config = this.binding.workspace(admitted.command, workerId, attempt);
         if (config.destination !== predecessor.workspace || config.baseSha !== input.expectedHead || attempt.baseSha !== input.expectedHead) throw new Error('continuation does not preserve the verified workspace head');
@@ -150,7 +152,7 @@ export class PiWorkerFleet {
         const worker = await this.binding.rehydrate!(admitted.command, workspace, predecessor.persistedSession!);
         if (worker.sessionId !== predecessor.sessionId) { worker.dispose(); throw new Error('continuation native session changed'); }
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
-          workspace: workspace.root, state: 'ready', inputDigest: digest(input), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+          workspace: workspace.root, owner: workspace.owner, state: 'ready', inputDigest: digest(input), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
         this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },

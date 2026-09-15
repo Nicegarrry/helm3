@@ -1,0 +1,9 @@
+# Exact-head integration evidence
+
+`src/integration` makes preparation and merge separate operations. Preparation binds repository, PR, immutable 40-character head, target ref and target head, exact acceptance-evidence refs, and trusted review-receipt IDs. It opens only when the PR is open, mergeable, all observed CI checks are green, every acceptance record is tied to that head, and a trusted runtime receipt records distinct builder and reviewer attempt/session identities from different model families.
+
+The concrete GitHub gateway uses argv-only `gh api` calls. It reads checks and legacy statuses from paths containing the bound SHA and performs `PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge` with the REST `sha` compare-and-swap parameter. A changed head therefore refuses at GitHub even after Helm's fresh read. The gateway deliberately has no API for accepting user/account/team strings as review authority; receipts belong to the trusted host registry.
+
+An already-admitted `integration.merge` command includes that full certificate in its strict payload. `mergeIntegration` recomputes the Kernel's exact `sha256(JSON.stringify(command))` immutable hash, claims through the Kernel, fresh-reads all facts at the effect boundary, invokes trusted authority and host-owned integrator checks with those exact command bytes, then requests the guarded merge. It reads the PR and target ref back and succeeds only when GitHub reports the resulting merge SHA and ancestry in the target. A timeout, malformed response, identity mismatch, or non-conclusive post-effect readback becomes `unknown`; the function never blindly replays the merge.
+
+The provider-free tests cover stale heads, non-green CI, missing/self-attested receipts, exact command-hash rejection, fresh authority refusal, GitHub CAS argv, successful readback, and ambiguous merge effects. They do not execute a live merge.

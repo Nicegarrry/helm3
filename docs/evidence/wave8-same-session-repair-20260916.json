@@ -42,7 +42,7 @@
     "rootForeignWorktreeRegression": {
       "redHead": "9efc3721f7e3d7bccc632316bca996e908a6b1da",
       "result": "red then green after repair",
-      "report": "reports/tmp/helm3-pr86-root-spec-final.md",
+      "report": "/private/tmp/helm3-pr86-root-spec-final.md",
       "redLog": "/private/tmp/helm3-pr86-gate-workspace-red.log",
       "regressionLog": "/private/tmp/helm3-pr86-gate-workspace-regression.log"
     }
@@ -61,6 +61,7 @@
   },
   "nominalGuard": {
     "currency": "USD",
+    "ceiling": 10,
     "total": 4.07309683,
     "settledKnown": 0.03083635,
     "retainedUnknownReservations": 4.04226048,
@@ -73,6 +74,7 @@
     "cleanupAndReview": "ongoing",
     "briefAndAddendumEdited": false,
     "secretsOrPrivatePromptsRecorded": false,
-    "newWorkStop": "2026-09-16T22:00:00+10:00"
+    "newWorkStop": "2026-09-15T22:00:00Z",
+    "newWorkStopLocal": "2026-09-16T08:00:00+10:00"
   }
 }

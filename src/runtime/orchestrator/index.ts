@@ -10,11 +10,14 @@ export type HelmToolResult =
 
 export type InvocationOutcome = 'succeeded' | 'failed' | 'unknown';
 
+/** Trusted invocation identity, supplied by a Helm driver or transport rather than model JSON. */
+export type HelmToolExecutionContext = Readonly<{ runId: string; sessionId: string; mode: 'primary' | 'consultant' }>;
+
 export type HelmTool = {
   name: string;
   description: string;
   input: ZodRawShape;
-  execute(input: Record<string, unknown>): Promise<HelmToolResult>;
+  execute(input: Record<string, unknown>, context: HelmToolExecutionContext): Promise<HelmToolResult>;
 };
 
 /** Domain tools are registered once and are never worker-harness tools. */
@@ -30,12 +33,12 @@ export class HelmToolRegistry {
 
   all(): HelmTool[] { return [...this.#tools.values()]; }
 
-  async invoke(name: string, input: unknown): Promise<HelmToolResult> {
+  async invoke(name: string, input: unknown, context: HelmToolExecutionContext): Promise<HelmToolResult> {
     const entry = this.#tools.get(name);
     if (!entry) return { state: 'unsupported', reason: `Helm tool is not registered: ${name}` };
     const parsed = z.object(entry.input).strict().safeParse(input);
     if (!parsed.success) return { state: 'refused', reason: parsed.error.issues.map((issue) => issue.message).join('; ') };
-    try { return await entry.execute(parsed.data); }
+    try { return await entry.execute(parsed.data, context); }
     catch (error) { return { state: 'unknown', reason: error instanceof Error ? error.message : 'Helm tool outcome is unknown' }; }
   }
 }
@@ -229,7 +232,7 @@ export class FableDriver extends BaseDriver {
       const helm = sdk.createSdkMcpServer({ name: 'helm', tools: this.tools.all().map((entry) => sdk.tool(entry.name, entry.description, entry.input, async (args) => {
         if (session.mode !== 'primary') return { content: [{ type: 'text', text: JSON.stringify({ state: 'refused', reason: 'Consultant sessions cannot issue Helm tool effects' }) }] };
         await this.guard.assertCurrent(session); this.continuing(session, invocation);
-        const result = await this.tools.invoke(entry.name, args);
+        const result = await this.tools.invoke(entry.name, args, { runId: session.runId, sessionId: session.sessionId, mode: session.mode });
         return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
       })) });
       const stream = sdk.query({ prompt, options: { resume: session.providerSessionId, tools: [], permissionMode: 'dontAsk', mcpServers: { helm }, strictMcpConfig: true, env: this.host.env, cwd: this.host.cwd, model: this.host.model, settingSources: [] } });
@@ -334,3 +337,5 @@ export class AstraDriver extends BaseDriver {
     return result;
   }
 }
+
+export { AstraLoopbackMcpTransport, type AstraLoopbackMcpClose, type AstraLoopbackMcpConfig, type AstraLoopbackSession } from './astra-loopback-mcp.js';

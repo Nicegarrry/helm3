@@ -33,6 +33,33 @@ checked before lifecycle mutations and immediately before a Fable tool effect.
 The artifact/recovery implementations are responsible for trusted ownership,
 durability and the actual Brief/Map/Log recovery manifest.
 
+## Astra loopback MCP transport
+
+`AstraLoopbackMcpTransport` is a local-only, host-wired bridge for the pinned
+`@modelcontextprotocol/sdk` `1.30.0`. It binds `127.0.0.1` on an ephemeral port
+and generates an unguessable per-Helm-session bearer secret. Its Codex config
+contains only the loopback URL and a generated `bearer_token_env_var`; the
+secret itself is returned only in an in-memory host environment fragment. The
+bridge accepts no caller URL, header or raw config input, does not log the
+secret, and rejects non-loopback Host values and all Origin-bearing requests.
+
+Each HTTP request receives a fresh stateless MCP protocol transport, so a new
+Codex process can initialize against the same Helm session bridge after a prior
+client exits. This keeps the MCP protocol session separate from the fixed Helm
+run/session/mode. Before every tool callback, the bridge checks the trusted
+guard and passes that fixed identity as a second, non-model execution-context
+argument to `HelmToolRegistry`; tool JSON cannot select a run or epoch.
+
+`test/runtime/astra-loopback-mcp.test.ts` connects real pinned MCP clients,
+performs two fresh initializations against one generated endpoint, validates
+schema and unknown-tool responses, confirms auth/Host/Origin and byte-limit
+rejections, and runs the real pinned Codex SDK against a local executable to
+observe generated config forwarding without exposing the token value. It also
+covers stale ownership, close during a blocked handler, and close racing an
+awaited guard, plus consultant refusal before guard or effect. Closing the transport only fences new callbacks. It returns
+`unknown` until tracked handler promises settle; it never claims an abort signal
+cancels `HelmTool.execute`, and a late successful effect remains observed.
+
 ## Boundaries still open
 
 - No SDK call contacted a provider. The fixtures do not prove account access,
@@ -42,9 +69,9 @@ durability and the actual Brief/Map/Log recovery manifest.
   not establish live model/pool authorization, internal SDK request bounding,
   takeover cleanup, service/API integration, or production guard/artifact
   implementations.
-- Astra reports its in-process Helm tool bridge as unsupported because the
-  pinned `ThreadOptions` surface has no in-process callback or MCP server
-  configuration. A loopback MCP transport is a separate future slice.
+- Astra's direct in-process callback remains unsupported. The loopback MCP
+  transport is local configuration and transport evidence only; no live model
+  dispatch has proved that a provider will discover or call it.
 - These adapters do not establish full Helm-tool parity, a live small-feature
   orchestration trace, cross-provider takeover, or comparable Fable/Astra
   interchange. Those acceptance items remain open in [DRIVER #27](https://github.com/Nicegarrry/helm3/issues/27), [ASTRA #29](https://github.com/Nicegarrry/helm3/issues/29), and their dependent live-provider work.

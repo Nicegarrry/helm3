@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
 import { z } from 'zod/v3';
 import type { Command, Observation, Precondition } from '../contracts/index.js';
 import type { EffectObservation, KernelEffect, TrustedExecutor } from '../core/index.js';
@@ -24,6 +25,7 @@ export const gateRunPayloadSchema = z.object({
   gateId: nonEmpty,
   workerId: nonEmpty,
   workspaceId: nonEmpty,
+  workspaceDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   expectedHead: sha,
   acceptanceVersion: nonEmpty,
   gateConfigDigest: nonEmpty,
@@ -118,6 +120,13 @@ function snapshotGate(value: unknown): GateSnapshot {
   const digest = gateConfigDigest(target);
   return Object.freeze({ ...target, gateConfigDigest: digest, trustedDefinitionRef: `gate-definition:${digest}` });
 }
+async function canonicalSnapshot(value: unknown): Promise<GateSnapshot> {
+  const snapshot = snapshotGate(value);
+  const workspace = await realpath(snapshot.workspace);
+  const target = Object.freeze({ ...snapshot, workspace });
+  const digest = gateConfigDigest(target);
+  return Object.freeze({ ...target, gateConfigDigest: digest, trustedDefinitionRef: `gate-definition:${digest}` });
+}
 
 function matchesContext(actual: HelmToolExecutionContext, expected: HelmToolExecutionContext): boolean {
   return actual.runId === expected.runId && actual.sessionId === expected.sessionId && actual.mode === expected.mode;
@@ -137,6 +146,7 @@ function commandFor(options: HostGateToolOptions, target: GateSnapshot): Command
     gateId: target.gateId,
     workerId: target.workerId,
     workspaceId: target.workspaceId,
+    workspaceDigest: `sha256:${createHash('sha256').update(target.workspace).digest('hex')}`,
     expectedHead: target.expectedHead,
     acceptanceVersion: target.acceptanceVersion,
     gateConfigDigest: target.gateConfigDigest,
@@ -198,7 +208,7 @@ export function createHostGateTool(options: HostGateToolOptions): HelmTool {
       if (!parsed.success) return { state: 'refused', reason: 'gate input must contain only a registered gate ID, worker ID, and exact expected head' };
       const input = parsed.data;
       let target: GateSnapshot;
-      try { target = snapshotGate(await bound.catalog.resolve(input.gateId, input.workerId)); }
+      try { target = await canonicalSnapshot(await bound.catalog.resolve(input.gateId, input.workerId)); }
       catch { return { state: 'refused', reason: 'gate or worker is not registered for this host run' }; }
       if (target.gateId !== input.gateId || target.workerId !== input.workerId || target.expectedHead !== input.expectedHead) {
         return { state: 'refused', reason: 'gate input does not match the registered trusted target' };
@@ -217,7 +227,7 @@ export function createHostGateTool(options: HostGateToolOptions): HelmTool {
           // A registry may be backed by mutable external configuration. It is
           // re-read at effect time, but execution continues only with the
           // immutable planned snapshot when all material facts still agree.
-          const fresh = snapshotGate(await bound.catalog.resolve(input.gateId, input.workerId));
+          const fresh = await canonicalSnapshot(await bound.catalog.resolve(input.gateId, input.workerId));
           if (fresh.gateConfigDigest !== target.gateConfigDigest || fresh.acceptanceVersion !== target.acceptanceVersion || fresh.expectedHead !== target.expectedHead) {
             throw new Error('registered gate definition changed before effect');
           }

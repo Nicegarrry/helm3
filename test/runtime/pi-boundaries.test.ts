@@ -49,7 +49,7 @@ async function setup() {
       return { metadata, text: (await journal.read(metadata.raw, metadata.sourceIdentity)).toString() };
     }));
   }
-  return { root, worker, manager, workspace, owner, faux, ai, journal, effects, stops, active: () => active,
+  return { root, worker, manager, workspace, owner, runtime, faux, ai, journal, effects, stops, active: () => active,
     expireAfterWrite: () => { expireAfterWrite = true; }, artifacts,
     async cleanup() { worker.dispose(); manager.close(); await journal.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -83,6 +83,43 @@ test('reopen continues edits and semantic evidence; malformed and exact terminal
     await assert.rejects(readFile(join(f.root, 'extension-ran')), /ENOENT/);
     assert.equal(f.faux.state.callCount, 5);
     assert.equal(f.effects.filter((kind) => kind === 'model.request').length, 5);
+  } finally { await f.cleanup(); }
+});
+
+test('a disposed wrapper rehydrates the same persisted Pi session only under a fresh host binding', async () => {
+  const f = await setup();
+  try {
+    f.faux.setResponses([
+      f.ai.fauxAssistantMessage(f.ai.fauxToolCall('helm_write', { path: 'README.md', contents: 'first session edit\n' })),
+      f.ai.fauxAssistantMessage(envelope(['README.md'])),
+    ]);
+    await f.worker.run('first-session-objective', 'repair');
+    const persisted = await f.worker.persistedSession();
+    const successor = { attemptId: 'follow-up-attempt', generation: 2, expiresAt: '2099-01-01T00:00:00Z' };
+    const transferred = f.manager.transfer(f.workspace, 1, successor);
+    f.worker.dispose();
+
+    const effects: Array<{ commandId: string; kind: string }> = [];
+    const authority: PiAuthority = {
+      async perform(effect, action) { effects.push({ commandId: effect.commandId, kind: effect.kind }); await action(); },
+      async requestCancellation() {}, async reportWorkerStop() {},
+    };
+    const followUp = await PiNativeWorker.rehydrate({
+      commandId: 'follow-up-command', attemptId: successor.attemptId, workspace: transferred, owner: successor,
+      workspaceManager: f.manager, authority, journal: f.journal, stateRoot: join(f.root, 'pi-state'),
+      modelRuntime: f.runtime,
+      model: f.faux.getModel(),
+    }, persisted);
+    const messages = (followUp as unknown as { session: { messages: Array<{ role: string; content?: unknown }> } }).session.messages;
+    assert.ok(messages.some((message) => message.role === 'user' && JSON.stringify(message.content).includes('first-session-objective')), 'rehydration retains native prior-session context');
+    f.faux.setResponses([
+      f.ai.fauxAssistantMessage(f.ai.fauxToolCall('helm_write', { path: 'README.md', contents: 'follow-up session edit\n' })),
+      f.ai.fauxAssistantMessage(envelope(['README.md'])),
+    ]);
+    await followUp.run('repair the red gate finding', 'repair');
+    assert.equal(await readFile(join(transferred.root, 'README.md'), 'utf8'), 'follow-up session edit\n');
+    assert.ok(effects.length >= 2 && effects.every((effect) => effect.commandId === 'follow-up-command'), 'new model and write effects use the fresh continuation authority');
+    followUp.dispose();
   } finally { await f.cleanup(); }
 });
 

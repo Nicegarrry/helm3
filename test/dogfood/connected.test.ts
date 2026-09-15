@@ -6,21 +6,28 @@ import test from 'node:test';
 import { runLocalFixture } from '../../src/dogfood/index.js';
 import { startLocalFixtureOperatorServer } from '../../src/dogfood/observe.js';
 
-for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orchestrator} fixture drives one host-fenced Pi faux worker and retains recovery evidence`, async () => {
+for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orchestrator} fixture steers one native Pi session from red gate to green`, async () => {
   const directory = await mkdtemp(join(tmpdir(), `helm3-connected-${orchestrator}-`)); let fixture: Awaited<ReturnType<typeof runLocalFixture>> | undefined;
   try {
     fixture = await runLocalFixture({ stateDirectory: directory, orchestrator });
     assert.equal(await readFile(fixture.resultPath, 'utf8'), 'provider-free Pi fixture\n');
     assert.equal(fixture.commandState, 'succeeded');  assert.equal(fixture.expiredRefusal, true);
     assert.ok(fixture.recoveryBundleRef.length > 0); assert.ok(fixture.recoveryStateRef.length > 0);
-    assert.ok(fixture.rawRefs.length > 0); assert.ok(fixture.usageActions.modelRequests >= 1); assert.equal(fixture.usageActions.workspaceWrites, 1);
-    assert.ok(fixture.toolNames.includes('gate.run'));
+    assert.ok(fixture.rawRefs.length > 0); assert.equal(fixture.usageActions.modelRequests, 4); assert.equal(fixture.usageActions.workspaceWrites, 2);
+    assert.ok(fixture.toolNames.includes('gate.run')); assert.ok(fixture.toolNames.includes('worker.steer'));
     assert.match(fixture.gateHead, /^[0-9a-f]{40}$/); assert.equal(fixture.gateCommandState, 'succeeded'); assert.ok(fixture.gateEvidenceRefs.length >= 2);
+    assert.match(fixture.redGateHead, /^[0-9a-f]{40}$/); assert.notEqual(fixture.redGateHead, fixture.gateHead); assert.ok(fixture.redGateEvidenceRefs.length >= 2);
+    assert.equal(fixture.steerSessionId, fixture.workerSessionId); assert.equal(fixture.secondModelSawPriorContext, true);
     const snapshot = await fixture.host.recover(fixture.runId);
-    const gate = snapshot.commands.find((record) => record.command.kind === 'gate.run');
-    assert.equal((gate?.command.payload as { expectedHead?: string } | undefined)?.expectedHead, fixture.gateHead);
-    assert.ok(gate?.observations.some((observation) => observation.evidenceRefs.length >= 2));
+    const gates = snapshot.commands.filter((record) => record.command.kind === 'gate.run'); const redGate = gates.find((record) => (record.command.payload as { expectedHead?: string }).expectedHead === fixture!.redGateHead); const greenGate = gates.find((record) => (record.command.payload as { expectedHead?: string }).expectedHead === fixture!.gateHead);
+    assert.equal(gates.length, 2); assert.equal((redGate?.command.payload as { expectedHead?: string } | undefined)?.expectedHead, fixture.redGateHead); assert.equal((greenGate?.command.payload as { expectedHead?: string } | undefined)?.expectedHead, fixture.gateHead);
+    assert.ok(redGate?.observations.some((observation) => observation.evidenceRefs.every((ref) => fixture!.redGateEvidenceRefs.includes(ref)))); assert.ok(greenGate?.observations.some((observation) => observation.evidenceRefs.length >= 2));
     assert.equal(snapshot.commands.find((record) => record.command.commandId === 'fixture-worker-spawn')?.status, 'succeeded'); assert.equal(snapshot.attemptLifecycles.find((entry) => entry.attemptId === fixture!.attemptId)?.state, 'finished');
+    const steer = snapshot.commands.find((record) => record.command.commandId === fixture!.steerCommandId);
+    assert.equal(steer?.status, 'succeeded'); assert.notEqual(fixture.steerAttemptId, fixture.workerAttemptId);
+    const steerPayload = steer?.command.payload as { workerId?: string; attemptId?: string; predecessorWorkerId?: string; expectedHead?: string; gateCommandId?: string; evidenceRefs?: string[] } | undefined;
+    assert.equal(steerPayload?.workerId, fixture.steerWorkerId); assert.equal(steerPayload?.attemptId, fixture.steerAttemptId); assert.equal(steerPayload?.expectedHead, fixture.redGateHead); assert.equal(steerPayload?.predecessorWorkerId, (snapshot.commands.find((record) => record.command.kind === 'worker.spawn')?.command.payload as { workerId?: string } | undefined)?.workerId); assert.equal(steerPayload?.gateCommandId, redGate?.command.commandId); assert.deepEqual(steerPayload?.evidenceRefs, fixture.redGateEvidenceRefs);
+    assert.equal(snapshot.attemptLifecycles.find((entry) => entry.attemptId === fixture!.steerAttemptId)?.state, 'finished');
   } finally { await fixture?.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

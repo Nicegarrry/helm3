@@ -91,6 +91,22 @@ export class WorkspaceManager {
     }
     this.validOwner(current.owner);
   }
+  /** Host-only recovery lookup; it does not grant ownership. */
+  reservation(root: string): WorktreeReservation {
+    const row = this.db.prepare('SELECT bytes,status FROM workspace_ownership WHERE root=?').get(root) as OwnershipRow | undefined;
+    if (!row || row.status !== 'active') throw new WorkspaceRefusal('no active durable worktree ownership');
+    return Object.freeze(JSON.parse(row.bytes) as WorktreeReservation);
+  }
+  /** Re-read exact Git reality immediately before a continuation changes ownership. */
+  async assertExactHead(reservation: WorktreeReservation, expectedHead: string): Promise<void> {
+    this.assertOwner(reservation, reservation.owner);
+    if (!/^[0-9a-f]{40}$/.test(expectedHead)) throw new WorkspaceRefusal('expected worktree head must be an exact commit SHA');
+    const [{ stdout: head }, { stdout: status }] = await Promise.all([
+      exec('git', ['-C', reservation.root, 'rev-parse', 'HEAD']),
+      exec('git', ['-C', reservation.root, 'status', '--porcelain', '--untracked-files=all']),
+    ]);
+    if (head.trim() !== expectedHead || status !== '') throw new WorkspaceRefusal('worktree does not match the expected clean head');
+  }
   /** Trusted host takeover; the old generation is fenced across all managers. */
   transfer(reservation: WorktreeReservation, expectedGeneration: number, owner: WorktreeOwner): WorktreeReservation {
     return this.transaction(() => {
@@ -98,7 +114,8 @@ export class WorkspaceManager {
       const row = this.db.prepare('SELECT bytes,status FROM workspace_ownership WHERE root=?').get(reservation.root) as OwnershipRow | undefined;
       if (!row || row.status !== 'active') throw new WorkspaceRefusal('worktree is not available for transfer');
       const current = JSON.parse(row.bytes) as WorktreeReservation;
-      if (current.owner.generation !== expectedGeneration || owner.generation !== expectedGeneration + 1) throw new WorkspaceRefusal('stale worktree ownership generation');
+      if (current.owner.attemptId !== reservation.owner.attemptId || current.owner.generation !== reservation.owner.generation || current.owner.expiresAt !== reservation.owner.expiresAt
+        || current.owner.generation !== expectedGeneration || owner.generation !== expectedGeneration + 1) throw new WorkspaceRefusal('stale worktree ownership generation');
       const next = Object.freeze({ ...current, owner: Object.freeze({ ...owner }) });
       this.db.prepare('UPDATE workspace_ownership SET bytes=? WHERE root=?').run(JSON.stringify(next), current.root);
       return next;

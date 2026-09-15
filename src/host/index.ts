@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { commandSchema, type Attempt, type AutonomyLease, type Command, type Event, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef } from '../contracts/index.js';
 import {
@@ -267,6 +268,7 @@ export class HostControlPlane {
   recordAutonomyLease(lease: AutonomyLease): void { this.kernel.host.issueAutonomyLease(lease); }
   /** Trusted model-registry ingestion; orchestration JSON only selects an existing fact. */
   recordModelFact(fact: ModelFact): void { this.kernel.host.putModelFact(fact); }
+  assertModelProvenance(modelId: string, provider: string, factVersion: number): void { this.kernel.host.assertModelProvenance(modelId, provider, factVersion); }
   revokeAutonomyLease(leaseId: string): void { this.kernel.host.revokeAutonomyLease(leaseId); }
   /** Trusted runtime records immutable worker-attempt provenance before Pi begins effects. */
   recordAttempt(attempt: Attempt): void { this.kernel.host.appendAttempt(attempt); }
@@ -438,11 +440,34 @@ export class HostControlPlane {
     const snapshot = this.kernel.host.readRun(input.runId);
     const spawn = snapshot.commands.find((entry) => entry.command.commandId === input.spawnCommandId);
     const payload = spawn?.command.payload as { attemptId?: unknown } | undefined;
-    if (!spawn || spawn.command.kind !== 'worker.spawn' || payload?.attemptId !== input.attemptId) {
-      throw new Error('fleet evidence is not bound to an admitted worker spawn');
+    if (!spawn || (spawn.command.kind !== 'worker.spawn' && spawn.command.kind !== 'worker.steer') || payload?.attemptId !== input.attemptId) {
+      throw new Error('fleet evidence is not bound to an admitted worker invocation');
     }
     const artifacts = new HostArtifactStore(this.journal, () => ({ runId: input.runId, sessionId: `fleet:${input.attemptId}` }));
     return artifacts.writeEffect(`host.worker_fleet.${input.phase}`, input.text, `host-worker-${input.phase}:${input.runId}:${input.attemptId}`);
+  }
+
+  /**
+   * Gate bytes are raw journal evidence, so they are meaningful for a steer
+   * only through the durable gate command that produced them.  A host note or
+   * a gate from another worker/head cannot stand in for that binding.
+   */
+  async assertGateEvidence(runId: string, gateCommandId: string, predecessorCommandId: string, workerId: string, workspace: string, expectedHead: string, evidenceRefs: readonly string[]): Promise<void> {
+    const gate = this.kernel.host.readRun(runId).commands.find((entry) => entry.command.commandId === gateCommandId);
+    const predecessor = this.kernel.host.readRun(runId).commands.find((entry) => entry.command.commandId === predecessorCommandId);
+    const payload = gate?.command.payload as { workerId?: unknown; workspaceDigest?: unknown; expectedHead?: unknown } | undefined;
+    const workspaceDigest = `sha256:${createHash('sha256').update(await realpath(workspace)).digest('hex')}`;
+    if (!gate || !predecessor || gate.command.kind !== 'gate.run' || gate.command.scope.repositoryId !== predecessor.command.scope.repositoryId || payload?.workerId !== workerId || payload.workspaceDigest !== workspaceDigest || payload.expectedHead !== expectedHead
+      || (gate.status !== 'succeeded' && gate.status !== 'failed')) throw new Error('gate evidence is not a completed exact predecessor gate');
+    const recorded = new Set(gate.observations.flatMap((observation) => observation.evidenceRefs));
+    if (!evidenceRefs.length || evidenceRefs.some((ref) => !recorded.has(ref))) throw new Error('gate evidence refs are not recorded by the bound gate command');
+    await Promise.all(evidenceRefs.map(async (ref) => {
+      const metadata = (await this.journal.metadata()).filter((entry) => entry.raw.ref === ref);
+      if (!metadata.length) throw new Error('gate evidence bytes have no durable metadata');
+      // The gate command establishes provenance; journal metadata supplies a
+      // source identity for the required hash-checked raw read.
+      await this.journal.read(metadata[0].raw, metadata[0].sourceIdentity, { permitSensitive: true });
+    }));
   }
 
   /**

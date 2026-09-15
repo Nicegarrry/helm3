@@ -82,7 +82,7 @@ export type KernelKind = {
   /** Legacy fail-closed marker: it remains invalid until a resolver is supplied. */
   requiresResourceEnforcement?: boolean;
   resourceRequest?: (payload: unknown) => ResourceRequest;
-  modelSelection?: (payload: unknown) => { modelId: string; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' };
+  modelSelection?: (payload: unknown) => { modelId: string; provider?: string; factVersion?: number; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' };
 };
 export type KernelOptions = {
   databasePath: string;
@@ -206,6 +206,8 @@ export class KernelHost {
   }
 
   putModelFact(fact: ModelFact): void { this.core.putModelFact(fact); }
+  /** Host-only binding from immutable worker provenance to the current registry fact. */
+  assertModelProvenance(modelId: string, provider: string, factVersion: number): void { this.core.assertModelProvenance(modelId, provider, factVersion); }
   requestCancellation(commandId: string): void { this.core.requestCancellation(commandId); }
   /** A pending/unknown stop quarantines the command and keeps any reservation. */
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): void { this.core.reportWorkerStop(commandId, observed); }
@@ -692,7 +694,7 @@ class Kernel {
     // A host-created spawn is the one orchestrator command that establishes a
     // worker attempt.  No other orchestrator effect may smuggle itself into a
     // worker lifecycle through the trusted caller capability.
-    if (command.kind === 'worker.spawn' && caller.attemptId && z.string().min(1).safeParse(caller.attemptId).success) return caller.attemptId;
+    if ((command.kind === 'worker.spawn' || command.kind === 'worker.steer') && caller.attemptId && z.string().min(1).safeParse(caller.attemptId).success) return caller.attemptId;
     return undefined;
   }
 
@@ -784,10 +786,20 @@ class Kernel {
     this.assertLegalModel(selection, kind.resourceRequest?.(payload));
   }
 
-  private assertLegalModel(selection: { modelId: string; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' }, request?: ResourceRequest): void {
+  assertModelProvenance(modelId: string, provider: string, factVersion: number): void {
+    if (!z.string().min(1).safeParse(modelId).success || !z.string().min(1).safeParse(provider).success || !Number.isInteger(factVersion) || factVersion < 1) throw new Error('model provenance is invalid');
+    const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(modelId) as { bytes: string } | undefined;
+    if (!row) throw new Error('model provenance has no registered facts');
+    const fact = modelFactSchema.parse(JSON.parse(row.bytes));
+    if (fact.provider !== provider || fact.factVersion !== factVersion) throw new Error('model provenance does not match current registered facts');
+  }
+
+  private assertLegalModel(selection: { modelId: string; provider?: string; factVersion?: number; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' }, request?: ResourceRequest): void {
     const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(selection.modelId) as { bytes: string } | undefined;
     if (!row) throw new Error('model selection has no registered facts');
     const fact = modelFactSchema.parse(JSON.parse(row.bytes));
+    if (selection.provider !== undefined && fact.provider !== selection.provider) throw new Error('model selection provider does not match registered facts');
+    if (selection.factVersion !== undefined && fact.factVersion !== selection.factVersion) throw new Error('model selection fact version does not match registered facts');
     if (!fact.enabled) throw new Error('model selection is disabled');
     if (fact.availability !== 'known_available') throw new Error('model selection availability is not known available');
     if (!fact.roles.includes(selection.role)) throw new Error('model selection lacks required role');

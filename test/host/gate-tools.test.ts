@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -72,8 +73,10 @@ test('gate.run binds a host-registered gate to exact head, checks, and raw evide
     assert.equal(result.state, 'succeeded');
     assert.equal((result as { value: { gateState: string } }).value.gateState, 'succeeded');
     assert.equal(value.admitted?.kind, 'gate.run');
-    const digest = gateConfigDigest(value.target);
-    assert.deepEqual(value.admitted?.payload, { gateId: 'fixture.gate', workerId: 'fixture-worker', workspaceId: 'fixture-workspace', expectedHead: value.target.expectedHead, acceptanceVersion: 'acceptance-v1', gateConfigDigest: digest, trustedDefinitionRef: `gate-definition:${digest}` });
+    const workspace = await realpath(value.target.workspace);
+    const digest = gateConfigDigest({ ...value.target, workspace });
+    const workspaceDigest = `sha256:${createHash('sha256').update(workspace).digest('hex')}`;
+    assert.deepEqual(value.admitted?.payload, { gateId: 'fixture.gate', workerId: 'fixture-worker', workspaceId: 'fixture-workspace', workspaceDigest, expectedHead: value.target.expectedHead, acceptanceVersion: 'acceptance-v1', gateConfigDigest: digest, trustedDefinitionRef: `gate-definition:${digest}` });
     assert.deepEqual(value.admitted?.expected, [{ authority: 'git', subject: 'fixture-workspace', version: value.target.expectedHead, predicate: 'registered workspace is clean at the exact expected head' }]);
     const metadata = await value.journal.metadata(); assert.deepEqual(new Set(metadata.map((entry) => entry.source)), new Set(['helm.gate.started', 'helm.gate.check', 'helm.gate.completed']));
   } finally { value.journal.close(); await rm(value.root, { recursive: true, force: true }); }

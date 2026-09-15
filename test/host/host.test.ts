@@ -187,7 +187,9 @@ test('recover(runId) leaves another run\'s active effect untouched', async () =>
   } finally { plane.close(); }
 });
 
-test('PiNativeRuntime runs the packaged Pi faux provider through host resource enforcement', async () => {
+type NativeFixtureCase = 'success' | 'provider-error' | 'timeout';
+
+async function runNativeFixture(testCase: NativeFixtureCase): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'helm3-host-native-pi-'));
   let plane: Awaited<ReturnType<typeof openHost>> | undefined;
   let manager: WorkspaceManager | undefined;
@@ -205,9 +207,12 @@ test('PiNativeRuntime runs the packaged Pi faux provider through host resource e
     const faux = ai.fauxProvider({ provider: 'host-native-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('host-native-faux', 'offline');
     const fauxModel = faux.getModel();
     const access = new BoundedPiAccess({ poolId: 'overnight-api-usd', provider: fauxModel.provider, model: fauxModel.id, api: fauxModel.api, baseUrl: fauxModel.baseUrl, authEnvironment: 'TEST_ONLY_NO_KEY',
-      contextWindow: fauxModel.contextWindow, maxOutputTokens: 32, maxBilledOutputTokens: fauxModel.maxTokens, maxPacketBytes: 8_000, maxRequests: 1, maxToolCalls: 0, timeoutMs: 1_000,
+      contextWindow: fauxModel.contextWindow, maxOutputTokens: 32, maxBilledOutputTokens: fauxModel.maxTokens, maxPacketBytes: 8_000, maxRequests: 1, maxToolCalls: 0, timeoutMs: testCase === 'timeout' ? 20 : 1_000,
       inputUsdPerMillion: 1, outputUsdPerMillion: 1, cacheReadUsdPerMillion: 1, cacheWriteUsdPerMillion: 1 });
-    faux.setResponses([ai.fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: [], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' }))]);
+    const envelope = JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: [], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' });
+    faux.setResponses([testCase === 'success' ? ai.fauxAssistantMessage(envelope)
+      : testCase === 'provider-error' ? async () => { throw new Error('provider-body-must-not-escape'); }
+        : async () => { await new Promise((resolve) => setTimeout(resolve, 100)); return ai.fauxAssistantMessage('longtext'); }]);
     const payloadSchema = z.object({ effectId: z.string(), kind: z.enum(['model.request', 'workspace.write']) }).strict();
     const poolLimits = [{ poolId: 'overnight-api-usd', unit: 'usd', limit: 10 }];
     const commandForPiEffect = (effect: { effectId: string; kind: 'model.request' | 'workspace.write' }) => {
@@ -235,15 +240,30 @@ test('PiNativeRuntime runs the packaged Pi faux provider through host resource e
     plane.recordAttempt({ attemptId: 'native-attempt', mapNodeId: 'node-1', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'host-native-faux', capability: 'build', poolId: 'overnight-api-usd', workspace: workspace.root, baseSha: base, contextManifestHash: 'sha256:host-native-context', leaseId: 'autonomy-1', sessionIds: [], commandIds: [], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] });
     plane.acquireOwnership({ runId: 'run-1', leaseId: 'orchestrator-1', owner: 'fable', sessionId: 'fable-host-session', epoch: 1, issuedAt: now, expiresAt: later }, 0);
     plane.admitOrchestrator(command('fable-host-session'), { runId: 'run-1', sessionId: 'fable-host-session', mode: 'primary' }, 'trusted-fable');
-    assert.equal((await plane.perform('command-1', { executorId: 'host-pi' }, '2026-09-15T00:10:00Z', async () => ({ value: true, state: 'known', source: 'fixture', observedAt: now }))).state, 'succeeded');
+    const outcome = await plane.perform('command-1', { executorId: 'host-pi' }, '2026-09-15T00:10:00Z', async () => ({ value: true, state: 'known', source: 'fixture', observedAt: now }));
+    assert.equal(outcome.state, testCase === 'success' ? 'succeeded' : 'unknown');
     assert.equal(faux.state.callCount, 1);
     const nativeSnapshot = await plane.snapshot('run-1');
-    assert.ok((nativeSnapshot.reservations[0]?.settledActual ?? 0) > 0, 'validated faux usage settles through the same host ledger');
+    if (testCase === 'success') {
+      assert.ok((nativeSnapshot.reservations[0]?.settledActual ?? 0) > 0, 'validated faux usage settles through the same host ledger');
+    } else {
+      assert.equal(nativeSnapshot.reservations[0]?.settledActual, undefined, 'unusable provider telemetry keeps the full reservation charged');
+    }
     assert.equal(nativeSnapshot.attempts[0]?.attemptId, 'native-attempt');
-    assert.equal(nativeSnapshot.attemptLifecycles[0]?.state, 'active');
-    await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'command-1' }, async () => undefined), /reservation is absent/);
-    await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'unobserved-write', kind: 'workspace.write', commandId: 'command-1' }, async () => { throw new Error('worker lost its observation'); }), /not successfully observed/);
-    await plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect }).reportWorkerStop('command-1', 'unknown');
-    assert.equal((await plane.snapshot('run-1')).attemptLifecycles[0]?.state, 'unknown');
+    if (testCase === 'success') {
+      assert.equal(nativeSnapshot.attemptLifecycles[0]?.state, 'active');
+      await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'command-1' }, async () => undefined), /reservation is absent/);
+      await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'unobserved-write', kind: 'workspace.write', commandId: 'command-1' }, async () => { throw new Error('worker lost its observation'); }), /not successfully observed/);
+      await plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect }).reportWorkerStop('command-1', 'unknown');
+      assert.equal((await plane.snapshot('run-1')).attemptLifecycles[0]?.state, 'unknown');
+    } else {
+      assert.equal(nativeSnapshot.attemptLifecycles[0]?.state, 'unknown', 'the failed native session must not remain active after its provider stream has ended');
+      assert.equal(nativeSnapshot.commands[0]?.observations[0]?.detail, 'Pi worker invocation failed');
+      if (testCase === 'provider-error') assert.ok(!JSON.stringify(nativeSnapshot).includes('provider-body-must-not-escape'));
+    }
   } finally { plane?.close(); manager?.close(); await rm(root, { recursive: true, force: true }); }
-});
+}
+
+test('PiNativeRuntime runs the packaged Pi faux provider through host resource enforcement', async () => runNativeFixture('success'));
+test('PiNativeRuntime fails closed after a native Pi provider error and quarantines the attempt', async () => runNativeFixture('provider-error'));
+test('PiNativeRuntime quarantines a partial stream timeout without issuing a second request', async () => runNativeFixture('timeout'));

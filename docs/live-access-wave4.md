@@ -74,6 +74,15 @@ aborted, or unusable telemetry is `unknown` and leaves the full upper bound
 charged. There is no retry, fallback, compaction, or provider/model discovery
 in this path.
 
+If a Pi stream fails after dispatch, the runtime aborts the local session and
+records the parent attempt as `unknown`. It does not report a clean worker stop:
+the outer host effect has no trustworthy terminal observation, so both the
+attempt and its full reservation remain quarantined. A later recovery needs a
+new, observed local-state decision; it must not retry this request.
+
+This containment does not establish why a live aborted session may take a long
+time to drain its event journal. Treat that slow-flush cause as unresolved.
+
 ## Binding recipe
 
 Create one gate for the whole worker session and pass it to both the Pi worker

@@ -55,6 +55,7 @@ export class PiNativeWorker {
   private running = false;
   private constructor(private readonly input: PiWorkerInput) {}
   get sessionId(): string { return this.session.getSessionStats().sessionId; }
+  get isActive(): boolean { return this.running || this.activeRequests.size > 0; }
 
   static async start(input: PiWorkerInput): Promise<PiNativeWorker> {
     input.workspaceManager.assertOwner(input.workspace, input.owner);
@@ -96,7 +97,7 @@ export class PiNativeWorker {
                 else output.push(event);
               }
               terminal ??= await source.result();
-              if (terminal.stopReason === 'error' || terminal.stopReason === 'aborted') throw new Error(terminal.errorMessage ?? 'provider request did not complete');
+              if (terminal.stopReason === 'error' || terminal.stopReason === 'aborted') throw new Error('provider request did not complete');
               input.access?.settle(effectId, terminal);
             });
             if (!terminal) throw new Error('model stream completed without a terminal observation');
@@ -196,6 +197,24 @@ export class PiNativeWorker {
     ]);
     clearTimeout(timer);
     await this.input.authority.reportWorkerStop(this.input.commandId, result);
+    return result;
+  }
+  /**
+   * A failed invocation has no trustworthy terminal effect observation yet.
+   * Stop the local session, but quarantine the parent attempt rather than
+   * claiming it stopped cleanly while its outer host effect is still unknown.
+   */
+  async abortAfterFailure(timeoutMs = 5_000): Promise<'stopped' | 'unknown'> {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5_000) throw new Error('invalid cancellation deadline');
+    this.cancelled = true;
+    await this.input.authority.requestCancellation(this.input.commandId);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      this.session.abort().then(async () => { await Promise.all([...this.activeRequests]); return !this.session.isStreaming && this.activeRequests.size === 0 ? 'stopped' as const : 'unknown' as const; }).catch(() => 'unknown' as const),
+      new Promise<'unknown'>((resolve) => { timer = setTimeout(() => resolve('unknown'), timeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    await this.input.authority.reportWorkerStop(this.input.commandId, 'unknown');
     return result;
   }
   async reopen(): Promise<PiNativeWorker> {

@@ -96,12 +96,23 @@ export class PiNativeRuntime implements HostRuntime {
       effectId,
       execute: async () => {
         const worker = await this.binding.start({ command: input.command, journal: input.artifacts.journalForTrustedPi(), authority: this.binding.authority() });
+        let locallyStopped = false;
         try {
           const outcome = await worker.run(this.binding.prompt(input.command), this.binding.correction(input.command));
           evidenceRef = await input.artifacts.writeEffect('host.pi_native.completed', JSON.stringify({ sessionId: worker.sessionId, result: outcome.result, repaired: outcome.repaired, rawArtifacts: outcome.artifacts }));
           terminal = outcome.result.status === 'succeeded' ? 'succeeded' : 'failed';
           detail = outcome.result.status === 'succeeded' ? undefined : `Pi worker returned ${outcome.result.status}`;
-        } finally { worker.dispose(); }
+        } catch (error) {
+          // The outer effect has not yet been observed. Quarantine it after
+          // local abort rather than leaving an active worker after a stream error.
+          locallyStopped = (await worker.abortAfterFailure()) === 'stopped';
+          // Provider/session errors can contain request material. The kernel
+          // records effect failures, so only a stable public disposition crosses
+          // this boundary.
+          throw new Error('Pi worker invocation failed');
+        } finally {
+          if (locallyStopped || !worker.isActive) worker.dispose();
+        }
       },
       observe: async () => ({ commandId: input.command.commandId, effectId, state: evidenceRef ? terminal : 'unknown', source: 'pi-native', observedAt: new Date().toISOString(), evidenceRefs: [evidenceRef ?? 'host:pi-native-observation-missing'], ...(detail ? { detail } : {}) }),
     };

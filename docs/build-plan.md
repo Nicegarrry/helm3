@@ -1,6 +1,6 @@
 # Proposed Helm 3 Map and build plan
 
-Status: first implementation wave approved after context clean; see [authority record](wave1-authority.md). Remaining waves are planned. It is a changeable approach
+Status: wave 1 foundation is merged; wave 2 is explicitly approved. See [wave-two authority and acceptance](wave2-authority.md) and [wave-one progress](wave1-progress.md). Later outcomes remain planned. It is a changeable approach
 to the approved Brief, not a workflow DSL or a promise that elapsed time alone
 authorises action.
 

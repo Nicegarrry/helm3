@@ -13,10 +13,19 @@ export type WorkerInspect = Readonly<{
   activeRequests?: number; contextOccupancy?: unknown; eventCursor?: string;
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
+type SpawnProvenance = Readonly<{ modelId: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
 type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
 
 function digest(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
+function spawnProvenance(command: Command): SpawnProvenance {
+  const value = command.payload as Partial<SpawnProvenance>;
+  if (typeof value.modelId !== 'string' || typeof value.inputDigest !== 'string' || typeof value.baseSha !== 'string'
+    || !Number.isInteger(value.modelFactVersion) || (value.modelFactVersion ?? 0) < 1 || typeof value.dataPolicy !== 'string') {
+    throw new Error('worker spawn command omits immutable launch provenance');
+  }
+  return value as SpawnProvenance;
+}
 function now(): string { return new Date().toISOString(); }
 function event(kind: string, record: StoredWorker, runId: string, payload: unknown): Event {
   return { schemaVersion: 1, eventId: randomUUID(), kind, source: 'host.worker_fleet', sourceEventId: `${record.workerId}:${kind}:${randomUUID()}`,
@@ -61,7 +70,8 @@ export class PiWorkerFleet {
     const workerId = `worker-${randomUUID()}`;
     const attemptId = `attempt-${workerId}`;
     const command = this.binding.spawnCommand(validated, workerId, attemptId, context);
-    if (this.binding.inputDigest(command) !== digest(validated)) throw new Error('worker spawn command does not bind the validated input references');
+    const provenance = spawnProvenance(command);
+    if (provenance.modelId !== validated.modelId || this.binding.inputDigest(command) !== digest(validated)) throw new Error('worker spawn command does not bind the validated input references');
     const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId);
     const attempt = this.binding.attempt(admitted.command, workerId);
     let record: StoredWorker | undefined;
@@ -71,8 +81,15 @@ export class PiWorkerFleet {
         // Immutable attempt provenance precedes workspace/session creation.
         this.binding.host.recordAttempt(attempt);
         const config = this.binding.workspace(admitted.command, workerId, attempt);
+        if (config.baseSha !== provenance.baseSha || attempt.baseSha !== provenance.baseSha || attempt.model !== provenance.modelId) {
+          throw new Error('worker spawn provenance does not match its worktree or attempt');
+        }
         const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
         const worker = await this.binding.start(admitted.command, workspace);
+        if (worker.modelIdentity.modelId !== provenance.modelId) {
+          worker.dispose();
+          throw new Error('Pi runtime model does not match the admitted worker model');
+        }
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
           workspace: workspace.root, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
@@ -102,22 +119,30 @@ export class PiWorkerFleet {
   async waitForTerminal(workerId: string): Promise<void> { await this.#runs.get(workerId); }
 
   private async run(workerId: string, live: LiveWorker): Promise<void> {
-    let terminal: StoredWorker;
+    let terminal: StoredWorker | undefined;
     try {
       const outcome = await live.worker.run(this.binding.prompt(live.command), this.binding.correction(live.command));
-      terminal = Object.freeze({ ...live.record, state: 'terminal', evidenceRefs: Object.freeze([...live.record.evidenceRefs, ...outcome.artifacts.map((item) => item.ref)]) });
+      const completed = Object.freeze({ ...live.record, state: 'terminal' as const, evidenceRefs: Object.freeze([...live.record.evidenceRefs, ...outcome.artifacts.map((item) => item.ref)]) });
+      // Write a disposition before updating the query projection. A completed
+      // agent may disappear between these operations; its evidence must not.
+      terminal = await this.persistRecord(live.context, completed, 'terminal');
+      this.#records.set(workerId, terminal);
       this.binding.host.reportAttemptStop(live.record.attemptId, 'stopped');
-      terminal = await this.persistRecord(live.context, terminal, 'terminal');
       this.binding.host.appendFleetEvent(event('worker.completed', terminal, live.context.runId, { result: outcome.result.status, evidenceRefs: terminal.evidenceRefs }));
     } catch {
       if (this.#stopping.has(workerId)) return;
-      terminal = Object.freeze({ ...live.record, state: 'unknown' });
+      // Once completion is durably recorded it wins over a later projection or
+      // event failure. Never rewrite that stable terminal disposition as an
+      // unknown worker merely because a subsequent bookkeeping call failed.
+      if (terminal?.state === 'terminal') return;
+      const unknown = Object.freeze({ ...live.record, state: 'unknown' as const });
+      terminal = await this.persistRecord(live.context, unknown, 'terminal');
+      this.#records.set(workerId, terminal);
       this.binding.host.reportAttemptStop(live.record.attemptId, 'unknown');
-      terminal = await this.persistRecord(live.context, terminal, 'terminal');
       this.binding.host.appendFleetEvent(event('worker.failed', terminal, live.context.runId, { disposition: 'unknown' }));
     } finally {
       if (!this.#stopping.has(workerId)) {
-        this.#records.set(workerId, terminal!);
+        if (terminal) this.#records.set(workerId, terminal);
         this.#live.delete(workerId);
         this.#runs.delete(workerId);
         if (!live.worker.isActive) live.worker.dispose();

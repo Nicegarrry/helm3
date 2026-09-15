@@ -83,6 +83,10 @@ export class PiNativeWorker {
   get contextOccupancy() { return observePiContext(this.session); }
   /** Pi's requested and selected SDK setting; providers may ignore or translate it. */
   get thinkingConfiguration(): Readonly<{ requested: PiThinkingLevel; nativeSelected: PiThinkingLevel; providerEffective: 'unknown' }> { return this.thinking; }
+  /** Immutable SDK model selected by the trusted host at worker creation. */
+  get modelIdentity(): Readonly<{ modelId: string; provider: string; api: string }> {
+    return Object.freeze({ modelId: this.input.model.id, provider: this.input.model.provider, api: this.input.model.api });
+  }
 
   static async start(input: PiWorkerInput): Promise<PiNativeWorker> {
     input.workspaceManager.assertOwner(input.workspace, input.owner);

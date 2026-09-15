@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, readdir, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -23,7 +23,7 @@ const runId = 'fixture-run';
 const attemptId = 'fixture-attempt';
 const commandId = 'fixture-worker-spawn';
 const hash = (value: unknown): string => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
-const workerPayload = z.object({ workerId: z.string().min(1), attemptId: z.string().min(1), modelId: z.literal('offline'), role: z.literal('builder'), inputDigest: z.string().min(1) }).strict();
+const workerPayload = z.object({ workerId: z.string().min(1), attemptId: z.string().min(1), modelId: z.literal('offline'), role: z.literal('builder'), inputDigest: z.string().min(1), baseSha: z.string().min(1), modelFactVersion: z.literal(1), dataPolicy: z.literal('public-only') }).strict();
 const piPayload = z.object({ effectId: z.string().min(1), kind: z.enum(['model.request', 'workspace.write']) }).strict();
 
 export type LocalFixtureResult = Readonly<{
@@ -48,6 +48,13 @@ export type LocalFixtureResult = Readonly<{
 
 export type LocalFixtureOptions = Readonly<{ stateDirectory: string; orchestrator: 'fable' | 'astra' }>;
 
+async function waitForFile(path: string): Promise<void> {
+  for (;;) {
+    try { await access(path); return; }
+    catch { await new Promise<void>((resolve) => setTimeout(resolve, 20)); }
+  }
+}
+
 function localFixtureReadRegistry(host: HostControlPlane, context: HelmToolExecutionContext, observedAt: string): HelmToolRegistry {
   return createHostReadToolRegistry({
     context,
@@ -68,8 +75,8 @@ export function createLocalFixtureReadToolRegistry(result: LocalFixtureResult): 
   return localFixtureReadRegistry(result.host, { runId: result.runId, sessionId: result.sessionId, mode: 'primary' }, result.observedAt);
 }
 
-function workerCommand(input: WorkerSpawnInput, workerId: string, attempt: string, context: HelmToolExecutionContext): Command {
-  const payload = { workerId, attemptId: attempt, modelId: 'offline' as const, role: 'builder' as const, inputDigest: hash({ ...input, contextRefs: [...input.contextRefs] }) };
+function workerCommand(input: WorkerSpawnInput, workerId: string, attempt: string, context: HelmToolExecutionContext, baseSha: string): Command {
+  const payload = { workerId, attemptId: attempt, modelId: 'offline' as const, role: 'builder' as const, inputDigest: hash({ ...input, contextRefs: [...input.contextRefs] }), baseSha, modelFactVersion: 1 as const, dataPolicy: 'public-only' as const };
   const id = commandId;
   return { schemaVersion: 1, commandId: id, kind: 'worker.spawn', idempotencyKey: id, payloadHash: hash(payload), scope: { repositoryId: 'fixture-repository', mapNodeId: 'fixture-node' }, actorId: 'fixture-model', runId: context.runId, origin: 'orchestrator', leaseId: 'fixture-autonomy', leaseRevision: 1, orchestratorLeaseId: 'fixture-orchestrator', orchestratorEpoch: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] };
 }
@@ -114,7 +121,7 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
   let activeContext: HelmToolExecutionContext | undefined;
   let fixtureSpawnInput: WorkerSpawnInput | undefined;
   const fleet = new PiWorkerFleet({ host: plane, workspaceManager, executor: { executorId: 'fixture-host' }, claimExpiresAt: () => later, readFact: async () => ({ value: true, state: 'known', source: 'fixture', observedAt: now }),
-    spawnCommand: (input: WorkerSpawnInput, workerId: string, spawnedAttemptId: string, context: HelmToolExecutionContext) => { activeContext = context; return workerCommand(input, workerId, spawnedAttemptId, context); },
+    spawnCommand: (input: WorkerSpawnInput, workerId: string, spawnedAttemptId: string, context: HelmToolExecutionContext) => { activeContext = context; return workerCommand(input, workerId, spawnedAttemptId, context, baseSha); },
     inputDigest: (command) => (command.payload as { inputDigest: string }).inputDigest,
     stopCommand: (record, context) => { const payload = { workerId: record.workerId }; return { schemaVersion: 1, commandId: `fixture-worker-stop-${record.workerId}`, kind: 'worker.stop', idempotencyKey: `fixture-worker-stop-${record.workerId}`, payloadHash: hash(payload), scope: { repositoryId: 'fixture-repository', mapNodeId: 'fixture-node' }, actorId: 'fixture-model', runId: context.runId, origin: 'orchestrator', leaseId: 'fixture-autonomy', leaseRevision: 1, orchestratorLeaseId: 'fixture-orchestrator', orchestratorEpoch: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] } as Command; },
     attempt: (command, workerId) => ({ attemptId, mapNodeId: 'fixture-node', mapNodeRevision: 'fixture', objectiveVersion: 'fixture', acceptanceVersion: 'fixture', role: 'builder', model: 'offline', family: 'faux', provider: 'helm3-local-faux', capability: 'fixture', poolId: 'fixture-requests', workspace: join(root, 'worker'), baseSha, contextManifestHash: 'sha256:fixture-context', leaseId: 'fixture-autonomy', sessionIds: [], commandIds: [command.commandId], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] }),
@@ -156,6 +163,14 @@ const args = process.argv.join(' '); const resumed = args.includes('resume'); co
   const spawned = (await plane.snapshot(runId)).commands.find((entry) => entry.command.kind === 'worker.spawn');
   const spawnedId = (spawned?.command.payload as { workerId?: string } | undefined)?.workerId;
   if (!spawnedId) throw new Error('fixture worker setup did not persist a worker ID');
+  if (afterWriteMarker) {
+    // The interrupted-child test kills this process at the precise point after
+    // a Pi-native write, before its observation and terminal handoff. Do not
+    // close the host (which would hide the in-flight worker) or fabricate a
+    // completed worker merely to make the child settle.
+    await waitForFile(afterWriteMarker);
+    await new Promise<void>(() => { setInterval(() => undefined, 1_000); });
+  }
   await fleet.waitForTerminal(spawnedId);
   const checkpoint = await driver.checkpoint({ sessionId: started.sessionId });
   const bundle = await artifacts.loadRecoveryBundle(checkpoint.bundleRef);
@@ -182,7 +197,7 @@ const args = process.argv.join(' '); const resumed = args.includes('resume'); co
   const resultPath = join(workspace.root, 'result.txt');
   clock = later;
   let expiredRefusal = false;
-  try { plane.admitOrchestrator({ ...workerCommand(fixtureSpawnInput, 'expired-worker', 'expired-attempt', { runId, sessionId: started.sessionId, mode: 'primary' }), commandId: 'fixture-expired-command', idempotencyKey: 'fixture-expired-command', notAfter: ownerLater }, { runId, sessionId: started.sessionId, mode: 'primary' }, `fixture-${options.orchestrator}`); } catch (error) { expiredRefusal = /autonomy|lease/i.test(String(error)); }
+  try { plane.admitOrchestrator({ ...workerCommand(fixtureSpawnInput, 'expired-worker', 'expired-attempt', { runId, sessionId: started.sessionId, mode: 'primary' }, baseSha), commandId: 'fixture-expired-command', idempotencyKey: 'fixture-expired-command', notAfter: ownerLater }, { runId, sessionId: started.sessionId, mode: 'primary' }, `fixture-${options.orchestrator}`); } catch (error) { expiredRefusal = /autonomy|lease/i.test(String(error)); }
   if (!expiredRefusal) throw new Error('expired autonomy lease admitted a new command without a lease-expiry refusal');
   return Object.freeze({ fixture: true, orchestrator: options.orchestrator, stateDirectory: root, observedAt: clock, runId, attemptId, sessionId: started.sessionId, workspace: workspace.root, resultPath, recoveryBundleRef: checkpoint.bundleRef, recoveryStateRef: bundle.recoveryStateRef, rawRefs: Object.freeze(snapshot.artifacts.map((item) => item.ref)), commandState: snapshot.commands.find((entry) => entry.command.kind === 'worker.spawn')?.status ?? 'unknown', usageActions: Object.freeze({ modelRequests: snapshot.commands.filter((entry) => entry.command.kind === 'pi.model' && entry.status === 'succeeded').length, workspaceWrites: snapshot.commands.filter((entry) => entry.command.kind === 'pi.write' && entry.status === 'succeeded').length }), expiredRefusal: expiredRefusal as true, host: plane, async close() { await bridge?.close(); plane?.close(); workspaceManager.close(); modelRuntime?.dispose?.(); } });
 }

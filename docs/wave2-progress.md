@@ -13,11 +13,11 @@ The combined local suite has 47 tests. Its native Pi test uses the SDK's package
 
 ## Remaining acceptance
 
-[ACCESS #5](https://github.com/Nicegarrry/helm3/issues/5) and [PI-SLICE #11](https://github.com/Nicegarrry/helm3/issues/11) remain open. Pi does not use the existing Codex CLI login automatically. Its own OpenAI Codex OAuth credentials were absent at the non-refreshing status observation. An explicit user request for permission to configure that local login is pending; no answer or consent is inferred from elapsed time. Current scope excludes account/login changes, purchases and paid API fallback.
+[ACCESS #5](https://github.com/Nicegarrry/helm3/issues/5) and [PI-SLICE #11](https://github.com/Nicegarrry/helm3/issues/11) remain open. Pi does not use the existing Codex CLI login automatically. Its own OpenAI Codex OAuth credentials were absent at the non-refreshing status observation. The human is unavailable for interactive OAuth until tomorrow (expected 2026-09-16). Login is deferred until they return; no consent is inferred from elapsed time. Current scope excludes account/login changes, purchases and paid API fallback.
 
 The approved bounded access harness supports one request, no retries, no tools and a 30-second local deadline using the intended existing subscription. Provider output ceiling, subscription headroom and remote cancellation remain unknown where the SDK/provider does not expose them. A local deadline is not a guaranteed remote spending cutoff.
 
-After the login decision, validate the intended provider/model route and record the receipt. Then prove a real native worker with linked worktree/session/command/evidence under explicit runtime authority. Only after this native slice is sound, connect the first orchestrator driver, prove the second against the same Helm domain contract, then continue consultation, supervisor, quality integration and cockpit evidence. The library currently requires trusted host wiring; there is no complete runnable control-plane service or end-to-end Fable/Astra driver.
+After the login decision, validate the intended provider/model route and record the receipt. Then prove a real native worker with linked worktree/session/command/evidence under explicit runtime authority. While OAuth is deferred, construct both orchestrator drivers against the shared Helm domain contract and exercise local lifecycle, tool and recovery conformance. After authentication, prove the real native slice and driver interchange, then continue consultation, supervisor, quality integration and cockpit evidence. Live-proof dependencies do not block independent construction. The library currently requires trusted host wiring; there is no complete runnable control-plane service or end-to-end Fable/Astra driver.
 
 AUTHORITY #7, WORKSPACE #10 and EXTENSION #12 have substantial partial implementation but remain open for their full acceptance. The authority slice does not yet supply a complete supervisor escalation/refusal classification service. The worker exposes one controlled write tool; broader tools, full runtime topology, context management and OS-level shell isolation are not established. A controlled tool surface is not an OS sandbox.
 
@@ -34,4 +34,4 @@ npm test
 python3 scripts/check-preparation.py
 ```
 
-The separate access harness tests run in `spikes/sdk-feasibility` with `npm run pi-access-probe:test`; never enable the live probe without its specific approval and established route. Review and CI remain tied to exact PR heads. No unattended Helm run lease has been issued.
+The separate access harness tests run in `spikes/sdk-feasibility` with `npm run pi-access-probe-test`; never enable the live probe without its specific approval and established route. Review and CI remain tied to exact PR heads. No unattended Helm run lease has been issued.

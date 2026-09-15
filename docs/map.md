@@ -68,3 +68,7 @@ flowchart TD
 ```
 
 The native issue graph is authoritative; this overview omits edges for readability. A first and second driver describe proving order, not a mandatory Fable-first implementation dependency. See [build-plan.md](build-plan.md), [coverage.md](coverage.md), and [approval-packet.md](approval-packet.md).
+
+## OAuth deferral — 2026-09-15
+
+The human is away from the computer until tomorrow. ACCESS and live PI-SLICE/interchange evidence remain open. ORCH-DRIVER and Fable/Astra adapter construction, typed tools, and local checkpoint/recovery tests proceed under wave-two authority. Dependencies above describe complete outcome acceptance; they do not prohibit independent implementation with local SDK fixtures. See [wave-two authority](wave2-authority.md) and [current progress](wave2-progress.md).

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod/v3';
 import { type OrchestratorLease, utcTimestampSchema } from '../contracts/index.js';
-import type { KernelHost } from '../core/index.js';
+import type { CommandRecord, EffectObservation, KernelHost, TrustedExecutor } from '../core/index.js';
+import type { Observation, Precondition } from '../contracts/index.js';
 
 const id = z.string().min(1).max(512);
 const signalSchema = z.object({
@@ -13,13 +14,18 @@ const signalSchema = z.object({
 }).strict();
 export type SupervisorSignal = z.infer<typeof signalSchema>;
 export type Wake = Readonly<{ runId: string; epoch: number; group: string; wakeId: string; causes: readonly string[]; evidenceRefs: readonly string[] }>;
-type Log = Pick<KernelHost, 'appendEvent' | 'appendOwnedEvent' | 'readEvents' | 'assertCurrentOwner'>;
+/**
+ * The deliberately small trusted Log capability the supervisor needs.  It is
+ * safe to hand this to deterministic supervisor code, but not to a model or
+ * an external observation adapter.
+ */
+export type SupervisorLog = Pick<KernelHost, 'appendEvent' | 'appendOwnedEvent' | 'readEvents' | 'assertCurrentOwner'>;
 const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const correlation = (runId: string): string => `supervisor:${runId}`;
 
 /** Durable signals and coalesced judgement queue; this does not itself invoke a model. */
 export class EventSupervisor {
-  constructor(private readonly log: Log, private readonly now: () => string) {}
+  constructor(private readonly log: SupervisorLog, private readonly now: () => string) {}
 
   record(input: SupervisorSignal): void {
     const signal = signalSchema.parse(input);
@@ -57,6 +63,33 @@ export class EventSupervisor {
     })));
   }
 
+  /**
+   * Persist the current coalesced wake before returning it to a host delivery
+   * adapter.  The deterministic ID makes restart delivery idempotent, while
+   * the owner append fences a controller transfer at the write itself.
+   */
+  recordWakes(owner: OrchestratorLease): readonly Wake[] {
+    const wakes = this.pending(owner);
+    for (const wake of wakes) {
+      const payload = { runId: wake.runId, epoch: wake.epoch, group: wake.group, wakeId: wake.wakeId, causes: [...wake.causes], evidenceRefs: [...wake.evidenceRefs] };
+      const event = {
+        eventId: `wake:${wake.wakeId}`, schemaVersion: 1 as const, kind: 'supervisor.wake',
+        source: 'helm.supervisor.wake', sourceEventId: wake.wakeId, correlationId: correlation(wake.runId),
+        // Wake identity is derived solely from durable causes, so its event
+        // bytes must remain stable across restart/re-delivery.
+        occurredAt: this.wakeTimestamp(wake), recordedAt: this.wakeTimestamp(wake), sessionId: owner.sessionId, payload,
+      };
+      this.log.appendOwnedEvent(event, owner);
+    }
+    return wakes;
+  }
+
+  private wakeTimestamp(wake: Wake): string {
+    const event = this.log.readEvents(correlation(wake.runId)).find((candidate) => candidate.eventId === wake.causes[0]);
+    if (!event) throw new Error('wake cause is absent from the durable Log');
+    return event.occurredAt;
+  }
+
   /** Acknowledge handled causes, not merely attempted model delivery. Epoch is checked again. */
   acknowledge(wake: Wake, owner: OrchestratorLease): void {
     const current = this.log.assertCurrentOwner(owner);
@@ -84,6 +117,81 @@ const recoverySchema = z.object({
 }).strict();
 export type RecoveryFacts = z.infer<typeof recoverySchema>;
 export type RecoveryDecision = Readonly<{ action: 'observe' | 'block' | 'wake' | 'retry'; reason: string }>;
+
+/** A host-owned execution capability; observation adapters never receive it. */
+export type SupervisorRetryExecutor = Readonly<{
+  retry(input: Readonly<{
+    intent: unknown;
+    executor: TrustedExecutor;
+    claimExpiresAt: string;
+    readFact: (precondition: Precondition) => Promise<Observation<boolean>>;
+  }>): Promise<Readonly<{ record: CommandRecord; observation?: EffectObservation }>>;
+}>;
+export type SupervisorProcessInput = Readonly<{
+  signal: SupervisorSignal;
+  recovery?: RecoveryFacts;
+  retry?: Readonly<{
+    intent: unknown;
+    executor: TrustedExecutor;
+    claimExpiresAt: string;
+    readFact: (precondition: Precondition) => Promise<Observation<boolean>>;
+  }>;
+}>;
+export type SupervisorProcessResult = Readonly<{
+  decision?: RecoveryDecision;
+  wakes: readonly Wake[];
+  retry?: Readonly<{ status: 'performed' | 'already-terminal'; record: CommandRecord; observation?: EffectObservation }>;
+}>;
+
+/**
+ * Serial, event-driven mechanics. It has no timer, model callback, provider
+ * client, or workflow graph: an integration host explicitly feeds trusted
+ * observations and optionally supplies a prebuilt retry command.
+ */
+export class EventDrivenSupervisor {
+  private tail: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly events: EventSupervisor,
+    private readonly retryExecutor: SupervisorRetryExecutor,
+    private readonly now: () => string,
+  ) {}
+
+  process(input: SupervisorProcessInput, owner?: OrchestratorLease): Promise<SupervisorProcessResult> {
+    const frozen = Object.freeze({ ...input, signal: signalSchema.parse(input.signal), ...(input.recovery ? { recovery: recoverySchema.parse(input.recovery) } : {}) });
+    const result = this.tail.then(() => this.processOne(frozen, owner));
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async processOne(input: SupervisorProcessInput, owner?: OrchestratorLease): Promise<SupervisorProcessResult> {
+    this.events.record(input.signal);
+    let decision: RecoveryDecision | undefined;
+    let retry: SupervisorProcessResult['retry'];
+    if (input.recovery) {
+      decision = planRecovery(input.recovery, this.now());
+      if (decision.action === 'retry') {
+        if (!input.retry) throw new Error('retry decision requires an explicit trusted retry command');
+        const executed = await this.retryExecutor.retry(input.retry);
+        retry = executed.observation
+          ? { status: 'performed', ...executed }
+          : { status: 'already-terminal', ...executed };
+      }
+    }
+    // Expired or concurrently replaced controllers retain their unhandled
+    // signal in the Log, but cannot receive a newly owned wake. A later active
+    // controller will coalesce the same causes under its own epoch.
+    let wakes: readonly Wake[] = [];
+    if (owner && input.signal.needsJudgement) {
+      try { wakes = this.events.recordWakes(owner); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (!/ownership lease is inactive|orchestrator ownership lease is stale/.test(message)) throw error;
+      }
+    }
+    return Object.freeze({ ...(decision ? { decision } : {}), wakes: Object.freeze(wakes), ...(retry ? { retry } : {}) });
+  }
+}
 
 /** Pure mechanical classification; a retry is only a proposal for a fresh kernel admission. */
 export function planRecovery(input: RecoveryFacts, nowInput: string): RecoveryDecision {

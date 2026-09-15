@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Attempt, AutonomyLease, Command, Observation, OrchestratorLease, Precondition, RawArtifactRef } from '../contracts/index.js';
+import { commandSchema, type Attempt, type AutonomyLease, type Command, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef } from '../contracts/index.js';
 import {
   openKernel,
   type CommandRecord,
@@ -13,6 +13,13 @@ import {
   type TrustedExecutor,
 } from '../core/index.js';
 import { ArtifactJournal, type ArtifactMetadata } from '../journal/index.js';
+import {
+  EventDrivenSupervisor,
+  EventSupervisor,
+  type SupervisorLog,
+  type SupervisorProcessInput,
+  type SupervisorProcessResult,
+} from '../supervisor/index.js';
 import type {
   HelmToolExecutionContext,
   InvocationOutcome,
@@ -136,6 +143,14 @@ export type DriverStartAuthority = Readonly<{
   expiresAt: string;
 }>;
 
+/** Provider-free host entry point for explicit trusted supervisor observations. */
+export type HostSupervisor = Readonly<{
+  /** Narrow Log capability for status projections and trusted delivery adapters. */
+  log(): SupervisorLog;
+  /** Serially records an observation, persists current wakes, and may run one bounded retry. */
+  process(input: SupervisorProcessInput): Promise<SupervisorProcessResult>;
+}>;
+
 export class HostArtifactStore implements OrchestratorArtifacts {
   constructor(private readonly journal: ArtifactJournal, private readonly scope: () => ArtifactScope) {}
 
@@ -200,17 +215,20 @@ export class HostArtifactStore implements OrchestratorArtifacts {
 }
 
 export class HostControlPlane {
+  private supervisorService?: HostSupervisor;
   private constructor(
     private readonly kernel: ReturnType<typeof openKernel>,
     private readonly journal: ArtifactJournal,
     private readonly runtime?: HostRuntime,
+    private readonly now: () => string = () => new Date().toISOString(),
   ) {}
 
   static async open(options: HostOptions): Promise<HostControlPlane> {
     await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
-    const kernel = openKernel({ databasePath: join(options.stateDirectory, 'kernel.sqlite'), kinds: options.kinds, now: options.now });
+    const now = options.now ?? (() => new Date().toISOString());
+    const kernel = openKernel({ databasePath: join(options.stateDirectory, 'kernel.sqlite'), kinds: options.kinds, now });
     const journal = await ArtifactJournal.open({ root: join(options.stateDirectory, 'journal'), hostPolicy: { allowSensitiveWrites: true } });
-    return new HostControlPlane(kernel, journal, options.runtime);
+    return new HostControlPlane(kernel, journal, options.runtime, now);
   }
 
   /** The caller must have already recorded the human grant and autonomy lease. */
@@ -242,6 +260,62 @@ export class HostControlPlane {
 
   acquireOwnership(lease: OrchestratorLease, expectedEpoch: number): OrchestratorLease {
     return this.kernel.host.acquireOwnership(lease, expectedEpoch);
+  }
+
+  /**
+   * Returns the only supervisor-facing Log surface. It intentionally excludes
+   * authority grants, leases, raw SQLite and provider operations.
+   */
+  supervisorLog(): SupervisorLog {
+    return Object.freeze({
+      appendEvent: this.kernel.host.appendEvent.bind(this.kernel.host),
+      appendOwnedEvent: this.kernel.host.appendOwnedEvent.bind(this.kernel.host),
+      readEvents: this.kernel.host.readEvents.bind(this.kernel.host),
+      assertCurrentOwner: this.kernel.host.assertCurrentOwner.bind(this.kernel.host),
+    });
+  }
+
+  /**
+   * No polling or provider adapter is hidden here. Callers feed explicit
+   * trusted observations; retry effects always traverse kernel admission,
+   * claim and at-effect fresh fact reads.
+   */
+  createSupervisor(): HostSupervisor {
+    if (this.supervisorService) return this.supervisorService;
+    const service = new EventDrivenSupervisor(new EventSupervisor(this.supervisorLog(), this.now), {
+      retry: async (input) => {
+        // Kernel's immutable admission is still authoritative for a new
+        // command. On replay, check exact durable bytes before returning the
+        // old command so SQLite NULL representation cannot turn an already
+        // terminal supervisor command into a second admission attempt.
+        const proposed = commandSchema.parse(input.intent);
+        if (proposed.origin !== 'supervisor') throw new Error('trusted supervisor accepts only supervisor-origin retry commands');
+        const canonical = { ...proposed, actorId: 'trusted-supervisor' };
+        const existing = this.kernel.kernel.getCommand(proposed.commandId);
+        if (existing) {
+          if (JSON.stringify(existing.command) !== JSON.stringify(canonical)) throw new Error('idempotency collision has different immutable command bytes');
+          return { record: existing };
+        }
+        const record = this.kernel.host.admit(proposed, { actorId: 'trusted-supervisor', allowedOrigins: ['supervisor'] });
+        if (record.status !== 'queued') return { record };
+        if (!this.runtime) throw new Error('host has no trusted runtime effect binding');
+        const effect = await this.runtime.createEffect({ command: record.command, artifacts: new HostArtifactStore(this.journal, () => {
+          const ownership = this.kernel.host.readRun(record.command.runId).ownership;
+          return { runId: record.command.runId, sessionId: ownership?.sessionId ?? 'supervisor-no-owner' };
+        }) });
+        const claim = this.kernel.host.claim(record.command.commandId, input.executor, input.claimExpiresAt);
+        const observation = await this.kernel.host.perform(record.command.commandId, claim, input.executor, input.readFact, effect);
+        return { record: this.kernel.kernel.getCommand(record.command.commandId) ?? record, observation };
+      },
+    }, this.now);
+    this.supervisorService = Object.freeze({
+      log: () => this.supervisorLog(),
+      process: async (input) => {
+        const owner = this.kernel.host.readRun(input.signal.runId).ownership;
+        return service.process(input, owner);
+      },
+    });
+    return this.supervisorService;
   }
 
   private assertSession(context: HelmToolExecutionContext): OrchestratorLease {

@@ -65,6 +65,12 @@ test('separate journal instances grant one durable pre-spawn claim and launch on
     assert.equal(spawns, 1);
     assert.equal(outcomes[0].reviewId, outcomes[1].reviewId);
     assert.ok(outcomes.some(outcome => outcome.state === 'launched'));
+    const launched = outcomes.find(outcome => outcome.state === 'launched')!;
+    const retry = await service(new JournalReviewDurabilityStore(leftJournal, 'run')).request(input);
+    assert.equal(retry.state, 'launched'); assert.equal(spawns, 1, 'a launched review reopens without a second native spawn');
+    await service(new JournalReviewDurabilityStore(leftJournal, 'run')).recordTerminal(launched.reviewId, launched.idempotencyKey, { resultRef: 'result', rawEventRefs: ['raw-event'], readonlyObservation: { beforeRef: 'before', afterRef: 'after' } });
+    const terminalRetry = await service(new JournalReviewDurabilityStore(leftJournal, 'run')).request(input);
+    assert.equal(terminalRetry.state, 'terminal'); assert.equal(spawns, 1, 'a terminal review reopens without a second native spawn');
     leftJournal.close(); rightJournal.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

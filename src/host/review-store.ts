@@ -91,7 +91,7 @@ export class JournalReviewDurabilityStore implements ReviewDurabilityStore {
     const identity = id(this.runId, record.idempotencyKey, 'intent');
     const existing = await this.reopen(record.idempotencyKey);
     if (existing) {
-      if (JSON.stringify(existing) !== JSON.stringify(record)) throw new Error('review intent claim conflicts with existing intent');
+      if (!sameIntent(existing, record)) throw new Error('review intent claim conflicts with existing intent');
       return Object.freeze({ record: existing, created: false });
     }
     // ArtifactJournal intentionally treats identical immutable appends as
@@ -103,7 +103,7 @@ export class JournalReviewDurabilityStore implements ReviewDurabilityStore {
       return Object.freeze({ record, created: true });
     } catch (error) {
       const winner = await this.reopen(record.idempotencyKey);
-      if (!winner || JSON.stringify(winner) !== JSON.stringify(record)) throw error;
+      if (!winner || !sameIntent(winner, record)) throw error;
       return Object.freeze({ record: winner, created: false });
     }
   }

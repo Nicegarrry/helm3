@@ -131,10 +131,10 @@ export class IndependentReviewService {
       launched = frozenRecord({ ...planned, state: 'launched', reviewer: { requestedModelId: request.reviewerModelId, workerId: spawned.workerId, attemptId: spawned.attemptId, sessionId: spawned.sessionId, ...(spawned.spawnCommandId ? { spawnCommandId: spawned.spawnCommandId } : {}), modelId: spawned.modelId ?? request.reviewerModelId, ...(spawned.family ? { family: spawned.family } : {}), ...(spawned.poolId ? { poolId: spawned.poolId } : {}) } });
       await this.binding.durability.append(launched);
       return launched;
-    } catch {
+    } catch (error) {
       const unknown = frozenRecord({ ...(launched ?? planned), state: 'unknown', failure: { reason: launched ? 'persistence-unknown' : 'spawn-unknown' } });
       try { await this.binding.durability.append(unknown); } catch { /* The planned record remains the reconciliation identity. */ }
-      throw new Error(`review launch outcome is unknown; reconcile ${planned.reviewId}`);
+      throw new Error(`review launch outcome is unknown; reconcile ${planned.reviewId}; ${error instanceof Error ? error.message : 'unknown cause'}`);
     }
   }
 
@@ -174,5 +174,15 @@ export function createFleetIndependentReviewService(input: Readonly<{
   };
   return new IndependentReviewService({ source, readArtifact: (ref) => input.host.artifactsFor(input.context).readText(ref),
     inspectSource: async (value) => { const reservation = input.workspaceManager.reservation(value.workspace); await input.workspaceManager.assertExactHead(reservation, value.head); return { head: value.head, clean: true }; },
-    authorize: input.authorize, durability: input.durability, spawn: async request => input.fleet.spawn(input.context, request) });
+    authorize: input.authorize, durability: input.durability,
+    spawn: async request => {
+      const spawned = await input.fleet.spawn(input.context, request);
+      const inspected = await input.fleet.inspect(input.context, spawned.workerId);
+      const snapshot = await input.host.snapshot(input.context.runId);
+      const attempt = snapshot.attempts.find(item => item.attemptId === spawned.attemptId);
+      const command = snapshot.commands.find(item => item.command.commandId === inspected.spawnCommandId)?.command;
+      const payload = command?.payload as Partial<{ modelId: string }> | undefined;
+      if (!attempt || !command || typeof payload?.modelId !== 'string') throw new Error('reviewer launch provenance is unavailable');
+      return { ...spawned, spawnCommandId: inspected.spawnCommandId, modelId: payload.modelId, family: attempt.family, poolId: attempt.poolId };
+    } });
 }

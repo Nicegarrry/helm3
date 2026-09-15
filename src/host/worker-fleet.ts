@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import type { Attempt, Command, Event, Observation, Precondition } from '../contracts/index.js';
 import type { KernelEffect, TrustedExecutor } from '../core/index.js';
 import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js';
@@ -115,8 +116,9 @@ export class PiWorkerFleet {
           throw new Error('worker spawn provenance does not match its worktree or attempt');
         }
         const review = validated.reviewConstraint;
+        const sameRepository = !review || await realpath(config.repository) === await realpath(review.repository).catch(() => '');
         if (review && (review.mode !== 'review-readonly' || !/^[0-9a-f]{40}$/.test(review.expectedHead)
-          || config.repository !== review.repository || config.baseSha !== review.expectedHead
+          || !sameRepository || config.baseSha !== review.expectedHead
           || config.policy.writableRoots.length !== 0 || (admitted.command.payload as { mode?: unknown }).mode !== 'review-readonly')) {
           throw new Error('independent review spawn does not bind its readonly repository head');
         }

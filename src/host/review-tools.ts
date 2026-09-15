@@ -13,7 +13,11 @@ export function createHostReviewToolRegistry(reads: HostReadToolsOptions, review
     async execute(input, actual) {
       if (actual.runId !== expected.runId || actual.sessionId !== expected.sessionId || actual.mode !== 'primary') return { state: 'refused', reason: 'tool context is outside the trusted host binding' };
       try { await reads.authorize?.(actual); return { state: 'succeeded', value: await reviews.request(request.parse(input) as ReviewRequest) }; }
-      catch { return { state: 'refused', reason: 'review request was refused by trusted host authority' }; }
+      catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (message.startsWith('review launch outcome is unknown; reconcile ')) return { state: 'unknown', reason: message };
+        return { state: 'refused', reason: 'review request was refused by trusted host authority' };
+      }
     } };
   return new HelmToolRegistry([...createHostReadToolRegistry(reads).all(), tool]);
 }

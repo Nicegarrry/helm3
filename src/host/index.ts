@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { commandSchema, type Attempt, type AutonomyLease, type Command, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef } from '../contracts/index.js';
+import { commandSchema, type Attempt, type AutonomyLease, type Command, type Event, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef } from '../contracts/index.js';
 import {
   openKernel,
   type CommandRecord,
@@ -297,6 +297,22 @@ export class HostControlPlane {
       readEvents: this.kernel.host.readEvents.bind(this.kernel.host),
       assertCurrentOwner: this.kernel.host.assertCurrentOwner.bind(this.kernel.host),
     });
+  }
+
+  /**
+   * Bounded public Log projection for host-owned read tools. Event payloads can
+   * include provider or artifact material, so they never cross this boundary.
+   */
+  readRunEvents(runId: string, limit: number): ReadonlyArray<Readonly<Omit<Event, 'schemaVersion' | 'correlationId' | 'causationId' | 'payload'>>> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('log read limit must be between 1 and 100');
+    const events = this.kernel.host.readEvents(runId);
+    return Object.freeze(events.slice(-limit).map((event) => Object.freeze({
+      eventId: event.eventId, kind: event.kind, source: event.source, sourceEventId: event.sourceEventId,
+      occurredAt: event.occurredAt, recordedAt: event.recordedAt,
+      ...(event.commandId ? { commandId: event.commandId } : {}),
+      ...(event.attemptId ? { attemptId: event.attemptId } : {}),
+      ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+    })));
   }
 
   /**

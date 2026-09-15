@@ -1,4 +1,5 @@
 import { formatOperatorCli, formatOperatorJson, validateOperatorSnapshot } from './projection.js';
+import type { HelmToolResult } from '../runtime/orchestrator/index.js';
 
 /** CLI reads the same loopback API as the cockpit; it has no host authority. */
 export async function readOperatorApi(origin: string) {
@@ -20,9 +21,33 @@ export async function readOperatorApi(origin: string) {
   } finally { await reader.cancel().catch(() => undefined); }
 }
 
+export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'map.get' | 'log.query' | 'models.get' | 'budget.get', limit?: number): Promise<HelmToolResult> {
+  const url = new URL(origin);
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Expected an explicit http://127.0.0.1:PORT origin');
+  if (name !== 'log.query' && limit !== undefined) throw new Error('Only log.query accepts --limit');
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) throw new Error('--limit must be between 1 and 100');
+  const path = `/api/operator/read/${name}${limit === undefined ? '' : `?limit=${limit}`}`;
+  const response = await fetch(new URL(path, url), { signal: AbortSignal.timeout(5_000), redirect: 'error' });
+  if (!response.ok) throw new Error(`Operator read API unavailable (${response.status})`);
+  const bytes = await response.arrayBuffer(); if (bytes.byteLength > 1024 * 1024) throw new Error('Operator read result exceeds the CLI read bound');
+  const parsed: unknown = JSON.parse(Buffer.from(bytes).toString('utf8'));
+  if (!parsed || typeof parsed !== 'object' || !('state' in parsed)) throw new Error('Operator read API returned an invalid result');
+  return parsed as HelmToolResult;
+}
+
 export async function operatorCli(args: readonly string[]): Promise<string> {
+  if (args.length >= 4 && args.length <= 6 && args[0] === '--url' && args[2] === '--read') {
+    const name = args[3];
+    if (!['brief.get', 'map.get', 'log.query', 'models.get', 'budget.get'].includes(name)) throw new Error('Unknown read tool');
+    let limit: number | undefined;
+    if (args.length > 4) {
+      if (args.length !== 6 || args[4] !== '--limit' || !/^[1-9][0-9]{0,2}$/.test(args[5]!)) throw new Error('Usage: tsx src/operator/cli.ts --url http://127.0.0.1:PORT --read TOOL [--limit 1..100]');
+      limit = Number(args[5]);
+    }
+    return `${JSON.stringify(await readOperatorToolApi(args[1], name as 'brief.get' | 'map.get' | 'log.query' | 'models.get' | 'budget.get', limit))}\n`;
+  }
   if (args.length < 2 || args.length > 3 || args[0] !== '--url' || (args.length === 3 && args[2] !== '--json')) {
-    throw new Error('Usage: tsx src/operator/cli.ts --url http://127.0.0.1:PORT [--json]');
+    throw new Error('Usage: tsx src/operator/cli.ts --url http://127.0.0.1:PORT [--json] | --url http://127.0.0.1:PORT --read TOOL [--limit 1..100]');
   }
   const snapshot = await readOperatorApi(args[1]);
   return args[2] === '--json' ? formatOperatorJson(snapshot) : formatOperatorCli(snapshot);

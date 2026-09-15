@@ -126,7 +126,7 @@ function argv(method: string, path: string, fields: readonly string[] = []): str
 async function api(transport: TrackerCommandTransport, args: readonly string[]): Promise<Api> { const result = await transport(args, { timeoutMs: 10_000, outputByteLimit: 1024 * 1024 }); if (!result.ok || result.timedOut || result.outputTruncated) throw new Error('GitHub transport is unavailable or incomplete'); try { return object(JSON.parse(result.stdout)); } catch { throw new Error('GitHub response is invalid JSON'); } }
 
 /** Concrete argv-only GitHub gateway. Approval receipts remain a host-owned registry. */
-export function createGitHubIntegrationGateway(options: Readonly<{ repository: string; receipts: () => readonly IntegrationFacts['reviewReceipts'][number][]; acceptanceEvidence: (pr: number, head: ExactHead) => readonly { ref: string; head: ExactHead }[]; transport?: TrackerCommandTransport }>): IntegrationGateway {
+export function createGitHubIntegrationGateway(options: Readonly<{ repository: string; receipts: () => readonly IntegrationFacts['reviewReceipts'][number][]; acceptanceEvidence: (pr: number, head: ExactHead) => readonly { ref: string; head: ExactHead }[]; transport?: TrackerCommandTransport; /** Fixtures only: REST merge guards the source SHA but has no atomic target-ref CAS. */ testOnlyAllowDirectMerge?: boolean }>): IntegrationGateway {
   repository.parse(options.repository); const transport = options.transport ?? ghCommandTransport;
   return {
     read: async pr => {
@@ -137,6 +137,13 @@ export function createGitHubIntegrationGateway(options: Readonly<{ repository: s
       const comparison = state === 'MERGED' && mergeCommit !== null ? await api(transport, argv('GET', `${base}/compare/${mergeCommit}...${targetHead}`)) : null; const targetContainsMerge = comparison === null ? null : ['ahead', 'identical'].includes(text(comparison.status, 'comparison.status'));
       return Object.freeze({ repository: options.repository, pr, head, baseRef, baseHead, state, mergeable: typeof pull.mergeable_state === 'string' && pull.mergeable_state === 'clean' ? 'MERGEABLE' : 'UNKNOWN', checks: Object.freeze([...checkRows(completeRows(runs, 'check_runs'), 'check_run'), ...checkRows(completeRows(statuses, 'statuses'), 'status')]), acceptanceEvidence: Object.freeze(options.acceptanceEvidence(pr, head)), mergeCommit, targetHead, targetContainsMerge, reviewReceipts: Object.freeze(options.receipts().filter(receipt => receipt.pr === pr && receipt.head === head)) });
     },
-    merge: async (pr, expectedHead) => { positive.parse(pr); sha.parse(expectedHead); await api(transport, argv('PUT', `repos/${options.repository}/pulls/${pr}/merge`, ['-f', `sha=${expectedHead}`])); },
+    merge: async (pr, expectedHead) => {
+      positive.parse(pr); sha.parse(expectedHead);
+      // GitHub's REST `sha` compares only the PR head. It cannot atomically bind
+      // the target ref observed during prepare, so production execution must use
+      // a merge-queue gateway with an equivalent target-lane guarantee instead.
+      if (options.testOnlyAllowDirectMerge !== true) throw new Error('GitHub REST direct merge lacks atomic target-ref protection; use a merge-queue gateway');
+      await api(transport, argv('PUT', `repos/${options.repository}/pulls/${pr}/merge`, ['-f', `sha=${expectedHead}`]));
+    },
   };
 }

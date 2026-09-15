@@ -1,6 +1,6 @@
 # Wave 4 proposal: connect economy, supervision and the quality loop
 
-This is a proposal for the next implementation wave. It does not change the original Brief, addendum, Map authority or spending rules. The original design remains authoritative in [design-original.md](design-original.md) and [design-addendum.md](design-addendum.md); GitHub issues and pull requests remain the live Map.
+Wave 4 and onward were approved for bounded overnight execution on 2026-09-15; see [overnight authority](overnight-authority.md). This records the work sequence. It does not change the original Brief, addendum, Map authority or spending rules. The original design remains authoritative in [design-original.md](design-original.md) and [design-addendum.md](design-addendum.md); GitHub issues and pull requests remain the live Map.
 
 ## Starting point
 
@@ -25,7 +25,7 @@ The recorded Map observation at 2026-09-15T08:23:56.450Z found 34 nodes and fron
 
 4. **Quality and exact integration.** Run the complete gate → independent review → repair → exact-head integration loop against a real Helm 3 PR. Store command output, checked SHA, Standards/Spec verdicts and repair provenance. Integration must refuse moved heads, dirty worktrees, missing required review or stale evidence; workers prepare PRs and do not merge their own changes.
 
-5. **Parallel access preparation.** Keep provider-free implementation and OAuth/live-access preparation independent. When the human is available, obtain only the explicitly bounded account approval and live probe authority then, with recorded limits and a stop condition. No elapsed time, baseline credential, fixture success or scheduled task grants consent automatically.
+5. **Parallel bounded access.** Continue provider-free implementation alongside the expressly authorised OpenCode/Gemini account work under one cumulative US$10 guard. OpenCode Go native Pi access has a successful synthetic receipt and a subsequent failure-path finding; see [Wave 4 progress](wave4-progress.md). Interactive OAuth remains deferred. Account changes, purchases and top-ups remain outside authority.
 
 ## Sequencing and acceptance
 

@@ -21,6 +21,10 @@ test('host projection keeps incomplete Map, quota, decisions and expired authori
   assert.equal(result.needsYou, null); assert.equal(result.quality.gate.passed, null);
   assert.ok(result.unknowns.some((reason) => reason.includes('Provider quota')));
   assert.doesNotMatch(JSON.stringify(result), /recoveryRefs|rawArtifacts|payloadHash/);
+  const future = projectHostSnapshot({ ...host, ownership: { ...host.ownership!, issuedAt: '2026-09-16T09:00:00.000Z', expiresAt: '2026-09-17T10:00:00.000Z' } }, null, now, 'fixture');
+  assert.equal(future.run.leases.orchestrator.state, 'unknown');
+  const malformed = projectHostSnapshot({ ...host, ownership: { ...host.ownership!, issuedAt: 'invalid' } }, null, now, 'fixture');
+  assert.equal(malformed.run.leases.orchestrator.state, 'unknown');
 });
 
 test('reservations are not reported as usage or subscription headroom; revoked lease cannot appear active', () => {
@@ -39,6 +43,8 @@ test('reservations are not reported as usage or subscription headroom; revoked l
   assert.equal(result.resources.units[0].limit, null);
   const settled = projectHostSnapshot({ ...input, reservations: input.reservations.slice(0, 1) }, null, now, 'authoritative');
   assert.equal(settled.resources.units[0].used, 0.25); assert.equal(settled.resources.units[0].reserved, 0);
+  const futureLease = { ...input.autonomyLeases[0], revoked: false, lease: { ...input.autonomyLeases[0].lease, issuedAt: '2026-09-16T09:00:00.000Z' } };
+  assert.equal(projectHostSnapshot({ ...input, autonomyLeases: [futureLease] }, null, now, 'fixture').run.leases.autonomy.state, 'unknown');
 });
 
 test('tracker outage leaves durable host view readable and source refreshes on every read', async () => {

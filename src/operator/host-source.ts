@@ -14,9 +14,10 @@ export type HostSourceOptions = Readonly<{
 }>;
 
 const unavailableLease = () => ({ state: 'unknown' as const, id: null, expiresAt: null });
-function leaseState(expiresAt: string, now: string): LeaseState {
-  const expiry = Date.parse(expiresAt), observed = Date.parse(now);
-  return !Number.isFinite(expiry) || !Number.isFinite(observed) ? 'unknown' : expiry <= observed ? 'expired' : 'active';
+function leaseState(issuedAt: string, expiresAt: string, now: string): LeaseState {
+  const issued = Date.parse(issuedAt), expiry = Date.parse(expiresAt), observed = Date.parse(now);
+  if (![issued, expiry, observed].every(Number.isFinite) || issued > observed || expiry <= issued) return 'unknown';
+  return expiry <= observed ? 'expired' : 'active';
 }
 
 /** A display projection. No cached field from this adapter authorises an effect. */
@@ -34,7 +35,7 @@ export function projectHostSnapshot(host: HostSnapshot, map: GitHubMapSnapshot |
   // Several leases may cover distinct scopes. A single status must not imply
   // that one active lease grants authority over every displayed command.
   const autonomy = leases.length === 1 ? {
-    state: leases[0].revoked ? 'revoked' as const : leaseState(leases[0].lease.expiresAt, observedAt),
+    state: leases[0].revoked ? 'revoked' as const : leaseState(leases[0].lease.issuedAt, leases[0].lease.expiresAt, observedAt),
     id: leases[0].lease.leaseId,
     expiresAt: leases[0].lease.expiresAt,
   } : unavailableLease();
@@ -68,7 +69,7 @@ export function projectHostSnapshot(host: HostSnapshot, map: GitHubMapSnapshot |
       runId: host.runId,
       owner: { orchestrator: ownership?.owner ?? null, epoch: ownership?.epoch ?? null },
       leases: {
-        orchestrator: ownership ? { state: leaseState(ownership.expiresAt, observedAt), id: ownership.leaseId, expiresAt: ownership.expiresAt } : unavailableLease(),
+        orchestrator: ownership ? { state: leaseState(ownership.issuedAt, ownership.expiresAt, observedAt), id: ownership.leaseId, expiresAt: ownership.expiresAt } : unavailableLease(),
         autonomy,
       },
     },

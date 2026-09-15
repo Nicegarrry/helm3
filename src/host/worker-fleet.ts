@@ -2,11 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Attempt, Command, Event, Observation, Precondition } from '../contracts/index.js';
 import type { KernelEffect, TrustedExecutor } from '../core/index.js';
 import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js';
-import type { PiNativeWorker } from '../runtime/pi/index.js';
+import type { PiNativeWorker, PiPersistedSession } from '../runtime/pi/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../workspace/index.js';
 import type { HostControlPlane } from './index.js';
 
 export type WorkerSpawnInput = Readonly<{ objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[]; modelId: string; role: string; label?: string }>;
+/** A bounded, orchestrator-selected follow-up; all paths and authority remain host configured. */
+export type WorkerSteerInput = Readonly<{ workerId: string; objectiveRef: string; evidenceRefs: readonly string[]; expectedSessionId: string; expectedHead: string }>;
 export type WorkerInspect = Readonly<{
   workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string;
   state: 'ready' | 'running' | 'terminal' | 'unknown'; live: 'known' | 'unknown';
@@ -14,7 +16,7 @@ export type WorkerInspect = Readonly<{
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
 type SpawnProvenance = Readonly<{ modelId: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
-type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean }>;
+type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
 
 function digest(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
@@ -42,12 +44,14 @@ export type WorkerFleetBinding = Readonly<{
   /** Trusted host fact reader. It must return an observation, never a model claim. */
   readFact(precondition: Precondition): Promise<Observation<boolean>>;
   spawnCommand(input: WorkerSpawnInput, workerId: string, attemptId: string, context: HelmToolExecutionContext): Command;
+  steerCommand?(input: WorkerSteerInput, record: StoredWorker, attemptId: string, context: HelmToolExecutionContext): Command;
   /** Extract the host-configured immutable input digest from the command payload. */
   inputDigest(command: Command): string;
   stopCommand(record: StoredWorker, context: HelmToolExecutionContext): Command;
   attempt(command: Command, workerId: string): Attempt;
   workspace(command: Command, workerId: string, attempt: Attempt): Readonly<{ repository: string; destination: string; branch: string; baseSha: string; owner: WorktreeOwner; policy: { writableRoots: readonly string[]; protectedRoots?: readonly string[] } }>;
   start(command: Command, workspace: WorktreeReservation): Promise<PiNativeWorker>;
+  rehydrate?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession): Promise<PiNativeWorker>;
   prompt(command: Command): string;
   correction(command: Command): string;
 }>;
@@ -122,7 +126,7 @@ export class PiWorkerFleet {
     let terminal: StoredWorker | undefined;
     try {
       const outcome = await live.worker.run(this.binding.prompt(live.command), this.binding.correction(live.command));
-      const completed = Object.freeze({ ...live.record, state: 'terminal' as const, evidenceRefs: Object.freeze([...live.record.evidenceRefs, ...outcome.artifacts.map((item) => item.ref)]) });
+      const completed = Object.freeze({ ...live.record, state: 'terminal' as const, persistedSession: live.worker.persistedSession, evidenceRefs: Object.freeze([...live.record.evidenceRefs, ...outcome.artifacts.map((item) => item.ref)]) });
       // Write a disposition before updating the query projection. A completed
       // agent may disappear between these operations; its evidence must not.
       terminal = await this.persistRecord(live.context, completed, 'terminal');

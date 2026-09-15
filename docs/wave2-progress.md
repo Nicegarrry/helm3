@@ -22,7 +22,7 @@ After the login decision, validate the intended provider/model route and record 
 
 AUTHORITY #7, WORKSPACE #10 and EXTENSION #12 have substantial partial implementation but remain open for their full acceptance. The authority slice does not yet supply a complete supervisor escalation/refusal classification service. The worker exposes one controlled write tool; broader tools, full runtime topology, context management and OS-level shell isolation are not established. A controlled tool surface is not an OS sandbox.
 
-The predecessor handoff [#3](https://github.com/Nicegarrry/helm3/issues/3) is still independent. Its repository, worktrees, tests and working state were not accessed. Do not infer an immutable handoff from historical status.
+The predecessor handoff [#3](https://github.com/Nicegarrry/helm3/issues/3) is now unlocked by the human and pinned in the [M1 receipt](predecessor-m1.md). Earlier wave-two work did not access it. The [next wave](wave3-plan.md) now prioritises verified reuse and incremental dogfooding; import and legacy retirement remain distinct acceptance outcomes.
 
 ## Continue safely
 

@@ -1,0 +1,34 @@
+# Migration coordinator profile for the pinned predecessor CLI. No models or adapters.
+# Configuration is not an authority boundary: tracker-writing verbs still need task authority.
+repo = "Nicegarrry/helm3"
+worktree_root = "."
+worktree_pattern = "unused/{repo}/{branch}"
+branch_pattern = "{type}/{ticket}-{slug}"
+gate = "false"
+map_issue = 1
+spawn = "inline"
+[herdr]
+workspace_label = "helm3-observation"
+tab_per = "role"
+gc = "on-merge"
+[caps]
+concurrent = 1
+model_probe_usd = 0
+[tiers.low]
+turn_budget = 0
+oracle_required = true
+[tiers.medium]
+turn_budget = 0
+[tiers.high]
+turn_budget = 0
+[tiers.mechanical]
+turn_budget = 0
+oracle_required = true
+[seams]
+[adapters]
+[pools]
+[models]
+[policy]
+allow_training_models = false
+allow_china_hosted = false
+go_publishers = []

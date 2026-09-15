@@ -1,6 +1,6 @@
 # Proposed Helm 3 Map and build plan
 
-Status: wave 1 foundation is merged; wave 2 is explicitly approved. See [wave-two authority and acceptance](wave2-authority.md), [wave-two progress](wave2-progress.md) and [wave-one progress](wave1-progress.md). Later outcomes remain planned. It is a changeable approach
+Status: wave 1 foundation and wave 2 libraries are merged; the human has now unlocked predecessor reuse and dogfooding for the next wave. See [wave 3](wave3-plan.md). See [wave-two authority and acceptance](wave2-authority.md), [wave-two progress](wave2-progress.md) and [wave-one progress](wave1-progress.md). Later outcomes remain planned. It is a changeable approach
 to the approved Brief, not a workflow DSL or a promise that elapsed time alone
 authorises action.
 
@@ -25,14 +25,14 @@ ACCESS remains the live acceptance gate: finite, authorised native Pi and select
 orchestrator-route requests. The human has deferred interactive OAuth until tomorrow;
 continue driver implementation and local conformance while that gate waits. This chat's Terra/Luna availability is not proof
 those routes are usable. The Claude route has prior narrow SDK evidence; Codex
-SDK lifecycle/tool feasibility, including actual parity, remains unprobed. Freeze
+SDK lifecycle and local MCP transport have fixture evidence; live parity remains unproven. Freeze
 [protocol revision 1](protocol.md) after findings, then fan out across three lanes:
 
 1. Terra: Pi native sessions, tool policy, context and isolation.
 2. Terra: command/journal/lease/epoch-fencing spine, then first driver and quality integration.
 3. Luna/Terra as complexity requires: early Map/API/cockpit; SHA-pinned predecessor reuse when the handoff arrives.
 
-Keep stable predecessor behaviour behind proposed interfaces rather than speculatively rebuilding it while Opus works. Wave 1 is foundation only: contracts, raw-artifact journal/durable Log clarity, orchestrator epochs and SDK feasibility; it builds no product workflow. Implement the second driver early and prove the same comparable feature through both drivers before treating interchangeability as established. The first six hours of the build are an observational
+Reuse pinned, verified predecessor behaviour behind Helm 3 interfaces before rebuilding it. Wave 1 is foundation only: contracts, raw-artifact journal/durable Log clarity, orchestrator epochs and SDK feasibility; it builds no product workflow. Implement the second driver early and prove the same comparable feature through both drivers before treating interchangeability as established. The first six hours of the build are an observational
 checkpoint: report discovered interfaces, provider/authentication/isolation
 blockers and revised sequencing; it is not a guaranteed completion gate.
 
@@ -54,12 +54,14 @@ Work the native dependency frontier rather than starting every named issue at on
 
 ## Predecessor dependency
 
-No predecessor source, tests, credentials or working state are imported until
-Opus supplies an explicit Milestone 1 handoff with immutable SHA. Receipt of
-that handoff is independent of build approval. The later approved import lane
-classifies predecessor tests as behavioural or implementation-specific, pins
-the SHA in the Log, and ports only verified behaviours behind Helm 3 interfaces.
-It does not block independent Pi/orchestrator/client preparation or new control-plane slices. Full outcome closure remains blocked on the handoff/import/transition evidence; do not claim the entire migration complete without it.
+The human has explicitly unlocked the completed M1 predecessor for reuse. Source
+`ae5c3ff18ef8c0e12d57973ecb21c928b020b5c7` is pinned in the [receipt](predecessor-m1.md).
+The receipt unblocks inspection/import work; it does not claim all behaviours
+already ported or legacy retirement complete. Prioritise tracker, exact-evidence
+checks/integration, model economy and handoffs before rebuilding those mechanics.
+The old supervisor is design-only M2, and its fixed sequencing/provider adapter
+architecture does not transfer into Helm 3. Dogfood verified CLI operations now
+and replace them with accepted Helm 3 operations as the next wave connects them.
 
 ## Freeze checklist
 

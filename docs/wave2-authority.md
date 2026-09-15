@@ -24,3 +24,9 @@ Record each accepted slice and its exact review/test evidence on the Map. Preser
 The human subsequently said: “I won’t be at my computer for interactive oauth until tomorrow so need to manage around that”. Interactive Pi login is deferred until the human is available (expected 2026-09-16); this is not scheduled consent or an automatic login instruction.
 
 Continue already-approved work without provider calls: implement both orchestrator drivers and the shared typed tool seam, exercise local SDK fixtures, and test checkpoint/recovery and authority boundaries. Live access and real native-worker/interchange acceptance remain open. The earlier proving order does not block independent implementation. No substitute credentials, paid API route or predecessor access is introduced. When the human returns and explicitly approves the interactive login, complete that step and run the already-authorised bounded live proofs under their recorded limits against the tested implementation.
+
+## Predecessor milestone received; next-wave reuse and dogfooding
+
+The human confirmed: “the opus worker has finished to the milestone of helm cli build ... Now we can unblock and build on top of it freely/bring across the elements we need” and “let’s dogfood the existing work from that and things we build as we go”. This supersedes the predecessor prohibition and receipt-only/import hold in earlier documents. Source inspection, verification, selected behaviour imports, supervised development and dogfooding are authorised. See [the pinned receipt](predecessor-m1.md) and [revised next wave](wave3-plan.md).
+
+Retain the existing independent review, isolated worktree and spending/login boundaries. Dogfooding adopts verified deterministic operations as they become useful; it does not turn the old supervisor workflow or provider adapters into Helm 3 architecture. No new OAuth or paid-provider authority is implied.

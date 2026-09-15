@@ -96,7 +96,7 @@ export type KernelRunProjection = Readonly<{
   ownership?: OrchestratorLease;
   commands: readonly CommandRecord[];
   attempts: readonly Attempt[];
-  autonomyLeases: readonly AutonomyLease[];
+  autonomyLeases: readonly AutonomyLeaseProjection[];
   reservations: readonly ResourceReservationProjection[];
 }>;
 export type ResourceReservationProjection = Readonly<{
@@ -110,6 +110,7 @@ export type ResourceReservationProjection = Readonly<{
   repositoryId?: string;
   mapNodeId?: string;
 }>;
+export type AutonomyLeaseProjection = Readonly<{ lease: AutonomyLease; revoked: boolean }>;
 export const effectObservationSchema = z.object({
   commandId: z.string().min(1),
   effectId: z.string().min(1),
@@ -188,6 +189,10 @@ export class KernelHost {
 
   acquireOwnership(lease: OrchestratorLease, expectedEpoch: number): OrchestratorLease {
     return this.core.acquireOwnership(orchestratorLeaseSchema.parse(lease), expectedEpoch);
+  }
+
+  assertCurrentOwner(lease: OrchestratorLease): OrchestratorLease {
+    return this.core.assertCurrentOwner(orchestratorLeaseSchema.parse(lease));
   }
 
   readRun(runId: string): KernelRunProjection { return this.core.readRun(runId); }
@@ -396,8 +401,8 @@ class Kernel {
     });
     const leaseIds = [...new Set(parsedRows.map((row) => row.lease_id ?? undefined).filter((id): id is string => Boolean(id)))];
     const autonomyLeases = leaseIds.flatMap((leaseId) => {
-      const row = this.db.prepare(`SELECT bytes FROM autonomy_leases WHERE lease_id = ?`).get(leaseId) as { bytes: string } | undefined;
-      return row ? [autonomyLeaseSchema.parse(JSON.parse(row.bytes))] : [];
+      const row = this.db.prepare(`SELECT bytes, revoked FROM autonomy_leases WHERE lease_id = ?`).get(leaseId) as { bytes: string; revoked: number } | undefined;
+      return row ? [{ lease: autonomyLeaseSchema.parse(JSON.parse(row.bytes)), revoked: row.revoked === 1 }] : [];
     });
     const reservationRows = this.db.prepare(`SELECT command_id, lease_id, pool_id, unit, reserved, settled_actual, state, repository_id, map_node_id FROM resource_reservations WHERE command_id IN (SELECT command_id FROM commands WHERE run_id = ?) ORDER BY command_id`).all(runId) as Array<{
       command_id: string; lease_id: string; pool_id: string; unit: string; reserved: number; settled_actual: number | null; state: string; repository_id: string | null; map_node_id: string | null;
@@ -521,6 +526,16 @@ class Kernel {
       else this.db.prepare(`INSERT INTO ownership (run_id, lease_id, owner, session_id, epoch, bytes) VALUES (?, ?, ?, ?, ?, ?)`).run(lease.runId, lease.leaseId, lease.owner, lease.sessionId, lease.epoch, bytes);
       return lease;
     });
+  }
+
+  assertCurrentOwner(input: OrchestratorLease): OrchestratorLease {
+    const stored = this.db.prepare(`SELECT bytes FROM ownership WHERE run_id = ?`).get(input.runId) as { bytes: string } | undefined;
+    if (!stored) throw new Error('orchestrator ownership is absent');
+    const current = orchestratorLeaseSchema.parse(JSON.parse(stored.bytes));
+    if (current.leaseId !== input.leaseId || current.owner !== input.owner || current.sessionId !== input.sessionId || current.epoch !== input.epoch) throw new Error('orchestrator ownership is stale');
+    const now = this.safeNow();
+    if (Date.parse(current.issuedAt) > Date.parse(now) || isExpired(current.expiresAt, now)) throw new Error('orchestrator ownership lease is inactive');
+    return current;
   }
 
   recoverInterrupted(): void {

@@ -31,8 +31,34 @@ A subsequent read-only engineering-review attempt exposed a failure-path defect:
 
 The coordinator updated Map #1 through the accepted mutator inside an admitted, claimed and executed Kernel command. The adapter re-read membership and the exact issue revision before PATCH, rechecked host ownership/lease/hash authority, then confirmed the requested body by readback. It preserved the existing body and appended a dated progress section. The [receipt](evidence/wave4-map-mutation-20260915.json) records success at revision `2026-09-15T12:23:32Z`. GitHub issue PATCH remains read-before-write rather than an atomic revision CAS. No issue was closed.
 
-## Remaining work
+## Accepted failure recovery, supervisor host and integration slice
 
-The Pi failure-termination regression and fix, executable supervisor/host dispatch, and exact-head integration are active work. The existing supervisor library does not yet prove continuous reconciliation or actual retry dispatch. Integration PR #66 is under final review. A full accepted engineering review/repair/merge loop, live frontier orchestration, consultation, context lifecycle, failover, calibration and the complete original/addendum acceptance scenarios remain open.
+PR #67 connects the durable supervisor to trusted host observations and command execution. PR #68 stops and quarantines failed native sessions. PR #70 removes repeated metadata scans from streamed journal appends while retaining durable per-hash sensitivity authority, and PR #71 redacts thrown stream exceptions before Core records them. PR #66 adds exact integration certificates and a durable gate/review evidence registry.
 
-Unknown outcomes remain visible. A successful access probe is not closure of ACCESS #5, which also requires the active-orchestrator route and wider bounded-access evidence.
+The combined main head `0c46dcbcdb86b013620b20cfc61a4b9694fe3543` passed Node 22.22.2 typecheck and **145/145 tests** using a private frozen installation. Final reviewed heads were:
+
+| PR | Exact head | Independent validation |
+| --- | --- | --- |
+| #67 | `69a699fbfd7efd9651414316ad499a2b7613a2fa` | 129 tests, typecheck, host observation/epoch regressions |
+| #68 | `f5fc5e25485e16f80a52cab27217bf9cc237a535` | 125 tests, typecheck, preserved native success/error/timeout cases |
+| #70 | `fc76e5ffd8b440db16186a67181e18f8fe8c0a9f` | Spec: 126 tests and typecheck; Standards: code review and typecheck |
+| #71 | `d10eab4fe03391e9c252cdc54900a19a416ab052` | Both reviews: 132 tests and typecheck; synthetic thrown-iterator redaction regression |
+| #66 | `36c4ead2a696021f936eebefdb49a319e4a8e644` | Spec: 133 tests and typecheck; final Standards delta: 10 integration tests and typecheck |
+
+Each final head had green CI before coordinator merge and observed merge readback. The integration tests include actual Core admission/claim/perform, a machine-produced local gate persisted through registry reopen, and refusal after target-only movement or callback-time CI change.
+
+The production GitHub REST integration gateway still refuses to merge: source-SHA comparison does not atomically protect the target lane. A live read of this private repository's branch-protection endpoint returned a plan-related 403. No account plan or repository visibility was changed. Coordinator-reviewed development merges are authorised operations, not proof of Helm unattended production integration.
+
+The matched journal workload improved from 78,379 ms to 29,359 ms for 1,000 appends. A separate native faux-provider stress run with tiny chunks and a 1,200 ms provider deadline drained to an honest unknown result in 43,955 ms, compared with approximately 116 seconds before the fixes. These are local measurements; provider timeout does not imply instant durable-event draining. Legacy journal writers must be quiescent during descriptor migration.
+
+## Third native request: completed cognition, missing result
+
+A fresh bounded supervisor-review attempt ran on accepted `d289c6c1c6a8e470049807aeb2a4a2d3767ee0f4`. The provider request completed and settled **US$0.00818485** of nominal token accounting. Its terminal event reported `stopReason: length`, 1,200 output tokens, and thinking content without answer text. The output allowance was exhausted before a WorkerResult envelope appeared. The host exited normally and recorded the outer attempt as unknown; it did not accept a review or claim the task succeeded.
+
+The ledger now retains two unknown outer attempts: the earlier uncertain provider request, and this known-cost but missing-envelope attempt. The cumulative guard is **US$1.35647771 of US$10**: US$0.00905755 settled nominal accounting plus the original US$1.34742016 uncertain reservation. No reservation was reset or freed to create capacity. Actual incremental subscription billing and quota headroom remain unknown. [Sanitised third-request receipt](evidence/wave4-pi-review-after-fixes-20260915.json).
+
+## Remaining work and next lane
+
+Full Wave 4 acceptance remains open: this work has not yet produced a usable live engineering review/repair/merge receipt. A continuous supervisor still needs production source observers and frontier wake delivery. The integration transport needs a target-lane guarantee. Live Fable/Astra access, interchange, consultation and failover remain unproven.
+
+Wave 5 starts with explicitly selected, bounded context manifests and native context-occupancy observation, followed by context-preserving recovery and compaction/model-change paths only after their model requests and ownership boundaries are covered. Draft PR #72 is not acceptance evidence. Calibration, complete original/addendum scenarios and legacy retirement remain open. OAuth-dependent work stays deferred; the existing overnight authority and cumulative budget continue to apply.

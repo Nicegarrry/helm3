@@ -23,30 +23,40 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
   const { InMemoryCredentialStore, fauxAssistantMessage, fauxProvider, fauxToolCall } = await import('@earendil-works/pi-ai');
   let host: ReturnType<typeof openKernel>['host'] | undefined;
   let worker: PiNativeWorker | undefined;
+  let manager: WorkspaceManager | undefined;
   let modelEffects = 0;
   try {
     const repo = join(root, 'repo'); await mkdir(repo); await exec('git', ['init', repo]);
     await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']); await exec('git', ['-C', repo, 'config', 'user.name', 'Test']);
     await writeFile(join(repo, 'README.md'), 'base\n'); await exec('git', ['-C', repo, 'add', '.']); await exec('git', ['-C', repo, 'commit', '-m', 'base']);
     const base = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
-    const manager = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
+    manager = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
     const owner = { attemptId: 'attempt-1', generation: 1, expiresAt: '2099-01-01T00:00:00Z' };
     const workspace = await manager.create(repo, join(root, 'worker'), 'pi-attempt-1', base, owner);
-    const kernel = openKernel({ databasePath: join(root, 'helm.sqlite'), kinds: { 'pi.effect': { payloadSchema: z.object({ effectId: z.string(), kind: z.string() }).strict() } }, now: () => now }); host = kernel.host;
-    host.issueAutonomyLease({ leaseId: 'lease-1', revision: 1, issuedBy: 'human', parentAuthorityId: 'approval', scope: { repositoryId: 'repo-1', mapNodeIds: ['node-1'] }, allowedActions: ['pi.effect'], issuedAt: now, expiresAt: later, maxConcurrency: 4, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
+    const payloadSchema = z.object({ effectId: z.string(), kind: z.enum(['model.request', 'workspace.write']) }).strict();
+    const kernel = openKernel({ databasePath: join(root, 'helm.sqlite'), kinds: {
+      'pi.model': { payloadSchema, resourceRequest: () => ({ poolId: 'offline-requests', unit: 'requests', upperBound: 1, consumer: 'worker' }) },
+      'pi.write': { payloadSchema },
+    }, now: () => now }); host = kernel.host;
+    const poolLimits = [{ poolId: 'offline-requests', unit: 'requests', limit: 3 }];
+    host.declareHumanAuthority({ authorityId: 'approval', repositoryId: 'repo-1', mapNodeIds: ['node-1'], allowedActions: ['pi.model', 'pi.write'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits, protectedReserves: [] });
+    host.issueAutonomyLease({ leaseId: 'lease-1', revision: 1, issuedBy: 'human', parentAuthorityId: 'approval', scope: { repositoryId: 'repo-1', mapNodeIds: ['node-1'] }, allowedActions: ['pi.model', 'pi.write'], issuedAt: now, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits, protectedReserves: [] });
     const authority: PiAuthority = {
       async perform(effect, action) {
-        if (effect.kind === 'model.request') modelEffects += 1;
+        const isModel = effect.kind === 'model.request';
         const payload = { effectId: effect.effectId, kind: effect.kind };
-        host!.admit({ schemaVersion: 1, commandId: effect.effectId, kind: 'pi.effect', idempotencyKey: effect.effectId, payloadHash: sha(payload), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'untrusted-worker', runId: 'run-1', origin: 'worker', leaseId: 'lease-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] }, { actorId: 'trusted-pi-runtime', allowedOrigins: ['worker'] });
+        host!.admit({ schemaVersion: 1, commandId: effect.effectId, kind: isModel ? 'pi.model' : 'pi.write', idempotencyKey: effect.effectId, payloadHash: sha(payload), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'untrusted-worker', runId: 'run-1', origin: 'worker', leaseId: 'lease-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] }, { actorId: 'trusted-pi-runtime', attemptId: 'attempt-1', allowedOrigins: ['worker'] });
+        if (isModel) modelEffects += 1;
         const claim = host!.claim(effect.effectId, { executorId: 'pi-session-1' }, later);
         const observed = await host!.perform(effect.effectId, claim, { executorId: 'pi-session-1' }, async () => { throw new Error('no precondition was admitted for this effect'); }, { effectId: `kernel:${effect.effectId}`, execute: action, observe: () => ({ commandId: effect.effectId, effectId: `kernel:${effect.effectId}`, state: 'succeeded' as const, source: 'native-pi-test', observedAt: now, evidenceRefs: ['test:kernel-observation'] }) });
         assert.equal(observed.state, 'succeeded');
+        // Only the completed faux request supplies this exact unit of evidence.
+        if (isModel) host!.settleResource(effect.effectId, { state: 'known', amount: 1 });
       },
       requestCancellation: async () => undefined,
-      reportWorkerStop: async (_commandId, observed) => assert.equal(observed, 'stopped'),
+      reportWorkerStop: async (_commandId, observed) => host!.reportAttemptStop('attempt-1', observed),
     };
-    const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: join(root, 'models.json'), credentials: new InMemoryCredentialStore() });
+    const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new InMemoryCredentialStore() });
     const faux = fauxProvider({ provider: 'helm3-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('helm3-faux', 'offline');
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall('helm_write', { path: 'result.txt', contents: 'native Pi wrote this\n' })),
@@ -60,7 +70,12 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     assert.equal(modelEffects, 3, 'every native turn, including the automatic post-tool turn and correction, crosses the authority guard');
     assert.equal(await readFile(join(workspace.root, 'result.txt'), 'utf8'), 'native Pi wrote this\n');
     assert.ok(outcome.artifacts.length >= 2, 'native event stream and envelope are durable artifacts');
-    const reopened = await worker.reopen(); assert.equal(reopened.sessionId, worker.sessionId); reopened.dispose(); worker = undefined;
+    const originalSession = worker.sessionId;
+    const reopened = await worker.reopen(); assert.equal(reopened.sessionId, originalSession);
+    await assert.rejects(authority.perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'attempt-command' }, async () => { throw new Error('must not reach provider'); }), /cap|budget/);
+    assert.equal(modelEffects, 3, 'settled requests stay charged across reopen');
+    assert.equal(await reopened.cancel(), 'stopped');
+    reopened.dispose(); worker = undefined;
     await journal.close();
-  } finally { worker?.dispose(); host?.close(); await rm(root, { recursive: true, force: true }); }
+  } finally { worker?.dispose(); host?.close(); manager?.close(); await rm(root, { recursive: true, force: true }); }
 });

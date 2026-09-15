@@ -20,25 +20,25 @@ const later = '2026-09-16T00:00:00Z';
 const context = { runId: 'map-run', sessionId: 'map-session', mode: 'primary' as const };
 const exec = promisify(execFile);
 
-function transport(input: { failPatch?: boolean } = {}) {
+function transport(input: { failPatch?: boolean; failReadback?: boolean } = {}) {
   const issues = new Map<number, { number: number; title: string; body: string; state: 'open' | 'closed'; updated_at: string; html_url: string; repository_url: string }>();
   const issue = (number: number, patch = {}) => ({ number, title: `Issue ${number}`, body: `Body ${number}`, state: 'open' as const, updated_at: before, html_url: `https://github.com/owner/repo/issues/${number}`, repository_url: 'https://api.github.com/repos/owner/repo', ...patch });
   issues.set(1, issue(1)); issues.set(2, issue(2)); issues.set(9, issue(9, { state: 'closed' as const }));
-  let patches = 0;
+  let patches = 0; let patched = false;
   const value: TrackerCommandTransport = async (argv) => {
     const method = argv[2]!; const path = argv[3]!; const match = path.match(/^repos\/owner\/repo\/issues\/(\d+)(?:\/(sub_issues|dependencies\/blocked_by))?/);
     if (!match) return { ok: false, stdout: '', stderr: 'unexpected' };
     const number = Number(match[1]); const relation = match[2];
     if (method === 'GET' && relation === 'sub_issues') return { ok: true, stdout: JSON.stringify(number === 1 ? [issues.get(2)] : []), stderr: '' };
     if (method === 'GET' && relation === 'dependencies/blocked_by') return { ok: true, stdout: JSON.stringify(number === 2 ? [issues.get(9)] : []), stderr: '' };
-    if (method === 'GET') return { ok: true, stdout: JSON.stringify(issues.get(number)), stderr: '' };
-    if (method === 'PATCH') { patches += 1; if (input.failPatch) return { ok: false, stdout: '', stderr: 'lost' }; const fields = Object.fromEntries(argv.slice(4).reduce<string[][]>((all, entry, index, values) => entry === '-f' && values[index + 1] ? [...all, values[index + 1]!.split(/=(.*)/s)] : all, [])); const current = issues.get(number)!; const next = { ...current, ...(fields.title ? { title: fields.title } : {}), ...(fields.body ? { body: fields.body } : {}), ...(fields.state ? { state: fields.state as 'open' | 'closed' } : {}), updated_at: after }; issues.set(number, next); return { ok: true, stdout: JSON.stringify(next), stderr: '' }; }
+    if (method === 'GET') { if (input.failReadback && patched && number === 2) return { ok: false, stdout: '', stderr: 'readback lost' }; return { ok: true, stdout: JSON.stringify(issues.get(number)), stderr: '' }; }
+    if (method === 'PATCH') { patches += 1; if (input.failPatch) return { ok: false, stdout: '', stderr: 'lost' }; const fields = Object.fromEntries(argv.slice(4).reduce<string[][]>((all, entry, index, values) => entry === '-f' && values[index + 1] ? [...all, values[index + 1]!.split(/=(.*)/s)] : all, [])); const current = issues.get(number)!; const next = { ...current, ...(fields.title ? { title: fields.title } : {}), ...(fields.body ? { body: fields.body } : {}), ...(fields.state ? { state: fields.state as 'open' | 'closed' } : {}), updated_at: after }; issues.set(number, next); patched = true; return { ok: true, stdout: JSON.stringify(next), stderr: '' }; }
     return { ok: false, stdout: '', stderr: 'unexpected' };
   };
   return { value, patches: () => patches };
 }
 
-async function fixture(input: { failPatch?: boolean; evidenceFails?: boolean; gateFails?: boolean; transferOnSecondEvidenceCheck?: boolean } = {}) {
+async function fixture(input: { failPatch?: boolean; failReadback?: boolean; evidenceFails?: boolean; gateFails?: boolean; transferOnSecondEvidenceCheck?: boolean } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'helm3-map-tools-'));
   const plane = await openHost({ stateDirectory: directory, now: () => before, kinds: { 'map.update': { payloadSchema: mapUpdatePayloadSchema }, 'map.close': { payloadSchema: mapClosePayloadSchema }, 'gate.run': { payloadSchema: gateRunPayloadSchema }, 'worker.spawn': { payloadSchema: z.object({ workerId: z.string() }).strict() } } });
   plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'owner/repo', mapNodeIds: ['2'], allowedActions: ['map.update', 'map.close', 'gate.run', 'worker.spawn'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
@@ -54,7 +54,7 @@ async function fixture(input: { failPatch?: boolean; evidenceFails?: boolean; ga
   const registryFor = (actual: HelmToolExecutionContext, epoch = 1) => appendHostMapTools(new HelmToolRegistry([]), { context: actual, authorize: async (value) => { plane.artifactsFor(value); }, host: plane, catalog: { async resolve(node) { if (node !== 'node-2') throw new Error('foreign'); return { node, repositoryId: 'owner/repo', parentIssue: 1, issueNumber: 2 }; } }, transport: fake.value, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: epoch, plannedAt: () => before, notAfter: () => later }, executor: { executorId: 'host-map' }, claimExpiresAt: () => later, closureEvidence: { async validate(value) { validation += 1; await validator.validate(value); if (input.transferOnSecondEvidenceCheck && validation === 2) plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'astra', sessionId: 'replacement', epoch: 2, issuedAt: before, expiresAt: later }, 1); } } });
   const tools = registryFor(context);
   const driverTools = new HelmToolRegistry(tools.all().map((entry) => ({ ...entry, async execute(value, actual) { const owner = (await plane.snapshot(actual.runId)).ownership; return registryFor(actual, owner?.epoch ?? 0).invoke(entry.name, value, actual); } })));
-  return { directory, plane, tools, driverTools, fake, gateEvidenceRef, validations: () => validation };
+  return { directory, plane, tools, driverTools, fake, transport: fake.value, gateEvidenceRef, validations: () => validation };
 }
 
 test('map.update uses Core admission, mutator readback receipt, and stable durable idempotency', async () => {
@@ -66,6 +66,22 @@ test('map.update uses Core admission, mutator readback receipt, and stable durab
     assert.equal(second.state, 'succeeded'); assert.equal(value.fake.patches(), 1, 'a replay reads the durable receipt and cannot PATCH twice');
     const snapshot = await value.plane.snapshot(context.runId); const command = snapshot.commands.find((item) => item.command.kind === 'map.update' && item.command.commandId !== 'proof-predecessor'); assert.equal(command?.status, 'succeeded'); assert.equal(command?.observations[0]?.evidenceRefs.length, 1);
   } finally { value.plane.close(); await rm(value.directory, { recursive: true, force: true }); }
+});
+
+test('successful PATCH with unavailable readback stays unknown across a host reopen and is never replayed', async () => {
+  const value = await fixture({ failReadback: true });
+  try {
+    const intent = { node: 'node-2', expectedRevision: before, title: 'Readback uncertain' };
+    const first = await value.tools.invoke('map.update', intent, context);
+    assert.equal(first.state, 'unknown'); assert.equal(value.fake.patches(), 1);
+    value.plane.close();
+    const reopened = await openHost({ stateDirectory: value.directory, now: () => before, kinds: { 'map.update': { payloadSchema: mapUpdatePayloadSchema }, 'map.close': { payloadSchema: mapClosePayloadSchema }, 'gate.run': { payloadSchema: gateRunPayloadSchema }, 'worker.spawn': { payloadSchema: z.object({ workerId: z.string() }).strict() } } });
+    try {
+      const tools = appendHostMapTools(new HelmToolRegistry([]), { context, authorize: async (actual) => { reopened.artifactsFor(actual); }, host: reopened, catalog: { async resolve(node) { if (node !== 'node-2') throw new Error('foreign'); return { node, repositoryId: 'owner/repo', parentIssue: 1, issueNumber: 2 }; } }, transport: value.transport, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => before, notAfter: () => later }, executor: { executorId: 'host-map' }, claimExpiresAt: () => later, closureEvidence: { async validate() { throw new Error('unused'); } } });
+      const replay = await tools.invoke('map.update', intent, context);
+      assert.equal(replay.state, 'unknown'); assert.equal(value.fake.patches(), 1, 'durable unknown must reconcile rather than PATCH again');
+    } finally { reopened.close(); }
+  } finally { await rm(value.directory, { recursive: true, force: true }); }
 });
 
 test('map.close binds only verified evidence while invalid input and uncertain writes never become success', async () => {

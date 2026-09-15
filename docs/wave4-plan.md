@@ -11,7 +11,7 @@ Wave 3 has accepted provider-free foundations:
 - durable host ownership, scoped recovery, Pi fixture execution and uncertain-effect handling;
 - one read-only operator projection, loopback API and CLI sharing the same snapshot.
 
-The merged connected-control-plane line has 90 passing tests at the recorded head. These are fixture and local-runtime outcomes. They do not prove live Pi OAuth, provider model access, autonomous dispatch, cross-provider interchange, or the complete feature scenario. Those outcomes remain open in the Map.
+The merged connected-control-plane line has a final 95-test provider-free fixture/demo result at PR #59 head `fa049ee6ad3497312bb49a268dbe7c4364a9b1c9`; PR #59 remains under final review. These are fixture and local-runtime outcomes. They do not prove live Pi OAuth, provider model access, autonomous dispatch, cross-provider interchange, or the complete feature scenario. Those outcomes remain open in the Map.
 
 The recorded Map observation at 2026-09-15T08:23:56.450Z found 34 nodes and frontier issues #5, #7, #8, #10, #15 and #22. That projection is dated evidence, not a permanent frontier or an action authority.
 

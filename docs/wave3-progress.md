@@ -13,7 +13,7 @@ The following Wave 3 PRs are merged and independently reviewed at their recorded
 - [PR #56](https://github.com/Nicegarrry/helm3/pull/56): connected host source, loopback CLI and shared projection; final reviewed head `8f9806e41d2be9ba44b1d22f9269c6fadfeada56`.
 - [PR #58](https://github.com/Nicegarrry/helm3/pull/58): read-only attempt lifecycle projection; final reviewed head `5410b59`.
 
-The merged connected line currently has 91 provider-free/local tests in the independent lifecycle review. These tests establish contracts, fixtures and local runtime boundaries; they are not live-provider or full-autonomy acceptance.
+The connected demo line has 95 provider-free/local tests at the final review head. These tests establish contracts, fixtures and local runtime boundaries; they are not live-provider or full-autonomy acceptance.
 
 ## What the local foundation proves
 
@@ -23,15 +23,18 @@ The reusable predecessor baseline is [`Nicegarrry/helm-cli@ae5c3ff18ef8c0e12d579
 
 ## Demo status
 
-**Review pending:** the final Astra fixture demo receipt, observed API/cockpit capture and exact run head are awaiting independent review. Do not treat this placeholder as a completion claim. Once root records the frozen receipt, replace this paragraph with the exact SHA, request/effect counts, authority-expiry observation, receipt path/hash and the loopback CLI/HTML entry used for the same snapshot.
+The final provider-free fixture demo is recorded at exact PR #59 head `fa049ee6ad3497312bb49a268dbe7c4364a9b1c9`; PR #59 remains under final independent review. The run used Fable and Astra fixture paths and recorded 95 passing tests at the final review head. It exercised three faux model requests, one `pi.write`, a succeeded command, lease-specific expiry refusal, normal lifecycle stop with `outcome: null`, and a nested Pi write process kill whose effect became unknown and whose replay was refused.
 
-The intended provider-free smoke path is:
+The raw Astra receipt is `/Volumes/T7/webdev-factory/worktrees/helm3/final-astra-receipt.json`. Its recovery bundle raw reference is `sha256:e8ab21fd5f3273fe92584e634a1c313c449a4460615fc090533d5166730d49df`. The retained fixture state is `/Volumes/T7/webdev-factory/worktrees/helm3/final-astra-fa049ee`. The final operator snapshot is recorded at `/Volumes/T7/webdev-factory/worktrees/helm3/final-operator-snapshot.json`; the snapshot and cockpit use the same loopback API projection. The receipt endpoint was `http://127.0.0.1:60397/api/operator/snapshot`. The inspected browser/API projection showed a stopped attempt with `outcome: null`, expired autonomy, active Astra ownership, three fixture requests, zero outstanding reservations, and explicit unknown live quota, context and Map values.
+
+The executable local CLI path is:
 
 ```sh
 npx tsx src/operator/cli.ts --url http://127.0.0.1:PORT --json
+npx tsx src/operator/cli.ts --serve
 ```
 
-The local server/demo supplies the ephemeral loopback port. The CLI is read-only, refuses remote origins and bounded response violations, and shares the API snapshot consumed by the cockpit. An optional `--serve` command remains review-pending until its final implementation and receipt are frozen.
+Use the ephemeral port printed by the demo. The CLI is read-only, refuses remote origins and bounded response violations, and shares the API snapshot consumed by the cockpit. This is provider-free fixture evidence; PR #59 remains review-pending until its final independent review is accepted.
 
 ## Remaining outcomes
 

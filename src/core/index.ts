@@ -159,6 +159,8 @@ export class KernelHost {
   requestCancellation(commandId: string): void { this.core.requestCancellation(commandId); }
   /** A pending/unknown stop quarantines the command and keeps any reservation. */
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): void { this.core.reportWorkerStop(commandId, observed); }
+  /** Releases worker capacity only after the trusted runtime confirms its whole attempt stopped. */
+  reportAttemptStop(attemptId: string, observed: 'stopped' | 'pending' | 'unknown'): void { this.core.reportAttemptStop(attemptId, observed); }
   /** Known actual consumption releases only the unused upper bound; unknown stays reserved. */
   settleResource(commandId: string, actual: { state: 'known'; amount: number } | { state: 'unknown' | 'unavailable' }): void { this.core.settleResource(commandId, actual); }
 
@@ -208,7 +210,8 @@ class Kernel {
       CREATE TABLE IF NOT EXISTS effect_observations (observation_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, bytes TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS clock_highwater (name TEXT PRIMARY KEY, observed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS resource_reservations (command_id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, parent_authority_id TEXT NOT NULL, pool_id TEXT NOT NULL, unit TEXT NOT NULL, reserved REAL NOT NULL, settled_actual REAL, state TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS attempt_scopes (attempt_id TEXT PRIMARY KEY, parent_authority_id TEXT NOT NULL, repository_id TEXT NOT NULL, map_node_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS attempt_lifecycle (attempt_id TEXT PRIMARY KEY, parent_authority_id TEXT NOT NULL, repository_id TEXT NOT NULL, map_node_id TEXT NOT NULL, state TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS attempt_leases (attempt_id TEXT NOT NULL, lease_id TEXT NOT NULL, PRIMARY KEY (attempt_id, lease_id));
       CREATE TABLE IF NOT EXISTS resource_usage_observations (observation_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, state TEXT NOT NULL, amount REAL, observed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS command_lifecycle (command_id TEXT PRIMARY KEY, cancel_requested INTEGER NOT NULL DEFAULT 0, stop_observed TEXT);
     `);
@@ -246,6 +249,7 @@ class Kernel {
         if (existing.attempt_id !== attemptId) throw new Error('idempotent command attempt identity does not match its original trusted caller');
         return this.toRecord(existing);
       }
+      if (attemptId) this.bindAttempt(command, lease, attemptId);
       this.db.prepare(`INSERT INTO commands (command_id, run_id, repository_id, kind, idempotency_key, immutable_json, immutable_hash, payload_json, payload_hash, status, lease_id, parent_authority_id, attempt_id, map_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`).run(
         command.commandId, command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey, immutableJson, immutableHash, payloadJson, exactHash(payloadJson), command.leaseId, lease.parentAuthorityId, attemptId ?? null, command.scope.mapNodeId ?? null,
       );
@@ -272,6 +276,7 @@ class Kernel {
       this.assertAuthority(command);
       this.assertNotCancelled(commandId);
       this.assertConcurrency(command);
+      this.activateAttempt(commandId);
       if (isExpired(expiresAt, now)) throw new Error('claim expiry must be in the future');
       const claim: Claim = { commandId, executorId: executor.executorId, token: randomUUID(), generation: refreshed.claim_generation + 1, expiresAt };
       this.db.prepare(`UPDATE commands SET status = 'claimed', claim_token = ?, claim_executor_id = ?, claim_generation = ?, claim_expires_at = ? WHERE command_id = ?`).run(claim.token, claim.executorId, claim.generation, claim.expiresAt, commandId);
@@ -428,7 +433,23 @@ class Kernel {
       } else if ((observed === 'stopped' || observed === 'pending' || observed === 'unknown') && (row.status === 'claimed' || row.status === 'effect_started' || row.status === 'observing')) {
         this.db.prepare(`UPDATE commands SET status = 'unknown', claim_token = NULL, claim_executor_id = NULL, claim_expires_at = NULL WHERE command_id = ?`).run(commandId);
       }
+      if (observed === 'pending' || observed === 'unknown') this.quarantineAttempt(commandId);
       this.appendGeneratedEvent(`worker.stop_${observed}`, commandId, {});
+    });
+  }
+
+  reportAttemptStop(attemptId: string, observed: 'stopped' | 'pending' | 'unknown'): void {
+    z.string().min(1).parse(attemptId);
+    this.transaction(() => {
+      const attempt = this.db.prepare(`SELECT state FROM attempt_lifecycle WHERE attempt_id = ?`).get(attemptId) as { state: string } | undefined;
+      if (!attempt) throw new Error('unknown worker attempt');
+      if (observed === 'stopped') {
+        const unsettled = this.db.prepare(`SELECT COUNT(*) AS count FROM commands WHERE attempt_id = ? AND status IN ('claimed', 'effect_started', 'observing', 'unknown')`).get(attemptId) as { count: number };
+        if (unsettled.count) throw new Error('worker attempt cannot finish before its commands are observed');
+        this.db.prepare(`UPDATE attempt_lifecycle SET state = 'finished' WHERE attempt_id = ? AND state IN ('ready', 'active')`).run(attemptId);
+      } else {
+        this.db.prepare(`UPDATE attempt_lifecycle SET state = 'unknown' WHERE attempt_id = ? AND state IN ('ready', 'active')`).run(attemptId);
+      }
     });
   }
 
@@ -498,18 +519,46 @@ class Kernel {
     return humanAuthorityGrantSchema.parse(JSON.parse(row.bytes));
   }
 
+  private bindAttempt(command: Command, lease: AutonomyLease, attemptId: string): void {
+    if (!command.scope.mapNodeId) throw new Error('worker commands require a map node scope for their attempt');
+    const current = this.db.prepare(`SELECT parent_authority_id, repository_id, map_node_id, state FROM attempt_lifecycle WHERE attempt_id = ?`).get(attemptId) as { parent_authority_id: string; repository_id: string; map_node_id: string; state: string } | undefined;
+    if (current && (current.parent_authority_id !== lease.parentAuthorityId || current.repository_id !== command.scope.repositoryId || current.map_node_id !== command.scope.mapNodeId)) throw new Error('trusted attempt identity is already bound to another authority scope');
+    if (current && current.state !== 'ready' && current.state !== 'active') throw new Error('worker attempt is no longer active');
+    if (!current) {
+      const grant = this.loadGrant(lease.parentAuthorityId);
+      const parentCount = this.attemptCount(`parent_authority_id = ? AND repository_id = ? AND map_node_id = ?`, [lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId]);
+      if (parentCount >= grant.maxAttemptsPerNode) throw new Error('human attempt cap refuses command');
+      const leaseCount = this.attemptCount(`attempt_id IN (SELECT attempt_id FROM attempt_leases WHERE lease_id = ?)`, [lease.leaseId]);
+      if (leaseCount >= lease.maxAttemptsPerNode) throw new Error('autonomy lease attempt cap refuses command');
+      this.db.prepare(`INSERT INTO attempt_lifecycle (attempt_id, parent_authority_id, repository_id, map_node_id, state) VALUES (?, ?, ?, ?, 'ready')`).run(attemptId, lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId);
+    }
+    this.db.prepare(`INSERT OR IGNORE INTO attempt_leases (attempt_id, lease_id) VALUES (?, ?)`).run(attemptId, lease.leaseId);
+  }
+
+  private attemptCount(where: string, values: unknown[]): number {
+    const row = this.db.prepare(`SELECT COUNT(DISTINCT attempt_id) AS count FROM attempt_lifecycle WHERE ${where}`).get(...values) as { count: number };
+    return row.count;
+  }
+
+  private attemptStateForCommand(commandId: string): { attempt_id: string; state: string } | undefined {
+    return this.db.prepare(`SELECT c.attempt_id, al.state FROM commands c JOIN attempt_lifecycle al ON al.attempt_id = c.attempt_id WHERE c.command_id = ?`).get(commandId) as { attempt_id: string; state: string } | undefined;
+  }
+
   private activeAttemptCount(where: string, values: unknown[]): number {
-    const row = this.db.prepare(`SELECT COUNT(DISTINCT COALESCE(attempt_id, command_id)) AS count FROM commands WHERE ${where} AND status IN ('claimed', 'effect_started', 'observing', 'unknown')`).get(...values) as { count: number };
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM attempt_lifecycle al WHERE ${where} AND al.state IN ('active', 'unknown')`).get(...values) as { count: number };
     return row.count;
   }
 
-  private distinctAttemptCount(where: string, values: unknown[]): number {
-    const row = this.db.prepare(`SELECT COUNT(DISTINCT attempt_id) AS count FROM resource_reservations WHERE ${where}`).get(...values) as { count: number };
-    return row.count;
+  private activateAttempt(commandId: string): void {
+    const attempt = this.attemptStateForCommand(commandId);
+    if (!attempt) return;
+    if (attempt.state !== 'ready' && attempt.state !== 'active') throw new Error('worker attempt is no longer active');
+    if (attempt.state === 'ready') this.db.prepare(`UPDATE attempt_lifecycle SET state = 'active' WHERE attempt_id = ? AND state = 'ready'`).run(attempt.attempt_id);
   }
 
-  private hasAttemptInScope(where: string, values: unknown[], attemptId: string): boolean {
-    return Boolean(this.db.prepare(`SELECT attempt_id FROM resource_reservations WHERE ${where} AND attempt_id = ? LIMIT 1`).get(...values, attemptId));
+  private quarantineAttempt(commandId: string): void {
+    const attempt = this.attemptStateForCommand(commandId);
+    if (attempt) this.db.prepare(`UPDATE attempt_lifecycle SET state = 'unknown' WHERE attempt_id = ? AND state IN ('ready', 'active')`).run(attempt.attempt_id);
   }
 
   private assertWithinHumanGrant(lease: AutonomyLease): void {
@@ -555,10 +604,12 @@ class Kernel {
   private assertConcurrency(command: Command): void {
     const lease = this.loadLease(command.leaseId);
     const grant = this.loadGrant(lease.parentAuthorityId);
-    const activeForLease = this.activeAttemptCount('lease_id = ?', [command.leaseId]);
-    if (activeForLease >= lease.maxConcurrency) throw new Error('autonomy lease concurrency cap refuses command');
-    const activeForAuthority = this.activeAttemptCount('parent_authority_id = ?', [lease.parentAuthorityId]);
-    if (activeForAuthority >= grant.maxConcurrency) throw new Error('human authority concurrency cap refuses command');
+    const attempt = this.attemptStateForCommand(command.commandId);
+    if (attempt?.state === 'unknown' || attempt?.state === 'finished') throw new Error('worker attempt is no longer active');
+    const activeForLease = this.activeAttemptCount('al.attempt_id IN (SELECT attempt_id FROM attempt_leases WHERE lease_id = ?)', [command.leaseId]);
+    if (attempt?.state !== 'active' && activeForLease >= lease.maxConcurrency) throw new Error('autonomy lease concurrency cap refuses command');
+    const activeForAuthority = this.activeAttemptCount('al.parent_authority_id = ?', [lease.parentAuthorityId]);
+    if (attempt?.state !== 'active' && activeForAuthority >= grant.maxConcurrency) throw new Error('human authority concurrency cap refuses command');
   }
 
   private reserve(command: Command, input: ResourceRequest, attemptId: string | undefined): void {
@@ -577,16 +628,6 @@ class Kernel {
     const effectivePoolLimit = Math.min(pool.limit, parentPool.limit);
     if (used.total + request.upperBound > effectivePoolLimit) throw new Error('resource pool cap refuses reservation');
     if (request.consumer !== 'orchestrator' && reserve > 0 && used.total + request.upperBound > effectivePoolLimit - reserve) this.consumeReserveException(request, command, lease, grant);
-    if (attemptId) {
-      if (!command.scope.mapNodeId) throw new Error('worker resource requests require a map node scope');
-      const attemptScope = this.db.prepare(`SELECT parent_authority_id, repository_id, map_node_id FROM attempt_scopes WHERE attempt_id = ?`).get(attemptId) as { parent_authority_id: string; repository_id: string; map_node_id: string } | undefined;
-      if (attemptScope && (attemptScope.parent_authority_id !== lease.parentAuthorityId || attemptScope.repository_id !== command.scope.repositoryId || attemptScope.map_node_id !== command.scope.mapNodeId)) throw new Error('trusted attempt identity is already bound to another authority scope');
-      if (!attemptScope) this.db.prepare(`INSERT INTO attempt_scopes (attempt_id, parent_authority_id, repository_id, map_node_id) VALUES (?, ?, ?, ?)`).run(attemptId, lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId);
-      const parentAttempts = this.distinctAttemptCount('parent_authority_id = ? AND repository_id = ? AND map_node_id = ?', [lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId]);
-      if (!this.hasAttemptInScope('parent_authority_id = ? AND repository_id = ? AND map_node_id = ?', [lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId], attemptId) && parentAttempts >= grant.maxAttemptsPerNode) throw new Error('human attempt cap refuses command');
-      const leaseAttempts = this.distinctAttemptCount('lease_id = ? AND repository_id = ? AND map_node_id = ?', [lease.leaseId, command.scope.repositoryId, command.scope.mapNodeId]);
-      if (!this.hasAttemptInScope('lease_id = ? AND repository_id = ? AND map_node_id = ?', [lease.leaseId, command.scope.repositoryId, command.scope.mapNodeId], attemptId) && leaseAttempts >= lease.maxAttemptsPerNode) throw new Error('autonomy lease attempt cap refuses command');
-    }
     this.db.prepare(`INSERT INTO resource_reservations (command_id, lease_id, parent_authority_id, pool_id, unit, reserved, state, attempt_id, repository_id, map_node_id) VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)`).run(command.commandId, command.leaseId, lease.parentAuthorityId, request.poolId, request.unit, request.upperBound, attemptId ?? null, command.scope.repositoryId, command.scope.mapNodeId ?? null);
     this.appendGeneratedEvent('resource.reserved', command.commandId, { poolId: request.poolId, unit: request.unit, upperBound: request.upperBound, consumer: request.consumer });
   }

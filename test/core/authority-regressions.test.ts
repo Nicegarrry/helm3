@@ -25,6 +25,7 @@ const modelResourceKind: KernelKind = {
   ...resourceKind,
   modelSelection: (payload) => ({ modelId: (payload as { modelId: string }).modelId, requiredCapabilities: ['build'], role: 'worker' }),
 };
+const plainWorkerKind: KernelKind = { payloadSchema: z.object({ value: z.string() }).strict() };
 
 function databasePath(): string { return join(mkdtempSync(join(tmpdir(), 'helm3-authority-')), 'kernel.sqlite'); }
 function command(overrides: Record<string, unknown> = {}) {
@@ -131,6 +132,31 @@ test('resource requests require a stable attempt id and enforce lease and parent
   constrained.host.issueAutonomyLease(lease({ leaseId: 'lease-renewal', maxAttemptsPerNode: 1 }));
   assert.throws(() => constrained.host.admit(command({ commandId: 'other-attempt', idempotencyKey: 'other-attempt', leaseId: 'lease-renewal', payload: { value: 'c', upper: 1 } }), caller('two')), /attempt cap/);
   constrained.host.close();
+});
+
+test('resource-free worker commands bind attempts, retain capacity across command gaps, and release only on a trusted finish', async () => {
+  const { kernel, host } = opened({ 'test.effect': plainWorkerKind }, grant({ maxConcurrency: 1, maxAttemptsPerNode: 2 }));
+  host.issueAutonomyLease(lease({ maxConcurrency: 1, maxAttemptsPerNode: 2, poolLimits: [] }));
+  host.admit(command({ commandId: 'first-tool', idempotencyKey: 'first-tool', payload: { value: 'a' } }), caller('attempt-a'));
+  const first = host.claim('first-tool', { executorId: 'worker-a' }, '2026-09-15T00:10:00Z');
+  await host.perform('first-tool', first, { executorId: 'worker-a' }, async () => ({ value: true, state: 'known', source: 'test', observedAt: now }), { effectId: 'first-effect', execute: async () => undefined, observe: async () => observedSuccess('first-tool', 'first-effect') });
+  host.admit(command({ commandId: 'same-attempt-tool', idempotencyKey: 'same-attempt-tool', payload: { value: 'b' } }), caller('attempt-a'));
+  assert.equal(host.claim('same-attempt-tool', { executorId: 'worker-a' }, '2026-09-15T00:20:00Z').commandId, 'same-attempt-tool');
+  host.reportWorkerStop('same-attempt-tool', 'stopped');
+  host.admit(command({ commandId: 'other-attempt-tool', idempotencyKey: 'other-attempt-tool', payload: { value: 'c' } }), caller('attempt-b'));
+  assert.throws(() => host.claim('other-attempt-tool', { executorId: 'worker-b' }, '2026-09-15T00:20:00Z'), /concurrency/);
+  host.reportAttemptStop('attempt-a', 'stopped');
+  assert.equal(host.claim('other-attempt-tool', { executorId: 'worker-b' }, '2026-09-15T00:20:00Z').commandId, 'other-attempt-tool');
+  assert.equal(kernel.getCommand('other-attempt-tool')?.status, 'claimed');
+  host.close();
+});
+
+test('resource-free worker attempts cannot bypass the parent node attempt cap', () => {
+  const { host } = opened({ 'test.effect': plainWorkerKind }, grant({ maxAttemptsPerNode: 1 }));
+  host.issueAutonomyLease(lease({ maxAttemptsPerNode: 1, poolLimits: [] }));
+  host.admit(command({ commandId: 'first', idempotencyKey: 'first', payload: { value: 'a' } }), caller('attempt-a'));
+  assert.throws(() => host.admit(command({ commandId: 'second', idempotencyKey: 'second', payload: { value: 'b' } }), caller('attempt-b')), /attempt cap/);
+  host.close();
 });
 
 test('current versioned model facts are rechecked after awaited facts and must match the charged pool', async () => {

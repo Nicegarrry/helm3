@@ -33,11 +33,15 @@ observation and records `effect_started` before invoking the adapter.
 
 Worker commands carry a host-authenticated `TrustedCaller.attemptId`, never a
 model-selected payload identifier. The kernel persists that identity with the
-parent authority, lease, repository and map node; it allows multiple tool
+parent authority, lease, repository and map node at admission for every worker
+command, including resource-free model and tool calls. It allows multiple tool
 commands in the same attempt but cannot rebind one attempt to another scope.
-Lease and parent concurrency count distinct active attempts across runs and
-include quarantined unknown commands. Attempts per node use typed columns and
-enforce both the lease and parent limits across lease renewals.
+Lease and parent concurrency count the durable active attempt across command
+gaps and include quarantined unknown attempts. `reportAttemptStop` is a trusted
+runtime lifecycle report: only a confirmed stopped attempt with no unresolved
+commands releases capacity; pending and unknown reports quarantine it. Attempts
+per node use typed columns and enforce both the lease and parent limits across
+lease renewals.
 
 Focused evidence is `test/core/kernel.test.ts` and
 `test/core/authority-regressions.test.ts`: two SQLite connections compete for

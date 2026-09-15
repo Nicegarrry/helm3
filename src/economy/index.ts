@@ -1,112 +1,83 @@
+import { z } from 'zod/v3';
 import type { ModelFact, ResourceRequest } from '../core/index.js';
 
 export type PoolKind = 'subscription' | 'api' | 'topup';
 export type ModelRole = 'builder' | 'reviewer' | 'consultant' | 'orchestrator';
 export type DataClassification = 'public' | 'restricted';
 export type Availability = 'known_available' | 'known_unavailable' | 'unknown';
-
 export type ResourcePool = Readonly<{ poolId: string; kind: PoolKind; unit: string }>;
-export type ModelProfile = Readonly<{
-  modelId: string;
-  provider: string;
-  family: string;
-  poolId: string;
-  enabled: boolean;
-  availability: Availability;
-  roles: readonly ModelRole[];
-  buildCapabilities: readonly string[];
-  reviewCapabilities: readonly string[];
-  dataPolicy: 'public-only' | 'restricted-ok';
-  observedAt: string;
-}>;
-export type QuotaObservation = Readonly<{
-  poolId: string;
-  state: 'known' | 'unknown' | 'unavailable';
-  remaining?: number;
-  resetAt?: string;
-  observedAt: string;
-  detail?: string;
-}>;
+export type ModelProfile = Readonly<{ modelId: string; provider: string; family: string; poolId: string; enabled: boolean; availability: Availability; roles: readonly ModelRole[]; buildCapabilities: readonly string[]; reviewCapabilities: readonly string[]; dataPolicy: 'public-only' | 'restricted-ok'; observedAt: string }>;
+export type QuotaObservation = Readonly<{ poolId: string; state: 'known'; remaining: number; resetAt?: string; observedAt: string; detail?: string } | { poolId: string; state: 'unknown' | 'unavailable'; observedAt: string; detail: string }>;
+export type UnobservedQuota = Readonly<{ poolId: string; state: 'unknown'; detail: 'no provider observation' }>;
 export type EconomySnapshot = Readonly<{ pools: readonly ResourcePool[]; models: readonly ModelProfile[]; quota: readonly QuotaObservation[] }>;
 
-/**
- * Projects a richer registry row into the immutable fact shape Core admits.
- * `capabilities` intentionally contains both build and review facts; callers
- * still pass the role-specific required floor through `KernelKind.modelSelection`.
- */
-export function toCoreModelFact(profile: ModelProfile, factVersion: number): ModelFact {
-  if (!Number.isInteger(factVersion) || factVersion <= 0) throw new Error('fact version must be a positive integer');
-  return {
-    modelId: profile.modelId, provider: profile.provider, poolId: profile.poolId, enabled: profile.enabled,
-    capabilities: [...new Set([...profile.buildCapabilities, ...profile.reviewCapabilities])].sort(),
-    roles: [...profile.roles].sort(), availability: profile.availability, factVersion, observedAt: profile.observedAt,
-  };
-}
-
-/**
- * This adapter is implemented by the Core command-admission path. Economy
- * never tracks reservations itself: Core remains authoritative for lease,
- * reserve, override and actual-use state.
- */
-export interface DispatchAuthority {
-  assertReservation(request: ResourceRequest): void;
-}
-
-export type EligibilityRequest = Readonly<{
-  modelId: string;
-  role: ModelRole;
-  requiredCapabilities: readonly string[];
-  dataClassification: DataClassification;
-  resource?: ResourceRequest;
-}>;
-export type Eligibility = Readonly<{ eligible: true } | { eligible: false; code: 'unknown_model' | 'disabled_model' | 'availability' | 'availability_unknown' | 'data_policy' | 'role' | 'capability' | 'pool_mismatch' | 'unattested_human_override' | 'authority'; detail: string }>;
-
-function requireId(value: string, label: string): void {
-  if (value.trim().length === 0) throw new Error(`${label} must not be empty`);
-}
+const identifier = z.string().min(1);
+const instant = z.string().datetime({ offset: false });
+const role = z.enum(['builder', 'reviewer', 'consultant', 'orchestrator']);
+const poolSchema = z.object({ poolId: identifier, kind: z.enum(['subscription', 'api', 'topup']), unit: identifier }).strict();
+const modelSchema = z.object({ modelId: identifier, provider: identifier, family: identifier, poolId: identifier, enabled: z.boolean(), availability: z.enum(['known_available', 'known_unavailable', 'unknown']), roles: z.array(role).min(1), buildCapabilities: z.array(identifier), reviewCapabilities: z.array(identifier), dataPolicy: z.enum(['public-only', 'restricted-ok']), observedAt: instant }).strict();
+const quotaSchema = z.discriminatedUnion('state', [
+  z.object({ poolId: identifier, state: z.literal('known'), remaining: z.number().finite().nonnegative(), resetAt: instant.optional(), observedAt: instant, detail: z.string().min(1).optional() }).strict(),
+  z.object({ poolId: identifier, state: z.enum(['unknown', 'unavailable']), observedAt: instant, detail: z.string().min(1) }).strict(),
+]);
+const snapshotSchema = z.object({ pools: z.array(poolSchema), models: z.array(modelSchema), quota: z.array(quotaSchema) }).strict();
 
 function unique(values: readonly string[], label: string): void {
-  const seen = new Set<string>();
-  for (const value of values) {
-    requireId(value, label);
-    if (seen.has(value)) throw new Error(`${label} must be unique`);
-    seen.add(value);
-  }
+  if (new Set(values).size !== values.length) throw new Error(`${label} must be unique`);
 }
 
-function validate(snapshot: EconomySnapshot): void {
+function parseSnapshot(input: EconomySnapshot, now: string): EconomySnapshot {
+  const snapshot = snapshotSchema.parse(input) as EconomySnapshot;
   unique(snapshot.pools.map((pool) => pool.poolId), 'pool id');
   unique(snapshot.models.map((model) => model.modelId), 'model id');
   unique(snapshot.quota.map((quota) => quota.poolId), 'quota pool id');
   const pools = new Set(snapshot.pools.map((pool) => pool.poolId));
   for (const model of snapshot.models) {
-    requireId(model.provider, 'provider'); requireId(model.family, 'family');
     if (!pools.has(model.poolId)) throw new Error('model refers to an unknown pool');
+    if (Date.parse(model.observedAt) > Date.parse(now)) throw new Error('model observation cannot be from the future');
     unique(model.roles, 'model role'); unique(model.buildCapabilities, 'build capability'); unique(model.reviewCapabilities, 'review capability');
   }
   for (const quota of snapshot.quota) {
     if (!pools.has(quota.poolId)) throw new Error('quota refers to an unknown pool');
-    if (quota.state === 'known' && (!Number.isFinite(quota.remaining) || quota.remaining === undefined || quota.remaining < 0)) throw new Error('known quota requires a non-negative remaining value');
+    if (Date.parse(quota.observedAt) > Date.parse(now)) throw new Error('quota observation cannot be from the future');
   }
+  return snapshot;
 }
 
+function frozenPool(pool: ResourcePool): ResourcePool { return Object.freeze({ ...pool }); }
+function frozenModel(model: ModelProfile): ModelProfile { return Object.freeze({ ...model, roles: Object.freeze([...model.roles]), buildCapabilities: Object.freeze([...model.buildCapabilities]), reviewCapabilities: Object.freeze([...model.reviewCapabilities]) }); }
+function frozenQuota(observation: QuotaObservation): QuotaObservation { return Object.freeze({ ...observation }); }
+
+/** Projects a registry row into Core's role-aware, versioned admission fact. */
+export function toCoreModelFact(input: ModelProfile, factVersion: number): ModelFact {
+  const profile = modelSchema.parse(input) as ModelProfile;
+  if (!Number.isInteger(factVersion) || factVersion <= 0) throw new Error('fact version must be a positive integer');
+  const capabilitiesByRole: Record<string, readonly string[]> = {};
+  for (const item of profile.roles) capabilitiesByRole[item] = Object.freeze([...(item === 'reviewer' ? profile.reviewCapabilities : profile.buildCapabilities)]);
+  return Object.freeze({
+    modelId: profile.modelId, provider: profile.provider, poolId: profile.poolId, enabled: profile.enabled,
+    capabilities: [...new Set([...profile.buildCapabilities, ...profile.reviewCapabilities])].sort(), roles: [...profile.roles].sort(), capabilitiesByRole: Object.freeze(capabilitiesByRole),
+    availability: profile.availability, factVersion, observedAt: profile.observedAt,
+  });
+}
+
+/** Core command admission owns reservations, human exceptions, and actual use. */
+export interface DispatchAuthority { assertReservation(request: ResourceRequest): void; }
+export type EligibilityRequest = Readonly<{ modelId: string; role: ModelRole; requiredCapabilities: readonly string[]; dataClassification: DataClassification; resource?: ResourceRequest }>;
+export type Eligibility = Readonly<{ eligible: true } | { eligible: false; code: 'unknown_model' | 'disabled_model' | 'availability' | 'availability_unknown' | 'data_policy' | 'role' | 'capability' | 'pool_mismatch' | 'unattested_human_override' | 'authority'; detail: string }>;
 function refusal(code: Exclude<Eligibility, { eligible: true }>['code'], detail: string): Eligibility { return { eligible: false, code, detail }; }
 
-export function createEconomy(input: EconomySnapshot, authority: DispatchAuthority) {
-  validate(input);
-  const pools = new Map(input.pools.map((pool) => [pool.poolId, Object.freeze({ ...pool })]));
-  const models = new Map(input.models.map((model) => [model.modelId, Object.freeze({ ...model, roles: [...model.roles], buildCapabilities: [...model.buildCapabilities], reviewCapabilities: [...model.reviewCapabilities] })]));
-  const quota = new Map(input.quota.map((observation) => [observation.poolId, Object.freeze({ ...observation })]));
-
+export function createEconomy(input: EconomySnapshot, authority: DispatchAuthority, options: Readonly<{ now?: () => string }> = {}) {
+  const now = options.now?.() ?? new Date().toISOString();
+  instant.parse(now);
+  const inputSnapshot = parseSnapshot(input, now);
+  const pools = new Map(inputSnapshot.pools.map((pool) => [pool.poolId, frozenPool(pool)]));
+  const models = new Map(inputSnapshot.models.map((model) => [model.modelId, frozenModel(model)]));
+  const quota = new Map(inputSnapshot.quota.map((observation) => [observation.poolId, frozenQuota(observation)]));
   return Object.freeze({
-    snapshot(): EconomySnapshot {
-      return { pools: [...pools.values()].sort((a, b) => a.poolId.localeCompare(b.poolId)), models: [...models.values()].sort((a, b) => a.modelId.localeCompare(b.modelId)), quota: [...quota.values()].sort((a, b) => a.poolId.localeCompare(b.poolId)) };
-    },
-    quota(poolId: string): QuotaObservation {
-      requireId(poolId, 'pool id');
-      return quota.get(poolId) ?? { poolId, state: 'unknown', observedAt: '', detail: 'no provider observation' };
-    },
-    /** A compact, pre-admission explanation. Core is still the final refusal gate. */
+    snapshot(): EconomySnapshot { return Object.freeze({ pools: Object.freeze([...pools.values()].sort((a, b) => a.poolId.localeCompare(b.poolId))), models: Object.freeze([...models.values()].sort((a, b) => a.modelId.localeCompare(b.modelId))), quota: Object.freeze([...quota.values()].sort((a, b) => a.poolId.localeCompare(b.poolId))) }); },
+    quota(poolId: string): QuotaObservation | UnobservedQuota { identifier.parse(poolId); return quota.get(poolId) ?? Object.freeze({ poolId, state: 'unknown', detail: 'no provider observation' as const }); },
+    /** Compact pre-admission explanation; Core remains the final command/refusal gate. */
     eligible(request: EligibilityRequest): Eligibility {
       const model = models.get(request.modelId);
       if (!model) return refusal('unknown_model', 'model has no registered facts');
@@ -118,11 +89,7 @@ export function createEconomy(input: EconomySnapshot, authority: DispatchAuthori
       const capabilities = request.role === 'reviewer' ? model.reviewCapabilities : model.buildCapabilities;
       if (request.requiredCapabilities.some((capability) => !capabilities.includes(capability))) return refusal('capability', 'model lacks a required capability');
       if (!request.resource) return { eligible: true };
-      if (request.resource.poolId !== model.poolId) return refusal('pool_mismatch', 'resource pool does not match the model pool');
-      const pool = pools.get(model.poolId)!;
-      if (request.resource.unit !== pool.unit) return refusal('pool_mismatch', 'resource unit does not match the model pool');
-      // An opaque override id in a model-originated request is never proof of a human ruling.
-      // A privileged host may attest an exception directly to the core authority before calling here.
+      if (request.resource.poolId !== model.poolId || request.resource.unit !== pools.get(model.poolId)!.unit) return refusal('pool_mismatch', 'resource pool or unit does not match the model pool');
       if (request.resource.humanOverrideId) return refusal('unattested_human_override', 'reserve override must be attested by the privileged host');
       try { authority.assertReservation(request.resource); } catch (error) { return refusal('authority', error instanceof Error ? error.message : 'reservation authority refused request'); }
       return { eligible: true };

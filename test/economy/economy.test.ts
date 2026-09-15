@@ -49,8 +49,19 @@ test('refuses disabled, policy, role and capability-ineligible selections', () =
 test('projects registry facts into the Core admission contract without adding a ledger', () => {
   assert.deepEqual(toCoreModelFact(snapshot.models[0]!, 3), {
     modelId: 'terra', provider: 'openai', poolId: 'chatgpt', enabled: true,
-    capabilities: ['security', 'typescript'], roles: ['builder', 'reviewer'], availability: 'known_available', factVersion: 3, observedAt: '2026-09-15T00:00:00Z',
+    capabilities: ['security', 'typescript'], roles: ['builder', 'reviewer'], capabilitiesByRole: { builder: ['typescript'], reviewer: ['security'] }, availability: 'known_available', factVersion: 3, observedAt: '2026-09-15T00:00:00Z',
   });
+});
+
+test('retains a deep immutable registry snapshot and rejects malformed observations', () => {
+  const economy = createEconomy(snapshot, authority());
+  const view = economy.snapshot();
+  assert.throws(() => (view.models[0]!.buildCapabilities as string[]).push('forged'), /read only|object is not extensible/i);
+  assert.equal(refusalCode(economy.eligible({ modelId: 'terra', role: 'builder', requiredCapabilities: ['forged'], dataClassification: 'public' })), 'capability');
+  assert.throws(() => createEconomy({ ...snapshot, quota: [{ poolId: 'chatgpt', state: 'unknown', remaining: 5, observedAt: '2026-09-15T00:00:00Z', detail: 'bad' }] as unknown as EconomySnapshot['quota'] }, authority()), /remaining/);
+  assert.throws(() => createEconomy({ ...snapshot, pools: [{ poolId: 'chatgpt', kind: 'subscription', unit: '' }] as unknown as EconomySnapshot['pools'] }, authority()), /at least 1/);
+  assert.throws(() => createEconomy({ ...snapshot, quota: [{ poolId: 'chatgpt', state: 'unknown', observedAt: '2026-09-16T00:00:00Z', detail: 'future' }] }, authority(), { now: () => '2026-09-15T00:00:00Z' }), /future/);
+  assert.deepEqual(economy.quota('topup'), { poolId: 'topup', state: 'unknown', detail: 'no provider observation' });
 });
 
 test('passes a legal selection to the authoritative reservation seam without recreating a ledger', () => {

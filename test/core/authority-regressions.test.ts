@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { z } from 'zod/v3';
 import { openKernel, type KernelKind, type KernelOptions } from '../../src/core/index.js';
+import { toCoreModelFact } from '../../src/economy/index.js';
 
 const now = '2026-09-15T00:00:00Z';
 const later = '2026-09-15T01:00:00Z';
@@ -24,6 +25,12 @@ const resourceKind: KernelKind = {
 const modelResourceKind: KernelKind = {
   ...resourceKind,
   modelSelection: (payload) => ({ modelId: (payload as { modelId: string }).modelId, requiredCapabilities: ['build'], role: 'worker' }),
+};
+const roleFloorKind: KernelKind = {
+  payloadSchema: z.object({ value: z.string(), upper: z.number().nonnegative(), modelId: z.string(), role: z.string(), capability: z.string() }).strict(),
+  requiresResourceEnforcement: true,
+  resourceRequest: (payload) => ({ ...pool, upperBound: (payload as { upper: number }).upper, consumer: 'worker' as const }),
+  modelSelection: (payload) => ({ modelId: (payload as { modelId: string }).modelId, requiredCapabilities: [(payload as { capability: string }).capability], role: (payload as { role: string }).role }),
 };
 const plainWorkerKind: KernelKind = { payloadSchema: z.object({ value: z.string() }).strict() };
 
@@ -221,6 +228,18 @@ test('current versioned model facts are rechecked after awaited facts and must m
   assert.equal(executed, false);
   assert.equal(matching.kernel.getCommand('freshness')?.status, 'refused');
   matching.host.close();
+});
+
+test('Core admission applies role-specific economy capability floors before reserving', () => {
+  const { host } = opened({ 'test.effect': roleFloorKind });
+  host.issueAutonomyLease(lease());
+  host.putModelFact(toCoreModelFact({
+    modelId: 'split-floor', provider: 'provider', family: 'provider', poolId: 'pool-1', enabled: true, availability: 'known_available',
+    roles: ['builder', 'reviewer'], buildCapabilities: ['build-only'], reviewCapabilities: ['review-only'], dataPolicy: 'restricted-ok', observedAt: now,
+  }, 1));
+  assert.throws(() => host.admit(command({ commandId: 'crossed-floor', idempotencyKey: 'crossed-floor', payload: { value: 'a', upper: 1, modelId: 'split-floor', role: 'builder', capability: 'review-only' } }), caller('split-floor-attempt')), /required capability/);
+  host.admit(command({ commandId: 'build-floor', idempotencyKey: 'build-floor', payload: { value: 'a', upper: 1, modelId: 'split-floor', role: 'builder', capability: 'build-only' } }), caller('split-floor-attempt'));
+  host.close();
 });
 
 test('a confirmed stop only settles zero before an effect starts and never releases an in-flight reservation', async () => {

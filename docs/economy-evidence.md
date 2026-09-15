@@ -6,9 +6,11 @@ This provider-free slice implements the model-fact and dispatch-eligibility port
 
 `src/economy` records compact registry facts, distinct subscription/API/top-up pools, and quota observations. A missing, unavailable, or explicitly unknown provider reading is represented as unknown; it is never converted into remaining capacity, cost, or reset time.
 
+Input is parsed by strict runtime schemas: provider, family, pool/unit, enum values and ISO observations are validated; future observations refuse. A known quota must carry a finite non-negative remaining value, while unknown/unavailable quota cannot carry known remaining/reset fields. Accepted snapshots and their nested capability arrays are frozen before use.
+
 ## Core binding
 
-`toCoreModelFact` projects a registry profile into Core's existing `ModelFact` contract. A privileged host wires the returned fact through `KernelHost.putModelFact`; Core's existing `KernelKind.modelSelection` and transactional resource reservation paths remain the final dispatch and reserve gates.
+`toCoreModelFact` projects a registry profile into Core's existing `ModelFact` contract, including role-namespaced capability floors. A privileged host wires the returned fact through `KernelHost.putModelFact`; Core's existing `KernelKind.modelSelection` and transactional resource reservation paths remain the final dispatch and reserve gates.
 
 `DispatchAuthority` is the explicit economy-to-Core seam. It accepts Core's `ResourceRequest` verbatim and does not expose a mutable economy ledger. The module checks model/pool/unit consistency before requesting that authority. The authority owns leases, accumulated reservations, actual settlement, human reserve exceptions, and the active-orchestrator reserve.
 
@@ -26,7 +28,7 @@ An opaque `humanOverrideId` inside an ordinary eligibility request is refused as
 | Reserve or lease limit | `authority` | Core reservation/lease ledger |
 | Forged human override | `unattested_human_override` | Privileged Core host only |
 
-The registry carries separate build and review capability arrays. `toCoreModelFact` preserves their union for Core's generic capability floor, while eligibility chooses the role-specific array before admission.
+The registry carries separate build and review capability arrays. `toCoreModelFact` supplies both the compatibility union and role-namespaced floors; Core uses the latter whenever present, so a reviewer-only capability cannot authorize a builder command.
 
 ## Provenance
 

@@ -41,6 +41,8 @@ const resourceRequestSchema = z.object({
 export type ModelFact = {
   modelId: string; provider: string; poolId: string; enabled: boolean;
   capabilities: readonly string[]; roles: readonly string[];
+  /** Optional role floors preserve compatibility with pre-economy facts. */
+  capabilitiesByRole?: Readonly<Record<string, readonly string[]>>;
   availability: 'known_available' | 'known_unavailable' | 'unknown';
   /** Monotonic per-model host observation version. Older snapshots remain durable. */
   factVersion: number;
@@ -70,6 +72,7 @@ const humanReserveExceptionSchema = z.object({
 const modelFactSchema = z.object({
   modelId: z.string().min(1), provider: z.string().min(1), poolId: z.string().min(1), enabled: z.boolean(),
   capabilities: z.array(z.string().min(1)), roles: z.array(z.string().min(1)), availability: z.enum(['known_available', 'known_unavailable', 'unknown']),
+  capabilitiesByRole: z.record(z.string().min(1), z.array(z.string().min(1))).optional(),
   factVersion: z.number().int().positive(), observedAt: z.string().datetime({ offset: false }),
 }).strict();
 export type KernelKind = {
@@ -680,7 +683,8 @@ class Kernel {
     if (!fact.enabled) throw new Error('model selection is disabled');
     if (fact.availability !== 'known_available') throw new Error('model selection availability is not known available');
     if (!fact.roles.includes(selection.role)) throw new Error('model selection lacks required role');
-    if (selection.requiredCapabilities.some((capability) => !fact.capabilities.includes(capability))) throw new Error('model selection lacks required capability');
+    const capabilities = fact.capabilitiesByRole?.[selection.role] ?? fact.capabilities;
+    if (selection.requiredCapabilities.some((capability) => !capabilities.includes(capability))) throw new Error('model selection lacks required capability');
     if (request && fact.poolId !== request.poolId) throw new Error('model selection pool does not match the requested resource pool');
   }
 

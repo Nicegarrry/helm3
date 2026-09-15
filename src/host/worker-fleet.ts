@@ -245,7 +245,7 @@ export class PiWorkerFleet {
       terminal = await this.persistRecord(live.context, completed, 'terminal');
       this.#records.set(workerId, terminal);
       this.binding.host.reportAttemptStop(live.record.attemptId, 'stopped');
-      this.binding.host.appendFleetEvent(event('worker.completed', terminal, live.context.runId, { result: outcome.result.status, evidenceRefs: terminal.evidenceRefs }));
+      await this.appendAndDeliverSupervisorEvent(event('worker.completed', terminal, live.context.runId, { result: outcome.result.status, evidenceRefs: terminal.evidenceRefs }));
     } catch {
       const stop = this.#stopping.get(workerId);
       // A confirmed local stop has one authoritative disposition, recorded by
@@ -260,7 +260,7 @@ export class PiWorkerFleet {
       terminal = await this.persistRecord(live.context, unknown, 'terminal');
       this.#records.set(workerId, terminal);
       this.binding.host.reportAttemptStop(live.record.attemptId, 'unknown');
-      this.binding.host.appendFleetEvent(event('worker.failed', terminal, live.context.runId, { disposition: 'unknown' }));
+      await this.appendAndDeliverSupervisorEvent(event('worker.failed', terminal, live.context.runId, { disposition: 'unknown' }));
     } finally {
       if (!this.#stopping.has(workerId)) {
         if (terminal) this.#records.set(workerId, terminal);
@@ -278,7 +278,7 @@ export class PiWorkerFleet {
       const persisted = await this.persistRecord(live.context, unknown, 'terminal');
       this.#records.set(workerId, persisted);
       this.binding.host.reportAttemptStop(live.record.attemptId, 'unknown');
-      this.binding.host.appendFleetEvent(event('worker.failed', persisted, live.context.runId, { disposition: 'unknown', persistence: 'recovered' }));
+      await this.appendAndDeliverSupervisorEvent(event('worker.failed', persisted, live.context.runId, { disposition: 'unknown', persistence: 'recovered' }));
     } catch {
       // Keep an active worker inspectable when even the unknown disposition
       // cannot be durably written; no success/terminal claim is manufactured.
@@ -292,6 +292,74 @@ export class PiWorkerFleet {
       : record.state === 'terminal' ? 'stop-confirmed' as const : 'stop-unknown' as const;
     const ref = await this.binding.host.writeFleetEffect({ runId: context.runId, attemptId: record.attemptId, spawnCommandId: record.spawnCommandId, phase: evidencePhase, text: JSON.stringify(record) });
     return Object.freeze({ ...record, evidenceRefs: Object.freeze([...record.evidenceRefs, ref]) });
+  }
+
+  /**
+   * Terminal evidence and its fleet event are the durable fact.  Supervisor
+   * notification is deliberately best-effort: a delivery failure must leave
+   * that fact intact for replay, rather than turning a completed worker into
+   * a new unknown outcome or an unhandled runner rejection.
+   */
+  private async appendAndDeliverSupervisorEvent(fleetEvent: Event): Promise<void> {
+    this.binding.host.appendFleetEvent(fleetEvent);
+    try { await this.deliverSupervisorEvent(fleetEvent); }
+    catch { /* The durable fleet event is replayable after any delivery fault. */ }
+  }
+
+  /** Convert one already-persisted native terminal observation into a signal. */
+  private async deliverSupervisorEvent(fleetEvent: Event): Promise<void> {
+    if (fleetEvent.source !== 'host.worker_fleet'
+      || (fleetEvent.kind !== 'worker.completed' && fleetEvent.kind !== 'worker.failed')
+      || !fleetEvent.commandId || !fleetEvent.attemptId || !fleetEvent.sessionId) {
+      throw new Error('fleet event is not a terminal worker observation');
+    }
+    const runId = fleetEvent.correlationId;
+    const snapshot = await this.binding.host.snapshot(runId);
+    const admitted = snapshot.commands.find((entry) => entry.command.commandId === fleetEvent.commandId);
+    const payload = admitted?.command.payload as { workerId?: unknown; attemptId?: unknown } | undefined;
+    if (!admitted || (admitted.command.kind !== 'worker.spawn' && admitted.command.kind !== 'worker.steer')
+      || admitted.command.runId !== runId || admitted.command.scope.mapNodeId === undefined
+      || payload?.attemptId !== fleetEvent.attemptId || typeof payload.workerId !== 'string'
+      || !snapshot.attempts.some((attempt) => attempt.attemptId === fleetEvent.attemptId && attempt.commandIds.includes(admitted.command.commandId))) {
+      throw new Error('fleet event is not bound to an admitted worker attempt');
+    }
+    const phase = fleetEvent.kind === 'worker.completed' ? 'terminal-known' : 'terminal-unknown';
+    const text = await this.binding.host.readFleetEffectByIdentity(runId, `host-worker-${phase}:${runId}:${fleetEvent.attemptId}`);
+    if (!text) throw new Error('fleet terminal evidence is absent');
+    let record: StoredWorker | undefined;
+    try { record = storedWorker(JSON.parse(text)); } catch { throw new Error('fleet terminal evidence is malformed'); }
+    if (!record || record.state !== (fleetEvent.kind === 'worker.completed' ? 'terminal' : 'unknown')
+      || record.workerId !== payload.workerId || record.attemptId !== fleetEvent.attemptId
+      || record.spawnCommandId !== admitted.command.commandId || record.sessionId !== fleetEvent.sessionId) {
+      throw new Error('fleet terminal evidence does not match its event binding');
+    }
+    await this.binding.host.createSupervisor().process({ signal: {
+      runId,
+      mapNodeId: admitted.command.scope.mapNodeId,
+      source: 'host.worker_fleet',
+      // The appended event ID is the stable identity on direct delivery and
+      // after restart; never derive a replacement ID during replay.
+      sourceEventId: fleetEvent.eventId,
+      group: record.workerId,
+      observedAt: fleetEvent.occurredAt,
+      kind: fleetEvent.kind,
+      evidenceRefs: [...record.evidenceRefs],
+      needsJudgement: fleetEvent.kind === 'worker.failed',
+    } });
+  }
+
+  /**
+   * Explicit library recovery hook. Hosts call it after reopening their
+   * durable control plane; it neither discovers processes nor starts/retries
+   * workers, and replaying an event is deduplicated by its persisted ID.
+   */
+  async replaySupervisorEvents(runId: string): Promise<void> {
+    const events = this.binding.host.createSupervisor().log().readEvents(runId);
+    for (const fleetEvent of events) {
+      if (fleetEvent.source !== 'host.worker_fleet' || (fleetEvent.kind !== 'worker.completed' && fleetEvent.kind !== 'worker.failed')) continue;
+      try { await this.deliverSupervisorEvent(fleetEvent); }
+      catch { /* Invalid or incomplete historical records never create a signal. */ }
+    }
   }
 
   private async durableRecord(runId: string, workerId: string): Promise<StoredWorker | undefined> {

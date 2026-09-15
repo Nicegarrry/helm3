@@ -1,5 +1,7 @@
 # Wave 3 durable host evidence
 
+The read model includes `attemptLifecycles` from the existing authoritative lifecycle table. It preserves immutable attempt-start provenance separately from observed runtime state. The operator displays a `finished` lifecycle as `stopped`; that observation does not invent a successful engineering outcome, acceptance verdict or end timestamp.
+
 `src/host/index.ts` is the privileged local embedding boundary. It opens the existing core SQLite database and artifact journal under one state directory; it does not create a second workflow store, provider process, OAuth flow, or automatic takeover policy.
 
 ## Binding and authority

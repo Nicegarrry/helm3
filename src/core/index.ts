@@ -96,6 +96,7 @@ export type KernelRunProjection = Readonly<{
   ownership?: OrchestratorLease;
   commands: readonly CommandRecord[];
   attempts: readonly Attempt[];
+  attemptLifecycles: readonly Readonly<{ attemptId: string; state: string }>[];
   autonomyLeases: readonly AutonomyLeaseProjection[];
   reservations: readonly ResourceReservationProjection[];
 }>;
@@ -400,6 +401,10 @@ class Kernel {
       const row = this.db.prepare(`SELECT bytes FROM attempts WHERE attempt_id = ?`).get(attemptId) as { bytes: string } | undefined;
       return row ? [attemptSchema.parse(JSON.parse(row.bytes))] : [];
     });
+    const attemptLifecycles = attemptIds.flatMap((attemptId) => {
+      const row = this.db.prepare(`SELECT state FROM attempt_lifecycle WHERE attempt_id = ?`).get(attemptId) as { state: string } | undefined;
+      return row ? [{ attemptId, state: row.state }] : [];
+    });
     const leaseIds = [...new Set(parsedRows.map((row) => row.lease_id ?? undefined).filter((id): id is string => Boolean(id)))];
     const autonomyLeases = leaseIds.flatMap((leaseId) => {
       const row = this.db.prepare(`SELECT bytes, revoked FROM autonomy_leases WHERE lease_id = ?`).get(leaseId) as { bytes: string; revoked: number } | undefined;
@@ -413,7 +418,7 @@ class Kernel {
       ...(row.settled_actual === null ? {} : { settledActual: row.settled_actual }), state: row.state,
       ...(row.repository_id ? { repositoryId: row.repository_id } : {}), ...(row.map_node_id ? { mapNodeId: row.map_node_id } : {}),
     }));
-    return { ...(ownership ? { ownership } : {}), commands, attempts, autonomyLeases, reservations };
+    return { ...(ownership ? { ownership } : {}), commands, attempts, attemptLifecycles, autonomyLeases, reservations };
   }
 
   storeLease(lease: AutonomyLease): void {

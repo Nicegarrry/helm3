@@ -113,6 +113,7 @@ export type HostSnapshot = Readonly<{
   ownership?: OrchestratorLease;
   commands: readonly CommandRecord[];
   attempts: KernelRunProjection['attempts'];
+  attemptLifecycles: KernelRunProjection['attemptLifecycles'];
   autonomyLeases: KernelRunProjection['autonomyLeases'];
   reservations: KernelRunProjection['reservations'];
   artifacts: readonly Readonly<{ source: string; ref: string }> [];
@@ -336,6 +337,7 @@ export class HostControlPlane {
       ...(projection.ownership ? { ownership: projection.ownership } : {}),
       commands: projection.commands,
       attempts: projection.attempts,
+      attemptLifecycles: projection.attemptLifecycles,
       autonomyLeases: projection.autonomyLeases,
       reservations: projection.reservations,
       artifacts: runArtifacts.filter((item) => evidenceRefs.has(encoded(item))).map((item) => ({ source: item.entry.source, ref: encoded(item) })),

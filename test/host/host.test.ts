@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { z } from 'zod/v3';
 import { BoundedPiAccess } from '../../src/access/index.js';
-import { createBoundedPiWorkerBinding } from '../../src/access/live.js';
+import { createBoundedPiWorkerBinding, settlementForBoundedPiEffect } from '../../src/access/live.js';
 import { type Command } from '../../src/contracts/index.js';
 import { type KernelEffect } from '../../src/core/index.js';
 import { openHost, PiNativeRuntime, type HostRuntime } from '../../src/host/index.js';
@@ -204,7 +204,7 @@ test('PiNativeRuntime runs the packaged Pi faux provider through host resource e
     const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
     const faux = ai.fauxProvider({ provider: 'host-native-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('host-native-faux', 'offline');
     const fauxModel = faux.getModel();
-    const access = new BoundedPiAccess({ poolId: 'overnight-api-usd', provider: fauxModel.provider, model: fauxModel.id, api: fauxModel.api, baseUrl: fauxModel.baseUrl,
+    const access = new BoundedPiAccess({ poolId: 'overnight-api-usd', provider: fauxModel.provider, model: fauxModel.id, api: fauxModel.api, baseUrl: fauxModel.baseUrl, authEnvironment: 'TEST_ONLY_NO_KEY',
       contextWindow: fauxModel.contextWindow, maxOutputTokens: 32, maxBilledOutputTokens: fauxModel.maxTokens, maxPacketBytes: 8_000, maxRequests: 1, maxToolCalls: 0, timeoutMs: 1_000,
       inputUsdPerMillion: 1, outputUsdPerMillion: 1, cacheReadUsdPerMillion: 1, cacheWriteUsdPerMillion: 1 });
     faux.setResponses([ai.fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: [], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' }))]);
@@ -214,11 +214,7 @@ test('PiNativeRuntime runs the packaged Pi faux provider through host resource e
       const payload = { effectId: effect.effectId, kind: effect.kind };
       return { schemaVersion: 1, commandId: effect.effectId, kind: effect.kind === 'model.request' ? 'pi.model' : 'pi.write', idempotencyKey: effect.effectId, payloadHash: hash(payload), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'untrusted-pi', runId: 'run-1', origin: 'worker', leaseId: 'autonomy-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] };
     };
-    const observedSettlement = (effect: { effectId: string; kind: 'model.request' | 'workspace.write' }) => {
-      if (effect.kind !== 'model.request') return undefined;
-      const settlement = access.settlement(effect.effectId);
-      return settlement?.state === 'known' ? settlement : settlement ? { state: 'unknown' as const } : undefined;
-    };
+    const observedSettlement = (effect: { effectId: string; kind: 'model.request' | 'workspace.write' }) => settlementForBoundedPiEffect(access, effect);
     const nativeRuntime = new PiNativeRuntime(createBoundedPiWorkerBinding({
       access,
       authority: () => plane!.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }),

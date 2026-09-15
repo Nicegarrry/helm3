@@ -86,6 +86,7 @@ const access = new BoundedPiAccess({
   model: 'kimi-k2.7-code',
   api: 'openai-completions',
   baseUrl: 'https://opencode.ai/zen/go/v1',
+  authEnvironment: 'OPENCODE_API_KEY',
   contextWindow: 262_144,
   inputUsdPerMillion: 0.95,
   outputUsdPerMillion: 4.00,

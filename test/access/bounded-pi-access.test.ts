@@ -12,7 +12,7 @@ const message = (total: number): AssistantMessage => ({
 function access() {
   return new BoundedPiAccess({ poolId: 'overnight-api-usd', inputUsdPerMillion: 0.95, outputUsdPerMillion: 4,
     cacheReadUsdPerMillion: 0.19, cacheWriteUsdPerMillion: 0,
-    provider: 'opencode-go', model: 'kimi-k2.7-code', api: 'openai-completions', baseUrl: 'https://opencode.ai/zen/go/v1', contextWindow: 262144,
+    provider: 'opencode-go', model: 'kimi-k2.7-code', api: 'openai-completions', baseUrl: 'https://opencode.ai/zen/go/v1', authEnvironment: 'OPENCODE_API_KEY', contextWindow: 262144,
     maxPacketBytes: 1000, maxOutputTokens: 100, maxBilledOutputTokens: 262144, maxRequests: 2, maxToolCalls: 1, timeoutMs: 1000 });
 }
 
@@ -51,4 +51,17 @@ test('refuses a changed provider fact and a third request even before provider d
   gate.prepare('one', model, { messages: [] }, undefined);
   gate.prepare('two', model, { messages: [] }, undefined);
   assert.throws(() => gate.prepare('three', model, { messages: [] }, undefined), /count cap/);
+});
+
+test('takes an immutable strict policy snapshot and retains zero or inconsistent usage', () => {
+  const original = { ...access().policy };
+  const gate = new BoundedPiAccess(original);
+  original.provider = 'opencode';
+  original.maxOutputTokens = 1;
+  const prepared = gate.prepare('immutable', model, { messages: [] }, undefined);
+  assert.equal(prepared.options.maxTokens, 100);
+  assert.equal(prepared.reservation.provider, 'opencode-go');
+  gate.settle('immutable', { ...message(0), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+  assert.deepEqual(gate.settlement('immutable'), { state: 'unknown', reason: 'provider token telemetry is zero, inconsistent, or exceeds a frozen cap' });
+  assert.throws(() => new BoundedPiAccess({ ...access().policy, untrusted: true } as unknown as typeof original), /unknown fields/);
 });

@@ -23,23 +23,26 @@ The reusable predecessor baseline is [`Nicegarrry/helm-cli@ae5c3ff18ef8c0e12d579
 
 ## Demo status
 
-The final provider-free fixture demo is recorded at exact PR #59 head `fa049ee6ad3497312bb49a268dbe7c4364a9b1c9`; PR #59 remains under final independent review. The run used Fable and Astra fixture paths and recorded 95 passing tests at the final review head. It exercised three faux model requests, one `pi.write`, a succeeded command, lease-specific expiry refusal, normal lifecycle stop with `outcome: null`, and a nested Pi write process kill whose effect became unknown and whose replay was refused.
+The final provider-free fixture demo is recorded at exact PR #59 head `fa049ee6ad3497312bb49a268dbe7c4364a9b1c9`; PR #59 is merged. The automated suite covers both Fable and Astra fixture paths and records 95 passing tests at the final review head. The manual Astra receipt exercised three faux model requests, one `pi.write`, a succeeded command, lease-specific expiry refusal, normal lifecycle stop with `outcome: null`, and a nested Pi write process kill whose effect became unknown and whose replay was refused.
 
-The raw Astra receipt is `/Volumes/T7/webdev-factory/worktrees/helm3/final-astra-receipt.json`. Its recovery bundle raw reference is `sha256:e8ab21fd5f3273fe92584e634a1c313c449a4460615fc090533d5166730d49df`. The retained fixture state is `/Volumes/T7/webdev-factory/worktrees/helm3/final-astra-fa049ee`. The final operator snapshot is recorded at `/Volumes/T7/webdev-factory/worktrees/helm3/final-operator-snapshot.json`; the snapshot and cockpit use the same loopback API projection. The receipt endpoint was `http://127.0.0.1:60397/api/operator/snapshot`. The inspected browser/API projection showed a stopped attempt with `outcome: null`, expired autonomy, active Astra ownership, three fixture requests, zero outstanding reservations, and explicit unknown live quota, context and Map values.
+The merged demo review receipt is [PR #59 comment](https://github.com/Nicegarrry/helm3/pull/59#issuecomment-5677503376). The raw Astra receipt is `/Volumes/T7/webdev-factory/worktrees/helm3/final-astra-receipt.json`. Its recovery bundle raw reference is `sha256:e8ab21fd5f3273fe92584e634a1c313c449a4460615fc090533d5166730d49df`. The retained fixture state is `/Volumes/T7/webdev-factory/worktrees/helm3/final-astra-fa049ee`. The final operator snapshot is recorded at `/Volumes/T7/webdev-factory/worktrees/helm3/final-operator-snapshot.json`; the snapshot and cockpit use the same loopback API projection. The verification endpoint was `http://127.0.0.1:60397/api/operator/snapshot` and was stopped after inspection; a fresh-state endpoint should be used for any rerun. The inspected browser/API projection showed a stopped attempt with `outcome: null`, expired autonomy, active Astra ownership, three fixture requests, zero outstanding reservations, and explicit unknown live quota, context and Map values.
 
 The executable local CLI path is:
 
 ```sh
-npx tsx src/operator/cli.ts --url http://127.0.0.1:PORT --json
-npx tsx src/operator/cli.ts --serve
+# Start the provider-free Astra fixture server with a fresh empty state directory.
+node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory /tmp/helm3-demo-state --serve
+
+# In another terminal, read the same loopback snapshot as JSON.
+node --import tsx src/operator/cli.ts --url http://127.0.0.1:PORT --json
 ```
 
-Use the ephemeral port printed by the demo. The CLI is read-only, refuses remote origins and bounded response violations, and shares the API snapshot consumed by the cockpit. This is provider-free fixture evidence; PR #59 remains review-pending until its final independent review is accepted.
+Use the ephemeral port printed by the server. The CLI is read-only, refuses remote origins and bounded response violations, and shares the API snapshot consumed by the cockpit. This is provider-free fixture evidence; PR #59 is merged at the recorded exact head.
 
 ## Remaining outcomes
 
 Live OAuth and provider model access remain open under the explicit human-availability boundary. The following are also unbuilt or only locally bounded: the native event supervisor with coalesced wakes and lease-bounded retries; model-economy facts, reserves and live quota observations; fresh GitHub Map mutation; the complete gate → independent review → repair → exact-head integration loop; Fable/Astra live interchange; consultation; context/compaction; cross-provider failover; calibration; full feature acceptance; and legacy retirement.
 
-[PR #57](https://github.com/Nicegarrry/helm3/pull/57) proposes the next sequencing for those outcomes. It is a draft planning document, not an implementation or authority grant. OAuth/live access may proceed in parallel only when the human is available and gives explicit bounded consent; no baseline credential, fixture success or elapsed time grants consent automatically.
+[PR #57](https://github.com/Nicegarrry/helm3/pull/57) is the merged Wave 4 sequencing proposal, not an implementation or authority grant. OAuth/live access may proceed in parallel only when the human is available and gives explicit bounded consent; no baseline credential, fixture success or elapsed time grants consent automatically.
 
 See [Wave 3 dogfood evidence](wave3-dogfood-evidence.md), [host evidence](host-evidence.md), [operator evidence](operator-evidence.md), [tracker import evidence](tracker-import-evidence.md), [gate evidence](gate-evidence.md), and the [Wave 4 proposal](wave4-plan.md) for detailed boundaries and receipts.

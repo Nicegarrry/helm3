@@ -35,6 +35,8 @@ export type PiWorkerInput = Readonly<{
   access?: BoundedPiAccess;
   /** Trusted host setting. The explicit default is forwarded to Pi rather than relying on its implicit default. */
   thinking?: PiThinkingPolicy;
+  /** Review sessions deliberately receive no filesystem, shell, or mutation tools. */
+  mode?: 'worker' | 'review-readonly';
 }>;
 /**
  * Host-only continuation evidence.  A persisted Pi transcript is useful only
@@ -80,6 +82,7 @@ export class PiNativeWorker {
   private cancelled = false;
   private disposed = false;
   private running = false;
+  private reviewReadCalls = 0;
   private thinking!: Readonly<{ requested: PiThinkingLevel; nativeSelected: PiThinkingLevel; providerEffective: 'unknown' }>;
   private constructor(private readonly input: PiWorkerInput) {}
   get sessionId(): string { return this.session.getSessionStats().sessionId; }
@@ -219,7 +222,19 @@ export class PiNativeWorker {
         return { content: [{ type: 'text', text: `wrote ${params.path}` }], details: {} };
       },
     };
+    const readParameters = Type.Object({ path: Type.String({ minLength: 1 }) });
+    const readTool: ToolDefinition<typeof readParameters> = {
+      name: 'helm_read', label: 'Helm read', description: 'Read up to 64 KiB from an allowed file in the assigned review worktree.', parameters: readParameters, executionMode: 'sequential',
+      execute: async (_toolCallId, params) => {
+        this.assertActive(); await this.flushEvents(); this.assertActive();
+        if (this.reviewReadCalls >= 16) throw new Error('review read call bound exceeded');
+        this.reviewReadCalls += 1;
+        const text = await this.input.workspaceManager.read(this.input.workspace, params.path, 64 * 1024);
+        return { content: [{ type: 'text', text }], details: {} };
+      },
+    };
     const requestedThinking = piThinkingPolicySchema.parse(this.input.thinking ?? defaultPiThinkingPolicy).level;
+    const reviewReadonly = this.input.mode === 'review-readonly';
     const created = await createAgentSession({
       cwd: this.input.workspace.root, agentDir, modelRuntime: await this.guardedRuntime(), model: this.input.model,
       sessionManager: sessionFile ? SessionManager.open(sessionFile, sessionDir, this.input.workspace.root) : SessionManager.create(this.input.workspace.root, sessionDir),
@@ -227,7 +242,10 @@ export class PiNativeWorker {
       // change Pi's retained-context policy.
       settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } }),
       thinkingLevel: requestedThinking,
-      noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()),
+      // This is a tool-surface restriction, not an OS sandbox claim. Review
+      // context is captured by the host before launch; Pi has no shell or
+      // mutable workspace tool through which to escape it.
+      noTools: reviewReadonly ? 'builtin' : 'builtin', tools: reviewReadonly ? ['helm_read'] : ['helm_write'], customTools: reviewReadonly ? [readTool] : [writeTool], resourceLoader: noResources(createExtensionRuntime()),
     });
     this.session = created.session;
     this.thinking = Object.freeze({ requested: requestedThinking, nativeSelected: piThinkingLevelSchema.parse(this.session.thinkingLevel), providerEffective: 'unknown' });

@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, realpathSync, renameSync } from 'node:fs';
-import { lstat, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -10,7 +10,7 @@ const exec = promisify(execFile);
 type DB = { exec(sql: string): void; prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[]; run(...args: unknown[]): unknown }; close(): void };
 const { DatabaseSync } = createRequire(__filename)('node:sqlite') as { DatabaseSync: new (path: string) => DB };
 export type WorktreeOwner = Readonly<{ attemptId: string; generation: number; expiresAt: string }>;
-export type WorktreeReservation = Readonly<{ repository: string; root: string; owner: WorktreeOwner; writableRoots: readonly string[]; protectedRoots: readonly string[] }>;
+export type WorktreeReservation = Readonly<{ repository: string; root: string; owner: WorktreeOwner; writableRoots: readonly string[]; readableRoots: readonly string[]; protectedRoots: readonly string[] }>;
 export class WorkspaceRefusal extends Error {}
 type OwnershipRow = { bytes: string; status: string };
 
@@ -46,7 +46,7 @@ export class WorkspaceManager {
       throw new WorkspaceRefusal('invalid or expired ownership');
     }
   }
-  async create(repository: string, destination: string, branch: string, baseSha: string, owner: WorktreeOwner, policy: { writableRoots: readonly string[]; protectedRoots?: readonly string[] } = { writableRoots: ['.'] }): Promise<WorktreeReservation> {
+  async create(repository: string, destination: string, branch: string, baseSha: string, owner: WorktreeOwner, policy: { writableRoots: readonly string[]; readableRoots?: readonly string[]; protectedRoots?: readonly string[] } = { writableRoots: ['.'] }): Promise<WorktreeReservation> {
     this.validOwner(owner);
     const repo = await realpath(repository);
     await mkdir(dirname(resolve(destination)), { recursive: true });
@@ -62,8 +62,9 @@ export class WorkspaceManager {
       return relative(root, resolve(root, path)).split(sep).join('/') || '.';
     };
     const writableRoots = policy.writableRoots.map(normalizePolicyPath);
+    const readableRoots = (policy.readableRoots ?? policy.writableRoots).map(normalizePolicyPath);
     const protectedRoots = ['.git', '.github', '.pi', 'src/core', 'src/runtime', 'test', 'scripts', 'docs/protocol.md', 'docs/brief.md', 'docs/design-original.md', 'docs/design-addendum.md', 'docs/design-source.md', 'AGENTS.md', ...(policy.protectedRoots ?? []).map(normalizePolicyPath)];
-    const reservation = Object.freeze({ repository: repo, root, owner: Object.freeze({ ...owner }), writableRoots: Object.freeze(writableRoots), protectedRoots: Object.freeze(protectedRoots) });
+    const reservation = Object.freeze({ repository: repo, root, owner: Object.freeze({ ...owner }), writableRoots: Object.freeze(writableRoots), readableRoots: Object.freeze(readableRoots), protectedRoots: Object.freeze(protectedRoots) });
     this.transaction(() => {
       this.validOwner(owner);
       if (this.db.prepare('SELECT root FROM workspace_ownership WHERE root=?').get(root)) throw new WorkspaceRefusal('worktree already has a durable owner');
@@ -86,6 +87,7 @@ export class WorkspaceManager {
     if (current.repository !== reservation.repository || current.owner.attemptId !== owner.attemptId
       || current.owner.generation !== owner.generation || current.owner.expiresAt !== owner.expiresAt
       || JSON.stringify(current.writableRoots) !== JSON.stringify(reservation.writableRoots)
+      || JSON.stringify(current.readableRoots) !== JSON.stringify(reservation.readableRoots)
       || JSON.stringify(current.protectedRoots) !== JSON.stringify(reservation.protectedRoots)) {
       throw new WorkspaceRefusal('worker does not own this worktree generation');
     }
@@ -121,17 +123,18 @@ export class WorkspaceManager {
       return next;
     });
   }
-  private relativePath(reservation: WorktreeReservation, requested: string): string {
+  private relativePath(reservation: WorktreeReservation, requested: string, operation: 'read' | 'write'): string {
     if (requested.includes('\0')) throw new WorkspaceRefusal('NUL is not a path');
     const target = resolve(reservation.root, requested);
     if (!inside(reservation.root, target)) throw new WorkspaceRefusal('path escapes assigned worktree');
     const path = relative(reservation.root, target).split(sep).join('/');
-    if (!reservation.writableRoots.some((entry) => entry === '.' || path === entry || path.startsWith(`${entry}/`))) throw new WorkspaceRefusal('path is outside assigned write scope');
+    const roots = operation === 'read' ? reservation.readableRoots : reservation.writableRoots;
+    if (!roots.some((entry) => entry === '.' || path === entry || path.startsWith(`${entry}/`))) throw new WorkspaceRefusal(`path is outside assigned ${operation} scope`);
     if (!path || reservation.protectedRoots.some((entry) => path === entry || path.startsWith(`${entry}/`))) throw new WorkspaceRefusal('control path is protected');
     return path;
   }
-  private async safePath(reservation: WorktreeReservation, requested: string): Promise<string> {
-    const path = this.relativePath(reservation, requested);
+  private async safePath(reservation: WorktreeReservation, requested: string, operation: 'read' | 'write' = 'write'): Promise<string> {
+    const path = this.relativePath(reservation, requested, operation);
     if (await realpath(reservation.root) !== reservation.root) throw new WorkspaceRefusal('worktree root changed');
     let cursor = reservation.root;
     for (const part of path.split('/')) {
@@ -142,9 +145,12 @@ export class WorkspaceManager {
     }
     return cursor;
   }
-  async read(reservation: WorktreeReservation, path: string): Promise<string> {
+  async read(reservation: WorktreeReservation, path: string, maxBytes = Number.MAX_SAFE_INTEGER): Promise<string> {
     this.assertOwner(reservation, reservation.owner);
-    return readFile(await this.safePath(reservation, path), 'utf8');
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new WorkspaceRefusal('invalid read size bound');
+    const target = await this.safePath(reservation, path, 'read');
+    if ((await stat(target)).size > maxBytes) throw new WorkspaceRefusal('read exceeds size bound');
+    return readFile(target, 'utf8');
   }
   async write(reservation: WorktreeReservation, owner: WorktreeOwner, path: string, contents: string): Promise<void> {
     this.assertOwner(reservation, owner);
@@ -155,7 +161,7 @@ export class WorkspaceManager {
     try {
       await writeFile(staged, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
       await this.safePath(reservation, path);
-      const normalized = this.relativePath(reservation, path);
+      const normalized = this.relativePath(reservation, path, 'write');
       this.transaction(() => {
         this.assertOwner(reservation, owner);
         let baseline = 'absent';
@@ -186,7 +192,7 @@ export class WorkspaceManager {
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       if (current !== row.baseline_hash) paths.add(row.path);
     }
-    for (const path of paths) this.relativePath(reservation, path); // Detective scope check includes ignored tool writes.
+    for (const path of paths) this.relativePath(reservation, path, 'write'); // Detective scope check includes ignored tool writes.
     return [...paths].sort();
   }
 }

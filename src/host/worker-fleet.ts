@@ -20,6 +20,9 @@ type SpawnProvenance = Readonly<{ modelId: string; modelProvider: string; modelA
 type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; modelId?: string; modelProvider?: string; modelApi?: string; modelFactVersion?: number; dataPolicy?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
 type ContinuationWorker = StoredWorker & Readonly<{ owner: WorktreeOwner; modelId: string; modelProvider: string; modelApi: string; modelFactVersion: number; dataPolicy: string; persistedSession: PiPersistedSession }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
+export class WorkerSteerUnknownError extends Error {
+  constructor(readonly commandId: string) { super(`worker steer outcome is unknown; reconcile command ${commandId}`); }
+}
 
 function digest(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
 function storedWorker(value: unknown): StoredWorker | undefined {
@@ -194,6 +197,7 @@ export class PiWorkerFleet {
       },
     };
     const observed = await this.binding.host.performAdmitted(admitted.command.commandId, this.binding.executor, this.binding.claimExpiresAt(), this.binding.readFact, effect);
+    if (observed.state === 'unknown') throw new WorkerSteerUnknownError(admitted.command.commandId);
     if (observed.state !== 'succeeded' || !record) throw new Error('worker continuation was not durably observed');
     const live = this.#live.get(workerId)!; const run = this.run(workerId, live).catch(async () => { await this.persistUnknown(workerId, live); }); this.#runs.set(workerId, run);
     return { workerId, attemptId: record.attemptId, sessionId: record.sessionId, state: 'ready', predecessorWorkerId: predecessor.workerId };

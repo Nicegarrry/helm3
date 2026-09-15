@@ -41,6 +41,9 @@ const resourceRequestSchema = z.object({
 export type ModelFact = {
   modelId: string; provider: string; poolId: string; enabled: boolean;
   capabilities: readonly string[]; roles: readonly string[];
+  /** Optional role floors preserve compatibility with pre-economy facts. */
+  capabilitiesByRole?: Readonly<Record<string, readonly string[]>>;
+  dataPolicy?: 'public-only' | 'restricted-ok';
   availability: 'known_available' | 'known_unavailable' | 'unknown';
   /** Monotonic per-model host observation version. Older snapshots remain durable. */
   factVersion: number;
@@ -70,6 +73,8 @@ const humanReserveExceptionSchema = z.object({
 const modelFactSchema = z.object({
   modelId: z.string().min(1), provider: z.string().min(1), poolId: z.string().min(1), enabled: z.boolean(),
   capabilities: z.array(z.string().min(1)), roles: z.array(z.string().min(1)), availability: z.enum(['known_available', 'known_unavailable', 'unknown']),
+  capabilitiesByRole: z.record(z.string().min(1), z.array(z.string().min(1))).optional(),
+  dataPolicy: z.enum(['public-only', 'restricted-ok']).optional(),
   factVersion: z.number().int().positive(), observedAt: z.string().datetime({ offset: false }),
 }).strict();
 export type KernelKind = {
@@ -77,7 +82,7 @@ export type KernelKind = {
   /** Legacy fail-closed marker: it remains invalid until a resolver is supplied. */
   requiresResourceEnforcement?: boolean;
   resourceRequest?: (payload: unknown) => ResourceRequest;
-  modelSelection?: (payload: unknown) => { modelId: string; requiredCapabilities: readonly string[]; role: string };
+  modelSelection?: (payload: unknown) => { modelId: string; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' };
 };
 export type KernelOptions = {
   databasePath: string;
@@ -694,14 +699,17 @@ class Kernel {
     this.assertLegalModel(selection, kind.resourceRequest?.(payload));
   }
 
-  private assertLegalModel(selection: { modelId: string; requiredCapabilities: readonly string[]; role: string }, request?: ResourceRequest): void {
+  private assertLegalModel(selection: { modelId: string; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' }, request?: ResourceRequest): void {
     const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(selection.modelId) as { bytes: string } | undefined;
     if (!row) throw new Error('model selection has no registered facts');
     const fact = modelFactSchema.parse(JSON.parse(row.bytes));
     if (!fact.enabled) throw new Error('model selection is disabled');
     if (fact.availability !== 'known_available') throw new Error('model selection availability is not known available');
     if (!fact.roles.includes(selection.role)) throw new Error('model selection lacks required role');
-    if (selection.requiredCapabilities.some((capability) => !fact.capabilities.includes(capability))) throw new Error('model selection lacks required capability');
+    const capabilities = fact.capabilitiesByRole ? fact.capabilitiesByRole[selection.role] ?? [] : fact.capabilities;
+    if (fact.dataPolicy && !selection.dataClassification) throw new Error('model selection data classification is unknown');
+    if (selection.dataClassification === 'restricted' && fact.dataPolicy !== 'restricted-ok') throw new Error('model selection data policy refuses restricted context');
+    if (selection.requiredCapabilities.some((capability) => !capabilities.includes(capability))) throw new Error('model selection lacks required capability');
     if (request && fact.poolId !== request.poolId) throw new Error('model selection pool does not match the requested resource pool');
   }
 

@@ -14,6 +14,17 @@ export type WorktreeReservation = Readonly<{ repository: string; root: string; o
 export class WorkspaceRefusal extends Error {}
 type OwnershipRow = { bytes: string; status: string };
 
+/**
+ * Records written before bounded read scopes did not contain readableRoots.
+ * Decode that accepted shape as its original writable scope without changing
+ * the durable bytes; an explicit empty read scope remains an explicit denial.
+ */
+function reservationFromBytes(bytes: string): WorktreeReservation {
+  const stored = JSON.parse(bytes) as Omit<WorktreeReservation, 'readableRoots'> & Partial<Pick<WorktreeReservation, 'readableRoots'>>;
+  const readableRoots = Object.hasOwn(stored, 'readableRoots') ? stored.readableRoots : stored.writableRoots;
+  return Object.freeze({ ...stored, owner: Object.freeze({ ...stored.owner }), writableRoots: Object.freeze([...stored.writableRoots]), readableRoots: Object.freeze([...(readableRoots ?? [])]), protectedRoots: Object.freeze([...stored.protectedRoots]) });
+}
+
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return path === '' || (!path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path));
@@ -83,7 +94,7 @@ export class WorkspaceManager {
   assertOwner(reservation: WorktreeReservation, owner: WorktreeOwner): void {
     const row = this.db.prepare('SELECT bytes,status FROM workspace_ownership WHERE root=?').get(reservation.root) as OwnershipRow | undefined;
     if (!row || row.status !== 'active') throw new WorkspaceRefusal('no active durable worktree ownership');
-    const current = JSON.parse(row.bytes) as WorktreeReservation;
+    const current = reservationFromBytes(row.bytes);
     if (current.repository !== reservation.repository || current.owner.attemptId !== owner.attemptId
       || current.owner.generation !== owner.generation || current.owner.expiresAt !== owner.expiresAt
       || JSON.stringify(current.writableRoots) !== JSON.stringify(reservation.writableRoots)
@@ -97,7 +108,7 @@ export class WorkspaceManager {
   reservation(root: string): WorktreeReservation {
     const row = this.db.prepare('SELECT bytes,status FROM workspace_ownership WHERE root=?').get(root) as OwnershipRow | undefined;
     if (!row || row.status !== 'active') throw new WorkspaceRefusal('no active durable worktree ownership');
-    return Object.freeze(JSON.parse(row.bytes) as WorktreeReservation);
+    return reservationFromBytes(row.bytes);
   }
   /** Re-read exact Git reality immediately before a continuation changes ownership. */
   async assertExactHead(reservation: WorktreeReservation, expectedHead: string): Promise<void> {
@@ -124,7 +135,7 @@ export class WorkspaceManager {
       this.validOwner(owner);
       const row = this.db.prepare('SELECT bytes,status FROM workspace_ownership WHERE root=?').get(reservation.root) as OwnershipRow | undefined;
       if (!row || row.status !== 'active') throw new WorkspaceRefusal('worktree is not available for transfer');
-      const current = JSON.parse(row.bytes) as WorktreeReservation;
+      const current = reservationFromBytes(row.bytes);
       if (current.owner.attemptId !== reservation.owner.attemptId || current.owner.generation !== reservation.owner.generation || current.owner.expiresAt !== reservation.owner.expiresAt
         || current.owner.generation !== expectedGeneration || owner.generation !== expectedGeneration + 1) throw new WorkspaceRefusal('stale worktree ownership generation');
       const next = Object.freeze({ ...current, owner: Object.freeze({ ...owner }) });

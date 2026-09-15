@@ -512,6 +512,14 @@ export class HostControlPlane {
     return this.kernel.host.perform(commandId, claim, executor, readFact, effect);
   }
 
+  /** Re-fence an active multi-step effect against current owner and authority. */
+  assertEffectAuthority(commandId: string, context: HelmToolExecutionContext): void {
+    this.assertSession(context);
+    const record = this.kernel.kernel.getCommand(commandId);
+    if (!record || record.command.runId !== context.runId) throw new Error('effect command is outside the trusted run');
+    this.kernel.host.assertEffectAuthority(commandId);
+  }
+
   /** A fleet reports an observed attempt disposition; it never edits spawn status. */
   reportAttemptStop(attemptId: string, observed: 'stopped' | 'pending' | 'unknown'): void {
     this.kernel.host.reportAttemptStop(attemptId, observed);

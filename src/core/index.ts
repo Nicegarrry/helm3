@@ -221,6 +221,8 @@ export class KernelHost {
   assertCurrentOwner(lease: OrchestratorLease): OrchestratorLease {
     return this.core.assertCurrentOwner(orchestratorLeaseSchema.parse(lease));
   }
+  /** Revalidate an already-started effect without admitting or claiming another command. */
+  assertEffectAuthority(commandId: string): void { this.core.assertEffectAuthority(commandId); }
 
   readRun(runId: string): KernelRunProjection { return this.core.readRun(runId); }
 
@@ -389,6 +391,17 @@ class Kernel {
     } catch (error) {
       return this.setTerminal(commandId, { commandId, effectId: effect.effectId, state: 'unknown', source: 'kernel-effect', observedAt: this.now(), evidenceRefs: ['kernel:effect-error'], detail: error instanceof Error ? error.message : 'effect failed before observed result' });
     }
+  }
+
+  /**
+   * Effect-time guard for multi-step trusted mechanics. It deliberately
+   * reuses the normal authority/epoch/lease logic rather than duplicating it.
+   */
+  assertEffectAuthority(commandId: string): void {
+    const row = this.requireCommand(commandId);
+    if (row.status !== 'effect_started') throw new Error('effect is not currently active');
+    this.assertAuthority(this.parseCommand(row));
+    this.assertNotCancelled(commandId);
   }
 
   recordObservation(commandId: string, observation: EffectObservation): void {

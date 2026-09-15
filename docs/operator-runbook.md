@@ -41,3 +41,19 @@ node --import tsx src/operator/saved-viewer.ts --snapshot preserved-snapshot.jso
 ```
 
 The viewer accepts one bounded regular JSON file, validates the existing snapshot schema, and exposes the existing GET-only loopback cockpit/API. It does not open a host, kernel, journal, credentials, or provider. Its UI, startup output, and `X-Helm-Projection: historical-untrusted` API header mark the result as an untrusted historical projection that cannot authorize actions. The displayed snapshot keeps its original timestamps and source/evidence fields. `src/operator/cli.ts --url http://127.0.0.1:PORT --json` preserves the existing bare snapshot JSON for live views; for this historical viewer it returns `{ "snapshot": ..., "projection": { "mode": "historical-untrusted", "actionAuthority": "none" } }`, so machine users cannot miss the boundary.
+
+## Provider-free fixture scenarios
+
+The observation command runs only local faux-provider fixtures; it does not establish authenticated frontier behavior, independent fork review, production merge, or full acceptance. Its default remains the same-session repair flow:
+
+```sh
+node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory <new-empty-path>
+node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory <new-empty-path> --scenario default
+```
+
+Use the optional `native-fork` scenario to exercise the already-implemented local source/child native-session fork flow. It reports `fixture: true` and `scenario: "native-fork"`; its four faux model requests, two writes, gate, and Map close are fixture evidence only:
+
+```sh
+node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory <new-empty-path> --scenario native-fork
+node --import tsx src/dogfood/observe.ts --orchestrator astra --state-directory <new-empty-path> --scenario native-fork --serve
+```

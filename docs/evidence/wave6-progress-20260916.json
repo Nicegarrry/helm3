@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "scope": "sanitised Wave 5/Wave 6 progress checkpoint; excludes prompts, model response text, raw thinking, credentials and private ledger contents",
+  "repository": {
+    "mainHead": "cfefb2f3037bfe1c57309552eb7b3d44716a3b72",
+    "repository": "Nicegarrry/helm3"
+  },
+  "acceptedSlices": [
+    {
+      "pullRequest": 80,
+      "reviewedHead": "a42f0c7b9bb97792472b1f85cf8e0b6ecc6a7d26",
+      "mergedHead": "8121e669e76aa77ee2834f7af57e1acdd89efcae",
+      "scope": "bounded native Pi manual idle compaction",
+      "validation": {
+        "root": "typecheck and 168/168 tests",
+        "standards": "11 focused tests and typecheck",
+        "ciChecks": 6
+      },
+      "open": [
+        "full context-pressure recovery",
+        "automatic compaction",
+        "model change",
+        "end-to-end recovery acceptance"
+      ]
+    },
+    {
+      "pullRequest": 81,
+      "reviewedHead": "bdf2b61986a23dd74c1eb649aee1120d4839ffab",
+      "mergedHead": "cfefb2f3037bfe1c57309552eb7b3d44716a3b72",
+      "scope": "host-owned bounded read registry wired to provider-free operator and dogfood construction",
+      "tools": ["brief.get", "map.get", "log.query", "models.get", "budget.get"],
+      "validation": {
+        "author": "typecheck and 176/176 tests",
+        "standards": "focused executable checks and typecheck",
+        "spec": "focused executable checks and typecheck",
+        "ciChecks": 6
+      },
+      "properties": [
+        "trusted run and repository scope",
+        "durable owner fencing",
+        "bounded metadata-only SQLite tails",
+        "sanitised source failures",
+        "honest unknown economy facts"
+      ],
+      "open": ["live Fable/Astra provider interchange"]
+    }
+  ],
+  "acceptedHeadGate": {
+    "head": "cfefb2f3037bfe1c57309552eb7b3d44716a3b72",
+    "state": "passed",
+    "startedAt": "2026-09-15T14:40:51.750Z",
+    "completedAt": "2026-09-15T14:41:34.025Z",
+    "typecheckExitCode": 0,
+    "fullTestsExitCode": 0,
+    "fullTests": "176/176",
+    "resultArtifact": "raw:sha256:a153da2fd54c0d0b7231d0f0d7d1435bd43fc24441a6737922759f85d2abd373",
+    "fullTestsArtifact": "raw:sha256:eeb0c9585acd6d50cdff64567fa6df08a84e2b1dc268c2ea7a1b24172f90106e",
+    "typecheckArtifact": "raw:sha256:1ad084df6bb4ed5628864ba835b464c226ca435820c1671042f4c75fec0cb38d",
+    "qualification": "runGate primitive; not full SDK-orchestrator autonomy"
+  },
+  "mapDogfood": {
+    "issue": 1,
+    "commandId": "map-wave4-904d9980-4770-4b19-8806-aafa958ea51f",
+    "state": "succeeded",
+    "observedState": "OPEN",
+    "revision": "2026-09-15T14:43:59Z",
+    "observedAt": "2026-09-15T14:44:00.093Z",
+    "commandHash": "sha256:55185b64dfe86e5709e7e49cd0af81517f700cb21d4ca6dc4e525ad37dab2d27",
+    "concurrency": "read_before_write_not_atomic",
+    "issuesClosed": 0
+  },
+  "savedPiReport": {
+    "classification": "advisory normalised report",
+    "providerRequestsAdded": 0,
+    "originalInvocationState": "unknown",
+    "originalLifecycle": "finished",
+    "historicalStatusRewritten": false
+  },
+  "nominalGuard": {
+    "currency": "USD",
+    "total": 4.07309683,
+    "settledKnown": 0.03083635,
+    "retainedUnknownReservations": 4.04226048,
+    "modelRequests": 6,
+    "attempts": 5,
+    "actualIncrementalCharge": "unknown",
+    "quotaHeadroom": "unknown",
+    "geminiRequests": 0,
+    "activePiSessions": 0
+  },
+  "nextLane": {
+    "status": "implementation begun",
+    "scope": ["worker.spawn", "worker.inspect", "worker.stop"],
+    "fullBriefAccepted": false
+  }
+}

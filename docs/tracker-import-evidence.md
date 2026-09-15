@@ -19,12 +19,20 @@ descriptive `frontier`. The frontier excludes the Map parent and contains only
 open membership nodes whose observed external blockers are closed. It chooses
 no model, tier, role, route or mutation.
 
-A page read failure, malformed response, output bound, pagination limit, missing
-referenced issue, or membership cycle makes the whole observation incomplete and
-returns no frontier. That is deliberately different from an empty complete Map.
+A page read failure, malformed response, output bound, pagination/node/request
+limit, missing referenced issue, returned-identity mismatch, or membership cycle
+makes the whole observation incomplete and returns no frontier. That is
+deliberately different from an empty complete Map. REST states are normalized
+from GitHub's lowercase payloads. A blocker retains its `OWNER/REPO` identity
+and is freshly re-read from that repository; it is never reinterpreted as an
+issue with the same number in the Map repository. Returned GitHub issue URLs must be canonical `https://github.com/OWNER/REPO/issues/N` URLs for the requested identity; unsafe or mismatched URLs are rejected.
+
 The default transport runs `gh` without a shell, has a 10-second timeout and a
-one-megabyte combined stdout/stderr ceiling. Constructor limits cap page count
-at 50, timeout at 60 seconds and output at four megabytes.
+one-megabyte combined stdout/stderr ceiling. It asks an overdue process to stop,
+then sends `SIGKILL` and closes local handles after a short bounded grace. This
+does not prove descendant cancellation. Constructor limits cap pages at 50,
+nodes at 1,000, requests at 10,000, timeout at 60 seconds and output at four
+megabytes.
 
 `src/tracker/observe.ts` is an operator-only JSON observer:
 
@@ -40,9 +48,9 @@ review; local fixture success is not a live GitHub proof.
 
 | Helm 3 path | Predecessor source/test | Classification | Evidence |
 |---|---|---|---|
-| `src/tracker/index.ts` | `src/tracker/github.ts`; `test/tracker.test.ts` native blocker cases | Behavioural: fresh external facts, native relationships, malformed/failed observations fail closed | `test/tracker/tracker.test.ts` covers recursive native membership, fresh blocker rereads, malformed pages, transport failure, page limits and cycles. |
+| `src/tracker/index.ts` | `src/tracker/github.ts`; `test/tracker.test.ts` native blocker cases | Behavioural: fresh external facts, native relationships, malformed/failed observations fail closed | `test/tracker/tracker.test.ts` covers recursive membership, lowercase REST state, fresh same/cross-repository blocker rereads, identity mismatch, malformed pages, transport failure, traversal limits and cycles. |
 | `src/tracker/observe.ts` | predecessor's CLI adapter boundary only | New Helm 3 read-only operator seam | Fixture `gh` proves strict `--repo`/`--map` arguments and JSON output; it never invokes a provider. |
-| `src/tracker/index.ts` transport | predecessor `execFileSync('gh', args)` discipline | Behavioural: argv data stays outside a shell | Fixture verifies bounded output; constructor tests reject unbounded page/time/output options. |
+| `src/tracker/index.ts` transport | predecessor `execFileSync('gh', args)` discipline | Behavioural: argv data stays outside a shell | Fixture verifies runaway output has one bounded termination sequence and ignores later chunks; constructor tests reject unbounded page/node/request/time/output options. |
 | predecessor labels/tiering and tracker mutations | `listOpenTasks`, `claim`, `comment`, `close`, `replaceComplexity` | Retired for this slice | No `wayfinder:task` dependency, automatic routing, model selection or GitHub mutation is exposed. |
 
 Validated locally with Node 22.22.2:

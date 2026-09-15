@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -9,7 +9,7 @@ import test from 'node:test';
 import type { Command } from '../../src/contracts/index.js';
 import type { EffectObservation, KernelEffect, TrustedExecutor } from '../../src/core/index.js';
 import { HostArtifactStore, openHost } from '../../src/host/index.js';
-import { appendHostGateTool, createHostGateTool, gateRunPayloadSchema, type GateToolHost, type RegisteredGate } from '../../src/host/gate-tools.js';
+import { appendHostGateTool, createHostGateTool, gateConfigDigest, gateRunPayloadSchema, type GateToolHost, type RegisteredGate } from '../../src/host/gate-tools.js';
 import { ArtifactJournal } from '../../src/journal/index.js';
 import { HelmToolRegistry, type HelmToolExecutionContext } from '../../src/runtime/orchestrator/index.js';
 
@@ -18,6 +18,8 @@ const now = '2026-09-16T00:00:00.000Z';
 const later = '2026-09-16T01:00:00.000Z';
 const context = { runId: 'gate-run', sessionId: 'gate-session', mode: 'primary' as const };
 const executor: TrustedExecutor = { executorId: 'gate-host' };
+
+function configuredGate(input: RegisteredGate): RegisteredGate { return input; }
 
 async function repository(root: string) {
   const workspace = join(root, 'workspace'); await mkdir(workspace, { recursive: true });
@@ -35,18 +37,15 @@ async function fixture(check: readonly string[] = ['process.exit(0)']) {
   (artifacts as unknown as { journalForTrustedPi(): ArtifactJournal }).journalForTrustedPi = () => journalFailure
     ? ({ async append() { throw new Error('synthetic journal failure'); } } as unknown as ArtifactJournal)
     : originalJournal();
-  const target: RegisteredGate = {
+  const target = configuredGate({
     gateId: 'fixture.gate', workerId: 'fixture-worker', repositoryId: 'fixture-repository', mapNodeId: 'fixture-node', workspaceId: 'fixture-workspace', workspace: repo.workspace,
-    expectedHead: repo.head, acceptanceVersion: 'acceptance-v1', gateConfigDigest: 'sha256:fixture-gate-config', trustedDefinitionRef: 'fixture://gate-definition',
+    expectedHead: repo.head, acceptanceVersion: 'acceptance-v1',
     checks: [{ name: 'fixture check', executable: process.execPath, args: ['-e', check.join(';')], timeoutMs: 5000 }], environment: { PATH: process.env.PATH ?? '' },
-    async observeWorkspace() {
-      const [head, status] = await Promise.all([exec('git', ['-C', repo.workspace, 'rev-parse', 'HEAD']), exec('git', ['-C', repo.workspace, 'status', '--porcelain', '--untracked-files=all'])]);
-      return { head: head.stdout.trim(), clean: status.stdout === '', observedAt: now };
-    },
-  };
+  });
   const host: GateToolHost = {
     artifactsFor: () => artifacts,
     admitOrchestrator(intent) { if (admissionError) throw admissionError; admitted = intent as Command; return { command: admitted }; },
+    assertEffectAuthority() {},
     async performAdmitted(commandId, _executor, _expires, readFact, effect) {
       const fact = await readFact(admitted!.expected[0]!);
       if (fact.state !== 'known' || fact.value !== true) return { commandId, effectId: effect.effectId, state: 'unknown', source: 'fixture-host', observedAt: now, evidenceRefs: ['fixture:precondition'] };
@@ -73,7 +72,8 @@ test('gate.run binds a host-registered gate to exact head, checks, and raw evide
     assert.equal(result.state, 'succeeded');
     assert.equal((result as { value: { gateState: string } }).value.gateState, 'succeeded');
     assert.equal(value.admitted?.kind, 'gate.run');
-    assert.deepEqual(value.admitted?.payload, { gateId: 'fixture.gate', workerId: 'fixture-worker', workspaceId: 'fixture-workspace', expectedHead: value.target.expectedHead, acceptanceVersion: 'acceptance-v1', gateConfigDigest: 'sha256:fixture-gate-config', trustedDefinitionRef: 'fixture://gate-definition' });
+    const digest = gateConfigDigest(value.target);
+    assert.deepEqual(value.admitted?.payload, { gateId: 'fixture.gate', workerId: 'fixture-worker', workspaceId: 'fixture-workspace', expectedHead: value.target.expectedHead, acceptanceVersion: 'acceptance-v1', gateConfigDigest: digest, trustedDefinitionRef: `gate-definition:${digest}` });
     assert.deepEqual(value.admitted?.expected, [{ authority: 'git', subject: 'fixture-workspace', version: value.target.expectedHead, predicate: 'registered workspace is clean at the exact expected head' }]);
     const metadata = await value.journal.metadata(); assert.deepEqual(new Set(metadata.map((entry) => entry.source)), new Set(['helm.gate.started', 'helm.gate.check', 'helm.gate.completed']));
   } finally { value.journal.close(); await rm(value.root, { recursive: true, force: true }); }
@@ -98,10 +98,30 @@ test('gate.run refuses arbitrary command/path/config input, reports evidence-wri
     assert.equal(invalid.state, 'refused');
     evidenceFailure.failEvidence();
     assert.equal((await evidenceFailure.tool.execute({ gateId: evidenceFailure.target.gateId, workerId: evidenceFailure.target.workerId, expectedHead: evidenceFailure.target.expectedHead }, context)).state, 'unknown');
+    const tampered = createHostGateTool({ ...value.options, catalog: { async resolve() { return { ...value.target, checks: [{ ...value.target.checks[0]!, args: ['-e', 'process.exit(7)'] }] }; } } });
+    // The independently resolved definition is valid at plan time; mutation
+    // after admission is separately rejected by the at-effect reread below.
+    assert.equal((await tampered.execute({ gateId: value.target.gateId, workerId: value.target.workerId, expectedHead: value.target.expectedHead }, context)).state, 'succeeded');
+    const marker = 'synthetic-host-detail-must-not-escape';
+    const throwing = createHostGateTool({ ...value.options, host: { ...value.options.host, async performAdmitted() { throw new Error(marker); } } });
+    const thrown = await throwing.execute({ gateId: value.target.gateId, workerId: value.target.workerId, expectedHead: value.target.expectedHead }, context);
+    assert.deepEqual(thrown, { state: 'unknown', reason: 'gate effect outcome is unavailable' }); assert.ok(!JSON.stringify(thrown).includes(marker));
     const base = new HelmToolRegistry([{ name: 'brief.get', description: 'fixture', input: {}, execute: async () => ({ state: 'succeeded', value: {} }) }]);
     const registry = appendHostGateTool(base, value.options);
     assert.deepEqual(registry.all().map((entry) => entry.name), ['brief.get', 'gate.run']);
   } finally { for (const item of [value, evidenceFailure]) { item.journal.close(); await rm(item.root, { recursive: true, force: true }); } }
+});
+
+test('a mutable catalog definition is re-read at effect time and cannot replace the planned checks', async () => {
+  const value = await fixture(); let calls = 0;
+  try {
+    const tool = createHostGateTool({ ...value.options, catalog: { async resolve() {
+      calls++;
+      return calls === 1 ? value.target : { ...value.target, checks: [{ ...value.target.checks[0]!, args: ['-e', 'process.exit(7)'] }] };
+    } } });
+    assert.equal((await tool.execute({ gateId: value.target.gateId, workerId: value.target.workerId, expectedHead: value.target.expectedHead }, context)).state, 'unknown');
+    assert.equal(calls, 2);
+  } finally { value.journal.close(); await rm(value.root, { recursive: true, force: true }); }
 });
 
 test('gate.run traverses the real Host Core admission, current-owner fence, claim, and exact-head evidence path', async () => {
@@ -112,22 +132,34 @@ test('gate.run traverses the real Host Core admission, current-owner fence, clai
     plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['gate.run'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
     plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['gate.run'], issuedAt: now, expiresAt: '2026-09-16T00:30:00.000Z', maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
     plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'fable', sessionId: context.sessionId, epoch: 1, issuedAt: now, expiresAt: later }, 0);
-    const target: RegisteredGate = {
+    const target = configuredGate({
       gateId: 'core.gate', workerId: 'core-worker', repositoryId: 'repo', mapNodeId: 'node', workspaceId: 'core-workspace', workspace: repo.workspace, expectedHead: repo.head,
-      acceptanceVersion: 'v1', gateConfigDigest: 'sha256:core-config', trustedDefinitionRef: 'fixture://core-gate', checks: [{ name: 'green', executable: process.execPath, args: ['-e', 'process.exit(0)'], timeoutMs: 5000 }], environment: { PATH: process.env.PATH ?? '' },
-      async observeWorkspace() { const [head, status] = await Promise.all([exec('git', ['-C', repo.workspace, 'rev-parse', 'HEAD']), exec('git', ['-C', repo.workspace, 'status', '--porcelain', '--untracked-files=all'])]); return { head: head.stdout.trim(), clean: status.stdout === '', observedAt: now }; },
-    };
+      acceptanceVersion: 'v1', checks: [{ name: 'green', executable: process.execPath, args: ['-e', 'process.exit(0)'], timeoutMs: 5000 }], environment: { PATH: process.env.PATH ?? '' },
+    });
     const tool = createHostGateTool({ context, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane, catalog: { async resolve() { return target; } },
       command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => now, notAfter: () => later, commandId: () => 'core-gate-command' }, executor, claimExpiresAt: () => later });
     const result = await tool.execute({ gateId: target.gateId, workerId: target.workerId, expectedHead: target.expectedHead }, context);
     assert.equal(result.state, 'succeeded');
     const snapshot = await plane.snapshot(context.runId); const command = snapshot.commands.find((entry) => entry.command.commandId === 'core-gate-command');
     assert.equal(command?.status, 'succeeded'); assert.equal(command?.observations[0]?.state, 'succeeded'); assert.equal(command?.observations[0]?.evidenceRefs.length, 2);
+    const marker = join(root, 'second-check-marker'); const midTarget = configuredGate({ ...target, acceptanceVersion: 'v2', checks: [
+      { name: 'first', executable: process.execPath, args: ['-e', 'require("node:fs").appendFileSync(process.env.MARKER, "x")'], timeoutMs: 5000 },
+      { name: 'second', executable: process.execPath, args: ['-e', 'require("node:fs").appendFileSync(process.env.MARKER, "y")'], timeoutMs: 5000 },
+    ], environment: { PATH: process.env.PATH ?? '', MARKER: marker } });
+    let guards = 0; const originalGuard = plane.assertEffectAuthority.bind(plane);
+    (plane as unknown as { assertEffectAuthority(commandId: string, value: HelmToolExecutionContext): void }).assertEffectAuthority = (commandId, value) => {
+      guards++; if (guards === 4) clock = '2026-09-16T00:45:00.000Z'; originalGuard(commandId, value);
+    };
+    const midExpiry = createHostGateTool({ context, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane, catalog: { async resolve() { return midTarget; } },
+      command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => now, notAfter: () => later, commandId: () => 'mid-expiry-gate-command' }, executor, claimExpiresAt: () => later });
+    assert.equal((await midExpiry.execute({ gateId: midTarget.gateId, workerId: midTarget.workerId, expectedHead: midTarget.expectedHead }, context)).state, 'unknown');
+    assert.equal(await readFile(marker, 'utf8'), 'x');
+    clock = now;
     const stale = createHostGateTool({ context, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane, catalog: { async resolve() { return target; } },
       command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 2, plannedAt: () => now, notAfter: () => later, commandId: () => 'stale-gate-command' }, executor, claimExpiresAt: () => later });
     assert.equal((await stale.execute({ gateId: target.gateId, workerId: target.workerId, expectedHead: target.expectedHead }, context)).state, 'refused');
     clock = '2026-09-16T00:45:00.000Z';
-    const expiredTarget = { ...target, gateConfigDigest: 'sha256:expired-config' };
+    const expiredTarget = configuredGate({ ...target, acceptanceVersion: 'v2' });
     const expired = createHostGateTool({ context, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane, catalog: { async resolve() { return expiredTarget; } },
       command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => now, notAfter: () => later, commandId: () => 'expired-gate-command' }, executor, claimExpiresAt: () => later });
     assert.equal((await expired.execute({ gateId: target.gateId, workerId: target.workerId, expectedHead: target.expectedHead }, context)).state, 'refused');

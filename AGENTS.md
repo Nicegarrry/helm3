@@ -2,6 +2,8 @@
 
 ## Current authority
 
+Wave 2 is now explicitly approved: “Ok to proceed with wave 2”. See [wave-two scope and acceptance](docs/wave2-authority.md). This supersedes first-wave-only wording for the supervised next slice; all predecessor, spending, login and isolation boundaries below remain applicable.
+
 The human explicitly approved the first implementation wave after context clean on 2026-09-15: “pick up the handoff and review map and the first wave. Let’s get working using mostly Luna/terra workers and reviewers please”. The scoped decision is recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235) and [wave-one authority](docs/wave1-authority.md). Implement and review that foundation in isolated worktrees and integrate reviewed PRs. No purchases, top-ups, incremental paid API fallback, unattended Helm run lease or predecessor import is authorised. Public SDK/package reads and local provider-free tests remain permitted.
 
 Do not read, modify, fetch, build, test, index, dispatch into, or otherwise interfere with `/Users/sa/code/other/helm-cli` or its worktrees until an explicit immutable handoff. Opus is finishing Milestone 1 there. Do not infer completion from historic state. Await an explicit handoff and immutable commit SHA.

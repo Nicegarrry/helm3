@@ -30,6 +30,19 @@ test('independent review freezes only caller-authorized context before a distinc
   assert.ok(!launch.manifest.entries.some(entry => entry.ref.includes('transcript')));
 });
 
+test('unapproved, purpose-swapped, and model-supplied review context refuse before spawn', async () => {
+  const approved = new Map([['objective:objective', 'immutable:objective'], ['acceptance:acceptance', 'immutable:acceptance'], ['code:factual-context', 'immutable:code']]);
+  for (const input of [
+    { objectiveRef: 'generic-primary-conclusion', acceptanceRef: 'acceptance', contextRefs: ['code'] },
+    { objectiveRef: 'code', acceptanceRef: 'acceptance', contextRefs: [] },
+    { objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: ['builder-transcript'] },
+  ]) {
+    const { service, count } = fixture({ assertReviewContext: async (ref, purpose, text) => { if (approved.get(`${ref}:${purpose}`) !== text) throw new Error('unapproved host review context'); } });
+    await assert.rejects(service.request({ sourceWorkerId: 'builder-1', expectedHead: head, reviewerModelId: 'reviewer', ...input }));
+    assert.equal(count(), 0);
+  }
+});
+
 test('review persists a stable pre-spawn intent and reopens it without a duplicate model request', async () => {
   const { service, count, records } = fixture();
   const input = { sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: ['brief'], reviewerModelId: 'reviewer' };

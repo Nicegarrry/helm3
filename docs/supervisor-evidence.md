@@ -1,30 +1,43 @@
-# Durable supervisor queue and recovery classification
+# Fleet terminal evidence and supervisor delivery
 
-This slice implements the event and judgement queue foundation for original sections 11–12, 25 and addendum 7–12. It stores signals and acknowledgements in the existing Helm Log, not a second task database. It does not claim a continuously running full supervisor or automatic dispatch is complete.
+`PiWorkerFleet` owns the narrow bridge from a native terminal observation to
+the deterministic supervisor. After a worker writes its immutable
+`terminal-known` or `terminal-unknown` effect, it appends the corresponding
+`host.worker_fleet` event and calls `HostControlPlane.createSupervisor().process`
+with a signal only. It supplies no retry input, executor, command, provider
+fact, or model callback.
 
-`EventSupervisor.record` accepts trusted runtime observations with stable source event identities. Exact duplicates do not create repeated records; identity collisions with different facts refuse. Quiet systems and purely informational gate results produce no judgement wake. `pending` coalesces unresolved signals by run and semantic group under the current orchestrator epoch. A replacement owner sees unhandled causes without inheriting an old controller's mutation authority.
+The signal binds the persisted fleet event ID as `sourceEventId`, the admitted
+spawn or steer command's run, attempt, worker and Map node, and the event's
+original observation timestamp. It reads the exact terminal phase matching
+that event and carries its hash-checked evidence references. A later confirmed
+stop or stronger terminal projection cannot rewrite the bytes of an earlier
+signal. Invalid event, command, attempt, worker, session, Map-node, or effect
+bindings do not create a supervisor signal.
 
-Acknowledgement records handled causes, not successful delivery of a model request. A delayed acknowledgement consumes only its original causes, preserving newly arrived events. Kernel-owned event append checks ownership and commits the event in one SQLite transaction, fencing takeover races. Model wake delivery itself still needs a bounded command admission; reading this queue spends nothing.
+An envelope-backed successful `worker.completed` is informational and produces
+no wake. An envelope-backed terminal result of `failed` or `partial` remains a
+completed-worker fact but requests judgement; this is distinct from a
+`worker.failed` terminal-unknown infrastructure observation, which also
+requests judgement. The result status is used only when exactly one
+hash-checked Pi terminal envelope in the immutable evidence chain matches the
+fleet event. A missing status, invalid or corrupt envelope, or multiple valid
+envelopes emits no completion signal; the durable fleet event remains available
+for later evidence/reconciliation without being guessed as success. Expired or replaced
+owners leave the cause durable; a later active owner may record its own wake.
+The bridge never treats an unknown native outcome as a physical-death fact,
+never retries, and never starts a Pi worker or provider request.
 
-`planRecovery` is a pure mechanical classifier over fresh runtime/effect/provider/lease observations. It proposes retry only for a confirmed stopped, dead, transiently failed worker whose previous effects are confirmed absent, with available provider and still-valid retry/attempt authority. Unknown or present effects never trigger replay. Quota or unknown availability stays blocked until fresh observations; reset timestamps alone are not evidence of recovered provider capacity. Expired/revoked authority blocks new retry while observation remains available.
+The host is a library and has no constructor-time recovery loop. A host that
+has reopened its state calls `await fleet.replaySupervisorEvents(runId)` after
+its normal `await host.recover(runId)` and fleet construction. Replay scans
+only existing terminal `host.worker_fleet` events and reuses each stored event
+ID, so an append-to-delivery interruption and repeated replay add no duplicate
+cause or wake. It performs no process discovery or worker recovery.
 
-A retry proposal is not authority or execution: the host must construct a new attempt and admit its deterministic command under freshly checked Kernel lease, resource and concurrency rules before any side effect. The full Pi/Git/worktree/CI observer loop and delivery connection remain integration work. No subjective model-quality failover or fixed workflow graph is introduced.
-
-`HostControlPlane.createSupervisor()` is the provider-free integration point. Its
-single serialized processor accepts signal data and an optional immutable
-`supervisor`-origin retry command, while recovery and precondition readers stay
-in the host-owned `supervisorRuntime` capability. A retry binds the signal run
-and Map node to its command, goes through Kernel admission, claim and
-`perform`, and performs a second recovery observation immediately before the
-runtime effect even when the command has no declared preconditions. Unknown,
-stale or present effects become reconciliation work without replay. Existing
-queued, claimed, in-effect, observing and unknown commands are classified
-separately; only a queued command may later be reconsidered with fresh facts.
-Coalesced primary wakes are durable `supervisor.wake` Log events, fenced by the
-current owner epoch. Provider, Git, CI and Pi observers are deliberately not
-implemented by this slice: an adapter must supply their trusted observations
-before any corresponding mechanical action is possible.
-
-The Log query is bounded at 10,000 correlated events and fails explicitly on overflow. A production cursor/archival mechanism is follow-up work; the query never silently truncates unseen wake causes.
-
-Provider-free tests use a real reopened SQLite Kernel to prove deduplication, coalescing, no quiet wake, scoped runs, durable acknowledgement, takeover fencing including at-append transfer, preservation of later causes, conflicting evidence refusal and lease/provider/effect retry classification.
+Supervisor delivery is best-effort after the durable fleet append. A delivery
+exception is swallowed so it cannot reinterpret a completed worker as failed
+or unknown, and the same recorded event remains available to the explicit
+replay hook. `test/host/fleet-supervisor.test.ts` covers native success and
+unknown outcomes, a fault after append before delivery, close/reopen replay,
+and repeated-replay deduplication with no additional Pi start or run.

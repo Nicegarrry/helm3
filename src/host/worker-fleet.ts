@@ -215,7 +215,9 @@ export class PiWorkerFleet {
     if (!record) throw new Error('unknown worker');
     this.#records.set(workerId, record);
     if (!live) return { ...record, live: 'unknown', state: record.state === 'terminal' ? 'terminal' : 'unknown', evidenceRefs: record.evidenceRefs };
-    return { ...live.record, state: live.worker.isActive ? 'running' : live.record.state, live: 'known', activeRequests: live.worker.isActive ? 1 : 0, contextOccupancy: live.worker.contextOccupancy, evidenceRefs: live.record.evidenceRefs };
+    // Liveness is an observation of the local process only; durable outcome,
+    // cancellation intent and evidence remain authoritative for the worker.
+    return { ...record, state: record.state === 'ready' && live.worker.isActive ? 'running' : record.state, live: 'known', contextOccupancy: live.worker.contextOccupancy, evidenceRefs: record.evidenceRefs };
   }
 
   async stop(context: HelmToolExecutionContext, workerId: string): Promise<{ state: 'stopped' | 'pending' | 'unknown'; evidenceRefs: readonly string[] }> {

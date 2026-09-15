@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { commandSchema, type Attempt, type AutonomyLease, type Command, type Event, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef } from '../contracts/index.js';
+import { commandSchema, workerResultSchema, type Attempt, type AutonomyLease, type Command, type Event, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef, type WorkerResult } from '../contracts/index.js';
 import {
   openKernel,
   type CommandRecord,
@@ -601,11 +601,37 @@ export class HostControlPlane {
   }
 
   async readFleetEffectByIdentity(runId: string, sourceIdentity: string): Promise<string | undefined> {
+    const record = await this.readFleetEffectRecordByIdentity(runId, sourceIdentity);
+    return record?.text;
+  }
+
+  /** Hash-checked immutable terminal evidence, including its raw reference. */
+  async readFleetEffectRecordByIdentity(runId: string, sourceIdentity: string): Promise<Readonly<{ text: string; evidenceRef: string }> | undefined> {
     const metadata = (await this.journal.metadata()).find((entry) => entry.sourceIdentity === sourceIdentity);
     if (!metadata) return undefined;
     const parsed = decodeEnvelope(JSON.parse((await this.journal.read(metadata.raw, metadata.sourceIdentity, { permitSensitive: true })).toString('utf8')));
     if (parsed.kind !== 'effect' || parsed.runId !== runId) throw new Error('fleet record does not match durable bytes');
-    return parsed.text;
+    return Object.freeze({ text: parsed.text, evidenceRef: metadata.raw.ref });
+  }
+
+  /**
+   * The worker result is meaningful only when one hash-checked Pi envelope in
+   * the terminal record proves the same immutable status. Invalid first-pass
+   * envelopes are allowed; more than one valid envelope is ambiguous.
+   */
+  async readFleetTerminalResult(input: Readonly<{ attemptId: string; evidenceRefs: readonly string[] }>): Promise<WorkerResult | undefined> {
+    const known = new Set(input.evidenceRefs);
+    const candidates = (await this.journal.metadata()).filter((entry) => known.has(entry.raw.ref)
+      && entry.source === 'pi.envelope' && entry.sourceIdentity.startsWith(`pi-envelope:${input.attemptId}:`));
+    const results: WorkerResult[] = [];
+    for (const candidate of candidates) {
+      try {
+        const raw = (await this.journal.read(candidate.raw, candidate.sourceIdentity)).toString('utf8');
+        const fenced = raw.match(/^```json\r?\n([\s\S]*)\r?\n```$/);
+        results.push(workerResultSchema.parse(JSON.parse(fenced ? fenced[1] : raw)));
+      } catch { /* An invalid first envelope is not a terminal result. */ }
+    }
+    return results.length === 1 ? results[0] : undefined;
   }
 
   async snapshot(runId: string): Promise<HostSnapshot> {

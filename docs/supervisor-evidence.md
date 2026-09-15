@@ -15,9 +15,13 @@ stop or stronger terminal projection cannot rewrite the bytes of an earlier
 signal. Invalid event, command, attempt, worker, session, Map-node, or effect
 bindings do not create a supervisor signal.
 
-`worker.completed` is informational and produces no wake. A
-`worker.failed` terminal-unknown observation requests judgement and uses the
-existing current-owner epoch fence and coalescing rules. Expired or replaced
+An envelope-backed successful `worker.completed` is informational and produces
+no wake. An envelope-backed terminal result of `failed` or `partial` remains a
+completed-worker fact but requests judgement; this is distinct from a
+`worker.failed` terminal-unknown infrastructure observation, which also
+requests judgement. The result status is used only when exactly one
+hash-checked Pi terminal envelope in the immutable evidence chain matches the
+fleet event. Expired or replaced
 owners leave the cause durable; a later active owner may record its own wake.
 The bridge never treats an unknown native outcome as a physical-death fact,
 never retries, and never starts a Pi worker or provider request.

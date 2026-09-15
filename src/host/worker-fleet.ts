@@ -324,14 +324,24 @@ export class PiWorkerFleet {
       throw new Error('fleet event is not bound to an admitted worker attempt');
     }
     const phase = fleetEvent.kind === 'worker.completed' ? 'terminal-known' : 'terminal-unknown';
-    const text = await this.binding.host.readFleetEffectByIdentity(runId, `host-worker-${phase}:${runId}:${fleetEvent.attemptId}`);
-    if (!text) throw new Error('fleet terminal evidence is absent');
+    const phaseRecord = await this.binding.host.readFleetEffectRecordByIdentity(runId, `host-worker-${phase}:${runId}:${fleetEvent.attemptId}`);
+    if (!phaseRecord) throw new Error('fleet terminal evidence is absent');
     let record: StoredWorker | undefined;
-    try { record = storedWorker(JSON.parse(text)); } catch { throw new Error('fleet terminal evidence is malformed'); }
+    try { record = storedWorker(JSON.parse(phaseRecord.text)); } catch { throw new Error('fleet terminal evidence is malformed'); }
     if (!record || record.state !== (fleetEvent.kind === 'worker.completed' ? 'terminal' : 'unknown')
       || record.workerId !== payload.workerId || record.attemptId !== fleetEvent.attemptId
       || record.spawnCommandId !== admitted.command.commandId || record.sessionId !== fleetEvent.sessionId) {
       throw new Error('fleet terminal evidence does not match its event binding');
+    }
+    let needsJudgement = fleetEvent.kind === 'worker.failed';
+    if (fleetEvent.kind === 'worker.completed') {
+      const reported = typeof (fleetEvent.payload as { result?: unknown } | null)?.result === 'string'
+        ? (fleetEvent.payload as { result: string }).result : undefined;
+      const result = await this.binding.host.readFleetTerminalResult({ attemptId: record.attemptId, evidenceRefs: record.evidenceRefs });
+      if (reported && result?.status !== reported) throw new Error('fleet completion result is not bound to its immutable terminal envelope');
+      // A valid native failure is distinct from an infrastructure-unknown
+      // event. It remains a completed worker fact, but requires judgement.
+      needsJudgement = result?.status === 'failed' || result?.status === 'partial';
     }
     await this.binding.host.createSupervisor().process({ signal: {
       runId,
@@ -343,8 +353,8 @@ export class PiWorkerFleet {
       group: record.workerId,
       observedAt: fleetEvent.occurredAt,
       kind: fleetEvent.kind,
-      evidenceRefs: [...record.evidenceRefs],
-      needsJudgement: fleetEvent.kind === 'worker.failed',
+      evidenceRefs: [...new Set([...record.evidenceRefs, phaseRecord.evidenceRef])],
+      needsJudgement,
     } });
   }
 

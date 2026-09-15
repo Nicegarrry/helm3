@@ -30,7 +30,11 @@ async function fixture(check: readonly string[] = ['process.exit(0)']) {
   const root = mkdtempSync(join(tmpdir(), 'helm3-gate-tools-')); const repo = await repository(root);
   const journal = await ArtifactJournal.open({ root: join(root, 'journal'), hostPolicy: { allowSensitiveWrites: true } });
   const artifacts = new HostArtifactStore(journal, () => context);
-  let admitted: Command | undefined; let admissionError: Error | undefined; let forceUnknown = false;
+  let admitted: Command | undefined; let admissionError: Error | undefined; let forceUnknown = false; let journalFailure = false;
+  const originalJournal = artifacts.journalForTrustedPi.bind(artifacts);
+  (artifacts as unknown as { journalForTrustedPi(): ArtifactJournal }).journalForTrustedPi = () => journalFailure
+    ? ({ async append() { throw new Error('synthetic journal failure'); } } as unknown as ArtifactJournal)
+    : originalJournal();
   const target: RegisteredGate = {
     gateId: 'fixture.gate', workerId: 'fixture-worker', repositoryId: 'fixture-repository', mapNodeId: 'fixture-node', workspaceId: 'fixture-workspace', workspace: repo.workspace,
     expectedHead: repo.head, acceptanceVersion: 'acceptance-v1', gateConfigDigest: 'sha256:fixture-gate-config', trustedDefinitionRef: 'fixture://gate-definition',
@@ -59,7 +63,7 @@ async function fixture(check: readonly string[] = ['process.exit(0)']) {
     executor, claimExpiresAt: () => later,
   };
   const tool = createHostGateTool(options);
-  return { root, journal, tool, options, target, get admitted() { return admitted; }, expire: () => { admissionError = new Error('expired lease'); }, stale: () => { admissionError = new Error('stale epoch'); }, unknown: () => { forceUnknown = true; } };
+  return { root, journal, tool, options, target, get admitted() { return admitted; }, expire: () => { admissionError = new Error('expired lease'); }, stale: () => { admissionError = new Error('stale epoch'); }, unknown: () => { forceUnknown = true; }, failEvidence: () => { journalFailure = true; } };
 }
 
 test('gate.run binds a host-registered gate to exact head, checks, and raw evidence', async () => {
@@ -87,23 +91,26 @@ test('a red gate is an evidence-bearing result, while head changes, expired leas
   } finally { for (const value of [red, changed, expired, stale]) { value.journal.close(); await rm(value.root, { recursive: true, force: true }); } }
 });
 
-test('gate.run refuses arbitrary command/path/config input and preserves the shared registry', async () => {
-  const value = await fixture();
+test('gate.run refuses arbitrary command/path/config input, reports evidence-write failure as unknown, and preserves the shared registry', async () => {
+  const value = await fixture(); const evidenceFailure = await fixture();
   try {
     const invalid = await value.tool.execute({ gateId: value.target.gateId, workerId: value.target.workerId, expectedHead: value.target.expectedHead, command: 'rm -rf /', workspace: '/tmp', budget: 0 }, context);
     assert.equal(invalid.state, 'refused');
+    evidenceFailure.failEvidence();
+    assert.equal((await evidenceFailure.tool.execute({ gateId: evidenceFailure.target.gateId, workerId: evidenceFailure.target.workerId, expectedHead: evidenceFailure.target.expectedHead }, context)).state, 'unknown');
     const base = new HelmToolRegistry([{ name: 'brief.get', description: 'fixture', input: {}, execute: async () => ({ state: 'succeeded', value: {} }) }]);
     const registry = appendHostGateTool(base, value.options);
     assert.deepEqual(registry.all().map((entry) => entry.name), ['brief.get', 'gate.run']);
-  } finally { value.journal.close(); await rm(value.root, { recursive: true, force: true }); }
+  } finally { for (const item of [value, evidenceFailure]) { item.journal.close(); await rm(item.root, { recursive: true, force: true }); } }
 });
 
 test('gate.run traverses the real Host Core admission, current-owner fence, claim, and exact-head evidence path', async () => {
   const root = mkdtempSync(join(tmpdir(), 'helm3-gate-core-')); const repo = await repository(root); let plane: Awaited<ReturnType<typeof openHost>> | undefined;
   try {
-    plane = await openHost({ stateDirectory: join(root, 'host'), now: () => now, kinds: { 'gate.run': { payloadSchema: gateRunPayloadSchema } } });
+    let clock = now;
+    plane = await openHost({ stateDirectory: join(root, 'host'), now: () => clock, kinds: { 'gate.run': { payloadSchema: gateRunPayloadSchema } } });
     plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['gate.run'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
-    plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['gate.run'], issuedAt: now, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
+    plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['gate.run'], issuedAt: now, expiresAt: '2026-09-16T00:30:00.000Z', maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
     plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'fable', sessionId: context.sessionId, epoch: 1, issuedAt: now, expiresAt: later }, 0);
     const target: RegisteredGate = {
       gateId: 'core.gate', workerId: 'core-worker', repositoryId: 'repo', mapNodeId: 'node', workspaceId: 'core-workspace', workspace: repo.workspace, expectedHead: repo.head,
@@ -119,5 +126,10 @@ test('gate.run traverses the real Host Core admission, current-owner fence, clai
     const stale = createHostGateTool({ context, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane, catalog: { async resolve() { return target; } },
       command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 2, plannedAt: () => now, notAfter: () => later, commandId: () => 'stale-gate-command' }, executor, claimExpiresAt: () => later });
     assert.equal((await stale.execute({ gateId: target.gateId, workerId: target.workerId, expectedHead: target.expectedHead }, context)).state, 'refused');
+    clock = '2026-09-16T00:45:00.000Z';
+    const expiredTarget = { ...target, gateConfigDigest: 'sha256:expired-config' };
+    const expired = createHostGateTool({ context, authorize: async (actual) => { plane!.artifactsFor(actual); }, host: plane, catalog: { async resolve() { return expiredTarget; } },
+      command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => now, notAfter: () => later, commandId: () => 'expired-gate-command' }, executor, claimExpiresAt: () => later });
+    assert.equal((await expired.execute({ gateId: target.gateId, workerId: target.workerId, expectedHead: target.expectedHead }, context)).state, 'refused');
   } finally { plane?.close(); await rm(root, { recursive: true, force: true }); }
 });

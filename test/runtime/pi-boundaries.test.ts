@@ -107,3 +107,14 @@ test('model authority remains in flight until provider completion; ignored abort
     assert.deepEqual(f.stops, ['unknown', 'stopped']);
   } finally { release?.(); await f.cleanup(); }
 });
+
+test('provider error text is not forwarded into Pi output or journal artifacts', async () => {
+  const f = await setup();
+  try {
+    f.faux.setResponses([async () => { throw new Error('provider-body-must-not-be-journalled'); }]);
+    await assert.rejects(f.worker.run('fail', 'repair'));
+    const artifacts = await f.artifacts();
+    assert.ok(artifacts.length > 0);
+    assert.ok(artifacts.every((entry) => !entry.text.includes('provider-body-must-not-be-journalled')));
+  } finally { await f.cleanup(); }
+});

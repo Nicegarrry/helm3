@@ -3,6 +3,7 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
+import { BoundedPiAccess } from '../../access/index.js';
 import { workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
@@ -18,6 +19,8 @@ export type PiWorkerInput = Readonly<{
   commandId: string; attemptId: string; workspace: WorktreeReservation; owner: WorktreeOwner;
   workspaceManager: WorkspaceManager; authority: PiAuthority; journal: ArtifactJournal;
   stateRoot: string; modelRuntime: ModelRuntime; model: Model<Api>;
+  /** Optional live-provider boundary. Omission preserves provider-free fixture behaviour. */
+  access?: BoundedPiAccess;
 }>;
 function noResources(runtime: ExtensionRuntime): ResourceLoader {
   return {
@@ -32,9 +35,10 @@ function noResources(runtime: ExtensionRuntime): ResourceLoader {
 function parseEnvelope(text: string): WorkerResult | undefined {
   try { return workerResultSchema.parse(JSON.parse(text)); } catch { return undefined; }
 }
-function errorMessage(model: Model<Api>, error: unknown): AssistantMessage {
+/** Provider error bodies can echo request data. Never put them in Pi events or the journal. */
+function errorMessage(model: Model<Api>): AssistantMessage {
   return { role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id,
-    stopReason: 'error', errorMessage: error instanceof Error ? error.message : 'Helm model request failed', timestamp: Date.now(),
+    stopReason: 'error', errorMessage: 'Helm model request failed', timestamp: Date.now(),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
 }
@@ -75,15 +79,17 @@ export class PiNativeWorker {
       }
       const guarded: ModelRuntime['streamSimple'] = (model, context, options) => {
         const output = createAssistantMessageEventStream();
+        const effectId = `model:${randomUUID()}`;
         // Completion stays inside authority.perform; merely constructing a lazy
         // SDK stream must never make the command/resource reservation successful.
         const work = Promise.resolve().then(async () => {
           let terminal: AssistantMessage | undefined;
           try {
             this.assertActive();
-            await input.authority.perform({ effectId: `model:${randomUUID()}`, kind: 'model.request', commandId: input.commandId }, async () => {
+            const prepared = input.access?.prepare(effectId, model, context, options);
+            await input.authority.perform({ effectId, kind: 'model.request', commandId: input.commandId }, async () => {
               this.assertActive();
-              const source = target.streamSimple(model, context, { ...options, maxRetries: 0 });
+              const source = target.streamSimple(model, context, prepared?.options ?? { ...options, maxRetries: 0 });
               for await (const event of source) {
                 if (event.type === 'done') terminal = event.message;
                 else if (event.type === 'error') terminal = event.error;
@@ -91,10 +97,14 @@ export class PiNativeWorker {
               }
               terminal ??= await source.result();
               if (terminal.stopReason === 'error' || terminal.stopReason === 'aborted') throw new Error(terminal.errorMessage ?? 'provider request did not complete');
+              input.access?.settle(effectId, terminal);
             });
             if (!terminal) throw new Error('model stream completed without a terminal observation');
             output.push({ type: 'done', reason: terminal.stopReason as 'stop' | 'length' | 'toolUse', message: terminal });
-          } catch (error) { output.push({ type: 'error', reason: 'error', error: terminal ?? errorMessage(model, error) }); }
+          } catch (error) {
+            if (input.access?.hasReservation(effectId)) input.access.unknown(effectId, error instanceof Error ? error.message : 'provider request did not complete');
+            output.push({ type: 'error', reason: 'error', error: errorMessage(model) });
+          }
           finally { output.end(); }
         });
         this.activeRequests.add(work);
@@ -115,6 +125,7 @@ export class PiNativeWorker {
       name: 'helm_write', label: 'Helm write', description: 'Write UTF-8 content to an allowed file in the assigned worktree.', parameters, executionMode: 'sequential',
       execute: async (toolCallId, params) => {
         this.assertActive();
+        this.input.access?.noteToolCall();
         await this.input.authority.perform({ effectId: `tool:${toolCallId}`, kind: 'workspace.write', commandId: this.input.commandId }, async () => {
           this.assertActive(); await this.input.workspaceManager.write(this.input.workspace, this.input.owner, params.path, params.contents);
         });
@@ -154,7 +165,7 @@ export class PiNativeWorker {
       await this.session.prompt(prompt);
       let result = await this.saveTerminal(invocation, 'initial'); saved = true;
       const repaired = !result;
-      if (!result) {
+      if (!result && (this.input.access?.correctionAllowed ?? true)) {
         this.assertActive();
         await this.session.prompt(correction, { streamingBehavior: 'followUp' });
         result = await this.saveTerminal(invocation, 'correction');

@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
-import { mkdir, realpath, rm } from 'node:fs/promises';
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import test from 'node:test';
+import { z } from 'zod/v3';
 import { openHost } from '../../src/host/index.js';
 import { appendHostMapTools, createRegisteredGateClosureValidator, mapClosePayloadSchema, mapUpdatePayloadSchema } from '../../src/host/map-tools.js';
-import { gateRunPayloadSchema } from '../../src/host/gate-tools.js';
+import { createHostGateTool, gateRunPayloadSchema } from '../../src/host/gate-tools.js';
 import { AstraLoopbackMcpTransport, FableDriver, HelmToolRegistry, type HelmToolExecutionContext, type OrchestratorArtifacts } from '../../src/runtime/orchestrator/index.js';
 import type { TrackerCommandTransport } from '../../src/tracker/index.js';
 
@@ -15,6 +18,7 @@ const before = '2026-09-15T00:00:00Z';
 const after = '2026-09-15T00:01:00Z';
 const later = '2026-09-16T00:00:00Z';
 const context = { runId: 'map-run', sessionId: 'map-session', mode: 'primary' as const };
+const exec = promisify(execFile);
 
 function transport(input: { failPatch?: boolean } = {}) {
   const issues = new Map<number, { number: number; title: string; body: string; state: 'open' | 'closed'; updated_at: string; html_url: string; repository_url: string }>();
@@ -36,20 +40,17 @@ function transport(input: { failPatch?: boolean } = {}) {
 
 async function fixture(input: { failPatch?: boolean; evidenceFails?: boolean } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'helm3-map-tools-'));
-  const plane = await openHost({ stateDirectory: directory, now: () => before, kinds: { 'map.update': { payloadSchema: mapUpdatePayloadSchema }, 'map.close': { payloadSchema: mapClosePayloadSchema }, 'gate.run': { payloadSchema: gateRunPayloadSchema } } });
-  plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'owner/repo', mapNodeIds: ['2'], allowedActions: ['map.update', 'map.close', 'gate.run'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
-  plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'owner/repo', mapNodeIds: ['2'] }, allowedActions: ['map.update', 'map.close', 'gate.run'], issuedAt: before, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
+  const plane = await openHost({ stateDirectory: directory, now: () => before, kinds: { 'map.update': { payloadSchema: mapUpdatePayloadSchema }, 'map.close': { payloadSchema: mapClosePayloadSchema }, 'gate.run': { payloadSchema: gateRunPayloadSchema }, 'worker.spawn': { payloadSchema: z.object({ workerId: z.string() }).strict() } } });
+  plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'owner/repo', mapNodeIds: ['2'], allowedActions: ['map.update', 'map.close', 'gate.run', 'worker.spawn'], expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
+  plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'owner/repo', mapNodeIds: ['2'] }, allowedActions: ['map.update', 'map.close', 'gate.run', 'worker.spawn'], issuedAt: before, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
   plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'fable', sessionId: context.sessionId, epoch: 1, issuedAt: before, expiresAt: later }, 0);
-  const workspace = await mkdir(join(directory, 'proof-workspace'), { recursive: true }).then(() => realpath(join(directory, 'proof-workspace')));
+  const workspace = join(directory, 'proof-workspace'); await mkdir(workspace, { recursive: true }); await exec('git', ['init', workspace]); await exec('git', ['-C', workspace, 'config', 'user.email', 'fixture@example.invalid']); await exec('git', ['-C', workspace, 'config', 'user.name', 'fixture']); await writeFile(join(workspace, 'proof.txt'), 'green\n'); await exec('git', ['-C', workspace, 'add', '.']); await exec('git', ['-C', workspace, 'commit', '-m', 'proof']); const canonicalWorkspace = await realpath(workspace); const proofHead = (await exec('git', ['-C', workspace, 'rev-parse', 'HEAD'])).stdout.trim();
   const common = { schemaVersion: 1 as const, scope: { repositoryId: 'owner/repo', mapNodeId: '2' }, actorId: 'fable', runId: context.runId, origin: 'orchestrator' as const, leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: before, notAfter: later, expected: [] };
-  const predecessor = plane.admitOrchestrator({ ...common, commandId: 'proof-predecessor', kind: 'map.update', idempotencyKey: 'proof-predecessor', payloadHash: `sha256:${createHash('sha256').update(JSON.stringify({ issueNumber: 2, expectedRevision: before, title: 'proof' })).digest('hex')}`, payload: { issueNumber: 2, expectedRevision: before, title: 'proof' }, requiredEvidence: [] }, context, 'fable');
-  const workspaceDigest = `sha256:${createHash('sha256').update(workspace).digest('hex')}`;
-  const proofHead = 'a'.repeat(40);
-  const gate = plane.admitOrchestrator({ ...common, commandId: 'proof-gate', kind: 'gate.run', idempotencyKey: 'proof-gate', payloadHash: `sha256:${createHash('sha256').update(JSON.stringify({ gateId: 'proof', workerId: 'proof-worker', workspaceId: 'proof-workspace', workspaceDigest, expectedHead: proofHead, acceptanceVersion: 'proof-v1', gateConfigDigest: 'proof-digest', trustedDefinitionRef: 'proof-definition' })).digest('hex')}`, payload: { gateId: 'proof', workerId: 'proof-worker', workspaceId: 'proof-workspace', workspaceDigest, expectedHead: proofHead, acceptanceVersion: 'proof-v1', gateConfigDigest: 'proof-digest', trustedDefinitionRef: 'proof-definition' }, requiredEvidence: ['proof-definition'] }, context, 'fable');
-  const gateEvidenceRef = (await plane.artifactsFor(context).journalForTrustedPi().append({ source: 'proof.gate', sourceIdentity: 'proof-gate-evidence', mediaType: 'text/plain', bytes: Buffer.from('actual gate evidence'), classification: 'sensitive' }, { permitSensitive: true })).ref;
-  await plane.performAdmitted(gate.command.commandId, { executorId: 'proof-gate' }, later, async () => ({ state: 'known', value: true, source: 'proof', observedAt: before }), { effectId: 'proof-gate-effect', async execute() {}, async observe() { return { commandId: gate.command.commandId, effectId: 'proof-gate-effect', state: 'succeeded' as const, source: 'proof', observedAt: before, evidenceRefs: [gateEvidenceRef] }; } });
+  const predecessor = plane.admitOrchestrator({ ...common, commandId: 'proof-predecessor', kind: 'worker.spawn', idempotencyKey: 'proof-predecessor', payloadHash: `sha256:${createHash('sha256').update(JSON.stringify({ workerId: 'proof-worker' })).digest('hex')}`, payload: { workerId: 'proof-worker' }, requiredEvidence: [] }, context, 'fable');
+  const gateTool = createHostGateTool({ context, authorize: async (value) => { plane.artifactsFor(value); }, host: plane, catalog: { async resolve() { return { gateId: 'proof', workerId: 'proof-worker', repositoryId: 'owner/repo', mapNodeId: '2', workspaceId: 'proof-workspace', workspace: canonicalWorkspace, expectedHead: proofHead, acceptanceVersion: 'proof-v1', checks: [{ name: 'green proof', executable: process.execPath, args: ['-e', 'process.exit(0)'], timeoutMs: 5000 }], environment: { PATH: process.env.PATH ?? '' } }; } }, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => before, notAfter: () => later, commandId: () => 'proof-gate' }, executor: { executorId: 'proof-gate' }, claimExpiresAt: () => later });
+  const gateResult = await gateTool.execute({ gateId: 'proof', workerId: 'proof-worker', expectedHead: proofHead }, context); assert.equal(gateResult.state, 'succeeded'); const gate = (await plane.snapshot(context.runId)).commands.find((command) => command.command.commandId === 'proof-gate')!; const gateEvidenceRef = gate.observations[0]!.evidenceRefs[0]!;
   const fake = transport(input); let validation = 0;
-  const validator = createRegisteredGateClosureValidator({ host: plane, proofs: input.evidenceFails ? [] : [{ evidenceRef: gateEvidenceRef, runId: context.runId, repositoryId: 'owner/repo', mapNodeId: '2', gateCommandId: gate.command.commandId, predecessorCommandId: predecessor.command.commandId, workerId: 'proof-worker', workspace, expectedHead: proofHead }] });
+  const validator = createRegisteredGateClosureValidator({ host: plane, proofs: input.evidenceFails ? [] : [{ evidenceRef: gateEvidenceRef, runId: context.runId, repositoryId: 'owner/repo', mapNodeId: '2', gateCommandId: gate.command.commandId, predecessorCommandId: predecessor.command.commandId, workerId: 'proof-worker', workspace: canonicalWorkspace, expectedHead: proofHead }] });
   const registryFor = (actual: HelmToolExecutionContext, epoch = 1) => appendHostMapTools(new HelmToolRegistry([]), { context: actual, authorize: async (value) => { plane.artifactsFor(value); }, host: plane, catalog: { async resolve(node) { if (node !== 'node-2') throw new Error('foreign'); return { node, repositoryId: 'owner/repo', parentIssue: 1, issueNumber: 2 }; } }, transport: fake.value, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: epoch, plannedAt: () => before, notAfter: () => later }, executor: { executorId: 'host-map' }, claimExpiresAt: () => later, closureEvidence: { async validate(value) { validation += 1; await validator.validate(value); } } });
   const tools = registryFor(context);
   const driverTools = new HelmToolRegistry(tools.all().map((entry) => ({ ...entry, async execute(value, actual) { const owner = (await plane.snapshot(actual.runId)).ownership; return registryFor(actual, owner?.epoch ?? 0).invoke(entry.name, value, actual); } })));

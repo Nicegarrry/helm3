@@ -27,7 +27,7 @@ export type MapTargetCatalog = Readonly<{ resolve(node: string): Promise<Registe
 export type MapCommandBinding = Readonly<{ actorId: string; leaseId: string; leaseRevision: number; orchestratorLeaseId: string; orchestratorEpoch: number; plannedAt(): string; notAfter(): string }>;
 export type ClosureEvidenceValidator = Readonly<{ validate(input: Readonly<{ context: HelmToolExecutionContext; target: RegisteredMapTarget; evidenceRefs: readonly string[] }>): Promise<void> }>;
 export type RegisteredGateClosureProof = Readonly<{ evidenceRef: string; runId: string; repositoryId: string; mapNodeId: string; gateCommandId: string; predecessorCommandId: string; workerId: string; workspace: string; expectedHead: string }>;
-type GateEvidenceHost = Readonly<{ assertGateEvidence(runId: string, gateCommandId: string, predecessorCommandId: string, workerId: string, workspace: string, expectedHead: string, evidenceRefs: readonly string[]): Promise<void> }>;
+type GateEvidenceHost = Readonly<{ assertGateEvidence(runId: string, gateCommandId: string, predecessorCommandId: string, workerId: string, workspace: string, expectedHead: string, evidenceRefs: readonly string[]): Promise<void>; snapshot(runId: string): Promise<HostSnapshot> }>;
 export type MapToolHost = Readonly<{
   artifactsFor(context: HelmToolExecutionContext): HostArtifactStore;
   snapshot(runId: string): Promise<HostSnapshot>;
@@ -51,6 +51,8 @@ export function createRegisteredGateClosureValidator(input: Readonly<{ host: Gat
       const proof = proofs.get(ref);
       if (!proof || proof.runId !== value.context.runId || proof.repositoryId !== value.target.repositoryId || proof.mapNodeId !== String(value.target.issueNumber)) throw new Error('gate proof is outside the current Map target');
       await input.host.assertGateEvidence(proof.runId, proof.gateCommandId, proof.predecessorCommandId, proof.workerId, proof.workspace, proof.expectedHead, [proof.evidenceRef]);
+      const gate = (await input.host.snapshot(proof.runId)).commands.find((command) => command.command.commandId === proof.gateCommandId);
+      if (!gate || gate.status !== 'succeeded' || gate.command.kind !== 'gate.run' || gate.command.scope.repositoryId !== proof.repositoryId || gate.command.scope.mapNodeId !== proof.mapNodeId) throw new Error('closure requires a successful registered gate for this exact Map target');
     }
   } });
 }

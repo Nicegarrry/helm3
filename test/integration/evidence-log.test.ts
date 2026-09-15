@@ -26,6 +26,10 @@ test('artifact-index loss and rebuild leave the authoritative Log intact', async
   let journal: ArtifactJournal | undefined;
   let database: DatabaseSync | undefined;
   try {
+    host.declareHumanAuthority({
+      authorityId: 'approval', repositoryId: 'fixture', mapNodeIds: ['node'], allowedActions: ['evidence.capture'], expiresAt: expires,
+      maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [],
+    });
     host.issueAutonomyLease({
       leaseId: 'authority', revision: 1, issuedBy: 'human', parentAuthorityId: 'approval',
       scope: { repositoryId: 'fixture', mapNodeIds: ['node'] }, allowedActions: ['evidence.capture'],

@@ -278,7 +278,11 @@ export class HostControlPlane {
     return {
       perform: async (effect, action) => {
         this.kernel.host.admit(binding.commandForEffect(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
-        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.now() + 60_000).toISOString());
+        // Core evaluates authority against its injected monotonic-safe clock.
+        // A native Pi effect must derive its claim expiry from that same clock;
+        // using the process clock can make a valid host-owned review appear
+        // expired in a recovered or deterministically tested control plane.
+        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.parse(this.now()) + 60_000).toISOString());
         const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: binding.executorId }, async () => { throw new Error('Pi effect has no external precondition'); }, {
           effectId: `host:${effect.effectId}`, execute: action,
           observe: () => ({ commandId: effect.effectId, effectId: `host:${effect.effectId}`, state: 'succeeded', source: 'host.pi_authority', observedAt: new Date().toISOString(), evidenceRefs: [`pi-effect:${effect.effectId}`] }),
@@ -289,7 +293,7 @@ export class HostControlPlane {
       },
       performCompact: binding.compactCommandForEffect ? async (effect, action) => {
         this.kernel.host.admit(binding.compactCommandForEffect!(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
-        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.now() + 60_000).toISOString());
+        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.parse(this.now()) + 60_000).toISOString());
         let evidenceRefs: readonly string[] | undefined;
         const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: binding.executorId }, async () => { throw new Error('Pi compact effect has no external precondition'); }, {
           effectId: `host:${effect.effectId}`,

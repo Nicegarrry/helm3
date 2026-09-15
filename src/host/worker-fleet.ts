@@ -71,7 +71,7 @@ export type WorkerFleetBinding = Readonly<{
   inputDigest(command: Command): string;
   stopCommand(record: StoredWorker, context: HelmToolExecutionContext): Command;
   attempt(command: Command, workerId: string): Attempt;
-  workspace(command: Command, workerId: string, attempt: Attempt): Readonly<{ repository: string; destination: string; branch: string; baseSha: string; owner: WorktreeOwner; policy: { writableRoots: readonly string[]; protectedRoots?: readonly string[] } }>;
+  workspace(command: Command, workerId: string, attempt: Attempt): Readonly<{ repository: string; destination: string; branch: string; baseSha: string; owner: WorktreeOwner; policy: { writableRoots: readonly string[]; readableRoots?: readonly string[]; protectedRoots?: readonly string[] } }>;
   start(command: Command, workspace: WorktreeReservation): Promise<PiNativeWorker>;
   rehydrate?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession): Promise<PiNativeWorker>;
   prompt(command: Command): string;

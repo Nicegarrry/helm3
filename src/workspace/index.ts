@@ -130,7 +130,12 @@ export class WorkspaceManager {
     const path = relative(reservation.root, target).split(sep).join('/');
     const roots = operation === 'read' ? reservation.readableRoots : reservation.writableRoots;
     if (!roots.some((entry) => entry === '.' || path === entry || path.startsWith(`${entry}/`))) throw new WorkspaceRefusal(`path is outside assigned ${operation} scope`);
-    if (!path || reservation.protectedRoots.some((entry) => path === entry || path.startsWith(`${entry}/`))) throw new WorkspaceRefusal('control path is protected');
+    // Control paths remain unavailable to writers.  They must still be
+    // reviewable when the trusted host deliberately grants a readonly whole
+    // repository scope: review-readonly Pi has no mutation tool, and hiding
+    // the code under review would make that scope useless.  This does not
+    // claim an OS sandbox; it is the narrow tool policy enforced here.
+    if (!path || (operation === 'write' && reservation.protectedRoots.some((entry) => path === entry || path.startsWith(`${entry}/`)))) throw new WorkspaceRefusal('control path is protected');
     return path;
   }
   private async safePath(reservation: WorktreeReservation, requested: string, operation: 'read' | 'write' = 'write'): Promise<string> {

@@ -29,16 +29,31 @@ type StoredArtifactRef = Readonly<{ schemaVersion: 1; kind: ArtifactKind; runId:
 type StoredArtifactEnvelope = Readonly<{ schemaVersion: 1; kind: ArtifactKind; runId: string; sessionId: string; text: string }>;
 
 function encodeRef(value: StoredArtifactRef): string { return JSON.stringify(value); }
+function isArtifactKind(value: unknown): value is ArtifactKind {
+  return value === 'text' || value === 'invocation' || value === 'recovery_bundle' || value === 'recovery_state' || value === 'effect';
+}
 function decodeRef(value: string): StoredArtifactRef {
   const parsed: unknown = JSON.parse(value);
   if (typeof parsed !== 'object' || parsed === null) throw new Error('invalid host artifact reference');
   const item = parsed as Partial<StoredArtifactRef>;
-  if (item.schemaVersion !== 1 || !['text', 'invocation', 'recovery_bundle', 'recovery_state', 'effect'].includes(item.kind as string)
+  if (item.schemaVersion !== 1 || !isArtifactKind(item.kind)
     || typeof item.runId !== 'string' || !item.runId || typeof item.sessionId !== 'string' || !item.sessionId || typeof item.sourceIdentity !== 'string' || !item.sourceIdentity
     || typeof item.raw !== 'object' || item.raw === null) throw new Error('invalid host artifact reference');
   const raw = item.raw as Partial<RawArtifactRef>;
   if (typeof raw.ref !== 'string' || typeof raw.hash !== 'string' || typeof raw.mediaType !== 'string') throw new Error('invalid host artifact reference');
   return { schemaVersion: 1, kind: item.kind as ArtifactKind, runId: item.runId, sessionId: item.sessionId, sourceIdentity: item.sourceIdentity, raw: { ref: raw.ref, hash: raw.hash, mediaType: raw.mediaType } };
+}
+function decodeEnvelope(value: unknown): StoredArtifactEnvelope {
+  if (typeof value !== 'object' || value === null) throw new Error('host artifact bytes lack a trusted scope envelope');
+  const envelope = value as Partial<StoredArtifactEnvelope>;
+  if (envelope.schemaVersion !== 1 || !isArtifactKind(envelope.kind) || typeof envelope.runId !== 'string' || !envelope.runId
+    || typeof envelope.sessionId !== 'string' || !envelope.sessionId || typeof envelope.text !== 'string') {
+    throw new Error('host artifact bytes lack a trusted scope envelope');
+  }
+  return envelope as StoredArtifactEnvelope;
+}
+function validRefs(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length > 0);
 }
 
 /** A trusted adapter supplies effects; the host never shells out or starts a provider itself. */
@@ -58,6 +73,8 @@ export type PiEffectAuthorityOptions = Readonly<{
   actorId: string;
   executorId: string;
   commandForEffect(effect: PiEffect): unknown;
+  /** A trusted runtime may settle an actually observed amount; the host never invents one. */
+  observedSettlement?(effect: PiEffect): { state: 'known'; amount: number } | { state: 'unknown' | 'unavailable' } | undefined;
 }>;
 export type PiWorkerBinding = Readonly<{
   authority(): PiAuthority;
@@ -138,9 +155,8 @@ export class HostArtifactStore implements OrchestratorArtifacts {
   private async read(ref: string, ...kinds: ArtifactKind[]): Promise<string> {
     const stored = decodeRef(ref); this.assert(stored, ...kinds);
     const parsed: unknown = JSON.parse((await this.journal.read(stored.raw, stored.sourceIdentity, { permitSensitive: true })).toString('utf8'));
-    if (typeof parsed !== 'object' || parsed === null) throw new Error('host artifact bytes lack a trusted scope envelope');
-    const envelope = parsed as Partial<StoredArtifactEnvelope>;
-    if (envelope.schemaVersion !== 1 || envelope.kind !== stored.kind || envelope.runId !== stored.runId || envelope.sessionId !== stored.sessionId || typeof envelope.text !== 'string') {
+    const envelope = decodeEnvelope(parsed);
+    if (envelope.kind !== stored.kind || envelope.runId !== stored.runId || envelope.sessionId !== stored.sessionId) {
       throw new Error('host artifact reference does not match durable scoped bytes');
     }
     return envelope.text;
@@ -169,11 +185,12 @@ export class HostArtifactStore implements OrchestratorArtifacts {
     const bundle = parsed as Partial<RecoveryBundle>;
     if ((bundle.driver !== 'fable' && bundle.driver !== 'astra') || typeof bundle.runId !== 'string'
       || typeof bundle.sessionId !== 'string' || (bundle.mode !== 'primary' && bundle.mode !== 'consultant')
-      || !Array.isArray(bundle.contextRefs) || !Array.isArray(bundle.eventRefs) || typeof bundle.recoveryStateRef !== 'string') {
+      || !validRefs(bundle.contextRefs) || !validRefs(bundle.eventRefs) || typeof bundle.recoveryStateRef !== 'string' || bundle.recoveryStateRef.length === 0) {
       throw new Error('invalid durable recovery bundle');
     }
     const scope = this.currentScope();
     if (bundle.runId !== scope.runId || bundle.sessionId !== scope.sessionId) throw new Error('recovery bundle does not match trusted artifact scope');
+    await this.loadRecoveryState(bundle.recoveryStateRef);
     return bundle as RecoveryBundle;
   }
 
@@ -204,18 +221,21 @@ export class HostControlPlane {
   recordAttempt(attempt: Attempt): void { this.kernel.host.appendAttempt(attempt); }
 
   piAuthority(options: PiEffectAuthorityOptions): PiAuthority {
+    const binding = Object.freeze({ ...options });
     return {
       perform: async (effect, action) => {
-        this.kernel.host.admit(options.commandForEffect(effect), { actorId: options.actorId, attemptId: options.attemptId, allowedOrigins: ['worker'] });
-        const claim = this.kernel.host.claim(effect.effectId, { executorId: options.executorId }, new Date(Date.now() + 60_000).toISOString());
-        const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: options.executorId }, async () => { throw new Error('Pi effect has no external precondition'); }, {
+        this.kernel.host.admit(binding.commandForEffect(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
+        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.now() + 60_000).toISOString());
+        const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: binding.executorId }, async () => { throw new Error('Pi effect has no external precondition'); }, {
           effectId: `host:${effect.effectId}`, execute: action,
           observe: () => ({ commandId: effect.effectId, effectId: `host:${effect.effectId}`, state: 'succeeded', source: 'host.pi_authority', observedAt: new Date().toISOString(), evidenceRefs: [`pi-effect:${effect.effectId}`] }),
         });
-        if (effect.kind === 'model.request' && observation.state === 'succeeded') this.kernel.host.settleResource(effect.effectId, { state: 'known', amount: 1 });
+        if (observation.state !== 'succeeded') throw new Error(`Pi effect was not successfully observed: ${observation.state}`);
+        const settlement = binding.observedSettlement?.(effect);
+        if (settlement) this.kernel.host.settleResource(effect.effectId, settlement);
       },
       requestCancellation: async (commandId) => this.kernel.host.requestCancellation(commandId),
-      reportWorkerStop: async (_commandId, observed) => this.kernel.host.reportAttemptStop(options.attemptId, observed),
+      reportWorkerStop: async (_commandId, observed) => this.kernel.host.reportAttemptStop(binding.attemptId, observed),
     };
   }
 
@@ -231,16 +251,18 @@ export class HostControlPlane {
   }
 
   artifactsFor(context: HelmToolExecutionContext): HostArtifactStore {
-    this.assertSession(context);
-    return new HostArtifactStore(this.journal, () => { this.assertSession(context); return { runId: context.runId, sessionId: context.sessionId }; });
+    const binding = Object.freeze({ runId: context.runId, sessionId: context.sessionId, mode: context.mode });
+    this.assertSession(binding);
+    return new HostArtifactStore(this.journal, () => { this.assertSession(binding); return { runId: binding.runId, sessionId: binding.sessionId }; });
   }
 
   artifactsForStart(authority: DriverStartAuthority): HostArtifactStore {
+    const binding = Object.freeze({ ...authority });
     return new HostArtifactStore(this.journal, () => {
-      const ownership = this.kernel.host.readRun(authority.runId).ownership;
-      if (!ownership || ownership.owner !== authority.owner || ownership.leaseId !== authority.leaseId || ownership.epoch !== authority.expectedEpoch + 1) throw new Error('driver start has no current durable ownership binding');
+      const ownership = this.kernel.host.readRun(binding.runId).ownership;
+      if (!ownership || ownership.owner !== binding.owner || ownership.leaseId !== binding.leaseId || ownership.epoch !== binding.expectedEpoch + 1) throw new Error('driver start has no current durable ownership binding');
       this.kernel.host.assertCurrentOwner(ownership);
-      return { runId: authority.runId, sessionId: ownership.sessionId };
+      return { runId: binding.runId, sessionId: ownership.sessionId };
     });
   }
 
@@ -249,30 +271,31 @@ export class HostControlPlane {
    * recovery capture. This is the only start path the durable host exposes.
    */
   createSessionGuard(authority: DriverStartAuthority): OrchestratorSessionGuard {
+    const binding = Object.freeze({ ...authority });
     let startAuthorised = false;
     return {
       authorizeStart: async (input) => {
-        if (startAuthorised || input.runId !== authority.runId || input.driver !== authority.owner || input.mode !== 'primary') {
+        if (startAuthorised || input.runId !== binding.runId || input.driver !== binding.owner || input.mode !== 'primary') {
           throw new Error('host start binding refused');
         }
         this.acquireOwnership({
-          runId: authority.runId,
-          leaseId: authority.leaseId,
-          owner: authority.owner,
+          runId: binding.runId,
+          leaseId: binding.leaseId,
+          owner: binding.owner,
           sessionId: input.sessionId,
-          epoch: authority.expectedEpoch + 1,
-          issuedAt: authority.issuedAt,
-          expiresAt: authority.expiresAt,
-        }, authority.expectedEpoch);
+          epoch: binding.expectedEpoch + 1,
+          issuedAt: binding.issuedAt,
+          expiresAt: binding.expiresAt,
+        }, binding.expectedEpoch);
         startAuthorised = true;
       },
       assertCurrent: async (input) => {
-        if (input.runId !== authority.runId || input.mode !== 'primary' || input.sessionId.length === 0) {
+        if (input.runId !== binding.runId || input.mode !== 'primary' || input.sessionId.length === 0) {
           throw new Error('orchestrator session is not the current durable owner');
         }
         this.kernel.host.assertCurrentOwner({
-          runId: authority.runId, leaseId: authority.leaseId, owner: authority.owner, sessionId: input.sessionId,
-          epoch: authority.expectedEpoch + 1, issuedAt: authority.issuedAt, expiresAt: authority.expiresAt,
+          runId: binding.runId, leaseId: binding.leaseId, owner: binding.owner, sessionId: input.sessionId,
+          epoch: binding.expectedEpoch + 1, issuedAt: binding.issuedAt, expiresAt: binding.expiresAt,
         });
       },
     };
@@ -300,16 +323,14 @@ export class HostControlPlane {
     const metadata = await this.journal.metadata();
     const protectedMetadata = metadata.filter((entry) => entry.classification === 'sensitive');
     const evidenceRefs = new Set(projection.commands.flatMap((record) => record.observations.flatMap((observation) => observation.evidenceRefs)));
-    const encoded = (entry: ArtifactMetadata) => encodeRef({ schemaVersion: 1, kind: entry.source === 'host.orchestrator.recovery_bundle' ? 'recovery_bundle' : entry.source === 'host.recovery' ? 'recovery_state' : 'effect', runId, sessionId: projection.ownership?.sessionId ?? 'unbound', sourceIdentity: entry.sourceIdentity, raw: entry.raw });
-    const recoveryEntries = await Promise.all(protectedMetadata
-      .filter((entry) => entry.source === 'host.orchestrator.recovery_bundle' || entry.source === 'host.recovery')
-      .map(async (entry) => {
-        try {
-          const value: unknown = JSON.parse(await this.journal.read(entry.raw, entry.sourceIdentity, { permitSensitive: true }).then((bytes) => bytes.toString('utf8')));
-          const candidate = value as { runId?: unknown };
-          return candidate.runId === runId ? entry : undefined;
-        } catch { return undefined; }
-      }));
+    const durable = await Promise.all(protectedMetadata.map(async (entry) => {
+      try {
+        const value = decodeEnvelope(JSON.parse((await this.journal.read(entry.raw, entry.sourceIdentity, { permitSensitive: true })).toString('utf8')));
+        return { entry, ref: { schemaVersion: 1 as const, kind: value.kind, runId: value.runId, sessionId: value.sessionId, sourceIdentity: entry.sourceIdentity, raw: entry.raw } };
+      } catch { return undefined; }
+    }));
+    const runArtifacts = durable.filter((item): item is { entry: ArtifactMetadata; ref: StoredArtifactRef } => item !== undefined && item.ref.runId === runId);
+    const encoded = (item: { entry: ArtifactMetadata; ref: StoredArtifactRef }) => encodeRef(item.ref);
     return {
       runId,
       ...(projection.ownership ? { ownership: projection.ownership } : {}),
@@ -317,22 +338,23 @@ export class HostControlPlane {
       attempts: projection.attempts,
       autonomyLeases: projection.autonomyLeases,
       reservations: projection.reservations,
-      artifacts: protectedMetadata.filter((entry) => evidenceRefs.has(encoded(entry))).map((entry) => ({ source: entry.source, ref: encoded(entry) })),
-      recoveryRefs: recoveryEntries.filter((entry): entry is ArtifactMetadata => Boolean(entry)).map(encoded),
+      artifacts: runArtifacts.filter((item) => evidenceRefs.has(encoded(item))).map((item) => ({ source: item.entry.source, ref: encoded(item) })),
+      recoveryRefs: runArtifacts.filter((item) => item.ref.kind === 'recovery_bundle' || item.ref.kind === 'recovery_state').map(encoded),
     };
   }
 
   /** Restart recovery is deterministic: in-flight effects become unknown and are never replayed blindly. */
   async recover(runId: string): Promise<HostSnapshot> {
-    this.kernel.host.recoverAfterRestart();
+    this.kernel.host.recoverAfterRestart(runId);
     return this.snapshot(runId);
   }
 
   recoveryStateFor(context: HelmToolExecutionContext): OrchestratorRecoveryState {
-    const artifacts = this.artifactsFor(context);
+    const binding = Object.freeze({ runId: context.runId, sessionId: context.sessionId, mode: context.mode });
+    const artifacts = this.artifactsFor(binding);
     return {
       capture: async (input) => {
-        if (input.runId !== context.runId || input.sessionId !== context.sessionId) throw new Error('recovery capture does not match trusted artifact scope');
+        if (input.runId !== binding.runId || input.sessionId !== binding.sessionId) throw new Error('recovery capture does not match trusted artifact scope');
         return { recoveryStateRef: await artifacts.saveRecoveryState({ schemaVersion: 1, driver: input.driver, runId: input.runId, sessionId: input.sessionId, mode: input.mode, contextRefs: input.contextRefs ?? [], eventRefs: input.eventRefs ?? [], snapshot: await this.snapshot(input.runId) }) };
       },
       restore: async (ref) => artifacts.loadRecoveryState(ref),
@@ -340,7 +362,8 @@ export class HostControlPlane {
   }
 
   recoveryStateForStart(authority: DriverStartAuthority): OrchestratorRecoveryState {
-    const artifacts = this.artifactsForStart(authority);
+    const binding = Object.freeze({ ...authority });
+    const artifacts = this.artifactsForStart(binding);
     return {
       capture: async (input) => {
         const scope = artifacts.scopeSnapshot();

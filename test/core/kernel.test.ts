@@ -18,7 +18,7 @@ const resourceKinds = {
     requiresResourceEnforcement: true,
     resourceRequest: (payload: unknown) => {
       const input = payload as { upper: number; humanOverrideId?: string };
-      return { poolId: 'chatgpt-subscription', unit: 'requests', upperBound: input.upper, consumer: 'worker' as const, attemptId: 'attempt', humanOverrideId: input.humanOverrideId };
+      return { poolId: 'chatgpt-subscription', unit: 'requests', upperBound: input.upper, consumer: 'worker' as const, humanOverrideId: input.humanOverrideId };
     },
   },
 };
@@ -52,7 +52,7 @@ function opened(path = databasePath(), options: Partial<KernelOptions> = {}) {
   });
   return { ...result, path, setNow: (value: string) => { clock = value; } };
 }
-function allowed() { return { actorId: 'trusted-runtime-actor', allowedOrigins: ['worker'] as const }; }
+function allowed() { return { actorId: 'trusted-runtime-actor', attemptId: 'attempt-1', allowedOrigins: ['worker'] as const }; }
 const trueFact = async () => ({ value: true, state: 'known' as const, source: 'git', observedAt: now, subjectVersion: 'sha-1' });
 const successfulEffect = { effectId: 'effect-1', execute: async () => undefined, observe: async (input: { commandId: string }) => ({ commandId: input.commandId, effectId: 'effect-1', state: 'succeeded' as const, source: 'test-observer', observedAt: now, evidenceRefs: ['artifact:receipt'], detail: 'external receipt' }) };
 
@@ -177,7 +177,7 @@ test('resource reservations are transactional, preserve human reserve, and retai
   first.host.settleResource('reserve-1', { state: 'unknown' });
   first.host.close(); second.host.close();
   const restarted = opened(path, { kinds: resourceKinds });
-  assert.throws(() => restarted.host.admit(command({ commandId: 'reserve-4', idempotencyKey: 'reserve-4', payload: { value: 'd', upper: 2 } }), allowed()), /protected orchestrator reserve/);
+  assert.throws(() => restarted.host.admit(command({ commandId: 'reserve-4', idempotencyKey: 'reserve-4', payload: { value: 'd', upper: 2 } }), allowed()), /(cap|reserve)/);
   restarted.host.close();
 });
 

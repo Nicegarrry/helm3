@@ -24,24 +24,27 @@ type DatabaseConstructor = new (path: string, options?: { timeout?: number }) =>
 const require = createRequire(__filename);
 const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: DatabaseConstructor };
 
-export type TrustedCaller = { actorId: string; sessionId?: string; allowedOrigins: readonly CommandOrigin[] };
+/** Attempt identity comes from the authenticated runtime, never command payload. */
+export type TrustedCaller = { actorId: string; sessionId?: string; attemptId?: string; allowedOrigins: readonly CommandOrigin[] };
 export type ResourceRequest = {
   poolId: string;
   unit: string;
   upperBound: number;
   consumer: 'worker' | 'orchestrator' | 'consultant';
-  attemptId?: string;
   /** Only a separately authenticated human ruling may cross a protected reserve. */
   humanOverrideId?: string;
 };
 const resourceRequestSchema = z.object({
   poolId: z.string().min(1), unit: z.string().min(1), upperBound: z.number().finite().nonnegative(),
-  consumer: z.enum(['worker', 'orchestrator', 'consultant']), attemptId: z.string().min(1).optional(), humanOverrideId: z.string().min(1).optional(),
+  consumer: z.enum(['worker', 'orchestrator', 'consultant']), humanOverrideId: z.string().min(1).optional(),
 }).strict();
 export type ModelFact = {
   modelId: string; provider: string; poolId: string; enabled: boolean;
   capabilities: readonly string[]; roles: readonly string[];
   availability: 'known_available' | 'known_unavailable' | 'unknown';
+  /** Monotonic per-model host observation version. Older snapshots remain durable. */
+  factVersion: number;
+  observedAt: string;
 };
 export type HumanAuthorityGrant = {
   authorityId: string; repositoryId: string; mapNodeIds: readonly string[]; allowedActions: readonly string[];
@@ -67,6 +70,7 @@ const humanReserveExceptionSchema = z.object({
 const modelFactSchema = z.object({
   modelId: z.string().min(1), provider: z.string().min(1), poolId: z.string().min(1), enabled: z.boolean(),
   capabilities: z.array(z.string().min(1)), roles: z.array(z.string().min(1)), availability: z.enum(['known_available', 'known_unavailable', 'unknown']),
+  factVersion: z.number().int().positive(), observedAt: z.string().datetime({ offset: false }),
 }).strict();
 export type KernelKind = {
   payloadSchema: ZodType<unknown>;
@@ -104,6 +108,7 @@ type CommandRow = {
   command_id: string; immutable_json: string; immutable_hash: string; status: CommandStatus;
   payload_json: string; payload_hash: string;
   claim_token: string | null; claim_executor_id: string | null; claim_generation: number; claim_expires_at: string | null; effect_id: string | null;
+  lease_id?: string | null; parent_authority_id?: string | null; attempt_id?: string | null; map_node_id?: string | null;
 };
 
 function exactHash(value: string): string {
@@ -190,6 +195,7 @@ class Kernel {
       CREATE TABLE IF NOT EXISTS human_authorities (authority_id TEXT PRIMARY KEY, bytes TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS human_reserve_exceptions (exception_id TEXT PRIMARY KEY, bytes TEXT NOT NULL, consumed_by_command_id TEXT);
       CREATE TABLE IF NOT EXISTS model_facts (model_id TEXT PRIMARY KEY, bytes TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_fact_versions (model_id TEXT NOT NULL, fact_version INTEGER NOT NULL, bytes TEXT NOT NULL, PRIMARY KEY (model_id, fact_version));
       CREATE TABLE IF NOT EXISTS ownership (run_id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, owner TEXT NOT NULL, session_id TEXT NOT NULL, epoch INTEGER NOT NULL, bytes TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS commands (
         command_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, repository_id TEXT NOT NULL, kind TEXT NOT NULL, idempotency_key TEXT NOT NULL,
@@ -202,8 +208,17 @@ class Kernel {
       CREATE TABLE IF NOT EXISTS effect_observations (observation_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, bytes TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS clock_highwater (name TEXT PRIMARY KEY, observed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS resource_reservations (command_id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, parent_authority_id TEXT NOT NULL, pool_id TEXT NOT NULL, unit TEXT NOT NULL, reserved REAL NOT NULL, settled_actual REAL, state TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS attempt_scopes (attempt_id TEXT PRIMARY KEY, parent_authority_id TEXT NOT NULL, repository_id TEXT NOT NULL, map_node_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS resource_usage_observations (observation_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, state TEXT NOT NULL, amount REAL, observed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS command_lifecycle (command_id TEXT PRIMARY KEY, cancel_requested INTEGER NOT NULL DEFAULT 0, stop_observed TEXT);
     `);
+    this.addColumn('commands', 'lease_id TEXT');
+    this.addColumn('commands', 'parent_authority_id TEXT');
+    this.addColumn('commands', 'attempt_id TEXT');
+    this.addColumn('commands', 'map_node_id TEXT');
+    this.addColumn('resource_reservations', 'attempt_id TEXT');
+    this.addColumn('resource_reservations', 'repository_id TEXT');
+    this.addColumn('resource_reservations', 'map_node_id TEXT');
   }
 
   close(): void { this.db.close(); }
@@ -214,25 +229,28 @@ class Kernel {
     const command = parseExecutableCommand({ ...envelope, actorId: caller.actorId }, this.registry);
     const kind = this.kinds[command.kind];
     if (!kind) throw new Error(`unsupported command kind: ${command.kind}`);
-    const resourceRequest = kind.resourceRequest?.(command.payload);
-    if (kind.requiresResourceEnforcement && !resourceRequest) throw new Error(`resource enforcement is unavailable for command kind: ${command.kind}`);
     const payloadJson = JSON.stringify(command.payload);
     if (exactHash(payloadJson) !== command.payloadHash) throw new Error('payloadHash does not match exact persisted payload bytes');
     const immutableJson = JSON.stringify(command);
     const immutableHash = exactHash(immutableJson);
     return this.transaction(() => {
       this.assertAuthority(command, caller);
-      if (kind.modelSelection) this.assertLegalModel(kind.modelSelection(command.payload));
-      const existing = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id FROM commands WHERE run_id = ? AND repository_id = ? AND kind = ? AND idempotency_key = ?`).get(command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey));
+      const lease = this.loadLease(command.leaseId);
+      const attemptId = this.attemptIdFor(command, caller);
+      const resourceRequest = kind.resourceRequest?.(command.payload);
+      if (kind.requiresResourceEnforcement && !resourceRequest) throw new Error(`resource enforcement is unavailable for command kind: ${command.kind}`);
+      if (kind.modelSelection) this.assertLegalModel(kind.modelSelection(command.payload), resourceRequest);
+      const existing = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id, lease_id, parent_authority_id, attempt_id, map_node_id FROM commands WHERE run_id = ? AND repository_id = ? AND kind = ? AND idempotency_key = ?`).get(command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey));
       if (existing) {
         if (existing.immutable_json !== immutableJson) throw new Error('idempotency collision has different immutable command bytes');
+        if (existing.attempt_id !== attemptId) throw new Error('idempotent command attempt identity does not match its original trusted caller');
         return this.toRecord(existing);
       }
-      this.db.prepare(`INSERT INTO commands (command_id, run_id, repository_id, kind, idempotency_key, immutable_json, immutable_hash, payload_json, payload_hash, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')`).run(
-        command.commandId, command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey, immutableJson, immutableHash, payloadJson, exactHash(payloadJson),
+      this.db.prepare(`INSERT INTO commands (command_id, run_id, repository_id, kind, idempotency_key, immutable_json, immutable_hash, payload_json, payload_hash, status, lease_id, parent_authority_id, attempt_id, map_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`).run(
+        command.commandId, command.runId, command.scope.repositoryId, command.kind, command.idempotencyKey, immutableJson, immutableHash, payloadJson, exactHash(payloadJson), command.leaseId, lease.parentAuthorityId, attemptId ?? null, command.scope.mapNodeId ?? null,
       );
       this.db.prepare(`INSERT INTO command_lifecycle (command_id) VALUES (?)`).run(command.commandId);
-      if (resourceRequest) this.reserve(command, resourceRequest);
+      if (resourceRequest) this.reserve(command, resourceRequest, attemptId);
       this.appendGeneratedEvent('command.queued', command.commandId, { immutableHash });
       return { command, status: 'queued', immutableHash, observations: [] };
     });
@@ -281,6 +299,9 @@ class Kernel {
         this.assertCurrentClaim(current, claim, executor);
         this.assertAuthority(command);
         this.assertNotCancelled(commandId);
+        const kind = this.kinds[command.kind];
+        if (!kind) throw new Error(`unsupported command kind: ${command.kind}`);
+        this.assertLegalModelSelection(kind, command.payload);
         this.db.prepare(`UPDATE commands SET status = 'effect_started', effect_id = ? WHERE command_id = ?`).run(effect.effectId, commandId);
         this.appendGeneratedEvent('command.effect_started', commandId, { claimGeneration: claim.generation, executorId: executor.executorId, effectId: effect.effectId, observations });
       });
@@ -328,7 +349,7 @@ class Kernel {
   }
 
   getCommand(commandId: string): CommandRecord | undefined {
-    const row = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id FROM commands WHERE command_id = ?`).get(commandId));
+    const row = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id, lease_id, parent_authority_id, attempt_id, map_node_id FROM commands WHERE command_id = ?`).get(commandId));
     return row ? this.toRecord(row) : undefined;
   }
 
@@ -373,9 +394,19 @@ class Kernel {
     const fact = modelFactSchema.parse(input);
     this.transaction(() => {
       const bytes = JSON.stringify(fact);
-      const existing = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(fact.modelId) as { bytes: string } | undefined;
-      if (existing && existing.bytes !== bytes) throw new Error('model facts are immutable snapshots; publish a new model identity for changed facts');
-      if (!existing) this.db.prepare(`INSERT INTO model_facts (model_id, bytes) VALUES (?, ?)`).run(fact.modelId, bytes);
+      const current = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(fact.modelId) as { bytes: string } | undefined;
+      const versioned = this.db.prepare(`SELECT MAX(fact_version) AS fact_version FROM model_fact_versions WHERE model_id = ?`).get(fact.modelId) as { fact_version: number | null };
+      if (current && versioned.fact_version === null) {
+        // Preserve a pre-versioned Wave 2 fact as a historical, unusable v0 row.
+        this.db.prepare(`INSERT INTO model_fact_versions (model_id, fact_version, bytes) VALUES (?, 0, ?)`).run(fact.modelId, current.bytes);
+      }
+      const currentVersion = versioned.fact_version ?? 0;
+      const existing = this.db.prepare(`SELECT bytes FROM model_fact_versions WHERE model_id = ? AND fact_version = ?`).get(fact.modelId, fact.factVersion) as { bytes: string } | undefined;
+      if (existing && existing.bytes !== bytes) throw new Error('model fact snapshot version is immutable');
+      if (fact.factVersion !== currentVersion + 1 && !existing) throw new Error('model fact version must advance by one from the current fact');
+      if (!existing) this.db.prepare(`INSERT INTO model_fact_versions (model_id, fact_version, bytes) VALUES (?, ?, ?)`).run(fact.modelId, fact.factVersion, bytes);
+      if (!current) this.db.prepare(`INSERT INTO model_facts (model_id, bytes) VALUES (?, ?)`).run(fact.modelId, bytes);
+      else if (fact.factVersion > currentVersion) this.db.prepare(`UPDATE model_facts SET bytes = ? WHERE model_id = ?`).run(bytes, fact.modelId);
     });
   }
 
@@ -394,7 +425,7 @@ class Kernel {
       if (observed === 'stopped' && row.status === 'claimed') {
         this.db.prepare(`UPDATE commands SET status = 'refused', claim_token = NULL, claim_executor_id = NULL, claim_expires_at = NULL WHERE command_id = ?`).run(commandId);
         this.settleReservation(commandId, { state: 'known', amount: 0 });
-      } else if ((observed === 'pending' || observed === 'unknown') && (row.status === 'claimed' || row.status === 'effect_started' || row.status === 'observing')) {
+      } else if ((observed === 'stopped' || observed === 'pending' || observed === 'unknown') && (row.status === 'claimed' || row.status === 'effect_started' || row.status === 'observing')) {
         this.db.prepare(`UPDATE commands SET status = 'unknown', claim_token = NULL, claim_executor_id = NULL, claim_expires_at = NULL WHERE command_id = ?`).run(commandId);
       }
       this.appendGeneratedEvent(`worker.stop_${observed}`, commandId, {});
@@ -449,12 +480,44 @@ class Kernel {
     }
   }
 
+  private attemptIdFor(command: Command, caller: TrustedCaller): string | undefined {
+    if (command.origin !== 'worker') return undefined;
+    if (!caller.attemptId || !z.string().min(1).safeParse(caller.attemptId).success) throw new Error('worker commands require a trusted stable attempt identity');
+    return caller.attemptId;
+  }
+
+  private loadLease(leaseId: string): AutonomyLease {
+    const row = this.db.prepare(`SELECT bytes FROM autonomy_leases WHERE lease_id = ?`).get(leaseId) as { bytes: string } | undefined;
+    if (!row) throw new Error('autonomy lease is absent');
+    return autonomyLeaseSchema.parse(JSON.parse(row.bytes));
+  }
+
+  private loadGrant(authorityId: string): HumanAuthorityGrant {
+    const row = this.db.prepare(`SELECT bytes FROM human_authorities WHERE authority_id = ?`).get(authorityId) as { bytes: string } | undefined;
+    if (!row) throw new Error('autonomy lease parent authority is absent or not human-delegated');
+    return humanAuthorityGrantSchema.parse(JSON.parse(row.bytes));
+  }
+
+  private activeAttemptCount(where: string, values: unknown[]): number {
+    const row = this.db.prepare(`SELECT COUNT(DISTINCT COALESCE(attempt_id, command_id)) AS count FROM commands WHERE ${where} AND status IN ('claimed', 'effect_started', 'observing', 'unknown')`).get(...values) as { count: number };
+    return row.count;
+  }
+
+  private distinctAttemptCount(where: string, values: unknown[]): number {
+    const row = this.db.prepare(`SELECT COUNT(DISTINCT attempt_id) AS count FROM resource_reservations WHERE ${where}`).get(...values) as { count: number };
+    return row.count;
+  }
+
+  private hasAttemptInScope(where: string, values: unknown[], attemptId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT attempt_id FROM resource_reservations WHERE ${where} AND attempt_id = ? LIMIT 1`).get(...values, attemptId));
+  }
+
   private assertWithinHumanGrant(lease: AutonomyLease): void {
     const row = this.db.prepare(`SELECT bytes FROM human_authorities WHERE authority_id = ?`).get(lease.parentAuthorityId) as { bytes: string } | undefined;
     if (!row) throw new Error('autonomy lease parent authority is absent or not human-delegated');
     const grant = humanAuthorityGrantSchema.parse(JSON.parse(row.bytes));
     if (grant.repositoryId !== lease.scope.repositoryId || Date.parse(lease.expiresAt) > Date.parse(grant.expiresAt)) throw new Error('autonomy lease exceeds human authority scope or expiry');
-    if (grant.mapNodeIds.length && lease.scope.mapNodeIds.some((node) => !grant.mapNodeIds.includes(node))) throw new Error('autonomy lease exceeds human map scope');
+    if (grant.mapNodeIds.length && (lease.scope.mapNodeIds.length === 0 || lease.scope.mapNodeIds.some((node) => !grant.mapNodeIds.includes(node)))) throw new Error('autonomy lease exceeds human map scope');
     if (lease.allowedActions.some((action) => !grant.allowedActions.includes(action))) throw new Error('autonomy lease exceeds human action authority');
     if (lease.maxConcurrency > grant.maxConcurrency || lease.maxAttemptsPerNode > grant.maxAttemptsPerNode) throw new Error('autonomy lease exceeds human execution limits');
     for (const limit of lease.poolLimits) {
@@ -467,7 +530,13 @@ class Kernel {
     }
   }
 
-  private assertLegalModel(selection: { modelId: string; requiredCapabilities: readonly string[]; role: string }): void {
+  private assertLegalModelSelection(kind: KernelKind, payload: unknown): void {
+    const selection = kind.modelSelection?.(payload);
+    if (!selection) return;
+    this.assertLegalModel(selection, kind.resourceRequest?.(payload));
+  }
+
+  private assertLegalModel(selection: { modelId: string; requiredCapabilities: readonly string[]; role: string }, request?: ResourceRequest): void {
     const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(selection.modelId) as { bytes: string } | undefined;
     if (!row) throw new Error('model selection has no registered facts');
     const fact = modelFactSchema.parse(JSON.parse(row.bytes));
@@ -475,6 +544,7 @@ class Kernel {
     if (fact.availability !== 'known_available') throw new Error('model selection availability is not known available');
     if (!fact.roles.includes(selection.role)) throw new Error('model selection lacks required role');
     if (selection.requiredCapabilities.some((capability) => !fact.capabilities.includes(capability))) throw new Error('model selection lacks required capability');
+    if (request && fact.poolId !== request.poolId) throw new Error('model selection pool does not match the requested resource pool');
   }
 
   private assertNotCancelled(commandId: string): void {
@@ -483,27 +553,41 @@ class Kernel {
   }
 
   private assertConcurrency(command: Command): void {
-    const lease = autonomyLeaseSchema.parse(JSON.parse((this.db.prepare(`SELECT bytes FROM autonomy_leases WHERE lease_id = ?`).get(command.leaseId) as { bytes: string }).bytes));
-    const active = this.db.prepare(`SELECT COUNT(*) AS count FROM commands WHERE run_id = ? AND status IN ('claimed', 'effect_started', 'observing')`).get(command.runId) as { count: number };
-    if (active.count >= lease.maxConcurrency) throw new Error('autonomy lease concurrency cap refuses command');
+    const lease = this.loadLease(command.leaseId);
+    const grant = this.loadGrant(lease.parentAuthorityId);
+    const activeForLease = this.activeAttemptCount('lease_id = ?', [command.leaseId]);
+    if (activeForLease >= lease.maxConcurrency) throw new Error('autonomy lease concurrency cap refuses command');
+    const activeForAuthority = this.activeAttemptCount('parent_authority_id = ?', [lease.parentAuthorityId]);
+    if (activeForAuthority >= grant.maxConcurrency) throw new Error('human authority concurrency cap refuses command');
   }
 
-  private reserve(command: Command, input: ResourceRequest): void {
+  private reserve(command: Command, input: ResourceRequest, attemptId: string | undefined): void {
     const request = resourceRequestSchema.parse(input);
-    const lease = autonomyLeaseSchema.parse(JSON.parse((this.db.prepare(`SELECT bytes FROM autonomy_leases WHERE lease_id = ?`).get(command.leaseId) as { bytes: string }).bytes));
-    const grant = humanAuthorityGrantSchema.parse(JSON.parse((this.db.prepare(`SELECT bytes FROM human_authorities WHERE authority_id = ?`).get(lease.parentAuthorityId) as { bytes: string }).bytes));
+    if (command.origin === 'worker' && !attemptId) throw new Error('resource requests require a trusted stable attempt identity');
+    const lease = this.loadLease(command.leaseId);
+    const grant = this.loadGrant(lease.parentAuthorityId);
     const pool = lease.poolLimits.find((limit) => limit.poolId === request.poolId && limit.unit === request.unit);
     const parentPool = grant.poolLimits.find((limit) => limit.poolId === request.poolId && limit.unit === request.unit);
     if (!pool || !parentPool) throw new Error('resource pool is outside autonomy authority');
-    const used = this.db.prepare(`SELECT COALESCE(SUM(reserved), 0) AS total FROM resource_reservations WHERE parent_authority_id = ? AND pool_id = ? AND unit = ? AND state = 'reserved'`).get(lease.parentAuthorityId, request.poolId, request.unit) as { total: number };
-    const reserve = grant.protectedReserves.find((item) => item.poolId === request.poolId && item.unit === request.unit)?.amount ?? 0;
-    if (request.consumer !== 'orchestrator' && used.total + request.upperBound > parentPool.limit - reserve) this.consumeReserveException(request, command, lease, grant);
-    if (used.total + request.upperBound > Math.min(pool.limit, parentPool.limit)) throw new Error('resource pool cap refuses reservation');
-    if (request.attemptId && command.scope.mapNodeId) {
-      const attempts = this.db.prepare(`SELECT COUNT(*) AS count FROM resource_reservations r JOIN commands c ON c.command_id = r.command_id WHERE r.parent_authority_id = ? AND c.repository_id = ? AND c.immutable_json LIKE ?`).get(lease.parentAuthorityId, command.scope.repositoryId, `%\"mapNodeId\":\"${command.scope.mapNodeId}\"%`) as { count: number };
-      if (attempts.count >= grant.maxAttemptsPerNode) throw new Error('human attempt cap refuses command');
+    const used = this.db.prepare(`SELECT COALESCE(SUM(CASE WHEN state = 'settled' THEN settled_actual ELSE reserved END), 0) AS total FROM resource_reservations WHERE parent_authority_id = ? AND pool_id = ? AND unit = ?`).get(lease.parentAuthorityId, request.poolId, request.unit) as { total: number };
+    const reserve = Math.max(
+      grant.protectedReserves.find((item) => item.poolId === request.poolId && item.unit === request.unit)?.amount ?? 0,
+      lease.protectedReserves.find((item) => item.poolId === request.poolId && item.unit === request.unit)?.amount ?? 0,
+    );
+    const effectivePoolLimit = Math.min(pool.limit, parentPool.limit);
+    if (used.total + request.upperBound > effectivePoolLimit) throw new Error('resource pool cap refuses reservation');
+    if (request.consumer !== 'orchestrator' && reserve > 0 && used.total + request.upperBound > effectivePoolLimit - reserve) this.consumeReserveException(request, command, lease, grant);
+    if (attemptId) {
+      if (!command.scope.mapNodeId) throw new Error('worker resource requests require a map node scope');
+      const attemptScope = this.db.prepare(`SELECT parent_authority_id, repository_id, map_node_id FROM attempt_scopes WHERE attempt_id = ?`).get(attemptId) as { parent_authority_id: string; repository_id: string; map_node_id: string } | undefined;
+      if (attemptScope && (attemptScope.parent_authority_id !== lease.parentAuthorityId || attemptScope.repository_id !== command.scope.repositoryId || attemptScope.map_node_id !== command.scope.mapNodeId)) throw new Error('trusted attempt identity is already bound to another authority scope');
+      if (!attemptScope) this.db.prepare(`INSERT INTO attempt_scopes (attempt_id, parent_authority_id, repository_id, map_node_id) VALUES (?, ?, ?, ?)`).run(attemptId, lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId);
+      const parentAttempts = this.distinctAttemptCount('parent_authority_id = ? AND repository_id = ? AND map_node_id = ?', [lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId]);
+      if (!this.hasAttemptInScope('parent_authority_id = ? AND repository_id = ? AND map_node_id = ?', [lease.parentAuthorityId, command.scope.repositoryId, command.scope.mapNodeId], attemptId) && parentAttempts >= grant.maxAttemptsPerNode) throw new Error('human attempt cap refuses command');
+      const leaseAttempts = this.distinctAttemptCount('lease_id = ? AND repository_id = ? AND map_node_id = ?', [lease.leaseId, command.scope.repositoryId, command.scope.mapNodeId]);
+      if (!this.hasAttemptInScope('lease_id = ? AND repository_id = ? AND map_node_id = ?', [lease.leaseId, command.scope.repositoryId, command.scope.mapNodeId], attemptId) && leaseAttempts >= lease.maxAttemptsPerNode) throw new Error('autonomy lease attempt cap refuses command');
     }
-    this.db.prepare(`INSERT INTO resource_reservations (command_id, lease_id, parent_authority_id, pool_id, unit, reserved, state) VALUES (?, ?, ?, ?, ?, ?, 'reserved')`).run(command.commandId, command.leaseId, lease.parentAuthorityId, request.poolId, request.unit, request.upperBound);
+    this.db.prepare(`INSERT INTO resource_reservations (command_id, lease_id, parent_authority_id, pool_id, unit, reserved, state, attempt_id, repository_id, map_node_id) VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)`).run(command.commandId, command.leaseId, lease.parentAuthorityId, request.poolId, request.unit, request.upperBound, attemptId ?? null, command.scope.repositoryId, command.scope.mapNodeId ?? null);
     this.appendGeneratedEvent('resource.reserved', command.commandId, { poolId: request.poolId, unit: request.unit, upperBound: request.upperBound, consumer: request.consumer });
   }
 
@@ -517,10 +601,18 @@ class Kernel {
   }
 
   private settleReservation(commandId: string, actual: { state: 'known'; amount: number } | { state: 'unknown' | 'unavailable' }): void {
-    const reservation = this.db.prepare(`SELECT reserved, state FROM resource_reservations WHERE command_id = ?`).get(commandId) as { reserved: number; state: string } | undefined;
+    const reservation = this.db.prepare(`SELECT r.reserved, r.state, c.status, c.effect_id FROM resource_reservations r JOIN commands c ON c.command_id = r.command_id WHERE r.command_id = ?`).get(commandId) as { reserved: number; state: string; status: CommandStatus; effect_id: string | null } | undefined;
     if (!reservation || reservation.state !== 'reserved') return;
-    if (actual.state !== 'known') { this.appendGeneratedEvent('resource.usage_unknown', commandId, { state: actual.state }); return; }
+    const observedAt = this.now();
+    if (actual.state !== 'known') {
+      this.db.prepare(`INSERT INTO resource_usage_observations (observation_id, command_id, state, amount, observed_at) VALUES (?, ?, ?, NULL, ?)`).run(randomUUID(), commandId, actual.state, observedAt);
+      this.appendGeneratedEvent('resource.usage_unknown', commandId, { state: actual.state });
+      return;
+    }
     if (!Number.isFinite(actual.amount) || actual.amount < 0 || actual.amount > reservation.reserved) throw new Error('observed resource actual is invalid or exceeds reserved upper bound');
+    if (reservation.status === 'queued' || reservation.status === 'claimed' || reservation.status === 'effect_started' || reservation.status === 'observing' || reservation.status === 'unknown') throw new Error('resource usage may still spend until a final effect observation is recorded');
+    if (reservation.status === 'refused' && reservation.effect_id !== null) throw new Error('resource usage may still spend until a final effect observation is recorded');
+    this.db.prepare(`INSERT INTO resource_usage_observations (observation_id, command_id, state, amount, observed_at) VALUES (?, ?, 'known', ?, ?)`).run(randomUUID(), commandId, actual.amount, observedAt);
     this.db.prepare(`UPDATE resource_reservations SET settled_actual = ?, state = 'settled' WHERE command_id = ?`).run(actual.amount, commandId);
     this.appendGeneratedEvent('resource.settled', commandId, { actual: actual.amount, released: reservation.reserved - actual.amount });
   }
@@ -604,6 +696,14 @@ class Kernel {
     if (!highwater) this.db.prepare(`INSERT INTO clock_highwater (name, observed_at) VALUES ('kernel', ?)`).run(current);
     else if (Date.parse(current) > Date.parse(highwater.observed_at)) this.db.prepare(`UPDATE clock_highwater SET observed_at = ? WHERE name = 'kernel'`).run(current);
     return current;
+  }
+
+  /** Older Wave 2 databases can be opened without losing their durable rows. */
+  private addColumn(table: 'commands' | 'resource_reservations', definition: string): void {
+    const name = definition.split(' ', 1)[0];
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === name)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
   }
 
   private transaction<T>(operation: () => T): T {

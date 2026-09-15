@@ -197,7 +197,8 @@ export class KernelHost {
 
   readRun(runId: string): KernelRunProjection { return this.core.readRun(runId); }
 
-  recoverAfterRestart(): void { this.core.recoverInterrupted(); }
+  /** Pass a run ID for scoped host recovery; the no-argument legacy kernel operation remains global. */
+  recoverAfterRestart(runId?: string): void { this.core.recoverInterrupted(runId); }
   close(): void { this.core.close(); }
   admit(intent: unknown, caller: TrustedCaller): CommandRecord { return this.core.admit(intent, caller); }
   claim(commandId: string, executor: TrustedExecutor, expiresAt: string): Claim { return this.core.claim(commandId, executor, expiresAt); }
@@ -538,9 +539,12 @@ class Kernel {
     return current;
   }
 
-  recoverInterrupted(): void {
+  recoverInterrupted(runId?: string): void {
+    if (runId !== undefined) z.string().min(1).parse(runId);
     this.transaction(() => {
-      const rows = this.db.prepare(`SELECT command_id, status FROM commands WHERE status IN ('claimed', 'effect_started', 'observing')`).all() as Array<{ command_id: string; status: CommandStatus }>;
+      const rows = (runId === undefined
+        ? this.db.prepare(`SELECT command_id, status FROM commands WHERE status IN ('claimed', 'effect_started', 'observing')`).all()
+        : this.db.prepare(`SELECT command_id, status FROM commands WHERE run_id = ? AND status IN ('claimed', 'effect_started', 'observing')`).all(runId)) as Array<{ command_id: string; status: CommandStatus }>;
       for (const row of rows) {
         const next = row.status === 'claimed' ? 'queued' : 'unknown';
         this.db.prepare(`UPDATE commands SET status = ?, claim_token = NULL, claim_expires_at = NULL WHERE command_id = ?`).run(next, row.command_id);

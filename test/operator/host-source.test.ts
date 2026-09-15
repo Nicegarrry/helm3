@@ -8,7 +8,7 @@ import { operatorCli, readOperatorApi } from '../../src/operator/cli.js';
 
 const now = '2026-09-15T10:00:00.000Z';
 const host: HostSnapshot = {
-  runId: 'run', commands: [], attempts: [], autonomyLeases: [], reservations: [], artifacts: [], recoveryRefs: [],
+  runId: 'run', commands: [], attempts: [], attemptLifecycles: [], autonomyLeases: [], reservations: [], artifacts: [], recoveryRefs: [],
   ownership: { runId: 'run', leaseId: 'owner', owner: 'astra', sessionId: 'session', epoch: 2, issuedAt: '2026-09-15T09:00:00.000Z', expiresAt: now },
 };
 const map: GitHubMapSnapshot = { source: { repository: 'owner/repo', parentIssue: 1 }, observedAt: now, completeness: 'incomplete', nodes: [], frontier: [], incomplete: [{ code: 'transport_failed', subject: 'GitHub' }] };
@@ -52,6 +52,14 @@ test('tracker outage leaves durable host view readable and source refreshes on e
   const source = createHostSnapshotSource({ host: { async snapshot() { reads++; return host; } }, runId: 'run', evidenceMode: 'fixture', now: () => now,
     map: { async snapshot() { throw new Error('offline'); } } });
   assert.equal((await source.read()).map, null); await source.read(); assert.equal(reads, 2);
+});
+
+test('a durable stop observation is visible without inventing an accepted attempt outcome', () => {
+  const attempt = { attemptId: 'attempt', mapNodeId: 'node', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'faux', capability: 'fixture', poolId: 'requests', workspace: '/fixture', baseSha: 'abc', contextManifestHash: 'fixture', leaseId: 'lease', sessionIds: [], commandIds: [], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] };
+  const result = projectHostSnapshot({ ...host, attempts: [attempt], attemptLifecycles: [{ attemptId: 'attempt', state: 'finished' }] }, null, now, 'fixture');
+  assert.equal(result.attempts[0].state, 'stopped');
+  assert.equal(result.attempts[0].outcome, null);
+  assert.equal(result.attempts[0].endedAt, null);
 });
 
 test('CLI reads identical host projection through loopback API and refuses remote origins', async () => {

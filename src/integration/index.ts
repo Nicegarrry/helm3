@@ -88,7 +88,10 @@ export async function mergeIntegration(prepared: IntegrationPreparation, input: 
   const fresh = async (): Promise<IntegrationFacts> => {
     const facts = await input.gateway.read(payload.pr);
     if (facts.repository !== payload.repository || facts.pr !== payload.pr || facts.head !== payload.expectedHead || facts.baseRef !== payload.expectedBaseRef || facts.baseHead !== payload.expectedBaseHead) throw new Error('Prepared exact head, base, or PR identity changed');
-    const refusal = validFacts(facts); if (refusal) throw new Error(refusal); return facts;
+    const refusal = validFacts(facts); if (refusal) throw new Error(refusal);
+    const currentEvidence = facts.acceptanceEvidence.map(item => item.ref), currentReceipts = facts.reviewReceipts.map(item => item.receiptId);
+    if (currentEvidence.length !== payload.acceptanceEvidence.length || !payload.acceptanceEvidence.every(ref => currentEvidence.includes(ref)) || currentReceipts.length !== payload.reviewReceiptIds.length || !payload.reviewReceiptIds.every(id => currentReceipts.includes(id))) throw new Error('Prepared acceptance evidence or review receipt set changed');
+    return facts;
   };
   const readFact = async (precondition: Precondition) => {
     try { await fresh(); return { value: true, state: 'known' as const, source: 'integration.fresh-github', observedAt: new Date().toISOString(), subjectVersion: precondition.version }; }
@@ -116,8 +119,9 @@ export async function mergeIntegration(prepared: IntegrationPreparation, input: 
 type Api = Record<string, unknown>;
 function object(value: unknown): Api { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('GitHub response is not an object'); return value as Api; }
 function text(value: unknown, field: string): string { if (typeof value !== 'string' || !value) throw new Error(`GitHub response lacks ${field}`); return value; }
-function pullState(value: unknown): IntegrationFacts['state'] { const state = text(value, 'state').toUpperCase(); if (state === 'OPEN' || state === 'MERGED' || state === 'CLOSED') return state; throw new Error('GitHub response has invalid pull state'); }
+function pullState(value: unknown, merged: unknown): IntegrationFacts['state'] { if (merged === true) return 'MERGED'; const state = text(value, 'state').toUpperCase(); if (state === 'OPEN' || state === 'CLOSED') return state; throw new Error('GitHub response has invalid pull state'); }
 function checkRows(value: unknown, source: CiCheck['source']): CiCheck[] { const rows = Array.isArray(value) ? value : []; return rows.map(row => { const item = object(row); return { source, status: text(item.status ?? item.state, 'check status'), conclusion: typeof item.conclusion === 'string' ? item.conclusion : null }; }); }
+function completeRows(response: Api, key: string): unknown[] { const rows = response[key]; if (!Array.isArray(rows) || !Number.isSafeInteger(response.total_count) || response.total_count !== rows.length || rows.length > 100) throw new Error(`GitHub ${key} response is incomplete or exceeds the bounded page`); return rows; }
 function argv(method: string, path: string, fields: readonly string[] = []): string[] { return ['api', '--method', method, path, ...fields]; }
 async function api(transport: TrackerCommandTransport, args: readonly string[]): Promise<Api> { const result = await transport(args, { timeoutMs: 10_000, outputByteLimit: 1024 * 1024 }); if (!result.ok || result.timedOut || result.outputTruncated) throw new Error('GitHub transport is unavailable or incomplete'); try { return object(JSON.parse(result.stdout)); } catch { throw new Error('GitHub response is invalid JSON'); } }
 
@@ -127,11 +131,11 @@ export function createGitHubIntegrationGateway(options: Readonly<{ repository: s
   return {
     read: async pr => {
       positive.parse(pr); const base = `repos/${options.repository}`;
-      const pull = await api(transport, argv('GET', `${base}/pulls/${pr}`)); const head = sha.parse(text(object(pull.head).sha, 'head.sha')); const baseRef = text(object(pull.base).ref, 'base.ref'); const baseHead = sha.parse(text(object(pull.base).sha, 'base.sha')); const state = pullState(pull.state);
-      const [runs, statuses, target] = await Promise.all([api(transport, argv('GET', `${base}/commits/${head}/check-runs`)), api(transport, argv('GET', `${base}/commits/${head}/status`)), api(transport, argv('GET', `${base}/git/ref/heads/${encodeURIComponent(baseRef)}`))]);
+      const pull = await api(transport, argv('GET', `${base}/pulls/${pr}`)); const head = sha.parse(text(object(pull.head).sha, 'head.sha')); const baseRef = text(object(pull.base).ref, 'base.ref'); const baseHead = sha.parse(text(object(pull.base).sha, 'base.sha')); const state = pullState(pull.state, pull.merged);
+      const [runs, statuses, target] = await Promise.all([api(transport, argv('GET', `${base}/commits/${head}/check-runs?per_page=100`)), api(transport, argv('GET', `${base}/commits/${head}/status?per_page=100`)), api(transport, argv('GET', `${base}/git/ref/heads/${encodeURIComponent(baseRef)}`))]);
       const targetHead = sha.parse(text(object(target.object).sha, 'target.sha')); const mergeCommit = typeof pull.merge_commit_sha === 'string' && sha.safeParse(pull.merge_commit_sha).success ? pull.merge_commit_sha : null;
-      const comparison = mergeCommit === null ? null : await api(transport, argv('GET', `${base}/compare/${mergeCommit}...${targetHead}`)); const targetContainsMerge = comparison === null ? null : ['ahead', 'identical'].includes(text(comparison.status, 'comparison.status'));
-      return Object.freeze({ repository: options.repository, pr, head, baseRef, baseHead, state, mergeable: typeof pull.mergeable_state === 'string' && pull.mergeable_state === 'clean' ? 'MERGEABLE' : 'UNKNOWN', checks: Object.freeze([...checkRows(runs.check_runs, 'check_run'), ...checkRows(statuses.statuses, 'status')]), acceptanceEvidence: Object.freeze(options.acceptanceEvidence(pr, head)), mergeCommit, targetHead, targetContainsMerge, reviewReceipts: Object.freeze(options.receipts().filter(receipt => receipt.pr === pr && receipt.head === head)) });
+      const comparison = state === 'MERGED' && mergeCommit !== null ? await api(transport, argv('GET', `${base}/compare/${mergeCommit}...${targetHead}`)) : null; const targetContainsMerge = comparison === null ? null : ['ahead', 'identical'].includes(text(comparison.status, 'comparison.status'));
+      return Object.freeze({ repository: options.repository, pr, head, baseRef, baseHead, state, mergeable: typeof pull.mergeable_state === 'string' && pull.mergeable_state === 'clean' ? 'MERGEABLE' : 'UNKNOWN', checks: Object.freeze([...checkRows(completeRows(runs, 'check_runs'), 'check_run'), ...checkRows(completeRows(statuses, 'statuses'), 'status')]), acceptanceEvidence: Object.freeze(options.acceptanceEvidence(pr, head)), mergeCommit, targetHead, targetContainsMerge, reviewReceipts: Object.freeze(options.receipts().filter(receipt => receipt.pr === pr && receipt.head === head)) });
     },
     merge: async (pr, expectedHead) => { positive.parse(pr); sha.parse(expectedHead); await api(transport, argv('PUT', `repos/${options.repository}/pulls/${pr}/merge`, ['-f', `sha=${expectedHead}`])); },
   };

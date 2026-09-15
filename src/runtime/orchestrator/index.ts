@@ -62,6 +62,11 @@ export interface OrchestratorArtifacts {
 }
 
 export interface OrchestratorSessionGuard {
+  /**
+   * Runs before the first recovery capture. A durable host can bind the driver-
+   * generated session identity to a fenced ownership epoch here.
+   */
+  authorizeStart?(input: { driver: 'fable' | 'astra'; runId: string; sessionId: string; mode: 'primary' | 'consultant' }): Promise<void>;
   assertCurrent(input: { runId: string; sessionId: string; mode: 'primary' | 'consultant' }): Promise<void>;
 }
 
@@ -144,6 +149,7 @@ abstract class BaseDriver implements OrchestratorDriver {
 
   async start(input: { runId: string; contextRefs: string[]; mode: 'primary' | 'consultant' }): Promise<{ sessionId: string }> {
     const sessionId = helmSessionId(this.provider);
+    await this.guard.authorizeStart?.({ driver: this.provider, runId: input.runId, sessionId, mode: input.mode });
     const captured = await this.recovery.capture({ driver: this.provider, runId: input.runId, sessionId, mode: input.mode });
     const session: Session = { runId: input.runId, sessionId, mode: input.mode, contextRefs: [...input.contextRefs], eventRefs: [], recoveryStateRef: captured.recoveryStateRef, state: 'idle', invocation: 0, cancellationRequested: false };
     await this.guard.assertCurrent(session);

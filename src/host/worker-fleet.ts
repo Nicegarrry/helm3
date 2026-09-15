@@ -74,7 +74,8 @@ export type WorkerFleetBinding = Readonly<{
   workspace(command: Command, workerId: string, attempt: Attempt): Readonly<{ repository: string; destination: string; branch: string; baseSha: string; owner: WorktreeOwner; policy: { writableRoots: readonly string[]; readableRoots?: readonly string[]; protectedRoots?: readonly string[] } }>;
   start(command: Command, workspace: WorktreeReservation): Promise<PiNativeWorker>;
   rehydrate?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession): Promise<PiNativeWorker>;
-  prompt(command: Command): string;
+  /** Host-built prompt bytes may be read from the immutable artifact refs captured at spawn. */
+  prompt(command: Command): string | Promise<string>;
   correction(command: Command): string;
 }>;
 
@@ -213,7 +214,7 @@ export class PiWorkerFleet {
   private async run(workerId: string, live: LiveWorker): Promise<void> {
     let terminal: StoredWorker | undefined;
     try {
-      const outcome = await live.worker.run(this.binding.prompt(live.command), this.binding.correction(live.command));
+      const outcome = await live.worker.run(await this.binding.prompt(live.command), this.binding.correction(live.command));
       const completed = Object.freeze({ ...live.record, state: 'terminal' as const, persistedSession: await live.worker.persistedSession(), evidenceRefs: Object.freeze([...live.record.evidenceRefs, ...outcome.artifacts.map((item) => item.ref)]) });
       // Write a disposition before updating the query projection. A completed
       // agent may disappear between these operations; its evidence must not.

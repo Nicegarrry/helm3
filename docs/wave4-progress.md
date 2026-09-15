@@ -129,3 +129,16 @@ Helm's actual `runGate` ran against the exact PR head `257cc57dbdbf4eb0eb794c80b
 The accepted Map #1 update was confirmed by readback: command `map-wave4-c9aa4fd7-cb2d-49f7-ab35-702f52330da8`, hash `sha256:fb479364f4b3093f89c9fe777184b114e3aa1c255643e41f3da8a493438852de`, revision `2026-09-15T18:33:46Z`, observed `2026-09-15T18:33:47.321Z`, state `OPEN`, with `read_before_write_not_atomic` concurrency. The update log is `/private/tmp/helm3-wave8-map-update.log`.
 
 PR #87's independent read-only review remains a draft and is not acceptance evidence. Full cleanup and review remain ongoing; **QUALITY 19** remains open. The nominal guard is unchanged at **US$4.07309683** against the authorised **US$10 ceiling**: US$0.03083635 settled plus US$4.04226048 retained unknown reservations. No new provider request or actual billing observation was made; actual billing and quota remain unknown. No keys, private prompts or full transcripts were recorded, and the Brief and addendum were not edited. New autonomous work stops at `2026-09-15T22:00:00Z` (**08:00 Australia/Sydney on 16 September 2026**).
+
+
+## Accepted independent Pi review — 19:46–19:49 UTC, 15 September 2026
+
+PR #87 merged as `a96a066e3e419d30fdc7f6f1999cc3a1e35f5927` at `2026-09-15T19:46:14Z` from exact independently reviewed head `11619f859a9a287c4fef16f8372e9e5febb6bb4a`. Both Spec and Standards review passed, as did six CI checks. Helm’s actual `runGate` ran on the clean PR head from `19:43:40.066Z` to `19:44:53.873Z`: typecheck and **220/220 tests passed**. The [sanitised receipt](evidence/wave9-independent-review-20260916.json) retains the exact head, raw evidence hashes and Map readback.
+
+The accepted [independent review path](independent-review.md) runs a distinct read-only Pi attempt against a builder-created commit. Host-approved context purposes and immutable hashes constrain what enters the reviewer; durable intent claims prevent duplicate launches. The terminal observer checks native envelope/event provenance and same-workspace Git evidence. An actual host/journal/workspace/fleet close-and-reopen test recovers terminal evidence through public reconciliation without a new model request. Unknown evidence remains incomplete; the model cannot grant itself integration approval.
+
+Helm updated Map #1 through Core and the fresh GitHub mutator: command `map-wave4-f84c0377-cef1-4dcd-baac-88312c84d001`, hash `sha256:f17347511b952cf8e98b3e3e75d9d742d4e9c19b1600c929f1ad4b4534e900c7`, revision `2026-09-15T19:49:17Z`, observed `2026-09-15T19:49:18.495Z`. State remains OPEN, concurrency remains `read_before_write_not_atomic`, and no child issue was closed.
+
+PR #89 remains under independent review; its shared Map mutation tools and six-turn local fixture are not yet accepted. The next active implementation connects already durable fleet outcomes to the supervisor queue and restart replay. Full QUALITY #19, live frontier interchange/failover, process discovery, production integration and complete Brief acceptance remain open.
+
+No paid API request was added. The last confirmed nominal guard remains **US$4.07309683** against the cumulative **US$10 ceiling**, including retained unknown reservations; actual incremental billing and provider headroom remain unknown. New autonomous work stops `2026-09-15T22:00:00Z` (08:00 Australia/Sydney on 16 September 2026).

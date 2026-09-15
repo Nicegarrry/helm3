@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-15T19:49:18.495Z",
+  "scope": "Provider-free independent Pi review and restart reconciliation",
+  "pullRequest": 87,
+  "reviewedHead": "11619f859a9a287c4fef16f8372e9e5febb6bb4a",
+  "mergeCommit": "a96a066e3e419d30fdc7f6f1999cc3a1e35f5927",
+  "mergedAt": "2026-09-15T19:46:14Z",
+  "independentReview": {
+    "spec": "passed",
+    "standards": "passed",
+    "ciChecks": 6,
+    "ci": "passed"
+  },
+  "gate": {
+    "result": {
+      "gateId": "wave5-combined-11619f859a9a287c4fef16f8372e9e5febb6bb4a",
+      "attemptId": "cafebd69-322c-4514-8f3f-899423efd672",
+      "expectedHead": "11619f859a9a287c4fef16f8372e9e5febb6bb4a",
+      "observedHead": "11619f859a9a287c4fef16f8372e9e5febb6bb4a",
+      "state": "passed",
+      "startedAt": "2026-09-15T19:43:40.066Z",
+      "completedAt": "2026-09-15T19:44:53.873Z",
+      "checks": [
+        {
+          "name": "typecheck",
+          "executable": "/Users/sa/.nvm/versions/node/v22.22.2/bin/npm",
+          "args": [
+            "run",
+            "typecheck"
+          ],
+          "timeoutMs": 60000,
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "outputLimit": false,
+          "evidence": {
+            "ref": "raw:sha256:1ad084df6bb4ed5628864ba835b464c226ca435820c1671042f4c75fec0cb38d",
+            "hash": "sha256:1ad084df6bb4ed5628864ba835b464c226ca435820c1671042f4c75fec0cb38d",
+            "mediaType": "application/json"
+          }
+        },
+        {
+          "name": "full-tests",
+          "executable": "/Users/sa/.nvm/versions/node/v22.22.2/bin/npm",
+          "args": [
+            "test"
+          ],
+          "timeoutMs": 180000,
+          "exitCode": 0,
+          "signal": null,
+          "timedOut": false,
+          "outputLimit": false,
+          "evidence": {
+            "ref": "raw:sha256:bd83055f2cab645addd112be2498eaea9a8346e156237e9e66ae777878db7243",
+            "hash": "sha256:bd83055f2cab645addd112be2498eaea9a8346e156237e9e66ae777878db7243",
+            "mediaType": "application/json"
+          }
+        }
+      ],
+      "reason": null
+    },
+    "evidence": {
+      "ref": "raw:sha256:71a59a32dedf12be76460dd0c67845730d8879c243f3a079cab3d83ea265f17a",
+      "hash": "sha256:71a59a32dedf12be76460dd0c67845730d8879c243f3a079cab3d83ea265f17a",
+      "mediaType": "application/json"
+    }
+  },
+  "testCounts": {
+    "passed": 220,
+    "failed": 0
+  },
+  "map": {
+    "id": "map-wave4-f84c0377-cef1-4dcd-baac-88312c84d001",
+    "receipt": {
+      "commandId": "map-wave4-f84c0377-cef1-4dcd-baac-88312c84d001",
+      "commandHash": "sha256:f17347511b952cf8e98b3e3e75d9d742d4e9c19b1600c929f1ad4b4534e900c7",
+      "action": "update",
+      "state": "succeeded",
+      "target": {
+        "repository": "Nicegarrry/helm3",
+        "number": 1,
+        "revision": "2026-09-15T19:49:17Z",
+        "state": "OPEN",
+        "url": "https://github.com/Nicegarrry/helm3/issues/1"
+      },
+      "observedAt": "2026-09-15T19:49:18.495Z",
+      "concurrency": "read_before_write_not_atomic"
+    },
+    "observed": {
+      "commandId": "map-wave4-f84c0377-cef1-4dcd-baac-88312c84d001",
+      "effectId": "map-wave4-f84c0377-cef1-4dcd-baac-88312c84d001",
+      "state": "succeeded",
+      "source": "github-map-mutator",
+      "observedAt": "2026-09-15T19:49:18.495Z",
+      "evidenceRefs": [
+        "local:map-receipt:map-wave4-f84c0377-cef1-4dcd-baac-88312c84d001"
+      ]
+    }
+  },
+  "providerCallsAdded": 0,
+  "limitUsdCombined": 10,
+  "lastConfirmedNominalGuardUsd": 4.07309683,
+  "actualIncrementalBilling": "unknown",
+  "providerHeadroom": "unknown",
+  "limitations": [
+    "Provider-free scripted orchestrator transports; not live frontier interchange",
+    "Tool restrictions are not an operating-system sandbox",
+    "Explicit review reconciliation does not discover processes or live native sessions",
+    "Coordinator GitHub merge is not Helm production integration acceptance",
+    "Full QUALITY #19 and original/addendum acceptance remain open"
+  ]
+}

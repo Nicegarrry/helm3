@@ -165,6 +165,7 @@ export class PiNativeWorker {
     if (`sha256:${createHash('sha256').update(await readFile(sourceFile)).digest('hex')}` !== persisted.historyHash) throw new Error('persisted Pi session history changed');
     const { SessionManager } = await import('@earendil-works/pi-coding-agent');
     const manager = SessionManager.open(sourceFile, sessionRoot, input.workspace.root);
+    if (manager.getSessionId() !== persisted.sessionId) throw new Error('persisted Pi session identity changed');
     const leafId = manager.getLeafId();
     const branchDigest = `sha256:${createHash('sha256').update(JSON.stringify(manager.getBranch())).digest('hex')}`;
     if (!leafId || branchDigest !== persisted.branchDigest) throw new Error('persisted Pi session branch changed');

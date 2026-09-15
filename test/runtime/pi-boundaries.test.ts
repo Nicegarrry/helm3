@@ -37,6 +37,7 @@ async function setup() {
       try { await action(); } finally { active--; }
       if (expireAfterWrite && effect.kind === 'workspace.write') revoked = true;
     },
+    async performCompact(effect, action) { if (revoked) throw new Error('lease expired'); effects.push(`pi.compact:${effect.commandId}`); await action(); },
     async requestCancellation() { revoked = true; },
     async reportWorkerStop(_id, result) { stops.push(result); },
   };
@@ -48,7 +49,7 @@ async function setup() {
       return { metadata, text: (await journal.read(metadata.raw, metadata.sourceIdentity)).toString() };
     }));
   }
-  return { root, worker, manager, workspace, owner, faux, ai, effects, stops, active: () => active,
+  return { root, worker, manager, workspace, owner, faux, ai, journal, effects, stops, active: () => active,
     expireAfterWrite: () => { expireAfterWrite = true; }, artifacts,
     async cleanup() { worker.dispose(); manager.close(); await journal.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -118,5 +119,20 @@ test('provider error text is not forwarded into Pi output or journal artifacts',
     const artifacts = await f.artifacts();
     assert.ok(artifacts.length > 0);
     assert.ok(artifacts.every((entry) => !entry.text.includes('provider-body-must-not-be-journalled')));
+  } finally { await f.cleanup(); }
+});
+
+test('manual compaction checkpoints immutable handoff facts, runs as a distinct control effect, and leaves post-compaction occupancy unknown', async () => {
+  const f = await setup();
+  try {
+    f.faux.setResponses([f.ai.fauxAssistantMessage(envelope([])), f.ai.fauxAssistantMessage('summary')]);
+    await f.worker.run('context '.repeat(8_000), 'repair');
+    const make = async (name: string) => ({ sourceIdentity: name, raw: await f.journal.append({ source: 'fixture', sourceIdentity: name, mediaType: 'application/json', bytes: Buffer.from('{}') }) });
+    const checkpoint = { objective: await make('objective'), acceptance: await make('acceptance'), brief: await make('brief'), map: await make('map'), decisions: [], handoffs: [await make('handoff')] };
+    const refs = await f.worker.manualCompact({ commandId: 'compact-command', effectId: 'compact-effect', checkpoint });
+    assert.equal(refs.length, 2); assert.ok(f.effects.includes('pi.compact:compact-command')); assert.equal(f.faux.state.callCount, 2);
+    const checkpointArtifact = (await f.artifacts()).find((entry) => entry.metadata.source === 'pi.checkpoint')!;
+    const persisted = JSON.parse(checkpointArtifact.text); assert.equal(persisted.provenance.compactCommandId, 'compact-command'); assert.equal(persisted.checkpoint.length, 5);
+    assert.equal(f.worker.contextOccupancy.state, 'unknown');
   } finally { await f.cleanup(); }
 });

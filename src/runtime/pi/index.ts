@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, realpath } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
@@ -12,9 +12,12 @@ import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../..
 import { z } from 'zod/v3';
 
 export type PiEffect = Readonly<{ effectId: string; kind: 'model.request' | 'workspace.write'; commandId: string }>;
+export type PiCompactEffect = Readonly<{ effectId: string; commandId: string }>;
 /** Trusted host must admit, claim, reserve and observe each effect. No authority is passed to the model. */
 export interface PiAuthority {
   perform(effect: PiEffect, action: () => Promise<void>): Promise<void>;
+  /** Separate non-monetary Core command for a manual compaction control effect. */
+  performCompact?(effect: PiCompactEffect, action: () => Promise<void>): Promise<void>;
   requestCancellation(commandId: string): Promise<void>;
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): Promise<void>;
 }
@@ -33,6 +36,11 @@ export type PiWorkerInput = Readonly<{
   /** Trusted host setting. The explicit default is forwarded to Pi rather than relying on its implicit default. */
   thinking?: PiThinkingPolicy;
 }>;
+/** Caller-selected immutable evidence only; this API never discovers transcripts or tracker state. */
+export type PiCheckpointEvidence = Readonly<{ sourceIdentity: string; raw: RawArtifactRef }>;
+export type PiManualCheckpoint = Readonly<{ objective: PiCheckpointEvidence; acceptance: PiCheckpointEvidence; brief: PiCheckpointEvidence; map: PiCheckpointEvidence; decisions: readonly PiCheckpointEvidence[]; handoffs: readonly PiCheckpointEvidence[] }>;
+/** A trusted host binds this to a distinct Core pi.compact command. It carries no monetary reservation: every summary remains a guarded pi.model request. */
+export type PiManualCompaction = Readonly<{ commandId: string; effectId: string; checkpoint: PiManualCheckpoint }>;
 function noResources(runtime: ExtensionRuntime): ResourceLoader {
   return {
     getExtensions: () => ({ extensions: [], errors: [], runtime }),
@@ -163,7 +171,8 @@ export class PiNativeWorker {
     const created = await createAgentSession({
       cwd: this.input.workspace.root, agentDir, modelRuntime: await this.guardedRuntime(), model: this.input.model,
       sessionManager: sessionFile ? SessionManager.open(sessionFile, sessionDir, this.input.workspace.root) : SessionManager.create(this.input.workspace.root, sessionDir),
-      settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } }),
+      // Automatic compaction remains disabled; the low retained-window setting only makes the host-owned manual operation able to prepare a bounded summary.
+      settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } }),
       thinkingLevel: requestedThinking,
       noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()),
     });
@@ -224,6 +233,39 @@ export class PiNativeWorker {
       await this.flushEvents();
       throw error;
     } finally { this.running = false; }
+  }
+  /** Host-owned, idle-only manual compaction. The public AgentSession API keeps every summary request inside guardedRuntime. */
+  async manualCompact(request: PiManualCompaction): Promise<readonly RawArtifactRef[]> {
+    this.assertActive();
+    if (this.isActive) throw new Error('Pi compaction requires an idle owned worker');
+    if (!request.commandId || request.commandId.trim() !== request.commandId || !request.effectId || request.effectId.trim() !== request.effectId) throw new Error('Pi compaction command identity must be nonempty and trimmed');
+    const checkpoint = request.checkpoint;
+    const evidence = [checkpoint.objective, checkpoint.acceptance, checkpoint.brief, checkpoint.map, ...checkpoint.decisions, ...checkpoint.handoffs];
+    if (checkpoint.handoffs.length === 0) throw new Error('Pi compaction requires at least one immutable handoff reference');
+    const identities = new Set<string>();
+    const validated = await Promise.all(evidence.map(async (entry) => {
+      if (entry.sourceIdentity.trim() !== entry.sourceIdentity || !entry.sourceIdentity) throw new Error('checkpoint source identity must be nonempty and trimmed');
+      if (identities.has(entry.sourceIdentity)) throw new Error('checkpoint source identities must be duplicate-free');
+      identities.add(entry.sourceIdentity);
+      // read() validates the immutable raw ref, source binding, classification and digest.
+      await this.input.journal.read(entry.raw, entry.sourceIdentity);
+      return Object.freeze({ sourceIdentity: entry.sourceIdentity, raw: entry.raw });
+    }));
+    await this.flushEvents(); this.assertActive();
+    const before = this.contextOccupancy;
+    const branch = this.session.sessionManager.getBranch();
+    const provenance = Object.freeze({ attemptId: this.input.attemptId, workerCommandId: this.input.commandId, compactCommandId: request.commandId, sessionId: this.sessionId, owner: this.input.owner, branchEntries: branch.length, branchDigest: `sha256:${createHash('sha256').update(JSON.stringify(branch)).digest('hex')}` });
+    const checkpointRef = await this.input.journal.append({ source: 'pi.checkpoint', sourceIdentity: `pi-checkpoint:${this.input.attemptId}:${request.commandId}`,
+      mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'prepared', provenance, checkpoint: validated, model: { provider: this.input.model.provider, id: this.input.model.id, api: this.input.model.api }, thinking: this.thinking, occupancy: before })) });
+    this.artifacts.push(checkpointRef);
+    let result: Awaited<ReturnType<AgentSession['compact']>> | undefined;
+    if (!this.input.authority.performCompact) throw new Error('Pi compaction requires a distinct admitted host command binding');
+    await this.input.authority.performCompact({ effectId: request.effectId, commandId: request.commandId }, async () => { this.assertActive(); result = await this.session.compact(); });
+    await this.flushEvents(); this.assertActive();
+    const outcome = await this.input.journal.append({ source: 'pi.compaction', sourceIdentity: `pi-compaction:${this.input.attemptId}:${request.commandId}`,
+      mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'succeeded', provenance, checkpointRef, result, occupancy: this.contextOccupancy })) });
+    this.artifacts.push(outcome);
+    return Object.freeze([checkpointRef, outcome]);
   }
   async cancel(timeoutMs = 5_000): Promise<'stopped' | 'unknown'> {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5_000) throw new Error('invalid cancellation deadline');

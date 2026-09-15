@@ -90,15 +90,21 @@ export class PiNativeWorker {
             const prepared = input.access?.prepare(effectId, model, context, options);
             await input.authority.perform({ effectId, kind: 'model.request', commandId: input.commandId }, async () => {
               this.assertActive();
-              const source = target.streamSimple(model, context, prepared?.options ?? { ...options, maxRetries: 0 });
-              for await (const event of source) {
-                if (event.type === 'done') terminal = event.message;
-                else if (event.type === 'error') terminal = event.error;
-                else output.push(event);
+              // Redact inside the effect: Core records thrown effect failures before
+              // the outer Pi loop converts them into a native error message.
+              try {
+                const source = target.streamSimple(model, context, prepared?.options ?? { ...options, maxRetries: 0 });
+                for await (const event of source) {
+                  if (event.type === 'done') terminal = event.message;
+                  else if (event.type === 'error') terminal = event.error;
+                  else output.push(event);
+                }
+                terminal ??= await source.result();
+                if (terminal.stopReason === 'error' || terminal.stopReason === 'aborted') throw new Error('provider request did not complete');
+                input.access?.settle(effectId, terminal);
+              } catch {
+                throw new Error('Pi provider request failed');
               }
-              terminal ??= await source.result();
-              if (terminal.stopReason === 'error' || terminal.stopReason === 'aborted') throw new Error('provider request did not complete');
-              input.access?.settle(effectId, terminal);
             });
             if (!terminal) throw new Error('model stream completed without a terminal observation');
             output.push({ type: 'done', reason: terminal.stopReason as 'stop' | 'length' | 'toolUse', message: terminal });

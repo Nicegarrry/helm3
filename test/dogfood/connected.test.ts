@@ -14,7 +14,7 @@ for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orches
     assert.equal(fixture.commandState, 'succeeded');  assert.equal(fixture.expiredRefusal, true);
     assert.ok(fixture.recoveryBundleRef.length > 0); assert.ok(fixture.recoveryStateRef.length > 0);
     assert.ok(fixture.rawRefs.length > 0); assert.equal(fixture.usageActions.modelRequests, 4); assert.equal(fixture.usageActions.workspaceWrites, 2);
-    assert.ok(fixture.toolNames.includes('gate.run')); assert.ok(fixture.toolNames.includes('worker.steer')); assert.ok(fixture.toolNames.includes('map.update')); assert.ok(fixture.toolNames.includes('map.close'));
+    assert.ok(fixture.toolNames.includes('gate.run')); assert.ok(fixture.toolNames.includes('worker.fork')); assert.ok(fixture.toolNames.includes('worker.steer')); assert.ok(fixture.toolNames.includes('map.update')); assert.ok(fixture.toolNames.includes('map.close'));
     assert.equal(fixture.mapUpdateState, 'succeeded'); assert.equal(fixture.mapCloseState, 'succeeded'); assert.equal(fixture.mapCommandIds.length, 2); assert.equal(fixture.mapReceiptRefs.length, 2);
     assert.match(fixture.gateHead, /^[0-9a-f]{40}$/); assert.equal(fixture.gateCommandState, 'succeeded'); assert.ok(fixture.gateEvidenceRefs.length >= 2);
     assert.match(fixture.redGateHead, /^[0-9a-f]{40}$/); assert.notEqual(fixture.redGateHead, fixture.gateHead); assert.ok(fixture.redGateEvidenceRefs.length >= 2);
@@ -29,6 +29,19 @@ for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orches
     const steerPayload = steer?.command.payload as { workerId?: string; attemptId?: string; predecessorWorkerId?: string; expectedHead?: string; gateCommandId?: string; evidenceRefs?: string[] } | undefined;
     assert.equal(steerPayload?.workerId, fixture.steerWorkerId); assert.equal(steerPayload?.attemptId, fixture.steerAttemptId); assert.equal(steerPayload?.expectedHead, fixture.redGateHead); assert.equal(steerPayload?.predecessorWorkerId, (snapshot.commands.find((record) => record.command.kind === 'worker.spawn')?.command.payload as { workerId?: string } | undefined)?.workerId); assert.equal(steerPayload?.gateCommandId, redGate?.command.commandId); assert.deepEqual(steerPayload?.evidenceRefs, fixture.redGateEvidenceRefs);
     assert.equal(snapshot.attemptLifecycles.find((entry) => entry.attemptId === fixture!.steerAttemptId)?.state, 'finished');
+  } finally { await fixture?.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('native-fork fixture uses the production registry without a model call until explicit child steer', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helm3-connected-native-fork-')); let fixture: Awaited<ReturnType<typeof runLocalFixture>> | undefined;
+  try {
+    fixture = await runLocalFixture({ stateDirectory: directory, orchestrator: 'fable', scenario: 'native-fork' });
+    const snapshot = await fixture.host.recover(fixture.runId);
+    const fork = snapshot.commands.find((record) => record.command.kind === 'worker.fork');
+    const forkPayload = fork?.command.payload as { workerId?: string; predecessorWorkerId?: string; sourceSessionId?: string; sourceHistoryHash?: string; sourceBranchDigest?: string } | undefined;
+    const steer = snapshot.commands.find((record) => record.command.commandId === fixture!.steerCommandId);
+    assert.equal(fork?.status, 'succeeded'); assert.equal(forkPayload?.sourceSessionId, fixture.workerSessionId); assert.match(forkPayload?.sourceHistoryHash ?? '', /^sha256:[0-9a-f]{64}$/); assert.match(forkPayload?.sourceBranchDigest ?? '', /^sha256:[0-9a-f]{64}$/);
+    assert.notEqual(fixture.steerSessionId, fixture.workerSessionId); assert.equal((steer?.command.payload as { predecessorWorkerId?: string }).predecessorWorkerId, forkPayload?.workerId); assert.equal(fixture.usageActions.modelRequests, 4);
   } finally { await fixture?.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

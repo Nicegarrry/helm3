@@ -152,7 +152,8 @@ export class PiWorkerFleet {
     if (!record) {
       const snapshot = await this.binding.host.snapshot(context.runId);
       const command = snapshot.commands.find((entry) => (entry.command.payload as { workerId?: unknown }).workerId === workerId);
-      const terminal = await this.binding.host.readFleetEffectByIdentity(context.runId, `host-worker-terminal:${context.runId}:${workerId}`);
+      const terminal = await this.binding.host.readFleetEffectByIdentity(context.runId, `host-worker-terminal:${context.runId}:${workerId}`)
+        ?? await this.binding.host.readFleetEffectByIdentity(context.runId, `host-worker-stop:${context.runId}:${workerId}`);
       const ref = command?.observations.flatMap((entry) => entry.evidenceRefs).find((entry) => entry.includes('"kind":"effect"'));
       if (terminal || ref) {
         try { record = JSON.parse(terminal ?? await this.binding.host.readFleetEffect(context.runId, ref!)) as StoredWorker; this.#records.set(workerId, record); }

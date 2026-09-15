@@ -14,7 +14,7 @@ for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orches
     assert.ok(fixture.recoveryBundleRef.length > 0); assert.ok(fixture.recoveryStateRef.length > 0);
     assert.ok(fixture.rawRefs.length > 0); assert.ok(fixture.usageActions.modelRequests >= 1); assert.equal(fixture.usageActions.workspaceWrites, 1);
     const snapshot = await fixture.host.recover(fixture.runId);
-    assert.equal(snapshot.commands.find((record) => record.command.commandId === 'fixture-worker-spawn')?.status, 'succeeded');
+    assert.equal(snapshot.commands.find((record) => record.command.commandId === 'fixture-worker-spawn')?.status, 'succeeded'); assert.equal(snapshot.attemptLifecycles.find((entry) => entry.attemptId === fixture!.attemptId)?.state, 'finished');
   } finally { await fixture?.close(); await rm(directory, { recursive: true, force: true }); }
 });
 

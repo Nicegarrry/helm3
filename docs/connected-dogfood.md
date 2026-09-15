@@ -9,7 +9,7 @@ The fixture has two real adapter paths:
 
 Both paths admit one `worker.spawn` command through `HostControlPlane`, create a Pi-native worker with Pi's packaged faux provider and in-memory credentials, write `result.txt` through the guarded `helm_write` tool, persist raw events/envelopes/usage plus driver recovery state, checkpoint, stop their first session, close the host, reopen it, resume a fresh driver from the durable bundle, and run a no-tool continuation. The test confirms that reopening did not produce a second workspace write. A mismatched duplicate trusted caller is refused, a protected path write is refused, and a new command at the synthetic autonomy-expiry instant is refused while the orchestrator ownership remains live.
 
-The fixture reports only local facts. Its three known `fixture-requests` settlements are faux Pi requests, not provider usage, quota, entitlement, or billing evidence. The stored attempt is an immutable start record. The fixture reports the normal Pi stop observation to the host, but the current host projection does not expose a terminal attempt outcome; this demo therefore reports the completed command and does not call the attempt completed.
+The fixture reports only local facts. Its three known `fixture-requests` settlements are faux Pi requests, not provider usage, quota, entitlement, or billing evidence. The stored attempt is an immutable start record. The fixture reports the normal Pi stop observation, which the host projects as lifecycle `finished` and the operator projects as `stopped`; it does not invent an accepted or succeeded attempt outcome.
 
 The observer CLI is intentionally explicit and local:
 

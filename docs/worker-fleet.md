@@ -24,10 +24,23 @@ local-abort seam without changing the succeeded spawn command. An unknown stop
 persists its cancellation request and retains the attempt's unknown
 disposition.
 
-This slice does not implement Pi session discovery, cross-process resume,
-pause/resume/steer/fork/model-change, automatic retry, live provider/OAuth
-acceptance, review/gate/integration workflow, frontier wake delivery, OS shell
-containment, or runtime verification that a later provider request still uses
-the original provider/API identity. A provider-free faux run proves
-control-plane plumbing only; worker claims remain claims until an appropriate
-gate or review checks evidence.
+`worker.steer` is an idle-only continuation, never a retry or a new repair
+worker. It accepts a persisted Pi session only after the preceding invocation
+is durably terminal, its native session ID and transcript hash remain intact,
+the assigned worktree is clean at the supplied exact SHA, and the old writer
+generation transfers once to a fresh continuation attempt. The continuation
+command binds its generated successor ID, predecessor ID, copied tool input,
+model/fact/policy provenance, and the verified head. Pi reopens under fresh
+authority and must report the same session and model identity. A currently
+running, unknown, cancelled, stale, expired, changed-head, or already-taken
+predecessor is refused before a model or write effect. When a gate is cited,
+its command ID and raw refs are checked against the recorded gate for that
+predecessor and exact head; arbitrary host notes cannot substitute for gate
+evidence. A persisted transcript is not session discovery: missing or changed
+history remains unrecoverable.
+
+This slice does not implement Pi session discovery, pause/resume/fork/model
+change, automatic retry, live provider/OAuth acceptance, frontier wake
+delivery, or OS shell containment. A provider-free faux run proves
+control-plane plumbing only; worker claims remain claims until a gate or review
+checks evidence.

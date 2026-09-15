@@ -6,7 +6,7 @@ import { PiWorkerFleet, type WorkerSpawnInput, type WorkerSteerInput } from './w
 const ref = z.string().min(1).max(512);
 const spawn = z.object({ objectiveRef: ref, acceptanceRef: ref, contextRefs: z.array(ref).max(32), modelId: z.string().min(1).max(128), role: z.string().min(1).max(64), label: z.string().min(1).max(128).optional() }).strict();
 const inspect = z.object({ workerId: z.string().min(1).max(128) }).strict();
-const steer = z.object({ workerId: z.string().min(1).max(128), objectiveRef: ref, evidenceRefs: z.array(ref).min(1).max(32), expectedSessionId: z.string().min(1).max(256), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+const steer = z.object({ workerId: z.string().min(1).max(128), objectiveRef: ref, evidenceRefs: z.array(ref).min(1).max(32), gateCommandId: z.string().min(1).max(128).optional(), expectedSessionId: z.string().min(1).max(256), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
 
 /** Compose one registry for driver transports, operator reads and local CLI. */
 export function createHostWorkerToolRegistry(reads: HostReadToolsOptions, fleet: PiWorkerFleet): HelmToolRegistry {

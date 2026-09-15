@@ -6,7 +6,7 @@ import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with {
 import { BoundedPiAccess } from '../../access/index.js';
 import { observePiContext } from '../../context/index.js';
 import { PiEventSpool } from './event-spool.js';
-import { workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
+import { rawArtifactRefSchema, workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
 import { z } from 'zod/v3';
@@ -17,7 +17,7 @@ export type PiCompactEffect = Readonly<{ effectId: string; commandId: string }>;
 export interface PiAuthority {
   perform(effect: PiEffect, action: () => Promise<void>): Promise<void>;
   /** Separate non-monetary Core command for a manual compaction control effect. */
-  performCompact?(effect: PiCompactEffect, action: () => Promise<void>): Promise<void>;
+  performCompact?(effect: PiCompactEffect, action: () => Promise<readonly RawArtifactRef[]>): Promise<void>;
   requestCancellation(commandId: string): Promise<void>;
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): Promise<void>;
 }
@@ -174,8 +174,9 @@ export class PiNativeWorker {
     const created = await createAgentSession({
       cwd: this.input.workspace.root, agentDir, modelRuntime: await this.guardedRuntime(), model: this.input.model,
       sessionManager: sessionFile ? SessionManager.open(sessionFile, sessionDir, this.input.workspace.root) : SessionManager.create(this.input.workspace.root, sessionDir),
-      // Automatic compaction remains disabled; the low retained-window setting only makes the host-owned manual operation able to prepare a bounded summary.
-      settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false, keepRecentTokens: 1 } }),
+      // Automatic compaction remains disabled. Manual compaction must not silently
+      // change Pi's retained-context policy.
+      settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } }),
       thinkingLevel: requestedThinking,
       noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()),
     });
@@ -241,37 +242,59 @@ export class PiNativeWorker {
   async manualCompact(request: PiManualCompaction): Promise<readonly RawArtifactRef[]> {
     this.assertActive();
     if (this.isActive) throw new Error('Pi compaction requires an idle owned worker');
-    if (!request.commandId || request.commandId.trim() !== request.commandId || !request.effectId || request.effectId.trim() !== request.effectId) throw new Error('Pi compaction command identity must be nonempty and trimmed');
-    const checkpoint = request.checkpoint;
-    const evidence = [checkpoint.objective, checkpoint.acceptance, checkpoint.brief, checkpoint.map, ...checkpoint.decisions, ...checkpoint.handoffs];
-    if (checkpoint.handoffs.length === 0) throw new Error('Pi compaction requires at least one immutable handoff reference');
-    const identities = new Set<string>();
-    const validated = await Promise.all(evidence.map(async (entry) => {
-      if (entry.sourceIdentity.trim() !== entry.sourceIdentity || !entry.sourceIdentity) throw new Error('checkpoint source identity must be nonempty and trimmed');
-      if (identities.has(entry.sourceIdentity)) throw new Error('checkpoint source identities must be duplicate-free');
-      identities.add(entry.sourceIdentity);
-      // read() validates the immutable raw ref, source binding, classification and digest.
-      await this.input.journal.read(entry.raw, entry.sourceIdentity);
-      return Object.freeze({ sourceIdentity: entry.sourceIdentity, raw: entry.raw });
-    }));
-    await this.flushEvents(); this.assertActive();
-    const before = this.contextOccupancy;
-    const branch = this.session.sessionManager.getBranch();
-    const provenance = Object.freeze({ attemptId: this.input.attemptId, workerCommandId: this.input.commandId, compactCommandId: request.commandId, sessionId: this.sessionId, owner: this.input.owner, branchEntries: branch.length, branchDigest: `sha256:${createHash('sha256').update(JSON.stringify(branch)).digest('hex')}` });
-    let checkpointRef: RawArtifactRef | undefined;
-    let result: Awaited<ReturnType<AgentSession['compact']>> | undefined;
-    if (!this.input.authority.performCompact) throw new Error('Pi compaction requires a distinct admitted host command binding');
-    await this.input.authority.performCompact({ effectId: request.effectId, commandId: request.commandId }, async () => {
-      this.assertActive(); checkpointRef = await this.input.journal.append({ source: 'pi.checkpoint', sourceIdentity: `pi-checkpoint:${this.input.attemptId}:${request.commandId}`,
-        mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'prepared', provenance, checkpoint: validated, model: { provider: this.input.model.provider, id: this.input.model.id, api: this.input.model.api }, thinking: this.thinking, occupancy: before })) });
-      this.artifacts.push(checkpointRef); result = await this.session.compact();
-    });
-    await this.flushEvents(); this.assertActive();
-    const outcome = await this.input.journal.append({ source: 'pi.compaction', sourceIdentity: `pi-compaction:${this.input.attemptId}:${request.commandId}`,
-      mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'succeeded', provenance, checkpointRef, result, occupancy: this.contextOccupancy })) });
-    this.artifacts.push(outcome);
-    if (!checkpointRef) throw new Error('Pi compaction completed without a prepared checkpoint');
-    return Object.freeze([checkpointRef, outcome]);
+    this.running = true;
+    try {
+      const commandId = request.commandId;
+      const effectId = request.effectId;
+      if (!commandId || commandId.trim() !== commandId || !effectId || effectId.trim() !== effectId) throw new Error('Pi compaction command identity must be nonempty and trimmed');
+      const freezeEvidence = (entry: PiCheckpointEvidence): PiCheckpointEvidence => Object.freeze({
+        sourceIdentity: entry.sourceIdentity,
+        // Copy the nested reference before any await; later caller mutation
+        // cannot change the already-validated checkpoint.
+        raw: Object.freeze(rawArtifactRefSchema.parse({ ref: entry.raw.ref, hash: entry.raw.hash, mediaType: entry.raw.mediaType })),
+      });
+      const source = request.checkpoint;
+      const checkpoint = Object.freeze({
+        objective: freezeEvidence(source.objective), acceptance: freezeEvidence(source.acceptance), brief: freezeEvidence(source.brief), map: freezeEvidence(source.map),
+        decisions: Object.freeze(source.decisions.map(freezeEvidence)), handoffs: Object.freeze(source.handoffs.map(freezeEvidence)),
+      });
+      if (checkpoint.handoffs.length === 0) throw new Error('Pi compaction requires at least one immutable handoff reference');
+      const evidence = [checkpoint.objective, checkpoint.acceptance, checkpoint.brief, checkpoint.map, ...checkpoint.decisions, ...checkpoint.handoffs];
+      const identities = new Set<string>();
+      for (const entry of evidence) {
+        if (entry.sourceIdentity.trim() !== entry.sourceIdentity || !entry.sourceIdentity) throw new Error('checkpoint source identity must be nonempty and trimmed');
+        if (identities.has(entry.sourceIdentity)) throw new Error('checkpoint source identities must be duplicate-free');
+        identities.add(entry.sourceIdentity);
+      }
+      // read() validates copied raw refs, source bindings, classifications and digests.
+      await Promise.all(evidence.map((entry) => this.input.journal.read(entry.raw, entry.sourceIdentity)));
+      await this.flushEvents(); this.assertActive();
+      const before = this.contextOccupancy;
+      const sessionId = this.sessionId;
+      const branch = this.session.sessionManager.getBranch();
+      const branchDigest = `sha256:${createHash('sha256').update(JSON.stringify(branch)).digest('hex')}`;
+      const provenance = Object.freeze({ attemptId: this.input.attemptId, workerCommandId: this.input.commandId, compactCommandId: commandId, sessionId, owner: this.input.owner, branchEntries: branch.length, branchDigest });
+      if (!this.input.authority.performCompact) throw new Error('Pi compaction requires a distinct admitted host command binding');
+      let refs: readonly RawArtifactRef[] | undefined;
+      await this.input.authority.performCompact({ effectId, commandId }, async () => {
+        this.assertActive();
+        const currentBranch = this.session.sessionManager.getBranch();
+        const currentDigest = `sha256:${createHash('sha256').update(JSON.stringify(currentBranch)).digest('hex')}`;
+        if (this.sessionId !== sessionId || currentDigest !== branchDigest) throw new Error('Pi compaction context changed before the admitted effect');
+        const checkpointRef = await this.input.journal.append({ source: 'pi.checkpoint', sourceIdentity: `pi-checkpoint:${this.input.attemptId}:${commandId}`,
+          mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'prepared', provenance, checkpoint, model: { provider: this.input.model.provider, id: this.input.model.id, api: this.input.model.api }, thinking: this.thinking, occupancy: before })) });
+        this.artifacts.push(checkpointRef);
+        const result = await this.session.compact();
+        await this.flushEvents(); this.assertActive();
+        const outcome = await this.input.journal.append({ source: 'pi.compaction', sourceIdentity: `pi-compaction:${this.input.attemptId}:${commandId}`,
+          mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, state: 'succeeded', provenance, checkpointRef, result, occupancy: this.contextOccupancy })) });
+        this.artifacts.push(outcome);
+        refs = Object.freeze([checkpointRef, outcome]);
+        return refs;
+      });
+      if (!refs) throw new Error('Pi compaction completed without durable terminal evidence');
+      return refs;
+    } finally { this.running = false; }
   }
   async cancel(timeoutMs = 5_000): Promise<'stopped' | 'unknown'> {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5_000) throw new Error('invalid cancellation deadline');

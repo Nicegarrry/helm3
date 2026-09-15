@@ -360,10 +360,46 @@ test('manual Pi compaction binds a Core control command to one bounded native su
     const control = snapshot.commands.find((entry) => entry.command.kind === 'pi.compact');
     const model = snapshot.commands.find((entry) => entry.command.kind === 'pi.model');
     assert.equal(control?.status, 'succeeded'); assert.equal(model?.status, 'succeeded');
+    assert.deepEqual(control?.observations[0]?.evidenceRefs, refs.map((ref) => ref.ref), 'Core records the actual durable checkpoint and completion evidence, not a placeholder');
     assert.equal(snapshot.reservations.length, 1); assert.ok((snapshot.reservations[0]?.settledActual ?? 0) > 0, 'the one native summary settled its Core reservation');
     const outcome = JSON.parse((await fixture.journal.read(refs[1]!, 'pi-compaction:compact-attempt:compact-command')).toString());
     assert.deepEqual(outcome.checkpointRef, refs[0], 'compaction evidence links to the prepared immutable checkpoint');
   } finally { await fixture.cleanup(); }
+});
+
+test('a failed terminal compaction write leaves the admitted Core control command unknown', async () => {
+  const fixture = await nativeCompactionFixture();
+  const append = fixture.journal.append.bind(fixture.journal);
+  try {
+    fixture.faux.setResponses([fixture.ai.fauxAssistantMessage('summary')]);
+    fixture.seedCompactionContext();
+    fixture.journal.append = async (input) => {
+      if (input.source === 'pi.compaction') throw new Error('fixture terminal evidence write failed');
+      return append(input);
+    };
+    await assert.rejects(fixture.worker.manualCompact({ commandId: 'compact-write-failure', effectId: 'compact-write-failure-effect', checkpoint: await fixture.checkpoint() }), /not successfully observed: unknown/);
+    fixture.journal.append = append;
+    const control = (await fixture.plane.snapshot('run-1')).commands.find((entry) => entry.command.kind === 'pi.compact');
+    assert.equal(control?.status, 'unknown', 'Core cannot report a successful control action without its terminal durable evidence');
+  } finally { fixture.journal.append = append; await fixture.cleanup(); }
+});
+
+test('manual Pi compaction holds the worker operation slot across native summary and rejects concurrent run, reopen and compact calls', async () => {
+  const fixture = await nativeCompactionFixture();
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  try {
+    fixture.seedCompactionContext();
+    fixture.faux.setResponses([async () => { entered(); await gate; return fixture.ai.fauxAssistantMessage('summary'); }]);
+    const pending = fixture.worker.manualCompact({ commandId: 'compact-first', effectId: 'compact-first-effect', checkpoint: await fixture.checkpoint() });
+    await started;
+    await assert.rejects(fixture.worker.run('nope', 'nope'), /active invocation/);
+    await assert.rejects(fixture.worker.reopen(), /active Pi session/);
+    await assert.rejects(fixture.worker.manualCompact({ commandId: 'compact-second', effectId: 'compact-second-effect', checkpoint: await fixture.checkpoint() }), /idle owned worker/);
+    assert.equal((await fixture.plane.snapshot('run-1')).commands.filter((entry) => entry.command.kind === 'pi.compact').length, 1);
+    release(); await pending;
+  } finally { release?.(); await fixture.cleanup(); }
 });
 
 test('manual Pi compaction refuses incomplete checkpoint evidence before Core admission or provider fetch', async () => {

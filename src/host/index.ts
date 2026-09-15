@@ -282,9 +282,14 @@ export class HostControlPlane {
       performCompact: binding.compactCommandForEffect ? async (effect, action) => {
         this.kernel.host.admit(binding.compactCommandForEffect!(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
         const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.now() + 60_000).toISOString());
+        let evidenceRefs: readonly string[] | undefined;
         const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: binding.executorId }, async () => { throw new Error('Pi compact effect has no external precondition'); }, {
-          effectId: `host:${effect.effectId}`, execute: action,
-          observe: () => ({ commandId: effect.effectId, effectId: `host:${effect.effectId}`, state: 'succeeded', source: 'host.pi_compaction', observedAt: new Date().toISOString(), evidenceRefs: [`pi-compact:${effect.effectId}`] }),
+          effectId: `host:${effect.effectId}`,
+          execute: async () => { evidenceRefs = (await action()).map((ref) => ref.ref); },
+          observe: () => {
+            if (!evidenceRefs || evidenceRefs.length === 0) throw new Error('Pi compaction completed without durable evidence references');
+            return { commandId: effect.effectId, effectId: `host:${effect.effectId}`, state: 'succeeded' as const, source: 'host.pi_compaction', observedAt: new Date().toISOString(), evidenceRefs: [...evidenceRefs] };
+          },
         });
         if (observation.state !== 'succeeded') throw new Error(`Pi compaction was not successfully observed: ${observation.state}`);
       } : undefined,

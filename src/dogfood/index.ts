@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import { z } from 'zod/v3';
 import type { Command } from '../contracts/index.js';
 import { openHost, PiNativeRuntime, type HostControlPlane } from '../host/index.js';
-import { AstraDriver, AstraLoopbackMcpTransport, createAstraSdk, FableDriver, HelmToolRegistry, type HelmToolExecutionContext, type OrchestratorSessionGuard } from '../runtime/orchestrator/index.js';
+import { createHostReadToolRegistry } from '../host/tools.js';
+import { AstraDriver, AstraLoopbackMcpTransport, createAstraSdk, FableDriver, HelmToolRegistry, type HelmTool, type HelmToolExecutionContext, type OrchestratorSessionGuard } from '../runtime/orchestrator/index.js';
 import { PiNativeWorker, type PiAuthority } from '../runtime/pi/index.js';
 import { WorkspaceManager, type WorktreeReservation } from '../workspace/index.js';
 
@@ -44,6 +45,26 @@ export type LocalFixtureResult = Readonly<{
 }>;
 
 export type LocalFixtureOptions = Readonly<{ stateDirectory: string; orchestrator: 'fable' | 'astra' }>;
+
+function localFixtureReadRegistry(host: HostControlPlane, context: HelmToolExecutionContext, observedAt: string): HelmToolRegistry {
+  return createHostReadToolRegistry({
+    context,
+    authorize: async (actual) => { host.artifactsFor(actual); },
+    host,
+    brief: { async read() { return { text: 'Provider-free local fixture Brief.', source: 'fixture://brief', observedAt }; } },
+    map: { async snapshot() { return { source: { repository: 'fixture/repository', parentIssue: 1 }, observedAt, completeness: 'complete' as const, nodes: [], frontier: [], incomplete: [] }; } },
+    economy: { snapshot: () => ({
+      pools: [{ poolId: 'fixture-requests', kind: 'subscription' as const, unit: 'requests' }],
+      models: [{ modelId: 'offline', provider: 'helm3-local-faux', family: 'faux', poolId: 'fixture-requests', enabled: true, availability: 'unknown' as const, roles: ['builder' as const], buildCapabilities: [], reviewCapabilities: [], dataPolicy: 'public-only' as const, observedAt }],
+      quota: [{ poolId: 'fixture-requests', state: 'unknown' as const, observedAt, detail: 'fixture provider capacity is unobserved' }],
+    }) },
+  });
+}
+
+/** The fixture's driver and loopback cockpit use this same host-owned read surface. */
+export function createLocalFixtureReadToolRegistry(result: LocalFixtureResult): HelmToolRegistry {
+  return localFixtureReadRegistry(result.host, { runId: result.runId, sessionId: result.sessionId, mode: 'primary' }, result.observedAt);
+}
 
 function workerCommand(sessionId: string, context: HelmToolExecutionContext): Command {
   const payload = { path: 'result.txt', contents: 'provider-free Pi fixture\n' };
@@ -96,9 +117,9 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
   plane.recordAttempt({ attemptId, mapNodeId: 'fixture-node', mapNodeRevision: 'fixture', objectiveVersion: 'fixture', acceptanceVersion: 'fixture', role: 'builder', model: 'offline', family: 'faux', provider: 'helm3-local-faux', capability: 'fixture', poolId: 'fixture-requests', workspace: workspace.root, baseSha, contextManifestHash: 'sha256:fixture-context', leaseId: 'fixture-autonomy', sessionIds: [], commandIds: [commandId], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] });
 
   const hostGuard = plane.createSessionGuard({ runId, owner: options.orchestrator, leaseId: 'fixture-orchestrator', expectedEpoch: 0, issuedAt: now, expiresAt: ownerLater });
-  const tools = new HelmToolRegistry([{
+  const workerTool: HelmTool = {
     name: 'worker.spawn', description: 'Start the one local Pi fixture worker.', input: {},
-    async execute(_input, context) {
+    async execute(_input: Record<string, unknown>, context: HelmToolExecutionContext) {
       if (context.mode !== 'primary') return { state: 'refused', reason: 'fixture requires primary ownership' };
       const admitted = plane!.admitOrchestrator(workerCommand(context.sessionId, context), context, `fixture-${options.orchestrator}`);
       const observed = await plane!.perform(admitted.command.commandId, { executorId: 'fixture-host' }, later, async () => ({ value: true, state: 'known', source: 'fixture', observedAt: now }));
@@ -106,7 +127,14 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
       if (observed.state !== 'succeeded') return { state: observed.state === 'unknown' ? 'unknown' : 'refused', reason: observed.detail ?? 'fixture worker did not succeed' };
       return { state: 'succeeded', value: { commandId: admitted.command.commandId } };
     },
-  }]);
+  };
+  // Drivers provide the session context, never model JSON. Rebuild the small
+  // host registry at invocation so its durable owner fence is checked again.
+  const readTemplate = localFixtureReadRegistry(plane, { runId, sessionId: 'fixture-read-template', mode: 'primary' }, now);
+  const tools = new HelmToolRegistry([workerTool, ...readTemplate.all().map((entry) => ({
+    name: entry.name, description: entry.description, input: entry.input,
+    execute: (input: Record<string, unknown>, context: HelmToolExecutionContext) => localFixtureReadRegistry(plane!, context, now).invoke(entry.name, input, context),
+  }))]);
   faux.setResponses([
     ai.fauxAssistantMessage(ai.fauxToolCall('helm_write', { path: 'result.txt', contents: 'provider-free Pi fixture\n' })),
     ai.fauxAssistantMessage('not a WorkerResult'),

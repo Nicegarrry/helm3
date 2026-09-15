@@ -48,5 +48,14 @@ test('fixture operator server exposes the same read-only lifecycle projection', 
     const attempt = snapshot.attempts.find((entry) => entry.attemptId === fixture!.attemptId);
     assert.equal(attempt?.state, 'stopped');
     assert.equal(attempt?.outcome, null);
+    const brief = await fetch(`${operator.url}/api/operator/read/brief.get`).then(async (response) => {
+      assert.equal(response.status, 200);
+      return response.json() as Promise<{ state: string; value?: { text: string } }>;
+    });
+    assert.deepEqual(brief, { state: 'succeeded', value: { text: 'Provider-free local fixture Brief.', source: 'fixture://brief', observedAt: fixture.observedAt } });
+    const log = await fetch(`${operator.url}/api/operator/read/log.query?limit=1`).then((response) => response.json() as Promise<{ state: string; value?: { runId: string; events: unknown[] } }>);
+    assert.equal(log.state, 'succeeded');
+    assert.equal(log.value?.runId, fixture.runId);
+    assert.ok((log.value?.events.length ?? 0) <= 1);
   } finally { await operator?.close(); await fixture?.close(); await rm(directory, { recursive: true, force: true }); }
 });

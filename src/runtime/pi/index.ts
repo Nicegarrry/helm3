@@ -9,6 +9,7 @@ import { PiEventSpool } from './event-spool.js';
 import { workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
+import { z } from 'zod/v3';
 
 export type PiEffect = Readonly<{ effectId: string; kind: 'model.request' | 'workspace.write'; commandId: string }>;
 /** Trusted host must admit, claim, reserve and observe each effect. No authority is passed to the model. */
@@ -17,12 +18,20 @@ export interface PiAuthority {
   requestCancellation(commandId: string): Promise<void>;
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): Promise<void>;
 }
+const piThinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+export type PiThinkingLevel = z.infer<typeof piThinkingLevelSchema>;
+const piThinkingPolicySchema = z.object({ level: piThinkingLevelSchema }).strict();
+/** Trusted runtime configuration. It records Pi's selected SDK setting, never a provider reasoning guarantee. */
+export type PiThinkingPolicy = Readonly<z.infer<typeof piThinkingPolicySchema>>;
+export const defaultPiThinkingPolicy: PiThinkingPolicy = Object.freeze({ level: 'medium' });
 export type PiWorkerInput = Readonly<{
   commandId: string; attemptId: string; workspace: WorktreeReservation; owner: WorktreeOwner;
   workspaceManager: WorkspaceManager; authority: PiAuthority; journal: ArtifactJournal;
   stateRoot: string; modelRuntime: ModelRuntime; model: Model<Api>;
   /** Optional live-provider boundary. Omission preserves provider-free fixture behaviour. */
   access?: BoundedPiAccess;
+  /** Trusted host setting. The explicit default is forwarded to Pi rather than relying on its implicit default. */
+  thinking?: PiThinkingPolicy;
 }>;
 function noResources(runtime: ExtensionRuntime): ResourceLoader {
   return {
@@ -55,11 +64,14 @@ export class PiNativeWorker {
   private cancelled = false;
   private disposed = false;
   private running = false;
+  private thinking!: Readonly<{ requested: PiThinkingLevel; nativeSelected: PiThinkingLevel; providerEffective: 'unknown' }>;
   private constructor(private readonly input: PiWorkerInput) {}
   get sessionId(): string { return this.session.getSessionStats().sessionId; }
   get isActive(): boolean { return this.running || this.activeRequests.size > 0; }
   /** Read-only observation; missing Pi SDK usage remains explicitly unknown. */
   get contextOccupancy() { return observePiContext(this.session); }
+  /** Pi's requested and selected SDK setting; providers may ignore or translate it. */
+  get thinkingConfiguration(): Readonly<{ requested: PiThinkingLevel; nativeSelected: PiThinkingLevel; providerEffective: 'unknown' }> { return this.thinking; }
 
   static async start(input: PiWorkerInput): Promise<PiNativeWorker> {
     input.workspaceManager.assertOwner(input.workspace, input.owner);
@@ -147,13 +159,18 @@ export class PiNativeWorker {
         return { content: [{ type: 'text', text: `wrote ${params.path}` }], details: {} };
       },
     };
+    const requestedThinking = piThinkingPolicySchema.parse(this.input.thinking ?? defaultPiThinkingPolicy).level;
     const created = await createAgentSession({
       cwd: this.input.workspace.root, agentDir, modelRuntime: await this.guardedRuntime(), model: this.input.model,
       sessionManager: sessionFile ? SessionManager.open(sessionFile, sessionDir, this.input.workspace.root) : SessionManager.create(this.input.workspace.root, sessionDir),
       settingsManager: SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } }),
+      thinkingLevel: requestedThinking,
       noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()),
     });
     this.session = created.session;
+    this.thinking = Object.freeze({ requested: requestedThinking, nativeSelected: piThinkingLevelSchema.parse(this.session.thinkingLevel), providerEffective: 'unknown' });
+    this.artifacts.push(await this.input.journal.append({ source: 'pi.configuration', sourceIdentity: `pi-configuration:${this.input.attemptId}:${this.sessionId}`,
+      mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(this.thinking)) }));
     this.eventSpool = new PiEventSpool(this.input.journal, { commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId });
     this.unsubscribe = this.session.subscribe((event: AgentSessionEvent) => {
       try {

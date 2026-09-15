@@ -61,6 +61,8 @@ test('reopen continues edits and semantic evidence; malformed and exact terminal
     const first = await f.worker.run('edit', 'repair envelope');
     assert.equal(first.repaired, true);
     const before = await f.artifacts();
+    const configuration = before.find((entry) => entry.metadata.source === 'pi.configuration');
+    assert.deepEqual(JSON.parse(configuration!.text), { requested: 'medium', nativeSelected: 'off', providerEffective: 'unknown' }, 'the durable receipt distinguishes the host request from Pi selection and never claims provider-effective reasoning');
     assert.ok(before.some((entry) => entry.metadata.source === 'pi.envelope' && entry.text === 'bad envelope'));
     assert.ok(before.some((entry) => entry.metadata.source === 'pi.envelope' && entry.text === terminal));
     assert.equal(await readFile(join(f.workspace.root, 'README.md'), 'utf8'), 'first edit\n');

@@ -7,7 +7,7 @@ const require = createRequire(__filename);
 const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new(path: string, options?: { timeout?: number }) => Database };
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 
-export type TrustedReviewReceipt = Readonly<{ receiptId: string; pr: number; head: string; verdict: 'approved'; builder: Readonly<{ attemptId: string; sessionId: string; family: string }>; reviewer: Readonly<{ attemptId: string; sessionId: string; family: string }> }>;
+export type TrustedReviewReceipt = Readonly<{ receiptId: string; pr: number; head: string; acceptanceVersion: string; verdict: 'approved'; builder: Readonly<{ attemptId: string; sessionId: string; family: string }>; reviewer: Readonly<{ attemptId: string; sessionId: string; family: string }> }>;
 
 /**
  * Privileged host storage for machine-produced gate evidence and review provenance.
@@ -25,6 +25,6 @@ export class IntegrationEvidenceRegistry {
     if (!receipt.receiptId.trim() || !Number.isSafeInteger(receipt.pr) || receipt.pr < 1 || !sha.safeParse(receipt.head).success || receipt.builder.attemptId === receipt.reviewer.attemptId || receipt.builder.sessionId === receipt.reviewer.sessionId || receipt.builder.family === receipt.reviewer.family) throw new Error('Review receipt lacks independent trusted provenance');
     this.db.prepare('INSERT INTO integration_reviews(receipt_id,pr,head,bytes) VALUES(?,?,?,?)').run(receipt.receiptId, receipt.pr, receipt.head, JSON.stringify(receipt));
   }
-  acceptanceEvidence(pr: number, head: string): readonly { ref: string; head: string }[] { sha.parse(head); return (this.db.prepare('SELECT ref, head FROM integration_gates WHERE pr=? AND head=?').all(pr, head) as { ref: string; head: string }[]).map(row => Object.freeze({ ...row })); }
+  acceptanceEvidence(_pr: number, _head: string): readonly { ref: string; head: string; acceptanceVersion: string }[] { return []; }
   reviewReceipts(pr: number, head: string): readonly TrustedReviewReceipt[] { sha.parse(head); return (this.db.prepare('SELECT bytes FROM integration_reviews WHERE pr=? AND head=?').all(pr, head) as { bytes: string }[]).map(row => Object.freeze(JSON.parse(row.bytes) as TrustedReviewReceipt)); }
 }

@@ -14,10 +14,10 @@ const positive = z.number().int().positive();
 export type IntegrationFacts = Readonly<{
   repository: string; pr: number; head: ExactHead; baseRef: string; baseHead: ExactHead; state: 'OPEN' | 'MERGED' | 'CLOSED'; mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   checks: readonly (CiCheck & Readonly<{ name: string; appId: string | null }>)[];
-  acceptanceEvidence: readonly Readonly<{ ref: string; head: ExactHead }>[];
-  mergeCommit: ExactHead | null; targetHead: ExactHead | null; targetContainsMerge: boolean | null;
+  acceptanceEvidence: readonly Readonly<{ ref: string; head: ExactHead; acceptanceVersion: string }>[];
+  mergeCommit: ExactHead | null; targetHead: ExactHead | null; targetContainsMerge: boolean | null; observedMergeMethod: 'merge' | 'squash' | 'rebase' | null;
   /** Receipts are written by trusted runtime/session registries, never by a review body or account string. */
-  reviewReceipts: readonly Readonly<{ receiptId: string; pr: number; head: ExactHead; verdict: 'approved'; builder: Readonly<{ attemptId: string; sessionId: string; family: string }>; reviewer: Readonly<{ attemptId: string; sessionId: string; family: string }> }> [];
+  reviewReceipts: readonly Readonly<{ receiptId: string; pr: number; head: ExactHead; acceptanceVersion: string; verdict: 'approved'; builder: Readonly<{ attemptId: string; sessionId: string; family: string }>; reviewer: Readonly<{ attemptId: string; sessionId: string; family: string }> }> [];
 }>;
 export type RequiredCheck = Readonly<{ name: string; appId: string; source: 'check_run'; conclusion: 'success' }>;
 export type IntegrationRequirements = Readonly<{ mergeMethod: 'merge' | 'squash' | 'rebase'; requiredChecks: readonly RequiredCheck[]; acceptanceVersion: string; leaseRevision: number; expiresAt: string }>;
@@ -26,7 +26,7 @@ export type IntegrationPreparation = Readonly<{ repository: string; pr: number; 
 export type IntegrationGateway = Readonly<{
   read(pr: number): Promise<IntegrationFacts>;
   /** Must be a head-CAS. It may have taken effect when its transport result is ambiguous. */
-  merge(pr: number, expectedHead: ExactHead): Promise<void>;
+  merge(certificate: IntegrationMergePayload): Promise<void>;
 }>;
 
 function exactCommandHash(command: Command): string {
@@ -48,9 +48,10 @@ function validFacts(facts: IntegrationFacts, required: readonly RequiredCheck[] 
 /** Pure preparation: no caller-supplied account/team strings count as approval. */
 export async function prepareIntegration(gateway: IntegrationGateway, pr: number, requirements: IntegrationRequirements, now: () => string = () => new Date().toISOString()): Promise<IntegrationPreparation> {
   if (!positive.safeParse(pr).success) throw new Error('PR must be a positive integer');
-  if (!requirements.acceptanceVersion.trim() || !Number.isSafeInteger(requirements.leaseRevision) || requirements.leaseRevision < 1 || Date.parse(requirements.expiresAt) <= Date.parse(now())) throw new Error('Integration certificate requirements are invalid or expired');
+  if (!requirements.acceptanceVersion.trim() || !Number.isSafeInteger(requirements.leaseRevision) || requirements.leaseRevision < 1 || !Number.isFinite(Date.parse(requirements.expiresAt)) || Date.parse(requirements.expiresAt) <= Date.parse(now()) || requirements.requiredChecks.length === 0) throw new Error('Integration certificate requirements are invalid or expired');
   const frozen = Object.freeze({ ...requirements, requiredChecks: Object.freeze(requirements.requiredChecks.map(item => Object.freeze({ ...item }))) }); const facts = await gateway.read(pr); const refusal = validFacts(facts, frozen.requiredChecks);
   if (refusal) throw new Error(`Integration preparation refused: ${refusal}`);
+  if (facts.acceptanceEvidence.some(item => item.acceptanceVersion !== frozen.acceptanceVersion) || facts.reviewReceipts.some(item => item.acceptanceVersion !== frozen.acceptanceVersion)) throw new Error('Evidence acceptance version does not match certificate');
   return Object.freeze({ repository: facts.repository, pr, expectedHead: facts.head, expectedBaseRef: facts.baseRef, expectedBaseHead: facts.baseHead, acceptanceEvidence: Object.freeze(facts.acceptanceEvidence.map(item => item.ref)), reviewReceiptIds: Object.freeze(facts.reviewReceipts.map(item => item.receiptId)), preparedAt: now(), requirements: frozen, facts: Object.freeze(facts) });
 }
 
@@ -110,12 +111,12 @@ export async function mergeIntegration(prepared: IntegrationPreparation, input: 
       await input.assertAuthority(command, commandHash);
       await input.assertIntegrationExecutor(command, input.executor);
       effectAttempted = true;
-      await input.gateway.merge(payload.pr, payload.expectedHead);
+      await input.gateway.merge(payload);
     },
     observe: async command => {
       const current = await input.gateway.read(payload.pr);
       if (current.repository !== payload.repository || current.pr !== payload.pr) return { commandId: command.commandId, effectId: input.effectId, state: 'unknown', source: 'integration.github', observedAt: new Date().toISOString(), evidenceRefs: ['integration:identity-unreadable'], detail: 'merge readback identity changed' };
-      if (current.state === 'MERGED' && current.head === payload.expectedHead && current.mergeCommit && current.targetHead && current.targetContainsMerge) return { commandId: command.commandId, effectId: input.effectId, state: 'succeeded', source: 'integration.github', observedAt: new Date().toISOString(), evidenceRefs: [`github:pr:${payload.pr}:merged:${current.mergeCommit}`, `github:ref:${current.baseRef}:${current.targetHead}`] };
+      if (current.state === 'MERGED' && current.head === payload.expectedHead && current.baseRef === payload.expectedBaseRef && current.mergeCommit && current.targetHead && current.targetContainsMerge && current.observedMergeMethod === payload.mergeMethod) return { commandId: command.commandId, effectId: input.effectId, state: 'succeeded', source: 'integration.github', observedAt: new Date().toISOString(), evidenceRefs: [`github:pr:${payload.pr}:merged:${current.mergeCommit}`, `github:ref:${current.baseRef}:${current.targetHead}`] };
       return { commandId: command.commandId, effectId: input.effectId, state: effectAttempted ? 'unknown' : 'failed', source: 'integration.github', observedAt: new Date().toISOString(), evidenceRefs: [`github:pr:${payload.pr}:readback`], detail: effectAttempted ? 'Merge effect has no conclusive matching readback; no replay is attempted' : 'Merge effect did not start' };
     },
   };
@@ -132,7 +133,7 @@ function argv(method: string, path: string, fields: readonly string[] = []): str
 async function api(transport: TrackerCommandTransport, args: readonly string[]): Promise<Api> { const result = await transport(args, { timeoutMs: 10_000, outputByteLimit: 1024 * 1024 }); if (!result.ok || result.timedOut || result.outputTruncated) throw new Error('GitHub transport is unavailable or incomplete'); try { return object(JSON.parse(result.stdout)); } catch { throw new Error('GitHub response is invalid JSON'); } }
 
 /** Concrete argv-only GitHub gateway. Approval receipts remain a host-owned registry. */
-export function createGitHubIntegrationGateway(options: Readonly<{ repository: string; registry?: IntegrationEvidenceRegistry; /** Fixture port only; production must use registry. */ receipts?: () => readonly IntegrationFacts['reviewReceipts'][number][]; /** Fixture port only; production must use registry. */ acceptanceEvidence?: (pr: number, head: ExactHead) => readonly { ref: string; head: ExactHead }[]; transport?: TrackerCommandTransport; /** Fixtures only: REST merge guards the source SHA but has no atomic target-ref CAS. */ testOnlyAllowDirectMerge?: boolean }>): IntegrationGateway {
+export function createGitHubIntegrationGateway(options: Readonly<{ repository: string; registry?: IntegrationEvidenceRegistry; /** Fixture port only; production must use registry. */ receipts?: () => readonly IntegrationFacts['reviewReceipts'][number][]; /** Fixture port only; production must use registry. */ acceptanceEvidence?: (pr: number, head: ExactHead) => readonly IntegrationFacts['acceptanceEvidence'][number][]; transport?: TrackerCommandTransport; /** Fixtures only: REST merge guards the source SHA but has no atomic target-ref CAS. */ testOnlyAllowDirectMerge?: boolean }>): IntegrationGateway {
   repository.parse(options.repository); if (!options.registry && (!options.receipts || !options.acceptanceEvidence)) throw new Error('GitHub integration requires the durable evidence registry outside fixtures'); const transport = options.transport ?? ghCommandTransport;
   return {
     read: async pr => {
@@ -143,15 +144,15 @@ export function createGitHubIntegrationGateway(options: Readonly<{ repository: s
       const comparison = state === 'MERGED' && mergeCommit !== null ? await api(transport, argv('GET', `${base}/compare/${mergeCommit}...${targetHead}`)) : null; const targetContainsMerge = comparison === null ? null : ['ahead', 'identical'].includes(text(comparison.status, 'comparison.status'));
       const acceptanceEvidence = options.registry ? options.registry.acceptanceEvidence(pr, head) : options.acceptanceEvidence!(pr, head);
       const reviewReceipts = options.registry ? options.registry.reviewReceipts(pr, head) : options.receipts!().filter(receipt => receipt.pr === pr && receipt.head === head);
-      return Object.freeze({ repository: options.repository, pr, head, baseRef, baseHead, state, mergeable: typeof pull.mergeable_state === 'string' && pull.mergeable_state === 'clean' ? 'MERGEABLE' : 'UNKNOWN', checks: Object.freeze([...checkRows(completeRows(runs, 'check_runs'), 'check_run'), ...checkRows(completeRows(statuses, 'statuses'), 'status')]), acceptanceEvidence: Object.freeze(acceptanceEvidence), mergeCommit, targetHead, targetContainsMerge, reviewReceipts: Object.freeze(reviewReceipts) });
+      return Object.freeze({ repository: options.repository, pr, head, baseRef, baseHead, state, mergeable: typeof pull.mergeable_state === 'string' && pull.mergeable_state === 'clean' ? 'MERGEABLE' : 'UNKNOWN', checks: Object.freeze([...checkRows(completeRows(runs, 'check_runs'), 'check_run'), ...checkRows(completeRows(statuses, 'statuses'), 'status')]), acceptanceEvidence: Object.freeze(acceptanceEvidence), mergeCommit, targetHead, targetContainsMerge, observedMergeMethod: null, reviewReceipts: Object.freeze(reviewReceipts) });
     },
-    merge: async (pr, expectedHead) => {
-      positive.parse(pr); sha.parse(expectedHead);
+    merge: async certificate => {
+      const parsed = integrationMergePayloadSchema.parse(certificate);
       // GitHub's REST `sha` compares only the PR head. It cannot atomically bind
       // the target ref observed during prepare, so production execution must use
       // a merge-queue gateway with an equivalent target-lane guarantee instead.
       if (options.testOnlyAllowDirectMerge !== true) throw new Error('GitHub REST direct merge lacks atomic target-ref protection; use a merge-queue gateway');
-      await api(transport, argv('PUT', `repos/${options.repository}/pulls/${pr}/merge`, ['-f', `sha=${expectedHead}`]));
+      await api(transport, argv('PUT', `repos/${options.repository}/pulls/${parsed.pr}/merge`, ['-f', `sha=${parsed.expectedHead}`, '-f', `merge_method=${parsed.mergeMethod}`]));
     },
   };
 }

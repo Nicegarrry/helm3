@@ -6,7 +6,7 @@ import { createHostReviewToolRegistry } from '../../src/host/review-tools.js';
 const head = 'a'.repeat(40);
 function fixture(overrides: Partial<ConstructorParameters<typeof IndependentReviewService>[0]> = {}) {
   let spawns = 0;
-  const source = { workerId: 'builder-1', attemptId: 'attempt-builder', sessionId: 'session-builder', modelId: 'builder', family: 'fable', provider: 'faux', api: 'responses', repository: 'fixture/repo', runId: 'run-1', head, clean: true, contextRefs: ['builder-transcript-forbidden'] };
+  const source = { workerId: 'builder-1', attemptId: 'attempt-builder', sessionId: 'session-builder', modelId: 'builder', family: 'fable', provider: 'faux', api: 'responses', repository: 'fixture/repo', workspace: '/fixture/workspace', runId: 'run-1', head, clean: true, contextRefs: ['builder-transcript-forbidden'] };
   const service = new IndependentReviewService({
     source: async () => source,
     readArtifact: async (ref) => `immutable:${ref}`,

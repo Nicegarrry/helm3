@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { WorkerSpawnInput } from './worker-fleet.js';
+import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js';
+import type { HostControlPlane } from './index.js';
+import { PiWorkerFleet } from './worker-fleet.js';
+import type { WorkspaceManager } from '../workspace/index.js';
 
 export type ReviewRequest = Readonly<{
   sourceWorkerId: string;
@@ -11,7 +15,7 @@ export type ReviewRequest = Readonly<{
 }>;
 export type ReviewSource = Readonly<{
   workerId: string; attemptId: string; sessionId: string; modelId: string; family: string; provider: string; api: string;
-  repository: string; runId: string; head: string; clean: boolean; contextRefs: readonly string[];
+  repository: string; workspace: string; runId: string; head: string; clean: boolean; contextRefs: readonly string[];
 }>;
 export type ReviewManifest = Readonly<{ digest: string; entries: readonly Readonly<{ ref: string; hash: string }>[] }>;
 export type ReviewLaunch = Readonly<{ reviewId: string; source: ReviewSource; manifest: ReviewManifest; workerId: string; attemptId: string; sessionId: string }>;
@@ -55,4 +59,31 @@ export class IndependentReviewService {
     if (!spawned.workerId || !spawned.attemptId || !spawned.sessionId || spawned.attemptId === source.attemptId || spawned.sessionId === source.sessionId) throw new Error('reviewer did not receive distinct native provenance');
     return Object.freeze({ reviewId: `review-${randomUUID()}`, source: Object.freeze({ ...source, contextRefs: Object.freeze([...source.contextRefs]) }), manifest, ...spawned });
   }
+}
+
+/**
+ * Adapts the existing durable Host/Fleet/Workspace seams without widening the
+ * model-facing worker inspection projection. The host supplies policy facts;
+ * the adapter only reconstructs already-recorded builder provenance.
+ */
+export function createFleetIndependentReviewService(input: Readonly<{
+  host: HostControlPlane; fleet: PiWorkerFleet; workspaceManager: WorkspaceManager; context: HelmToolExecutionContext;
+  authorize(source: ReviewSource, reviewerModelId: string): Promise<void>;
+}>): IndependentReviewService {
+  let cached: ReviewSource | undefined;
+  const source = async (workerId: string): Promise<ReviewSource | undefined> => {
+    const inspected = await input.fleet.inspect(input.context, workerId);
+    const snapshot = await input.host.snapshot(input.context.runId);
+    const attempt = snapshot.attempts.find(item => item.attemptId === inspected.attemptId);
+    const command = snapshot.commands.find(item => item.command.commandId === inspected.spawnCommandId)?.command;
+    const payload = command?.payload as Partial<{ modelId: string; modelProvider: string; modelApi: string }> | undefined;
+    if (!attempt || !command || !payload || typeof payload.modelId !== 'string' || typeof payload.modelProvider !== 'string' || typeof payload.modelApi !== 'string') return undefined;
+    const reservation = input.workspaceManager.reservation(inspected.workspace);
+    await input.workspaceManager.assertExactHead(reservation, attempt.baseSha);
+    cached = Object.freeze({ workerId, attemptId: attempt.attemptId, sessionId: inspected.sessionId, modelId: payload.modelId, family: attempt.family, provider: payload.modelProvider, api: payload.modelApi, repository: reservation.repository, workspace: inspected.workspace, runId: input.context.runId, head: attempt.baseSha, clean: true, contextRefs: Object.freeze([]) });
+    return cached;
+  };
+  return new IndependentReviewService({ source, readArtifact: (ref) => input.host.artifactsFor(input.context).readText(ref),
+    inspectSource: async (value) => { const reservation = input.workspaceManager.reservation(value.workspace); await input.workspaceManager.assertExactHead(reservation, value.head); return { head: value.head, clean: true }; },
+    authorize: input.authorize, spawn: async request => input.fleet.spawn(input.context, request) });
 }

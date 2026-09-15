@@ -109,6 +109,15 @@ export class WorkspaceManager {
     ]);
     if (head.trim() !== expectedHead || status !== '') throw new WorkspaceRefusal('worktree does not match the expected clean head');
   }
+  /** Trusted host observation for a completed worker handoff; it grants no ownership or write capability. */
+  async inspectGit(reservation: WorktreeReservation): Promise<Readonly<{ head: string; clean: boolean }>> {
+    this.assertOwner(reservation, reservation.owner);
+    const [{ stdout: head }, { stdout: status }] = await Promise.all([
+      exec('git', ['-C', reservation.root, 'rev-parse', 'HEAD']),
+      exec('git', ['-C', reservation.root, 'status', '--porcelain', '--untracked-files=all']),
+    ]);
+    return Object.freeze({ head: head.trim(), clean: status === '' });
+  }
   /** Trusted host takeover; the old generation is fenced across all managers. */
   transfer(reservation: WorktreeReservation, expectedGeneration: number, owner: WorktreeOwner): WorktreeReservation {
     return this.transaction(() => {

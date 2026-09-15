@@ -73,14 +73,15 @@ export function createFleetIndependentReviewService(input: Readonly<{
   let cached: ReviewSource | undefined;
   const source = async (workerId: string): Promise<ReviewSource | undefined> => {
     const inspected = await input.fleet.inspect(input.context, workerId);
+    if (inspected.state !== 'terminal') return undefined;
     const snapshot = await input.host.snapshot(input.context.runId);
     const attempt = snapshot.attempts.find(item => item.attemptId === inspected.attemptId);
     const command = snapshot.commands.find(item => item.command.commandId === inspected.spawnCommandId)?.command;
     const payload = command?.payload as Partial<{ modelId: string; modelProvider: string; modelApi: string }> | undefined;
     if (!attempt || !command || !payload || typeof payload.modelId !== 'string' || typeof payload.modelProvider !== 'string' || typeof payload.modelApi !== 'string') return undefined;
     const reservation = input.workspaceManager.reservation(inspected.workspace);
-    await input.workspaceManager.assertExactHead(reservation, attempt.baseSha);
-    cached = Object.freeze({ workerId, attemptId: attempt.attemptId, sessionId: inspected.sessionId, modelId: payload.modelId, family: attempt.family, provider: payload.modelProvider, api: payload.modelApi, repository: reservation.repository, workspace: inspected.workspace, runId: input.context.runId, head: attempt.baseSha, clean: true, contextRefs: Object.freeze([]) });
+    const git = await input.workspaceManager.inspectGit(reservation);
+    cached = Object.freeze({ workerId, attemptId: attempt.attemptId, sessionId: inspected.sessionId, modelId: payload.modelId, family: attempt.family, provider: payload.modelProvider, api: payload.modelApi, repository: reservation.repository, workspace: inspected.workspace, runId: input.context.runId, head: git.head, clean: git.clean, contextRefs: Object.freeze([]) });
     return cached;
   };
   return new IndependentReviewService({ source, readArtifact: (ref) => input.host.artifactsFor(input.context).readText(ref),

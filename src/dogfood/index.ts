@@ -9,7 +9,7 @@ import { z } from 'zod/v3';
 import type { Command } from '../contracts/index.js';
 import { openHost, PiNativeRuntime, type HostControlPlane } from '../host/index.js';
 import { AstraDriver, AstraLoopbackMcpTransport, createAstraSdk, FableDriver, HelmToolRegistry, type HelmToolExecutionContext, type OrchestratorSessionGuard } from '../runtime/orchestrator/index.js';
-import { PiNativeWorker } from '../runtime/pi/index.js';
+import { PiNativeWorker, type PiAuthority } from '../runtime/pi/index.js';
 import { WorkspaceManager, type WorktreeReservation } from '../workspace/index.js';
 
 const exec = promisify(execFile);
@@ -74,13 +74,18 @@ export async function runLocalFixture(options: LocalFixtureOptions): Promise<Loc
   let modelRuntime: { dispose?: () => void } | undefined;
   let bridge: AstraLoopbackMcpTransport | undefined; let astraExecutable: string | undefined;
   let activePiAuthority: ReturnType<HostControlPlane['piAuthority']> | undefined;
+  const afterWriteMarker = process.env.HELM_DOGFOOD_AFTER_WRITE_MARKER;
   const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
   const ai = await import('@earendil-works/pi-ai');
   const runtime = await ModelRuntime.create({ authPath: join(root, 'no-account-auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
   modelRuntime = runtime as unknown as { dispose?: () => void };
   const faux = ai.fauxProvider({ provider: 'helm3-local-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('helm3-local-faux', 'offline');
   const nativeRuntime = new PiNativeRuntime({
-    authority: () => activePiAuthority ??= plane!.piAuthority({ attemptId, actorId: 'fixture-pi', executorId: 'fixture-pi', commandForEffect: (effect) => piCommand(effect), observedSettlement: (effect) => effect.kind === 'model.request' ? { state: 'known', amount: 1 } : undefined }),
+    authority: (): PiAuthority => {
+      activePiAuthority ??= plane!.piAuthority({ attemptId, actorId: 'fixture-pi', executorId: 'fixture-pi', commandForEffect: (effect) => piCommand(effect), observedSettlement: (effect) => effect.kind === 'model.request' ? { state: 'known', amount: 1 } : undefined });
+      if (!afterWriteMarker) return activePiAuthority;
+      return { ...activePiAuthority, perform: async (effect, action) => activePiAuthority!.perform(effect, async () => { await action(); if (effect.kind === 'workspace.write') { await writeFile(afterWriteMarker, 'workspace write completed before observation\n'); await new Promise<void>(() => undefined); } }) };
+    },
     start: async ({ command, journal, authority }) => PiNativeWorker.start({ commandId: command.commandId, attemptId, workspace, owner, workspaceManager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel() }),
     prompt: () => 'Write result.txt using helm_write, then return a WorkerResult JSON envelope.', correction: () => 'Return only a valid WorkerResult JSON envelope.',
   });

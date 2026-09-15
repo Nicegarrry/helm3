@@ -18,3 +18,5 @@ node --import tsx src/dogfood/observe.ts --orchestrator fable --state-directory 
 ```
 
 It retains the supplied state directory for inspection. It performs no login, account read, provider request, GitHub operation, or network call beyond the generated loopback MCP server.
+
+`test/dogfood/connected.test.ts` also runs a fixture-only crash oracle. A child process blocks after the Pi `helm_write` action has completed but before the host observes it; the parent receives its local marker, kills that child, reopens the host state, and observes the parent command as `unknown`. The same command is not claimable for replay and the already-written file remains byte-for-byte unchanged. This is local fault evidence only.

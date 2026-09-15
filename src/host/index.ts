@@ -206,7 +206,7 @@ export class HostArtifactStore implements OrchestratorArtifacts {
   }
 
   async writeText(source: string, text: string, sourceIdentity?: string): Promise<string> { return this.write('text', source, text, sourceIdentity); }
-  async writeEffect(source: string, text: string): Promise<string> { return this.write('effect', source, text); }
+  async writeEffect(source: string, text: string, sourceIdentity?: string): Promise<string> { return this.write('effect', source, text, sourceIdentity); }
   journalForTrustedPi(): ArtifactJournal { return this.journal; }
 
   async readText(ref: string): Promise<string> { return this.read(ref, 'text'); }
@@ -512,6 +512,14 @@ export class HostControlPlane {
     const stored = decodeRef(ref);
     if (stored.kind !== 'effect' || stored.runId !== runId) throw new Error('fleet record is outside the requested run');
     const parsed = decodeEnvelope(JSON.parse((await this.journal.read(stored.raw, stored.sourceIdentity, { permitSensitive: true })).toString('utf8')));
+    if (parsed.kind !== 'effect' || parsed.runId !== runId) throw new Error('fleet record does not match durable bytes');
+    return parsed.text;
+  }
+
+  async readFleetEffectByIdentity(runId: string, sourceIdentity: string): Promise<string | undefined> {
+    const metadata = (await this.journal.metadata()).find((entry) => entry.sourceIdentity === sourceIdentity);
+    if (!metadata) return undefined;
+    const parsed = decodeEnvelope(JSON.parse((await this.journal.read(metadata.raw, metadata.sourceIdentity, { permitSensitive: true })).toString('utf8')));
     if (parsed.kind !== 'effect' || parsed.runId !== runId) throw new Error('fleet record does not match durable bytes');
     return parsed.text;
   }

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "observedAt": "2026-09-15T21:28:53Z",
+  "observedAt": "2026-09-15T21:33:26.141Z",
   "checkpointDate": "2026-09-16",
   "scope": "Accepted PR #99 saved historical projection viewer and overnight Wave 13 checkpoint",
   "repository": {
@@ -80,7 +80,7 @@
     "purpose": "PR #99 saved-viewer acceptance follow-up"
   },
   "economy": {
-    "observedAt": "2026-09-15T21:19:00Z",
+    "observedAt": "2026-09-15T21:19:25.358600Z",
     "newPaidApiCalls": 0,
     "combinedGuardUsd": 5.42051699,
     "combinedLimitUsd": 10,

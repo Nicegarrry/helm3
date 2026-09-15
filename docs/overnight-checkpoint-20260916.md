@@ -2,7 +2,7 @@
 
 This is a dated handoff of accepted work and remaining priorities. GitHub remains the live Map and the original Brief/addendum remain authoritative.
 
-PR #99 is accepted from reviewed head `a644223f70e921f92a8c4debdb7bcfb08930d1a3`, merged as `6ce2f92a4c5f5dfa2d92f70119b62188d82ec84c` at `2026-09-15T21:28:53Z`. Independent Spec and Standards reports are preserved at `/private/tmp/helm3-pr99-spec.md` and `/private/tmp/helm3-standards.md`; six CI checks passed. The exact reviewed head gate passed typecheck and **236/236 tests** from `21:26:54.834Z` to `21:27:49.379Z`. The [sanitised receipt](evidence/wave13-saved-viewer-20260916.json) binds the head, gate and audit.
+PR #99 is accepted from reviewed head `a644223f70e921f92a8c4debdb7bcfb08930d1a3`, merged as `6ce2f92a4c5f5dfa2d92f70119b62188d82ec84c` at `2026-09-15T21:28:53Z`. Independent Spec and Standards reports are preserved at `/private/tmp/helm3-pr99-spec.md` and `/private/tmp/helm3-pr99-standards.md`; six CI checks passed. The exact reviewed head gate passed typecheck and **236/236 tests** from `21:26:54.834Z` to `21:27:49.379Z`. The [sanitised receipt](evidence/wave13-saved-viewer-20260916.json) binds the head, gate and audit.
 
 The saved-viewer audit loaded the preserved Astra fixture through the API and CLI, verified equal snapshot data, historical-untrusted metadata and the `actionAuthority: none` wrapper, and inspected the rendered page in isolated headless Chrome. The source hash and `observedAt` were preserved; the server stopped cleanly after inspection. This is a saved projection seam: it does not claim live host access, provider calls, full CLIENTS acceptance, or a live cockpit/Map result.
 

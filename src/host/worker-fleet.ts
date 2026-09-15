@@ -60,7 +60,7 @@ export class PiWorkerFleet {
   readonly #live = new Map<string, LiveWorker>();
   readonly #records = new Map<string, StoredWorker>();
   readonly #runs = new Map<string, Promise<void>>();
-  readonly #stopping = new Set<string>();
+  readonly #stopping = new Map<string, Promise<'stopped' | 'unknown'>>();
   constructor(private readonly binding: WorkerFleetBinding) {}
 
   async spawn(context: HelmToolExecutionContext, input: WorkerSpawnInput): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'ready' }> {
@@ -72,7 +72,7 @@ export class PiWorkerFleet {
     const command = this.binding.spawnCommand(validated, workerId, attemptId, context);
     const provenance = spawnProvenance(command);
     if (provenance.modelId !== validated.modelId || this.binding.inputDigest(command) !== digest(validated)) throw new Error('worker spawn command does not bind the validated input references');
-    const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId);
+    const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId, attemptId);
     const attempt = this.binding.attempt(admitted.command, workerId);
     let record: StoredWorker | undefined;
     const effect: KernelEffect = {
@@ -130,7 +130,11 @@ export class PiWorkerFleet {
       this.binding.host.reportAttemptStop(live.record.attemptId, 'stopped');
       this.binding.host.appendFleetEvent(event('worker.completed', terminal, live.context.runId, { result: outcome.result.status, evidenceRefs: terminal.evidenceRefs }));
     } catch {
-      if (this.#stopping.has(workerId)) return;
+      const stop = this.#stopping.get(workerId);
+      // A confirmed local stop has one authoritative disposition, recorded by
+      // worker.stop.  If cancellation was not confirmed, this runner still
+      // owns reconciliation: an ignored abort can later complete or fail.
+      if (stop && await stop === 'stopped') return;
       // Once completion is durably recorded it wins over a later projection or
       // event failure. Never rewrite that stable terminal disposition as an
       // unknown worker merely because a subsequent bookkeeping call failed.
@@ -166,40 +170,55 @@ export class PiWorkerFleet {
   }
 
   private async persistRecord(context: HelmToolExecutionContext, record: StoredWorker, phase: 'terminal' | 'stop'): Promise<StoredWorker> {
-    const identity = `host-worker-${phase}:${context.runId}:${record.workerId}`;
-    const ref = await this.binding.host.artifactsFor(context).writeEffect(`host.worker_fleet.${phase}`, JSON.stringify(record), identity);
+    const ref = await this.binding.host.writeFleetEffect({ runId: context.runId, attemptId: record.attemptId, spawnCommandId: record.spawnCommandId, phase, text: JSON.stringify(record) });
     return Object.freeze({ ...record, evidenceRefs: Object.freeze([...record.evidenceRefs, ref]) });
   }
 
-  async inspect(context: HelmToolExecutionContext, workerId: string): Promise<WorkerInspect> {
-    let record = this.#records.get(workerId);
-    const live = this.#live.get(workerId);
-    if (!record) {
-      const snapshot = await this.binding.host.snapshot(context.runId);
-      const command = snapshot.commands.find((entry) => (entry.command.payload as { workerId?: unknown }).workerId === workerId);
-      const terminal = await this.binding.host.readFleetEffectByIdentity(context.runId, `host-worker-terminal:${context.runId}:${workerId}`)
-        ?? await this.binding.host.readFleetEffectByIdentity(context.runId, `host-worker-stop:${context.runId}:${workerId}`);
-      const ref = command?.observations.flatMap((entry) => entry.evidenceRefs).find((entry) => entry.includes('"kind":"effect"'));
-      if (terminal || ref) {
-        try { record = JSON.parse(terminal ?? await this.binding.host.readFleetEffect(context.runId, ref!)) as StoredWorker; this.#records.set(workerId, record); }
-        catch { /* durable bytes unavailable => honest unknown below */ }
-      }
+  private async durableRecord(runId: string, workerId: string): Promise<StoredWorker | undefined> {
+    const snapshot = await this.binding.host.snapshot(runId);
+    const command = snapshot.commands.find((entry) => (entry.command.payload as { workerId?: unknown }).workerId === workerId);
+    const attemptId = (command?.command.payload as { attemptId?: unknown } | undefined)?.attemptId;
+    const terminal = typeof attemptId === 'string'
+      ? await this.binding.host.readFleetEffectByIdentity(runId, `host-worker-terminal:${runId}:${attemptId}`)
+        ?? await this.binding.host.readFleetEffectByIdentity(runId, `host-worker-stop:${runId}:${attemptId}`)
+      : undefined;
+    if (terminal) {
+      try { return JSON.parse(terminal) as StoredWorker; } catch { return undefined; }
     }
+    const ref = command?.observations.flatMap((entry) => entry.evidenceRefs).find((entry) => entry.includes('"kind":"effect"'));
+    if (!ref) return undefined;
+    try { return JSON.parse(await this.binding.host.readFleetEffect(runId, ref)) as StoredWorker; } catch { return undefined; }
+  }
+
+  async inspect(context: HelmToolExecutionContext, workerId: string): Promise<WorkerInspect> {
+    // Durable terminal/stop evidence wins over a stale in-memory projection.
+    let record = await this.durableRecord(context.runId, workerId) ?? this.#records.get(workerId);
+    const live = this.#live.get(workerId);
     if (!record) throw new Error('unknown worker');
+    this.#records.set(workerId, record);
     if (!live) return { ...record, live: 'unknown', state: record.state === 'terminal' ? 'terminal' : 'unknown', evidenceRefs: record.evidenceRefs };
     return { ...live.record, state: live.worker.isActive ? 'running' : live.record.state, live: 'known', activeRequests: live.worker.isActive ? 1 : 0, contextOccupancy: live.worker.contextOccupancy, evidenceRefs: live.record.evidenceRefs };
   }
 
   async stop(context: HelmToolExecutionContext, workerId: string): Promise<{ state: 'stopped' | 'pending' | 'unknown'; evidenceRefs: readonly string[] }> {
-    const live = this.#live.get(workerId); const record = this.#records.get(workerId);
+    const live = this.#live.get(workerId); const record = await this.durableRecord(context.runId, workerId) ?? this.#records.get(workerId);
     if (!record) throw new Error('unknown worker');
     if (!live && record.state === 'terminal') return { state: 'stopped', evidenceRefs: record.evidenceRefs };
+    if (!live && record.cancellationRequested) return { state: 'unknown', evidenceRefs: record.evidenceRefs };
     const command = this.binding.stopCommand(record, context);
     const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId);
     let disposition: 'stopped' | 'unknown' = 'unknown'; let ref: string | undefined;
+    let resolveStop: (value: 'stopped' | 'unknown') => void = () => undefined;
+    const stopObserved = new Promise<'stopped' | 'unknown'>((resolve) => { resolveStop = resolve; });
     const effect: KernelEffect = {
       effectId: `host:worker-stop:${workerId}`,
-      execute: async () => { if (live) this.#stopping.add(workerId); disposition = live ? await live.worker.stopLocal() : 'unknown'; },
+      execute: async () => {
+        if (!live) { resolveStop('unknown'); return; }
+        this.#stopping.set(workerId, stopObserved);
+        try { disposition = await live.worker.stopLocal(); }
+        catch { disposition = 'unknown'; }
+        finally { resolveStop(disposition); }
+      },
       observe: async () => {
         const updated = await this.persistRecord(context, Object.freeze({ ...record, state: disposition === 'stopped' ? 'terminal' : 'unknown', cancellationRequested: true }), 'stop');
         this.#records.set(workerId, updated); ref = updated.evidenceRefs.at(-1)!;
@@ -209,9 +228,12 @@ export class PiWorkerFleet {
     };
     const observed = await this.binding.host.performAdmitted(admitted.command.commandId, this.binding.executor, this.binding.claimExpiresAt(), this.binding.readFact, effect);
     if (observed.state === 'succeeded') {
+      // Only after worker.stop itself is observed are all attempt commands
+      // terminal, so this is the point at which capacity can be released.
+      this.binding.host.reportAttemptStop(record.attemptId, 'stopped');
       this.#live.delete(workerId); this.#runs.delete(workerId); this.#stopping.delete(workerId);
       if (live && !live.worker.isActive) live.worker.dispose();
-    }
+    } else this.#stopping.delete(workerId);
     return { state: observed.state === 'succeeded' ? 'stopped' : 'unknown', evidenceRefs: ref ? [ref] : [] };
   }
 }

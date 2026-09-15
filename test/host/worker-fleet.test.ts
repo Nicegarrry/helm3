@@ -53,6 +53,8 @@ test('worker tools create a short setup effect, remain inspectable while running
     const active = await registry.invoke('worker.inspect', { workerId }, context); assert.equal(active.state, 'succeeded'); assert.equal((active as { value: { live: string } }).value.live, 'known');
     const stopped = await registry.invoke('worker.stop', { workerId }, context); assert.equal(stopped.state, 'succeeded');
     await new Promise((resolve) => setImmediate(resolve));
+    const stoppedAttempt = (await plane.snapshot('run')).attemptLifecycles.find((entry) => entry.attemptId === (start.value as { attemptId: string }).attemptId);
+    assert.equal(stoppedAttempt?.state, 'finished', 'a confirmed native stop closes its bound attempt only after worker.stop is observed');
     plane.close(); plane = await openHost({ stateDirectory: state, now: () => stamp, kinds: { 'worker.spawn': { payloadSchema: payload }, 'worker.stop': { payloadSchema: z.object({ workerId: z.string() }).strict() } } });
     const recovered = await plane.recover('run'); assert.equal(recovered.commands.find((entry) => entry.command.commandId === `spawn-${workerId}`)?.status, 'succeeded');
     const restartedFleet = new PiWorkerFleet({ ...(fleet as unknown as { binding: ConstructorParameters<typeof PiWorkerFleet>[0] }).binding, host: plane });

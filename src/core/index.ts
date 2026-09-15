@@ -672,9 +672,15 @@ class Kernel {
   }
 
   private attemptIdFor(command: Command, caller: TrustedCaller): string | undefined {
-    if (command.origin !== 'worker') return undefined;
-    if (!caller.attemptId || !z.string().min(1).safeParse(caller.attemptId).success) throw new Error('worker commands require a trusted stable attempt identity');
-    return caller.attemptId;
+    if (command.origin === 'worker') {
+      if (!caller.attemptId || !z.string().min(1).safeParse(caller.attemptId).success) throw new Error('worker commands require a trusted stable attempt identity');
+      return caller.attemptId;
+    }
+    // A host-created spawn is the one orchestrator command that establishes a
+    // worker attempt.  No other orchestrator effect may smuggle itself into a
+    // worker lifecycle through the trusted caller capability.
+    if (command.kind === 'worker.spawn' && caller.attemptId && z.string().min(1).safeParse(caller.attemptId).success) return caller.attemptId;
+    return undefined;
   }
 
   private loadLease(leaseId: string): AutonomyLease {

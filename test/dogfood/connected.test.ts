@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { runLocalFixture } from '../../src/dogfood/index.js';
+import { startLocalFixtureOperatorServer } from '../../src/dogfood/observe.js';
 
 for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orchestrator} fixture drives one host-fenced Pi faux worker and retains recovery evidence`, async () => {
   const directory = await mkdtemp(join(tmpdir(), `helm3-connected-${orchestrator}-`)); let fixture: Awaited<ReturnType<typeof runLocalFixture>> | undefined;
@@ -28,7 +29,24 @@ test('after-write fixture interruption recovers unknown effects and refuses repl
     const before = await readFile(join(stateDirectory, 'worker', 'result.txt'), 'utf8');
     const { openHost } = await import('../../src/host/index.js'); const { z } = await import('zod/v3');
     const host = await openHost({ stateDirectory: join(stateDirectory, 'host'), runtime: { async createEffect() { return { effectId: 'replay-fixture', async execute() {}, async observe() { return { commandId: 'fixture-worker-spawn', effectId: 'replay-fixture', state: 'succeeded' as const, source: 'fixture', observedAt: '2026-09-15T00:00:00.000Z', evidenceRefs: [] }; } }; } }, kinds: { 'worker.spawn': { payloadSchema: z.object({ path: z.literal('result.txt'), contents: z.literal('provider-free Pi fixture\n') }).strict() }, 'pi.model': { payloadSchema: z.object({ effectId: z.string(), kind: z.enum(['model.request', 'workspace.write']) }).strict(), resourceRequest: () => ({ poolId: 'fixture-requests', unit: 'requests', upperBound: 1, consumer: 'worker' as const }) }, 'pi.write': { payloadSchema: z.object({ effectId: z.string(), kind: z.enum(['model.request', 'workspace.write']) }).strict() } } });
-    try { const recovered = await host.recover('fixture-run'); assert.equal(recovered.commands.find((record) => record.command.commandId === 'fixture-worker-spawn')?.status, 'unknown'); await assert.rejects(host.perform('fixture-worker-spawn', { executorId: 'fixture-replay' }, '2099-01-01T00:00:00.000Z', async () => ({ value: true, state: 'known' as const, source: 'fixture', observedAt: '2026-09-15T00:00:00.000Z' })), /not claimable/); assert.equal(await readFile(join(stateDirectory, 'worker', 'result.txt'), 'utf8'), before); }
+    try { const recovered = await host.recover('fixture-run'); assert.equal(recovered.commands.find((record) => record.command.commandId === 'fixture-worker-spawn')?.status, 'unknown'); assert.equal(recovered.commands.find((record) => record.command.kind === 'pi.write')?.status, 'unknown'); let replayExecuted = 0; await assert.rejects(host.perform('fixture-worker-spawn', { executorId: 'fixture-replay' }, '2099-01-01T00:00:00.000Z', async () => { replayExecuted++; return { value: true, state: 'known' as const, source: 'fixture', observedAt: '2026-09-15T00:00:00.000Z' }; }), /not claimable/); assert.equal(replayExecuted, 0); assert.equal(await readFile(join(stateDirectory, 'worker', 'result.txt'), 'utf8'), before); }
     finally { host.close(); }
   } finally { child.kill('SIGKILL'); await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('fixture operator server exposes the same read-only lifecycle projection', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helm3-connected-operator-')); let fixture: Awaited<ReturnType<typeof runLocalFixture>> | undefined; let operator: Awaited<ReturnType<typeof startLocalFixtureOperatorServer>> | undefined;
+  try {
+    fixture = await runLocalFixture({ stateDirectory: directory, orchestrator: 'fable' });
+    operator = await startLocalFixtureOperatorServer(fixture);
+    const snapshot = await fetch(operator.apiUrl).then(async (response) => {
+      assert.equal(response.status, 200);
+      return response.json() as Promise<{ source: { evidenceMode: string }; attempts: Array<{ attemptId: string; state: string; outcome: unknown }> }>;
+    });
+    assert.equal(snapshot.source.evidenceMode, 'fixture');
+    const attempt = snapshot.attempts.find((entry) => entry.attemptId === fixture!.attemptId);
+    assert.equal(attempt?.state, 'stopped');
+    assert.equal(attempt?.outcome, null);
+  } finally { await operator?.close(); await fixture?.close(); await rm(directory, { recursive: true, force: true }); }
 });

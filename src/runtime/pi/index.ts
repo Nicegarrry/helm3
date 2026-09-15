@@ -45,6 +45,8 @@ export type PiWorkerInput = Readonly<{
 export type PiPersistedSession = Readonly<{ sessionId: string; sessionFile: string; historyHash: string; branchDigest: string }>;
 /** Evidence returned by an idle native branch fork. No provider request is made. */
 export type PiForkedSession = Readonly<{ worker: PiNativeWorker; predecessor: PiPersistedSession; successor: PiPersistedSession; leafId: string }>;
+/** Read-only, host-trusted source facts needed to admit one exact native fork. */
+export type PiForkSourceSnapshot = Readonly<{ sessionId: string; historyHash: string; branchDigest: string; leafId: string }>;
 /** Caller-selected immutable evidence only; this API never discovers transcripts or tracker state. */
 export type PiCheckpointEvidence = Readonly<{ sourceIdentity: string; raw: RawArtifactRef }>;
 export type PiManualCheckpoint = Readonly<{ objective: PiCheckpointEvidence; acceptance: PiCheckpointEvidence; brief: PiCheckpointEvidence; map: PiCheckpointEvidence; decisions: readonly PiCheckpointEvidence[]; handoffs: readonly PiCheckpointEvidence[] }>;
@@ -151,7 +153,7 @@ export class PiNativeWorker {
    * intentionally idle: the caller must create a separate Helm continuation
    * command before it can request a model turn.
    */
-  static async forkAtCurrentTip(input: PiWorkerInput, persisted: PiPersistedSession): Promise<PiForkedSession> {
+  static async inspectForkSource(input: Pick<PiWorkerInput, 'workspace' | 'workspaceManager' | 'owner' | 'stateRoot'>, persisted: PiPersistedSession): Promise<PiForkSourceSnapshot> {
     if (!persisted.sessionId.trim() || !persisted.sessionFile.trim() || !/^sha256:[0-9a-f]{64}$/.test(persisted.historyHash) || !/^sha256:[0-9a-f]{64}$/.test(persisted.branchDigest)) throw new Error('Pi persisted session identity is required');
     input.workspaceManager.assertOwner(input.workspace, input.owner);
     await mkdir(input.stateRoot, { recursive: true, mode: 0o700 });
@@ -169,14 +171,22 @@ export class PiNativeWorker {
     const leafId = manager.getLeafId();
     const branchDigest = `sha256:${createHash('sha256').update(JSON.stringify(manager.getBranch())).digest('hex')}`;
     if (!leafId || branchDigest !== persisted.branchDigest) throw new Error('persisted Pi session branch changed');
-    const forkFile = manager.createBranchedSession(leafId);
+    return Object.freeze({ sessionId: persisted.sessionId, historyHash: persisted.historyHash, branchDigest, leafId });
+  }
+  static async forkAtCurrentTip(input: PiWorkerInput, persisted: PiPersistedSession, expectedLeafId?: string): Promise<PiForkedSession> {
+    const source = await PiNativeWorker.inspectForkSource(input, persisted);
+    if (expectedLeafId && source.leafId !== expectedLeafId) throw new Error('persisted Pi session leaf changed');
+    const { SessionManager } = await import('@earendil-works/pi-coding-agent');
+    const stateRoot = await realpath(input.stateRoot); const sessionRoot = await realpath(join(stateRoot, 'sessions'));
+    const manager = SessionManager.open(await realpath(persisted.sessionFile), sessionRoot, input.workspace.root);
+    const forkFile = manager.createBranchedSession(source.leafId);
     if (!forkFile) throw new Error('Pi persisted session fork was not written');
     const worker = new PiNativeWorker({ ...input, stateRoot });
     try {
       await worker.initialize(forkFile);
       const successor = await worker.persistedSession();
       if (successor.sessionId === persisted.sessionId || successor.branchDigest !== persisted.branchDigest) throw new Error('Pi fork did not create the expected independent current branch');
-      return Object.freeze({ worker, predecessor: persisted, successor, leafId });
+      return Object.freeze({ worker, predecessor: persisted, successor, leafId: source.leafId });
     } catch (error) { worker.dispose(); throw error; }
   }
   private assertActive(): void {

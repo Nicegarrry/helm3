@@ -3,7 +3,7 @@ import { realpath } from 'node:fs/promises';
 import type { Attempt, Command, Event, Observation, Precondition } from '../contracts/index.js';
 import type { KernelEffect, TrustedExecutor } from '../core/index.js';
 import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js';
-import type { PiNativeWorker, PiPersistedSession } from '../runtime/pi/index.js';
+import type { PiForkSourceSnapshot, PiNativeWorker, PiPersistedSession } from '../runtime/pi/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../workspace/index.js';
 import type { HostControlPlane } from './index.js';
 
@@ -78,7 +78,8 @@ export type WorkerFleetBinding = Readonly<{
   spawnCommand(input: WorkerSpawnInput, workerId: string, attemptId: string, context: HelmToolExecutionContext): Command;
   /** The generated successor identity is host-owned and must be bound by the immutable command payload. */
   steerCommand?(input: WorkerSteerInput, workerId: string, record: StoredWorker, attemptId: string, context: HelmToolExecutionContext): Command;
-  forkCommand?(input: WorkerForkInput, workerId: string, record: StoredWorker, attemptId: string, context: HelmToolExecutionContext): Command;
+  /** The source snapshot is observed by the host, never supplied by the model. */
+  forkCommand?(input: WorkerForkInput, workerId: string, record: StoredWorker, attemptId: string, source: PiForkSourceSnapshot, context: HelmToolExecutionContext): Command;
   /** Extract the host-configured immutable input digest from the command payload. */
   inputDigest(command: Command): string;
   stopCommand(record: StoredWorker, context: HelmToolExecutionContext): Command;
@@ -86,7 +87,8 @@ export type WorkerFleetBinding = Readonly<{
   workspace(command: Command, workerId: string, attempt: Attempt): Readonly<{ repository: string; destination: string; branch: string; baseSha: string; owner: WorktreeOwner; policy: { writableRoots: readonly string[]; readableRoots?: readonly string[]; protectedRoots?: readonly string[] } }>;
   start(command: Command, workspace: WorktreeReservation): Promise<PiNativeWorker>;
   rehydrate?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession): Promise<PiNativeWorker>;
-  fork?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession): Promise<{ worker: PiNativeWorker; successor: PiPersistedSession; leafId: string }>;
+  fork?(command: Command, workspace: WorktreeReservation, persisted: PiPersistedSession, expectedLeafId: string): Promise<{ worker: PiNativeWorker; successor: PiPersistedSession; leafId: string }>;
+  forkSourceSnapshot?(persisted: PiPersistedSession, workspace: WorktreeReservation): Promise<PiForkSourceSnapshot>;
   /** Host-built prompt bytes may be read from the immutable artifact refs captured at spawn. */
   prompt(command: Command): string | Promise<string>;
   correction(command: Command): string;
@@ -243,7 +245,7 @@ export class PiWorkerFleet {
 
   /** Create a distinct, durable, idle Pi branch in a new worktree. */
   async fork(context: HelmToolExecutionContext, input: WorkerForkInput): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'fork_ready'; predecessorWorkerId: string }> {
-    if (!this.binding.forkCommand || !this.binding.fork) throw new Error('native session fork is not configured by this host');
+    if (!this.binding.forkCommand || !this.binding.fork || !this.binding.forkSourceSnapshot) throw new Error('native session fork is not configured by this host');
     const validated = Object.freeze({ ...input });
     const predecessor = await this.durableRecord(context.runId, validated.workerId) ?? this.#records.get(validated.workerId);
     if (!continuationWorker(predecessor) || predecessor.state !== 'terminal') throw new Error('worker is not a durable terminal Pi fork source');
@@ -251,6 +253,7 @@ export class PiWorkerFleet {
     const sourceWorkspace = this.binding.workspaceManager.reservation(predecessor.workspace);
     if (sourceWorkspace.owner.attemptId !== predecessor.owner.attemptId || sourceWorkspace.owner.generation !== predecessor.owner.generation || sourceWorkspace.owner.expiresAt !== predecessor.owner.expiresAt) throw new Error('predecessor worktree generation is no longer current');
     await this.binding.workspaceManager.assertExactHead(sourceWorkspace, validated.expectedHead);
+    const source = await this.binding.forkSourceSnapshot(predecessor.persistedSession, sourceWorkspace);
     const prior = (await this.binding.host.snapshot(context.runId)).commands.find((item) => item.command.kind === 'worker.fork'
       && (item.command.payload as { predecessorWorkerId?: unknown }).predecessorWorkerId === predecessor.workerId);
     if (prior || this.#forkSources.has(predecessor.workerId)) throw new Error('worker already has a durable fork attempt');
@@ -260,11 +263,11 @@ export class PiWorkerFleet {
     // than a check-then-create race between independently random children.
     const forkIdentity = digest({ runId: context.runId, predecessorWorkerId: predecessor.workerId, sessionId: predecessor.sessionId, expectedHead: validated.expectedHead }).slice('sha256:'.length, 'sha256:'.length + 32);
     const workerId = `worker-fork-${forkIdentity}`; const attemptId = `attempt-${workerId}`;
-    const command = this.binding.forkCommand(validated, workerId, predecessor, attemptId, context);
-    const payload = command.payload as { workerId?: unknown; attemptId?: unknown; predecessorWorkerId?: unknown; inputDigest?: unknown; modelId?: unknown; modelProvider?: unknown; modelApi?: unknown; modelFactVersion?: unknown; dataPolicy?: unknown; sourceHistoryHash?: unknown; sourceBranchDigest?: unknown; sourceSessionId?: unknown };
+    const command = this.binding.forkCommand(validated, workerId, predecessor, attemptId, source, context);
+    const payload = command.payload as { workerId?: unknown; attemptId?: unknown; predecessorWorkerId?: unknown; inputDigest?: unknown; modelId?: unknown; modelProvider?: unknown; modelApi?: unknown; modelFactVersion?: unknown; dataPolicy?: unknown; sourceHistoryHash?: unknown; sourceBranchDigest?: unknown; sourceSessionId?: unknown; sourceLeafId?: unknown };
     if (payload.workerId !== workerId || payload.attemptId !== attemptId || payload.predecessorWorkerId !== predecessor.workerId || payload.inputDigest !== digest(validated)
       || payload.modelId !== predecessor.modelId || payload.modelProvider !== predecessor.modelProvider || payload.modelApi !== predecessor.modelApi || payload.modelFactVersion !== predecessor.modelFactVersion || payload.dataPolicy !== predecessor.dataPolicy
-      || payload.sourceSessionId !== predecessor.persistedSession.sessionId || payload.sourceHistoryHash !== predecessor.persistedSession.historyHash || payload.sourceBranchDigest !== predecessor.persistedSession.branchDigest) throw new Error('worker fork command does not bind successor, predecessor, source session, and immutable validated inputs');
+      || payload.sourceSessionId !== source.sessionId || payload.sourceHistoryHash !== source.historyHash || payload.sourceBranchDigest !== source.branchDigest || payload.sourceLeafId !== source.leafId) throw new Error('worker fork command does not bind successor, predecessor, source session, leaf, and immutable validated inputs');
     // The destination and its owner are selected before admission and copied
     // into the immutable command bytes; an effect may only recreate this plan.
     const plannedAttempt = this.binding.attempt(command, workerId);
@@ -276,6 +279,8 @@ export class PiWorkerFleet {
     const effect: KernelEffect = { effectId: `host:worker-fork:${workerId}`,
       execute: async () => {
         await this.binding.workspaceManager.assertExactHead(sourceWorkspace, validated.expectedHead);
+        const currentSource = await this.binding.forkSourceSnapshot!(predecessor.persistedSession!, sourceWorkspace);
+        if (currentSource.sessionId !== source.sessionId || currentSource.leafId !== source.leafId || currentSource.historyHash !== source.historyHash || currentSource.branchDigest !== source.branchDigest) throw new Error('fork source changed after admission');
         const currentOwner = this.binding.workspaceManager.reservation(predecessor.workspace).owner;
         if (currentOwner.attemptId !== predecessor.owner.attemptId || currentOwner.generation !== predecessor.owner.generation || currentOwner.expiresAt !== predecessor.owner.expiresAt) throw new Error('predecessor worktree generation changed before fork effect');
         this.binding.host.assertEffectAuthority(admitted.command.commandId, context);
@@ -285,9 +290,9 @@ export class PiWorkerFleet {
         if (config.destination !== plannedConfig.destination || config.owner.attemptId !== plannedConfig.owner.attemptId || config.owner.generation !== plannedConfig.owner.generation || config.owner.expiresAt !== plannedConfig.owner.expiresAt) throw new Error('fork destination or owner changed after admission');
         if (config.destination === predecessor.workspace || config.baseSha !== validated.expectedHead || attempt.baseSha !== validated.expectedHead) throw new Error('fork must use a new worktree at the verified source head');
         const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
-        const forked = await this.binding.fork!(admitted.command, workspace, predecessor.persistedSession!);
+        const forked = await this.binding.fork!(admitted.command, workspace, predecessor.persistedSession!, source.leafId);
         if (forked.worker.sessionId === predecessor.sessionId || forked.successor.sessionId !== forked.worker.sessionId || forked.successor.branchDigest !== predecessor.persistedSession!.branchDigest
-          || forked.worker.modelIdentity.modelId !== predecessor.modelId || forked.worker.modelIdentity.provider !== predecessor.modelProvider || forked.worker.modelIdentity.api !== predecessor.modelApi) { forked.worker.dispose(); throw new Error('fork native identity changed'); }
+          || forked.leafId !== source.leafId || forked.worker.modelIdentity.modelId !== predecessor.modelId || forked.worker.modelIdentity.provider !== predecessor.modelProvider || forked.worker.modelIdentity.api !== predecessor.modelApi) { forked.worker.dispose(); throw new Error('fork native identity changed'); }
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: forked.worker.sessionId, workspace: workspace.root, owner: workspace.owner, modelId: predecessor.modelId, modelProvider: predecessor.modelProvider, modelApi: predecessor.modelApi, modelFactVersion: predecessor.modelFactVersion, dataPolicy: predecessor.dataPolicy, forkLeafId: forked.leafId, state: 'fork_ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false, persistedSession: forked.successor });
         this.#records.set(workerId, record); this.#live.set(workerId, Object.freeze({ worker: forked.worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },

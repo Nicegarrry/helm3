@@ -2,11 +2,10 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod/v3';
 import { type OrchestratorLease, utcTimestampSchema } from '../contracts/index.js';
 import type { CommandRecord, EffectObservation, KernelHost, TrustedExecutor } from '../core/index.js';
-import type { Observation, Precondition } from '../contracts/index.js';
 
 const id = z.string().min(1).max(512);
 const signalSchema = z.object({
-  runId: id, source: id, sourceEventId: id, group: id,
+  runId: id, mapNodeId: id, source: id, sourceEventId: id, group: id,
   observedAt: utcTimestampSchema,
   kind: z.enum(['worker.failed', 'provider.blocked', 'gate.finished', 'reconciliation.ambiguous', 'worker.completed']),
   evidenceRefs: z.array(id).max(100),
@@ -124,23 +123,21 @@ export type SupervisorRetryExecutor = Readonly<{
     intent: unknown;
     executor: TrustedExecutor;
     claimExpiresAt: string;
-    readFact: (precondition: Precondition) => Promise<Observation<boolean>>;
-  }>): Promise<Readonly<{ record: CommandRecord; observation?: EffectObservation }>>;
+    signal: SupervisorSignal;
+  }>): Promise<Readonly<{ decision: RecoveryDecision; status: 'performed' | 'terminal' | 'reconcile'; record?: CommandRecord; observation?: EffectObservation }>>;
 }>;
 export type SupervisorProcessInput = Readonly<{
   signal: SupervisorSignal;
-  recovery?: RecoveryFacts;
   retry?: Readonly<{
     intent: unknown;
     executor: TrustedExecutor;
     claimExpiresAt: string;
-    readFact: (precondition: Precondition) => Promise<Observation<boolean>>;
   }>;
 }>;
 export type SupervisorProcessResult = Readonly<{
   decision?: RecoveryDecision;
   wakes: readonly Wake[];
-  retry?: Readonly<{ status: 'performed' | 'already-terminal'; record: CommandRecord; observation?: EffectObservation }>;
+  retry?: Readonly<{ status: 'performed' | 'terminal' | 'reconcile'; record?: CommandRecord; observation?: EffectObservation }>;
 }>;
 
 /**
@@ -158,7 +155,8 @@ export class EventDrivenSupervisor {
   ) {}
 
   process(input: SupervisorProcessInput, owner?: OrchestratorLease): Promise<SupervisorProcessResult> {
-    const frozen = Object.freeze({ ...input, signal: signalSchema.parse(input.signal), ...(input.recovery ? { recovery: recoverySchema.parse(input.recovery) } : {}) });
+    const signal = signalSchema.parse(input.signal);
+    const frozen = Object.freeze({ signal, ...(input.retry ? { retry: freezeRetry(input.retry) } : {}) });
     const result = this.tail.then(() => this.processOne(frozen, owner));
     this.tail = result.then(() => undefined, () => undefined);
     return result;
@@ -168,15 +166,10 @@ export class EventDrivenSupervisor {
     this.events.record(input.signal);
     let decision: RecoveryDecision | undefined;
     let retry: SupervisorProcessResult['retry'];
-    if (input.recovery) {
-      decision = planRecovery(input.recovery, this.now());
-      if (decision.action === 'retry') {
-        if (!input.retry) throw new Error('retry decision requires an explicit trusted retry command');
-        const executed = await this.retryExecutor.retry(input.retry);
-        retry = executed.observation
-          ? { status: 'performed', ...executed }
-          : { status: 'already-terminal', ...executed };
-      }
+    if (input.retry) {
+      const executed = await this.retryExecutor.retry({ ...input.retry, signal: input.signal });
+      decision = executed.decision;
+      retry = { status: executed.status, ...(executed.record ? { record: executed.record } : {}), ...(executed.observation ? { observation: executed.observation } : {}) };
     }
     // Expired or concurrently replaced controllers retain their unhandled
     // signal in the Log, but cannot receive a newly owned wake. A later active
@@ -191,6 +184,21 @@ export class EventDrivenSupervisor {
     }
     return Object.freeze({ ...(decision ? { decision } : {}), wakes: Object.freeze(wakes), ...(retry ? { retry } : {}) });
   }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/** Snapshot caller-owned retry bytes before serial queueing. */
+function freezeRetry(input: SupervisorProcessInput['retry']): NonNullable<SupervisorProcessInput['retry']> {
+  if (!input) throw new Error('retry is required');
+  const copied = structuredClone({ intent: input.intent, executor: { executorId: input.executor.executorId }, claimExpiresAt: input.claimExpiresAt });
+  return deepFreeze(copied);
 }
 
 /** Pure mechanical classification; a retry is only a proposal for a fresh kernel admission. */

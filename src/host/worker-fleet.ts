@@ -176,6 +176,7 @@ export class PiWorkerFleet {
       effectId: `host:worker-steer:${workerId}`,
       execute: async () => {
         await this.binding.workspaceManager.assertExactHead(oldWorkspace, validated.expectedHead);
+        this.binding.host.assertEffectAuthority(admitted.command.commandId, context);
         this.binding.host.recordAttempt(attempt);
         const config = this.binding.workspace(admitted.command, workerId, attempt);
         if (config.destination !== predecessor.workspace || config.baseSha !== validated.expectedHead || attempt.baseSha !== validated.expectedHead) throw new Error('continuation does not preserve the verified workspace head');

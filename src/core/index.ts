@@ -82,7 +82,7 @@ export type KernelKind = {
   /** Legacy fail-closed marker: it remains invalid until a resolver is supplied. */
   requiresResourceEnforcement?: boolean;
   resourceRequest?: (payload: unknown) => ResourceRequest;
-  modelSelection?: (payload: unknown) => { modelId: string; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' };
+  modelSelection?: (payload: unknown) => { modelId: string; provider?: string; factVersion?: number; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' };
 };
 export type KernelOptions = {
   databasePath: string;
@@ -784,10 +784,12 @@ class Kernel {
     this.assertLegalModel(selection, kind.resourceRequest?.(payload));
   }
 
-  private assertLegalModel(selection: { modelId: string; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' }, request?: ResourceRequest): void {
+  private assertLegalModel(selection: { modelId: string; provider?: string; factVersion?: number; requiredCapabilities: readonly string[]; role: string; dataClassification?: 'public' | 'restricted' }, request?: ResourceRequest): void {
     const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(selection.modelId) as { bytes: string } | undefined;
     if (!row) throw new Error('model selection has no registered facts');
     const fact = modelFactSchema.parse(JSON.parse(row.bytes));
+    if (selection.provider !== undefined && fact.provider !== selection.provider) throw new Error('model selection provider does not match registered facts');
+    if (selection.factVersion !== undefined && fact.factVersion !== selection.factVersion) throw new Error('model selection fact version does not match registered facts');
     if (!fact.enabled) throw new Error('model selection is disabled');
     if (fact.availability !== 'known_available') throw new Error('model selection availability is not known available');
     if (!fact.roles.includes(selection.role)) throw new Error('model selection lacks required role');

@@ -29,7 +29,7 @@ function storedWorker(value: unknown): StoredWorker | undefined {
     || !item.owner || typeof item.owner.attemptId !== 'string' || !Number.isInteger(item.owner.generation) || typeof item.owner.expiresAt !== 'string'
     || (item.state !== 'ready' && item.state !== 'running' && item.state !== 'terminal' && item.state !== 'unknown')
     || !Array.isArray(item.evidenceRefs) || !item.evidenceRefs.every((ref) => typeof ref === 'string') || typeof item.cancellationRequested !== 'boolean') return undefined;
-  if (item.persistedSession && (typeof item.persistedSession.sessionId !== 'string' || typeof item.persistedSession.sessionFile !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.historyHash))) return undefined;
+  if (item.persistedSession && (typeof item.persistedSession.sessionId !== 'string' || typeof item.persistedSession.sessionFile !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.historyHash) || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.branchDigest))) return undefined;
   return Object.freeze({ ...item, owner: Object.freeze({ ...item.owner }), evidenceRefs: Object.freeze([...item.evidenceRefs]), ...(item.persistedSession ? { persistedSession: Object.freeze({ ...item.persistedSession }) } : {}) }) as StoredWorker;
 }
 function spawnProvenance(command: Command): SpawnProvenance {

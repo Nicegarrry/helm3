@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "scope": "sanitised Wave 6 worker-fleet and gate checkpoint; excludes credentials, prompts, model response text, raw thinking and private ledger contents",
+  "repository": {
+    "repository": "Nicegarrry/helm3",
+    "mainHead": "af8d90695071c8f0ef6f7b3cbd010ec158f676ab"
+  },
+  "acceptedSlices": [
+    {
+      "pullRequest": 83,
+      "reviewedHead": "464e458ccc7fe91faa129da0e60b2a815001947b",
+      "mergedHead": "6e3aea64679b07cd54164c3497e0ccaf7d63c0ac",
+      "mergedAt": "2026-09-15T16:33:50Z",
+      "scope": "durable asynchronous Pi worker.spawn, worker.inspect and worker.stop",
+      "validation": {
+        "independentReviews": "standards and spec",
+        "ciChecks": 6,
+        "focused": "typecheck and 8/8 worker-fleet/connected tests, zero cancellations"
+      },
+      "properties": [
+        "host-owned isolated worktree and durable attempt/session launch record",
+        "shared provider-free Fable/Astra worker registry wiring",
+        "owner-transfer and autonomy-expiry fencing for new work",
+        "durable unknown, terminal and confirmed-stop dispositions across restart"
+      ]
+    },
+    {
+      "pullRequest": 84,
+      "reviewedHead": "04c4c32893b28235095c6d15cc39e8ede523582a",
+      "mergedHead": "af8d90695071c8f0ef6f7b3cbd010ec158f676ab",
+      "mergedAt": "2026-09-15T16:38:26Z",
+      "scope": "bounded shared host gate.run tool",
+      "validation": {
+        "independentReviews": "standards and spec",
+        "ciChecks": 6,
+        "focused": "typecheck and 9/9 gate/connected tests, zero cancellations"
+      },
+      "properties": [
+        "registered host gate configuration deep-snapshotted and digest-bound",
+        "fresh exact Git head and clean-worktree checks",
+        "per-check effect authority and durable evidence references",
+        "provider-free Fable/Astra fixture calls on committed known worker output"
+      ]
+    }
+  ],
+  "acceptedHeadGate": {
+    "head": "af8d90695071c8f0ef6f7b3cbd010ec158f676ab",
+    "state": "passed",
+    "startedAt": "2026-09-15T16:38:51.750Z",
+    "completedAt": "2026-09-15T16:40:02.556Z",
+    "typecheckExitCode": 0,
+    "fullTestsExitCode": 0,
+    "fullTests": "185/185",
+    "resultArtifact": "raw:sha256:80068cdd3f2df6ba7fe6efa27105c2d7d8b08faa4afbd1660fbd767b5b8fcc3e",
+    "fullTestsArtifact": "raw:sha256:d35d6f6c84ff272969a6a877012724d44435ff4f98ad382a759e69b646d13c28",
+    "typecheckArtifact": "raw:sha256:1ad084df6bb4ed5628864ba835b464c226ca435820c1671042f4c75fec0cb38d",
+    "qualification": "deterministic local runGate on accepted main; not full SDK-orchestrator autonomy"
+  },
+  "mapDogfood": {
+    "issue": 1,
+    "commandId": "map-wave4-1651a51f-6df4-44a0-9a65-42f1696e4ba1",
+    "commandHash": "sha256:4145c7834edfa6b7bb565e44c5acc2be6df6a04594919b98ad591f0a2c069803",
+    "state": "succeeded",
+    "target": {
+      "repository": "Nicegarrry/helm3",
+      "number": 1,
+      "revision": "2026-09-15T16:41:01Z",
+      "state": "OPEN",
+      "url": "https://github.com/Nicegarrry/helm3/issues/1"
+    },
+    "observedAt": "2026-09-15T16:41:03.090Z",
+    "evidenceRefs": ["local:map-receipt:map-wave4-1651a51f-6df4-44a0-9a65-42f1696e4ba1"],
+    "concurrency": "read_before_write_not_atomic",
+    "issuesClosed": 0
+  },
+  "nominalGuard": {
+    "currency": "USD",
+    "total": 4.07309683,
+    "settledKnown": 0.03083635,
+    "retainedUnknownReservations": 4.04226048,
+    "modelRequests": 6,
+    "attempts": 5,
+    "actualIncrementalCharge": "unknown",
+    "quotaHeadroom": "unknown",
+    "newPaidCalls": 0
+  },
+  "status": {
+    "nativeFauxFixtures": "provider-free",
+    "productionHelmIntegration": false,
+    "manualGitHubMerges": "coordinator operations, not Helm production integration",
+    "sameSessionSteer": "ACTIVE implementation; not accepted",
+    "fullBriefAccepted": false
+  }
+}

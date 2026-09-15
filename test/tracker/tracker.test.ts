@@ -115,9 +115,9 @@ test('pagination reaches a terminating second page before declaring the native g
 });
 
 test('snapshot bounds concurrent independent reads while retaining a 34-node star', async () => {
-  const children = Array.from({ length: 34 }, (_, index) => issue(index + 2)); let active = 0, maximum = 0;
+  const children = Array.from({ length: 34 }, (_, index) => issue(index + 2)); let active = 0, maximum = 0, requests = 0;
   const transport: TrackerCommandTransport = async (argv) => {
-    const path = argv[3]!; active += 1; maximum = Math.max(maximum, active); await new Promise(resolve => setTimeout(resolve, 2)); active -= 1;
+    const path = argv[3]!; requests += 1; active += 1; maximum = Math.max(maximum, active); await new Promise(resolve => setTimeout(resolve, 2)); active -= 1;
     const match = path.match(/^repos\/owner\/repo\/issues\/(\d+)(?:\/([^?]+))?/); if (!match) return { ok: false, stdout: '', stderr: 'bad path' };
     const number = Number(match[1]), relation = match[2];
     if (relation === 'sub_issues') return { ok: true, stdout: JSON.stringify(number === 1 ? children : []), stderr: '' };
@@ -126,7 +126,17 @@ test('snapshot bounds concurrent independent reads while retaining a 34-node sta
   };
   const snapshot = await new GitHubMapTracker({ repo: 'owner/repo', parentIssue: 1, transport, now: () => timestamp, concurrency: 8 }).snapshot();
   assert.equal(snapshot.completeness, 'complete'); assert.equal(snapshot.nodes.length, 35);
+  assert.equal(requests, 105, 'one direct issue read and two sequential relation reads per observed node');
   assert.ok(maximum > 1); assert.ok(maximum <= 8);
+});
+
+test('concurrent child discovery retains multiple-parent and malformed-page refusals', async () => {
+  const multi = transportFixture({ issues: [issue(1), issue(2), issue(3), issue(4)], children: { 1: [issue(2), issue(3)], 2: [issue(4)], 3: [issue(4)] } });
+  const multipleParent = await new GitHubMapTracker({ repo: 'owner/repo', parentIssue: 1, transport: multi.transport, now: () => timestamp, concurrency: 8 }).snapshot();
+  assert.equal(multipleParent.completeness, 'incomplete'); assert.deepEqual(multipleParent.frontier, []); assert.ok(multipleParent.incomplete.some(reason => reason.code === 'cycle' && reason.subject === 'issue:4'));
+  const malformed = transportFixture({ issues: [issue(1), issue(2), issue(3)], children: { 1: [issue(2), issue(3)], 2: [{ broken: true }] } });
+  const invalid = await new GitHubMapTracker({ repo: 'owner/repo', parentIssue: 1, transport: malformed.transport, now: () => timestamp, concurrency: 8 }).snapshot();
+  assert.equal(invalid.completeness, 'incomplete'); assert.deepEqual(invalid.frontier, []); assert.ok(invalid.incomplete.some(reason => reason.code === 'invalid_response'));
 });
 
 test('default gh transport bounds runaway subprocess output with a single termination sequence', { concurrency: false }, async () => {

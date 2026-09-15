@@ -5,6 +5,7 @@ import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, R
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
 import { BoundedPiAccess } from '../../access/index.js';
 import { observePiContext } from '../../context/index.js';
+import { PiEventSpool } from './event-spool.js';
 import { workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
@@ -47,7 +48,7 @@ function errorMessage(model: Model<Api>): AssistantMessage {
 export class PiNativeWorker {
   private session!: AgentSession;
   private unsubscribe: () => void = () => undefined;
-  private eventFlush = Promise.resolve();
+  private eventSpool?: PiEventSpool;
   private eventError: unknown;
   private readonly artifacts: RawArtifactRef[] = [];
   private readonly activeRequests = new Set<Promise<void>>();
@@ -89,6 +90,8 @@ export class PiNativeWorker {
         const work = Promise.resolve().then(async () => {
           let terminal: AssistantMessage | undefined;
           try {
+            this.assertActive();
+            await this.flushEvents();
             this.assertActive();
             const prepared = input.access?.prepare(effectId, model, context, options);
             await input.authority.perform({ effectId, kind: 'model.request', commandId: input.commandId }, async () => {
@@ -136,6 +139,8 @@ export class PiNativeWorker {
       execute: async (toolCallId, params) => {
         this.assertActive();
         this.input.access?.noteToolCall();
+        await this.flushEvents();
+        this.assertActive();
         await this.input.authority.perform({ effectId: `tool:${toolCallId}`, kind: 'workspace.write', commandId: this.input.commandId }, async () => {
           this.assertActive(); await this.input.workspaceManager.write(this.input.workspace, this.input.owner, params.path, params.contents);
         });
@@ -149,12 +154,16 @@ export class PiNativeWorker {
       noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()),
     });
     this.session = created.session;
+    this.eventSpool = new PiEventSpool(this.input.journal, { commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId });
     this.unsubscribe = this.session.subscribe((event: AgentSessionEvent) => {
-      const bytes = Buffer.from(JSON.stringify({ commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId, event }));
-      this.eventFlush = this.eventFlush.then(async () => {
-        this.artifacts.push(await this.input.journal.append({ source: 'pi.event', sourceIdentity: `pi-event:${this.sessionId}:${randomUUID()}`, mediaType: 'application/json', bytes }));
-      }).catch((error: unknown) => { this.eventError = error; });
+      try { this.eventSpool!.record(event); }
+      catch (error) { this.eventError ??= error; void this.session.abort(); }
     });
+  }
+  private async flushEvents(): Promise<void> {
+    if (!this.eventSpool) throw new Error('Pi event spool is unavailable');
+    try { this.artifacts.push(...await this.eventSpool.drain()); }
+    catch (error) { this.eventError ??= error; }
   }
   private async saveTerminal(invocation: string, phase: string): Promise<WorkerResult | undefined> {
     const text = this.lastAssistantText();
@@ -183,7 +192,7 @@ export class PiNativeWorker {
       if (!result) throw new Error('Pi session did not produce a valid terminal WorkerResult after bounded correction');
       const changed = await this.input.workspaceManager.changedFiles(this.input.workspace);
       if (JSON.stringify([...result.changed_files].sort()) !== JSON.stringify(changed)) throw new Error('WorkerResult changed_files claim does not match observed changes');
-      await this.eventFlush;
+      await this.flushEvents();
       if (this.eventError) throw new Error('Pi evidence persistence failed');
       const contextOccupancy = observePiContext(this.session);
       this.artifacts.push(await this.input.journal.append({ source: 'pi.usage', sourceIdentity: `pi-usage:${this.input.attemptId}:${invocation}`, mediaType: 'application/json',
@@ -192,7 +201,7 @@ export class PiNativeWorker {
       return { result, artifacts: [...this.artifacts], repaired };
     } catch (error) {
       if (!saved) await this.saveTerminal(invocation, 'interrupted');
-      await this.eventFlush;
+      await this.flushEvents();
       throw error;
     } finally { this.running = false; }
   }
@@ -232,7 +241,7 @@ export class PiNativeWorker {
     if (this.running || this.activeRequests.size) throw new Error('cannot reopen an active Pi session');
     const stats = this.session.getSessionStats();
     if (!stats.sessionFile) throw new Error('Pi has not persisted this session yet');
-    await this.eventFlush;
+    await this.flushEvents();
     this.unsubscribe(); this.session.dispose();
     await this.initialize(stats.sessionFile);
     if (this.sessionId !== stats.sessionId) throw new Error('reopened Pi session identity changed');

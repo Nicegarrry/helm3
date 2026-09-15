@@ -33,3 +33,6 @@ jobs:
       - name: Check Codex SDK lifecycle against local fake executable
         run: npm run codex-conformance
         working-directory: spikes/sdk-feasibility
+      - name: Check bounded access harness without provider requests
+        run: npm run pi-access-probe-test
+        working-directory: spikes/sdk-feasibility

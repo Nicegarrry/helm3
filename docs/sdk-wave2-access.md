@@ -20,7 +20,7 @@ cd spikes/sdk-feasibility
 /Users/sa/.nvm/versions/node/v22.22.2/bin/node node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js --provider openai-codex --model gpt-5.6-luna --no-tools --no-session
 ```
 
-Run it with no prompt argument, complete the Pi OpenAI OAuth screen, then exit Pi without submitting a message. It does not use an API key or ask Pi to print a bearer token. Confirm only with `pi auth check --provider openai-codex --no-refresh --json`; do not use `--credentials`.
+Run it with no prompt argument, invoke the interactive `/login` command, select OpenAI Codex, complete browser consent, then exit Pi without submitting a model message. Starting the CLI alone does not initiate OAuth. It does not use an API key or ask Pi to print a bearer token. Confirm only with `pi auth check --provider openai-codex --no-refresh --json`; do not use `--credentials`.
 
 Sources: [Pi 0.85.1 provider and OAuth documentation](https://raw.githubusercontent.com/earendil-works/pi/v0.85.1/packages/ai/README.md), [official OpenAI authentication documentation](https://learn.chatgpt.com/docs/auth), and the installed pinned package source under `spikes/sdk-feasibility/node_modules`.
 
@@ -33,7 +33,7 @@ cd spikes/sdk-feasibility
 HELM3_LIVE_ACCESS_PROBE=1 /Users/sa/.nvm/versions/node/v22.22.2/bin/node pi-access-probe.mjs
 ```
 
-The harness makes at most one model request. It passes an empty tool list plus `toolChoice: "none"`, `maxRetries: 0`, SSE transport, a 30-second request timeout, and a host `AbortSignal` at 30 seconds. It prints a compact receipt containing provider/model, auth class, outcome, usage if returned, and the planned request pool. It never prints a credential value, auth source, response text, or headers.
+The harness requires OAuth auth explicitly, disables custom models.json overrides, and makes at most one model request. Missing or API-key auth refuses before inference. It passes an empty tool list plus `toolChoice: "none"`, `maxRetries: 0`, SSE transport, a 30-second request timeout, and a host `AbortSignal` at 30 seconds. It prints a compact receipt containing provider/model, auth class, outcome, native input/output usage if returned, observed response model/provider, and the planned request pool. Subscription monetary cost remains unknown; SDK catalog pricing is not a measured charge. It never prints a credential value, auth source, response text, or headers.
 
 The enforceable planned pool unit is **requests**, with a limit of **1**. Subscription quota is unknown. The pinned OpenAI Codex request builder does not serialize Pi's generic `maxTokens` option into the Codex request body, so no output-token cap is claimed. The harness records `outputTokenCap: null`. A host abort requests cancellation, but remote completion and post-abort charge are not guaranteed; it records that uncertainty rather than retrying.
 
@@ -46,4 +46,4 @@ cd spikes/sdk-feasibility
 /Users/sa/.nvm/versions/node/v22.22.2/bin/npm run pi-access-probe-test
 ```
 
-The fixture verifies that an absent credential produces `credentials_not_configured`; a ready synthetic OAuth status retains only the credential class; and the receipt retains the one-request, no-tool, zero-retry, timeout, unknown-output-bound, and remote-abort-uncertain controls. It makes no provider request and reads no real credential.
+The fixture executes the actual harness through an injected runtime: disarmed execution constructs no runtime; missing/API-key/unknown auth produces no completion call; OAuth passes exact no-tool/retry/transport options to one completion; wrong provider/model, error responses and incorrect markers cannot succeed; a hung completion produces a host-abort receipt without retry. Catalog dollar pricing stays unknown. It makes no provider request and reads no real credential.

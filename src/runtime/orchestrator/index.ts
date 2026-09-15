@@ -1,7 +1,7 @@
 import type * as ClaudeSdk from '@anthropic-ai/claude-agent-sdk' with { 'resolution-mode': 'import' };
 import type { Codex, CodexOptions, Thread, ThreadEvent, ThreadOptions } from '@openai/codex-sdk' with { 'resolution-mode': 'import' };
 import { randomUUID } from 'node:crypto';
-import { z, type ZodRawShape } from 'zod';
+import { z, type ZodRawShape } from 'zod/v3';
 import type { OrchestratorDriver } from '../../contracts/index.js';
 
 export type HelmToolResult =
@@ -51,7 +51,7 @@ export type RecoveryBundle = {
 
 export interface OrchestratorArtifacts {
   readText(ref: string): Promise<string>;
-  saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; text: string }): Promise<string>;
+  saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'unknown'; text: string }): Promise<string>;
   saveRecoveryBundle(bundle: RecoveryBundle): Promise<string>;
   loadRecoveryBundle(ref: string): Promise<RecoveryBundle>;
 }
@@ -147,7 +147,10 @@ abstract class BaseDriver implements OrchestratorDriver {
     if (afterRestore && afterRestore.state !== 'idle') throw new Error(`Cannot resume ${afterRestore.state} session`);
     if (afterRestore && afterRestore.runId !== bundle.runId) throw new Error('Recovery bundle run does not match existing session');
     await this.guard.assertCurrent(bundle);
-    this.sessions.set(bundle.sessionId, { ...bundle, state: 'idle', invocation: afterRestore?.invocation ?? 0, cancellationRequested: false, recoveryContext });
+    const afterGuard = this.sessions.get(bundle.sessionId);
+    if (afterGuard && afterGuard.state !== 'idle') throw new Error(`Cannot resume ${afterGuard.state} session`);
+    if (afterGuard && afterGuard.runId !== bundle.runId) throw new Error('Recovery bundle run does not match existing session');
+    this.sessions.set(bundle.sessionId, { ...bundle, state: 'idle', invocation: afterGuard?.invocation ?? 0, cancellationRequested: false, recoveryContext });
     return { sessionId: bundle.sessionId };
   }
 
@@ -203,6 +206,7 @@ export class FableDriver extends BaseDriver {
   async invoke(input: { sessionId: string; objectiveRef: string; contextRefs: string[] }): Promise<{ resultRef: string }> {
     const session = requireSession(this.sessions, input.sessionId);
     await this.guard.assertCurrent(session); const invocation = this.begin(session);
+    const messages: ClaudeSdk.SDKMessage[] = [];
     try {
       const sdk = this.sdk ?? await loadFableSdk();
       const prompt = await this.prompt(session, input.objectiveRef, input.contextRefs);
@@ -215,10 +219,12 @@ export class FableDriver extends BaseDriver {
       })) });
       const stream = sdk.query({ prompt, options: { resume: session.providerSessionId, tools: [], permissionMode: 'dontAsk', mcpServers: { helm }, strictMcpConfig: true, env: this.host.env, cwd: this.host.cwd, model: this.host.model, settingSources: [] } });
       this.#queries.set(session.sessionId, stream);
-      const messages: ClaudeSdk.SDKMessage[] = [];
       for await (const message of stream) { messages.push(message); session.providerSessionId ??= providerSessionId(message); }
-      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, text: JSON.stringify(messages) });
+      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'succeeded', text: JSON.stringify(messages) });
       return { resultRef };
+    } catch (error) {
+      await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'unknown', text: JSON.stringify({ messages, error: error instanceof Error ? error.message : 'Fable stream failed' }) });
+      throw error;
     } finally { this.#queries.delete(session.sessionId); this.finish(session, invocation); }
   }
 
@@ -238,10 +244,11 @@ export class FableDriver extends BaseDriver {
     const session = findSession(this.sessions, input.sessionId);
     await this.guard.assertCurrent(session);
     if (session.state === 'stopped') return { observed: 'stopped' };
+    if (session.state === 'idle') { session.state = 'stopped'; return { observed: 'stopped' }; }
     const stream = this.#queries.get(session.sessionId);
-    if (stream) { session.cancellationRequested = true; session.state = 'stopping'; stream.close(); return { observed: 'unknown' }; }
-    session.state = 'stopped';
-    return { observed: 'stopped' };
+    session.cancellationRequested = true; session.state = 'stopping';
+    if (stream) stream.close();
+    return { observed: 'unknown' };
   }
 }
 
@@ -278,15 +285,18 @@ export class AstraDriver extends BaseDriver {
     if (!thread) throw new Error(`No Codex thread for Helm session: ${session.sessionId}`);
     await this.guard.assertCurrent(session); const invocation = this.begin(session);
     const controller = new AbortController(); this.#controllers.set(session.sessionId, controller);
+    const observed: ThreadEvent[] = [];
     try {
       const prompt = await this.prompt(session, input.objectiveRef, input.contextRefs);
       await this.guard.assertCurrent(session); this.continuing(session, invocation);
       const { events } = await thread.runStreamed(prompt, { signal: controller.signal });
-      const observed: ThreadEvent[] = [];
       for await (const event of events) { observed.push(event); session.providerSessionId ??= providerSessionId(event); }
       session.providerSessionId ??= thread.id ?? undefined;
-      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, text: JSON.stringify(observed) });
+      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'succeeded', text: JSON.stringify(observed) });
       return { resultRef };
+    } catch (error) {
+      await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'unknown', text: JSON.stringify({ events: observed, error: error instanceof Error ? error.message : 'Astra stream failed' }) });
+      throw error;
     } finally { this.#controllers.delete(session.sessionId); this.finish(session, invocation); }
   }
 

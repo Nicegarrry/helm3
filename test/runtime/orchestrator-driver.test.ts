@@ -3,7 +3,7 @@ import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import {
   AstraDriver,
   FableDriver,
@@ -15,12 +15,12 @@ import {
 class Fixtures implements OrchestratorArtifacts {
   readonly text = new Map<string, string>([['objective', 'make a local observation'], ['context', 'known context'], ['event', 'known event']]);
   readonly bundles = new Map<string, RecoveryBundle>();
-  readonly invocations: Array<{ driver: string; sessionId: string; providerSessionId?: string; text: string }> = [];
+  readonly invocations: Array<{ driver: string; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'unknown'; text: string }> = [];
   failBundle = false;
   restoreWait?: Promise<void>;
 
   async readText(ref: string): Promise<string> { return this.text.get(ref) ?? ref; }
-  async saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; text: string }): Promise<string> {
+  async saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'unknown'; text: string }): Promise<string> {
     this.invocations.push(input); return `invocation:${this.invocations.length}`;
   }
   async saveRecoveryBundle(bundle: RecoveryBundle): Promise<string> {

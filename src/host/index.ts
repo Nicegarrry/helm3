@@ -273,7 +273,7 @@ export class HostControlPlane {
   revokeAutonomyLease(leaseId: string): void { this.kernel.host.revokeAutonomyLease(leaseId); }
   /** Trusted runtime records immutable worker-attempt provenance before Pi begins effects. */
   recordAttempt(attempt: Attempt): void { this.kernel.host.appendAttempt(attempt); }
-  reviewContextFor(context: HelmToolExecutionContext): JournalReviewContextStore { this.assertSession(context); return new JournalReviewContextStore(this.journal, context.runId); }
+  reviewContextFor(context: HelmToolExecutionContext): JournalReviewContextStore { this.assertSession(context); return new JournalReviewContextStore(this.journal, context.runId, ref => this.artifactsFor(context).readText(ref)); }
 
   piAuthority(options: PiEffectAuthorityOptions): PiAuthority {
     const binding = Object.freeze({ ...options });

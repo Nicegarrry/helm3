@@ -95,7 +95,20 @@ function frozenSource(value: ReviewSource): ReviewSource {
  * never paths, commands, writable roots, session reuse, receipts or approvals.
  */
 export class IndependentReviewService {
+  private readonly reconciling = new Map<string, Promise<DurableReviewRecord>>();
   constructor(private readonly binding: ReviewServiceBinding) {}
+
+  async reconcile(reviewId: string, idempotencyKey: string): Promise<DurableReviewRecord> {
+    const current = await this.binding.durability.reopen(idempotencyKey);
+    if (!current || current.reviewId !== reviewId) throw new Error('review cannot be reconciled from this durable identity');
+    if (current.state !== 'launched' || !this.binding.observeTerminal) return current;
+    const active = this.reconciling.get(idempotencyKey); if (active) return active;
+    const run = (async () => {
+      const outcome = await this.binding.observeTerminal!(current);
+      return outcome ? this.recordTerminal(current.reviewId, current.idempotencyKey, outcome) : current;
+    })().finally(() => this.reconciling.delete(idempotencyKey));
+    this.reconciling.set(idempotencyKey, run); return run;
+  }
 
   async request(input: ReviewRequest): Promise<ReviewLaunch> {
     const request = frozenRequest(input);
@@ -118,7 +131,7 @@ export class IndependentReviewService {
     // This is the durable point of no blind retry.  The manifest binds the
     // immutable artifact refs/hash observations before a session is created.
     const claim = await this.binding.durability.prepare(planned);
-    if (!claim.created) return claim.record;
+    if (!claim.created) return claim.record.state === 'launched' ? this.reconcile(claim.record.reviewId, claim.record.idempotencyKey) : claim.record;
     const atEffect = await this.binding.inspectSource(source);
     if (!atEffect.clean || atEffect.head !== request.expectedHead) {
       const refused = frozenRecord({ ...planned, state: 'unknown', failure: { reason: 'preflight-refused' } });
@@ -134,7 +147,7 @@ export class IndependentReviewService {
       if (!spawned.workerId || !spawned.attemptId || !spawned.sessionId || spawned.attemptId === source.attemptId || spawned.sessionId === source.sessionId) throw new Error('reviewer did not receive distinct native provenance');
       launched = frozenRecord({ ...planned, state: 'launched', reviewer: { requestedModelId: request.reviewerModelId, workerId: spawned.workerId, attemptId: spawned.attemptId, sessionId: spawned.sessionId, ...(spawned.spawnCommandId ? { spawnCommandId: spawned.spawnCommandId } : {}), modelId: spawned.modelId ?? request.reviewerModelId, ...(spawned.family ? { family: spawned.family } : {}), ...(spawned.poolId ? { poolId: spawned.poolId } : {}) } });
       await this.binding.durability.append(launched);
-      if (this.binding.observeTerminal) void this.binding.observeTerminal(launched).then(async outcome => { if (outcome) await this.recordTerminal(launched!.reviewId, launched!.idempotencyKey, outcome); }).catch(() => undefined);
+      if (this.binding.observeTerminal) void this.reconcile(launched.reviewId, launched.idempotencyKey).catch(() => undefined);
       return launched;
     } catch (error) {
       const unknown = frozenRecord({ ...(launched ?? planned), state: 'unknown', failure: { reason: launched ? 'persistence-unknown' : 'spawn-unknown' } });

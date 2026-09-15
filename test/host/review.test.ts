@@ -19,7 +19,16 @@ function fixture(overrides: Partial<ConstructorParameters<typeof IndependentRevi
     durability: { reopen: async key => records.get(key), prepare: async record => { const existing = records.get(record.idempotencyKey); if (existing) return { record: existing, created: false }; records.set(record.idempotencyKey, record); return { record, created: true }; }, append: async record => { records.set(record.idempotencyKey, record); } },
     ...overrides,
   });
-  return { service, count: () => spawns, records };
+  return { service, count: () => spawns, records, durability: {
+    reopen: async (key: string) => records.get(key),
+    prepare: async (record: DurableReviewRecord) => {
+      const existing = records.get(record.idempotencyKey);
+      if (existing) return { record: existing, created: false };
+      records.set(record.idempotencyKey, record);
+      return { record, created: true };
+    },
+    append: async (record: DurableReviewRecord) => { records.set(record.idempotencyKey, record); },
+  } };
 }
 
 test('independent review freezes only caller-authorized context before a distinct reviewer launch', async () => {
@@ -50,6 +59,55 @@ test('review persists a stable pre-spawn intent and reopens it without a duplica
   assert.equal(count(), 1); assert.equal(first.reviewId, second.reviewId); assert.equal(first.idempotencyKey, second.idempotencyKey);
   assert.equal(records.get(first.idempotencyKey)?.state, 'launched');
   assert.equal(first.manifest.entries[0]?.ref, 'objective');
+});
+
+test('reconcile reopens a durable launch after restart without source authority or a new native effect', async () => {
+  const initial = fixture();
+  const input = { sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' };
+  const launched = await initial.service.request(input);
+  let sourceCalls = 0;
+  let observed = 0;
+  const recovered = fixture({
+    durability: initial.durability,
+    source: async () => { sourceCalls++; throw new Error('reconciliation must not re-authorize source'); },
+    observeTerminal: async () => {
+      observed++;
+      return { resultRef: 'actual-result', rawEventRefs: ['actual-event'], readonlyObservation: { beforeRef: 'actual-before', afterRef: 'actual-after' } };
+    },
+  });
+  const [first, second] = await Promise.all([
+    recovered.service.reconcile(launched.reviewId, launched.idempotencyKey),
+    recovered.service.reconcile(launched.reviewId, launched.idempotencyKey),
+  ]);
+  assert.equal(first.state, 'terminal'); assert.equal(second.state, 'terminal');
+  assert.equal(observed, 1); assert.equal(sourceCalls, 0); assert.equal(recovered.count(), 0);
+  assert.equal(initial.records.get(launched.idempotencyKey)?.outcome?.resultRef, 'actual-result');
+});
+
+test('an existing launch waits for the same reconciliation and incomplete evidence never retries', async () => {
+  let release!: () => void;
+  const observedGate = new Promise<void>(resolve => { release = resolve; });
+  let observationStarted!: () => void;
+  const started = new Promise<void>(resolve => { observationStarted = resolve; });
+  let observed = 0;
+  const { service, count } = fixture({
+    observeTerminal: async () => {
+      observed++;
+      observationStarted();
+      await observedGate;
+      return undefined;
+    },
+  });
+  const input = { sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' };
+  const launched = await service.request(input);
+  await started;
+  const repeated = service.request(input);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(observed, 1);
+  release();
+  const reopened = await repeated;
+  assert.equal(launched.state, 'launched'); assert.equal(reopened.state, 'launched');
+  assert.equal(observed, 1); assert.equal(count(), 1);
 });
 
 test('review snapshots caller input before artifact reads can mutate it', async () => {

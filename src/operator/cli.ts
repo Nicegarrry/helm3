@@ -1,5 +1,11 @@
 import { formatOperatorCli, formatOperatorJson, validateOperatorSnapshot } from './projection.js';
 import type { HelmToolResult } from '../runtime/orchestrator/index.js';
+import { z } from 'zod/v3';
+
+const toolResultSchema = z.union([
+  z.object({ state: z.literal('succeeded'), value: z.unknown() }).strict().refine((value) => Object.hasOwn(value, 'value'), 'missing result value'),
+  z.object({ state: z.enum(['refused', 'unsupported', 'unknown']), reason: z.string().min(1) }).strict(),
+]);
 
 /** CLI reads the same loopback API as the cockpit; it has no host authority. */
 export async function readOperatorApi(origin: string) {
@@ -28,11 +34,22 @@ export async function readOperatorToolApi(origin: string, name: 'brief.get' | 'm
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) throw new Error('--limit must be between 1 and 100');
   const path = `/api/operator/read/${name}${limit === undefined ? '' : `?limit=${limit}`}`;
   const response = await fetch(new URL(path, url), { signal: AbortSignal.timeout(5_000), redirect: 'error' });
-  if (!response.ok) throw new Error(`Operator read API unavailable (${response.status})`);
-  const bytes = await response.arrayBuffer(); if (bytes.byteLength > 1024 * 1024) throw new Error('Operator read result exceeds the CLI read bound');
-  const parsed: unknown = JSON.parse(Buffer.from(bytes).toString('utf8'));
-  if (!parsed || typeof parsed !== 'object' || !('state' in parsed)) throw new Error('Operator read API returned an invalid result');
-  return parsed as HelmToolResult;
+  if (!response.ok || !response.body) throw new Error(`Operator read API unavailable (${response.status})`);
+  const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 1024 * 1024) throw new Error('Operator read result exceeds the CLI read bound');
+      chunks.push(value);
+    }
+  } finally { await reader.cancel().catch(() => undefined); }
+  let parsed: unknown;
+  try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch { throw new Error('Operator read API returned invalid JSON'); }
+  const validated = toolResultSchema.safeParse(parsed);
+  if (!validated.success) throw new Error('Operator read API returned an invalid result');
+  return validated.data as HelmToolResult;
 }
 
 export async function operatorCli(args: readonly string[]): Promise<string> {

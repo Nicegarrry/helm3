@@ -117,6 +117,27 @@ export type ResourceReservationProjection = Readonly<{
   mapNodeId?: string;
 }>;
 export type AutonomyLeaseProjection = Readonly<{ lease: AutonomyLease; revoked: boolean }>;
+/**
+ * Payload-free event projection for operator reads.  This deliberately has a
+ * narrower shape than Event: provider and artifact material remains in the
+ * append-only event bytes and never enters the public read path.
+ */
+export type EventMetadata = Readonly<{
+  eventId: string;
+  kind: string;
+  source: string;
+  sourceEventId: string;
+  occurredAt: string;
+  recordedAt: string;
+  commandId?: string;
+  attemptId?: string;
+  sessionId?: string;
+}>;
+const eventMetadataSchema = z.object({
+  eventId: z.string().min(1), kind: z.string().min(1), source: z.string().min(1), sourceEventId: z.string().min(1),
+  occurredAt: z.string().datetime({ offset: false }), recordedAt: z.string().datetime({ offset: false }),
+  commandId: z.string().min(1).nullable(), attemptId: z.string().min(1).nullable(), sessionId: z.string().min(1).nullable(),
+}).strict();
 export const effectObservationSchema = z.object({
   commandId: z.string().min(1),
   effectId: z.string().min(1),
@@ -212,6 +233,7 @@ export class KernelHost {
   recordObservation(commandId: string, observation: EffectObservation): void { this.core.recordObservation(commandId, observation); }
   appendEvent(event: Event): void { this.core.appendEvent(event); }
   readEvents(correlationId: string): Event[] { return this.core.readEvents(correlationId); }
+  readEventMetadata(correlationId: string, limit: number): readonly EventMetadata[] { return this.core.readEventMetadata(correlationId, limit); }
   appendOwnedEvent(event: Event, owner: OrchestratorLease): void { this.core.appendOwnedEvent(event, owner); }
   appendAttempt(attempt: Attempt): void { this.core.appendAttempt(attempt); }
 }
@@ -252,6 +274,7 @@ class Kernel {
       CREATE TABLE IF NOT EXISTS attempt_leases (attempt_id TEXT NOT NULL, lease_id TEXT NOT NULL, PRIMARY KEY (attempt_id, lease_id));
       CREATE TABLE IF NOT EXISTS resource_usage_observations (observation_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, state TEXT NOT NULL, amount REAL, observed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS command_lifecycle (command_id TEXT PRIMARY KEY, cancel_requested INTEGER NOT NULL DEFAULT 0, stop_observed TEXT);
+      CREATE INDEX IF NOT EXISTS events_correlation_metadata ON events(json_extract(bytes, '$.correlationId'));
     `);
     this.addColumn('commands', 'lease_id TEXT');
     this.addColumn('commands', 'parent_authority_id TEXT');
@@ -390,6 +413,49 @@ class Kernel {
     const rows = this.db.prepare(`SELECT bytes FROM events WHERE json_extract(bytes, '$.correlationId') = ? ORDER BY rowid LIMIT 10001`).all(correlationId) as Array<{ bytes: string }>;
     if (rows.length > 10000) throw new Error('event query exceeds bounded supervisor history');
     return rows.map((row) => eventSchema.parse(JSON.parse(row.bytes)));
+  }
+
+  /**
+   * Public readers need only a recent, payload-free page.  Keep the supervisor
+   * full-history query above unchanged: its overflow is a safety signal, while
+   * this query is intentionally a bounded tail projection.
+   */
+  readEventMetadata(correlationId: string, limit: number): readonly EventMetadata[] {
+    z.string().min(1).max(1024).parse(correlationId);
+    z.number().int().min(1).max(100).parse(limit);
+    const rows = this.db.prepare(`
+      SELECT
+        json_extract(bytes, '$.eventId') AS event_id,
+        json_extract(bytes, '$.kind') AS kind,
+        source AS source,
+        source_event_id AS source_event_id,
+        json_extract(bytes, '$.occurredAt') AS occurred_at,
+        json_extract(bytes, '$.recordedAt') AS recorded_at,
+        json_extract(bytes, '$.commandId') AS command_id,
+        json_extract(bytes, '$.attemptId') AS attempt_id,
+        json_extract(bytes, '$.sessionId') AS session_id
+      FROM events
+      WHERE json_extract(bytes, '$.correlationId') = ?
+      ORDER BY rowid DESC
+      LIMIT ?
+    `).all(correlationId, limit) as Array<{
+      event_id: unknown; kind: unknown; source: unknown; source_event_id: unknown;
+      occurred_at: unknown; recorded_at: unknown; command_id: unknown; attempt_id: unknown; session_id: unknown;
+    }>;
+    return Object.freeze(rows.reverse().map((row) => {
+      const parsed = eventMetadataSchema.parse({
+        eventId: row.event_id, kind: row.kind, source: row.source, sourceEventId: row.source_event_id,
+        occurredAt: row.occurred_at, recordedAt: row.recorded_at,
+        commandId: row.command_id, attemptId: row.attempt_id, sessionId: row.session_id,
+      });
+      return Object.freeze({
+        eventId: parsed.eventId, kind: parsed.kind, source: parsed.source, sourceEventId: parsed.sourceEventId,
+        occurredAt: parsed.occurredAt, recordedAt: parsed.recordedAt,
+        ...(parsed.commandId ? { commandId: parsed.commandId } : {}),
+        ...(parsed.attemptId ? { attemptId: parsed.attemptId } : {}),
+        ...(parsed.sessionId ? { sessionId: parsed.sessionId } : {}),
+      });
+    }));
   }
 
   appendEvent(event: Event): void {

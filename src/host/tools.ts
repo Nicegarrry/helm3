@@ -34,7 +34,8 @@ async function refusedForContext(actual: HelmToolExecutionContext, expected: Hel
 function readTool<T>(expected: HelmToolExecutionContext, authorize: HostReadToolsOptions['authorize'], action: () => Promise<T>) {
   return async (_input: Record<string, unknown>, context: HelmToolExecutionContext): Promise<HelmToolResult> => {
     const refusal = await refusedForContext(context, expected, authorize); if (refusal) return refusal;
-    return { state: 'succeeded', value: await action() };
+    try { return { state: 'succeeded', value: await action() }; }
+    catch { return { state: 'unknown', reason: 'host read source is unavailable' }; }
   };
 }
 
@@ -58,7 +59,8 @@ export function createHostReadToolRegistry(options: HostReadToolsOptions): HelmT
       async execute(input: Record<string, unknown>, actual: HelmToolExecutionContext): Promise<HelmToolResult> {
         const refusal = await refusedForContext(actual, context, options.authorize); if (refusal) return refusal;
         const limit = (input.limit as number | undefined) ?? 50;
-        return { state: 'succeeded', value: { runId: context.runId, events: options.host.readRunEvents(context.runId, limit) } };
+        try { return { state: 'succeeded', value: { runId: context.runId, events: options.host.readRunEvents(context.runId, limit) } }; }
+        catch { return { state: 'unknown', reason: 'host read source is unavailable' }; }
       },
     },
     {
@@ -68,7 +70,7 @@ export function createHostReadToolRegistry(options: HostReadToolsOptions): HelmT
     {
       name: 'budget.get', description: 'Read run-local reservations and configured economy quota observations.', input: {},
       execute: readTool(context, options.authorize, async () => {
-        const [host, economy] = await Promise.all([options.host.snapshot(context.runId), Promise.resolve(options.economy.snapshot())]);
+        const [host, economy] = await Promise.all([options.host.snapshot(context.runId), Promise.resolve().then(() => options.economy.snapshot())]);
         return {
           runId: context.runId,
           reservations: host.reservations,

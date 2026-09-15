@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import { resolve } from 'node:path';
 import { createHostSnapshotSource } from '../operator/host-source.js';
 import { createOperatorServer, listenOperatorServer } from '../operator/server.js';
-import { runLocalFixture, type LocalFixtureResult } from './index.js';
+import { createLocalFixtureReadToolRegistry, runLocalFixture, type LocalFixtureResult } from './index.js';
 
 export type LocalFixtureOperatorServer = Readonly<{
   url: string;
@@ -17,7 +17,8 @@ function closeServer(server: Server): Promise<void> {
 /** Serves the same read-only fixture projection as the operator CLI on loopback. */
 export async function startLocalFixtureOperatorServer(result: LocalFixtureResult): Promise<LocalFixtureOperatorServer> {
   const source = createHostSnapshotSource({ host: result.host, runId: result.runId, evidenceMode: 'fixture', now: () => result.observedAt });
-  const server = createOperatorServer(source);
+  const context = { runId: result.runId, sessionId: result.sessionId, mode: 'primary' as const };
+  const server = createOperatorServer(source, { registry: createLocalFixtureReadToolRegistry(result), context });
   const { host, port } = await listenOperatorServer(server);
   const url = `http://${host}:${port}`;
   return Object.freeze({ url, apiUrl: `${url}/api/operator/snapshot`, close: () => closeServer(server) });

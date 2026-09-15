@@ -7,6 +7,7 @@ import {
   type CommandRecord,
   type EffectObservation,
   type KernelEffect,
+  type EventMetadata,
   type HumanAuthorityGrant,
   type KernelKind,
   type KernelRunProjection,
@@ -305,14 +306,7 @@ export class HostControlPlane {
    */
   readRunEvents(runId: string, limit: number): ReadonlyArray<Readonly<Omit<Event, 'schemaVersion' | 'correlationId' | 'causationId' | 'payload'>>> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('log read limit must be between 1 and 100');
-    const events = this.kernel.host.readEvents(runId);
-    return Object.freeze(events.slice(-limit).map((event) => Object.freeze({
-      eventId: event.eventId, kind: event.kind, source: event.source, sourceEventId: event.sourceEventId,
-      occurredAt: event.occurredAt, recordedAt: event.recordedAt,
-      ...(event.commandId ? { commandId: event.commandId } : {}),
-      ...(event.attemptId ? { attemptId: event.attemptId } : {}),
-      ...(event.sessionId ? { sessionId: event.sessionId } : {}),
-    })));
+    return this.kernel.host.readEventMetadata(runId, limit) as ReadonlyArray<Readonly<Omit<EventMetadata, never>>>;
   }
 
   /**

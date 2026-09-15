@@ -2,6 +2,10 @@
 
 The human has unlocked predecessor reuse and asked that existing and newly built Helm capabilities be used during development. This revises the earlier host-first plan: inspect and reuse proven mechanics before rebuilding them. It is a build sequence, not a fixed workflow that Helm imposes on future orchestrators.
 
+## Authority and the meaning of open imports
+
+The human approved execution of this wave on 2026-09-15: “Go for next wave - explain ‘imports remain open’”. Open imports are implementation and acceptance work: select each predecessor behaviour, adapt it to Helm 3 authority/runtime boundaries, carry its regression evidence, independently review it and integrate it. They are not a remaining permission hold. HANDOFF #3 is accepted; IMPORT #22 remains open until its selected imports have evidence.
+
 ## Three lanes
 
 1. **Terra: selective deterministic reuse.** Import the GitHub tracker/issue relationships and exact-evidence gate/integration behaviours from the pinned M1 source, carrying behavioural regression tests and provenance. Adapt the Map selector instead of requiring the entire Helm 3 Map to adopt legacy labels. Reconcile the predecessor's review-provenance requirements with Helm 3 attempt identities. Extract only needed modules; do not embed the old runtime wholesale.

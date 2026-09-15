@@ -157,7 +157,7 @@ export class PiWorkerFleet {
     const predecessor = await this.durableRecord(context.runId, validated.workerId) ?? this.#records.get(validated.workerId);
     if (!continuationWorker(predecessor)) throw new Error('worker is not a recoverable idle same-session continuation');
     if (this.#live.has(validated.workerId) || predecessor.sessionId !== validated.expectedSessionId || predecessor.persistedSession.sessionId !== validated.expectedSessionId) throw new Error('worker is active or session identity changed');
-    if (validated.gateCommandId) await this.binding.host.assertGateEvidence(context.runId, validated.gateCommandId, predecessor.workerId, validated.expectedHead, validated.evidenceRefs);
+    if (validated.gateCommandId) await this.binding.host.assertGateEvidence(context.runId, validated.gateCommandId, predecessor.spawnCommandId, predecessor.workerId, predecessor.workspace, validated.expectedHead, validated.evidenceRefs);
     const artifacts = this.binding.host.artifactsFor(context);
     await Promise.all([artifacts.readText(validated.objectiveRef), ...(validated.gateCommandId ? [] : validated.evidenceRefs.map((ref) => artifacts.readText(ref)))]);
     const oldWorkspace = this.binding.workspaceManager.reservation(predecessor.workspace);

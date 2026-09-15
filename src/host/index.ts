@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { commandSchema, type Attempt, type AutonomyLease, type Command, type Event, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef } from '../contracts/index.js';
 import {
@@ -451,10 +452,12 @@ export class HostControlPlane {
    * only through the durable gate command that produced them.  A host note or
    * a gate from another worker/head cannot stand in for that binding.
    */
-  async assertGateEvidence(runId: string, gateCommandId: string, workerId: string, expectedHead: string, evidenceRefs: readonly string[]): Promise<void> {
+  async assertGateEvidence(runId: string, gateCommandId: string, predecessorCommandId: string, workerId: string, workspace: string, expectedHead: string, evidenceRefs: readonly string[]): Promise<void> {
     const gate = this.kernel.host.readRun(runId).commands.find((entry) => entry.command.commandId === gateCommandId);
-    const payload = gate?.command.payload as { workerId?: unknown; expectedHead?: unknown } | undefined;
-    if (!gate || gate.command.kind !== 'gate.run' || payload?.workerId !== workerId || payload.expectedHead !== expectedHead
+    const predecessor = this.kernel.host.readRun(runId).commands.find((entry) => entry.command.commandId === predecessorCommandId);
+    const payload = gate?.command.payload as { workerId?: unknown; workspaceDigest?: unknown; expectedHead?: unknown } | undefined;
+    const workspaceDigest = `sha256:${createHash('sha256').update(await realpath(workspace)).digest('hex')}`;
+    if (!gate || !predecessor || gate.command.kind !== 'gate.run' || gate.command.scope.repositoryId !== predecessor.command.scope.repositoryId || payload?.workerId !== workerId || payload.workspaceDigest !== workspaceDigest || payload.expectedHead !== expectedHead
       || (gate.status !== 'succeeded' && gate.status !== 'failed')) throw new Error('gate evidence is not a completed exact predecessor gate');
     const recorded = new Set(gate.observations.flatMap((observation) => observation.evidenceRefs));
     if (!evidenceRefs.length || evidenceRefs.some((ref) => !recorded.has(ref))) throw new Error('gate evidence refs are not recorded by the bound gate command');

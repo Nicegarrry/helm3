@@ -145,7 +145,7 @@ No paid API request was added. The last confirmed nominal guard remains **US$4.0
 
 ## Wave 10 PR #91 and bounded peer receipt — 20:08–20:21 UTC, 15 September 2026
 
-PR #91 was accepted from exact reviewed head `c222c02c3b79980584d968e7db5b34f71d221e0f` and merged as `4970c0c0951f34bc289b77e7443bc938a5fcfa9f` at `2026-09-15T20:18:58Z`. Independent Spec and Standards reviews passed, six CI checks passed, and the actual root Helm gate passed typecheck plus **225/225 tests** from `2026-09-15T20:08:53.674Z` through `2026-09-15T20:10:02.175Z`. The [sanitised receipt](evidence/wave10-pr91-and-peer-20260916.json) records the result and evidence hashes.
+PR #91 was accepted from exact reviewed head `c222c02c3b79980584d968e7db5b34f71d221e0f` and merged as `4970c0c0951f34bc289b77e7443bc938a5fcfa9f` at `2026-09-15T20:18:58Z`. Independent Spec and Standards reviews passed, six CI checks passed, and the actual root Helm gate `wave5-combined-c222c02c3b79980584d968e7db5b34f71d221e0f` passed on expected and observed head `c222c02c3b79980584d968e7db5b34f71d221e0f`, with typecheck plus **225/225 tests** from `2026-09-15T20:08:53.674Z` through `2026-09-15T20:10:02.175Z`. The [sanitised receipt](evidence/wave10-pr91-and-peer-20260916.json) records the result and evidence hashes.
 
 The accepted slice covers provider-free actual HostCore/PiWorkerFleet close-and-reopen replay: successful terminal results stay quiet; valid `failed` and `partial` results request judgement; missing, corrupt or ambiguous terminal envelopes produce no completion signal. It does not establish physical process discovery, retries, live frontier wake delivery or full issue #17 closure.
 

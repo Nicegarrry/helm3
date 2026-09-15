@@ -19,12 +19,20 @@
     },
     "rootGate": {
       "state": "passed",
+      "gateId": "wave5-combined-c222c02c3b79980584d968e7db5b34f71d221e0f",
+      "attemptId": "203c6346-ee83-45c5-a5b7-01ba155319d4",
+      "expectedHead": "c222c02c3b79980584d968e7db5b34f71d221e0f",
+      "observedHead": "c222c02c3b79980584d968e7db5b34f71d221e0f",
       "tests": "225/225",
       "typecheck": "passed",
       "startedAt": "2026-09-15T20:08:53.674Z",
       "completedAt": "2026-09-15T20:10:02.175Z",
       "resultSha256": "fc8eae584df5e9a32d6759bf68d1d77455e8070f3efc49b45e59cfebcfea9f70",
-      "testsSha256": "282b2d3361e841f5ec62a21954a0792da9fe408a88383ec918c8b022aaa3b05d"
+      "testsSha256": "282b2d3361e841f5ec62a21954a0792da9fe408a88383ec918c8b022aaa3b05d",
+      "checks": [
+        { "name": "typecheck", "command": ["npm", "run", "typecheck"], "exitCode": 0, "rawRef": "raw:sha256:1ad084df6bb4ed5628864ba835b464c226ca435820c1671042f4c75fec0cb38d" },
+        { "name": "full-tests", "command": ["npm", "test"], "exitCode": 0, "rawRef": "raw:sha256:282b2d3361e841f5ec62a21954a0792da9fe408a88383ec918c8b022aaa3b05d" }
+      ]
     },
     "ci": { "checksPassed": 6, "state": "passed" },
     "claim": "Provider-free actual HostCore/PiWorkerFleet close-and-reopen replay keeps success quiet, requests judgement for valid failed/partial results, and emits no completion signal for missing, corrupt or ambiguous terminal evidence.",

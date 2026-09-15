@@ -16,11 +16,12 @@ const exec = promisify(execFile);
 const now = '2026-09-15T00:00:00Z';
 const later = '2026-09-15T01:00:00Z';
 const sha = (value: unknown) => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
+type PersistedPiBatch = { events: Array<{ sequence: number; event: { type?: string; assistantMessageEvent?: { type?: string; delta?: string } } }> };
 
 test('native Pi faux session writes through kernel-guarded narrow tool, repairs envelope, journals events and reopens', async () => {
   const root = await mkdtemp(join(tmpdir(), 'helm3-pi-native-'));
   const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
-  const { InMemoryCredentialStore, fauxAssistantMessage, fauxProvider, fauxToolCall } = await import('@earendil-works/pi-ai');
+  const { InMemoryCredentialStore, fauxAssistantMessage, fauxProvider, fauxThinking, fauxToolCall } = await import('@earendil-works/pi-ai');
   let host: ReturnType<typeof openKernel>['host'] | undefined;
   let worker: PiNativeWorker | undefined;
   let manager: WorkspaceManager | undefined;
@@ -57,9 +58,9 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
       reportWorkerStop: async (_commandId, observed) => host!.reportAttemptStop('attempt-1', observed),
     };
     const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new InMemoryCredentialStore() });
-    const faux = fauxProvider({ provider: 'helm3-faux', models: [{ id: 'offline' }] }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('helm3-faux', 'offline');
+    const faux = fauxProvider({ provider: 'helm3-faux', models: [{ id: 'offline' }], tokensPerSecond: 1_000_000, tokenSize: { min: 1, max: 1 } }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('helm3-faux', 'offline');
     faux.setResponses([
-      fauxAssistantMessage(fauxToolCall('helm_write', { path: 'result.txt', contents: 'native Pi wrote this\n' })),
+      fauxAssistantMessage([fauxThinking('r'.repeat(1400)), fauxToolCall('helm_write', { path: 'result.txt', contents: 'native Pi wrote this\n' })]),
       fauxAssistantMessage('not a WorkerResult'),
       fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: ['result.txt'], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' })),
     ]);
@@ -71,6 +72,14 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     assert.equal(modelEffects, 3, 'every native turn, including the automatic post-tool turn and correction, crosses the authority guard');
     assert.equal(await readFile(join(workspace.root, 'result.txt'), 'utf8'), 'native Pi wrote this\n');
     assert.ok(outcome.artifacts.length >= 2, 'native event stream and envelope are durable artifacts');
+    const eventMetadata = (await journal.metadata()).filter(entry => entry.source === 'pi.event');
+    assert.ok(eventMetadata.length > 0, 'one-character faux reasoning is durably batched rather than snapshot-journaled per update');
+    const eventBatches = await Promise.all(eventMetadata.map(async entry => JSON.parse((await journal.read(entry.raw, entry.sourceIdentity)).toString('utf8')) as PersistedPiBatch));
+    const persistedEvents = eventBatches
+      .flatMap(batch => batch.events)
+      .sort((left, right) => left.sequence - right.sequence);
+    assert.deepEqual(persistedEvents.map(entry => entry.sequence), Array.from({ length: persistedEvents.length }, (_, index) => index + 1), 'Pi event batches retain exact observed ordering');
+    assert.equal(persistedEvents.filter(entry => entry.event.type === 'message_update' && entry.event.assistantMessageEvent?.type === 'thinking_delta').map(entry => entry.event.assistantMessageEvent?.delta).join(''), 'r'.repeat(1400), 'one-character reasoning deltas reconstruct exactly from durable JSON batches');
     assert.equal(worker.contextOccupancy.state, 'known', 'the native SDK exposes estimated current occupancy');
     const originalSession = worker.sessionId;
     const reopened = await worker.reopen(); assert.equal(reopened.sessionId, originalSession);

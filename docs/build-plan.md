@@ -1,6 +1,6 @@
 # Proposed Helm 3 Map and build plan
 
-Status: wave 1 foundation is merged; wave 2 is explicitly approved. See [wave-two authority and acceptance](wave2-authority.md) and [wave-one progress](wave1-progress.md). Later outcomes remain planned. It is a changeable approach
+Status: wave 1 foundation is merged; wave 2 is explicitly approved. See [wave-two authority and acceptance](wave2-authority.md), [wave-two progress](wave2-progress.md) and [wave-one progress](wave1-progress.md). Later outcomes remain planned. It is a changeable approach
 to the approved Brief, not a workflow DSL or a promise that elapsed time alone
 authorises action.
 
@@ -82,6 +82,6 @@ evidence.
 
 ## Current approval boundary
 
-Context clean is complete and the human's first-wave go-ahead is recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235) and [wave-one authority](wave1-authority.md). Begin the supervised foundation work and independently reviewed PR integration with at most three workers plus coordinator.
+The human's wave-two go-ahead is recorded in [wave-two authority](wave2-authority.md). Continue supervised native-runtime/authority work and independently reviewed PR integration with at most three workers plus coordinator. [Wave-two progress](wave2-progress.md) records accepted slices and the live-access dependency before driver proof.
 
 Before issuing any unattended Helm run lease, separately record actual provider routes, resource caps/reserves, concurrency, expiry and merge scope. No purchases or automatic top-ups are authorised. Live ACCESS must demonstrate bounded intended subscription routes; provider-free code and tests can progress while that evidence remains incomplete. The 48–72-hour estimate remains a planning target for the expanded build, not a granted continuous execution lease or promise. Re-estimate at six hours from accepted output.

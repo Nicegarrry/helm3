@@ -2,7 +2,7 @@
 
 ## Current boundary
 
-The first implementation wave is approved and supervised foundation work is underway; [current status](wave1-progress.md) is the operator entrypoint. The active predecessor belongs to Opus until its Milestone 1 handoff. This repository has not inspected or modified it. Do not resume a historical Helm CLI task based on memory or this repository's existence.
+Wave two is approved for supervised implementation; [current status](wave2-progress.md) and [wave-two authority](wave2-authority.md) are the operator entrypoints. The active predecessor belongs to Opus until its Milestone 1 handoff. This repository has not inspected or modified it. Do not resume a historical Helm CLI task based on memory or this repository's existence.
 
 ## Orient
 

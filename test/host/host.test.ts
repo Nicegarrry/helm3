@@ -233,6 +233,7 @@ test('PiNativeRuntime runs the packaged Pi faux provider through host resource e
     assert.equal(nativeSnapshot.attemptLifecycles[0]?.state, 'active');
     await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'command-1' }, async () => undefined), /cap|budget/);
     await assert.rejects(plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect, observedSettlement }).perform({ effectId: 'unobserved-write', kind: 'workspace.write', commandId: 'command-1' }, async () => { throw new Error('worker lost its observation'); }), /not successfully observed/);
+    await plane.piAuthority({ attemptId: 'native-attempt', actorId: 'trusted-pi', executorId: 'native-pi', commandForEffect: commandForPiEffect }).reportWorkerStop('command-1', 'unknown');
     assert.equal((await plane.snapshot('run-1')).attemptLifecycles[0]?.state, 'unknown');
   } finally { plane?.close(); manager?.close(); await rm(root, { recursive: true, force: true }); }
 });

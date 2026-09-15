@@ -265,6 +265,12 @@ export class PiWorkerFleet {
     if (payload.workerId !== workerId || payload.attemptId !== attemptId || payload.predecessorWorkerId !== predecessor.workerId || payload.inputDigest !== digest(validated)
       || payload.modelId !== predecessor.modelId || payload.modelProvider !== predecessor.modelProvider || payload.modelApi !== predecessor.modelApi || payload.modelFactVersion !== predecessor.modelFactVersion || payload.dataPolicy !== predecessor.dataPolicy
       || payload.sourceSessionId !== predecessor.persistedSession.sessionId || payload.sourceHistoryHash !== predecessor.persistedSession.historyHash || payload.sourceBranchDigest !== predecessor.persistedSession.branchDigest) throw new Error('worker fork command does not bind successor, predecessor, source session, and immutable validated inputs');
+    // The destination and its owner are selected before admission and copied
+    // into the immutable command bytes; an effect may only recreate this plan.
+    const plannedAttempt = this.binding.attempt(command, workerId);
+    const plannedConfig = this.binding.workspace(command, workerId, plannedAttempt);
+    const destination = (command.payload as { destination?: unknown; ownerAttemptId?: unknown; ownerGeneration?: unknown; ownerExpiresAt?: unknown });
+    if (destination.destination !== plannedConfig.destination || destination.ownerAttemptId !== plannedConfig.owner.attemptId || destination.ownerGeneration !== plannedConfig.owner.generation || destination.ownerExpiresAt !== plannedConfig.owner.expiresAt) throw new Error('worker fork command does not bind child destination and owner');
     const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId, attemptId); const attempt = this.binding.attempt(admitted.command, workerId);
     let record: StoredWorker | undefined;
     const effect: KernelEffect = { effectId: `host:worker-fork:${workerId}`,
@@ -276,6 +282,7 @@ export class PiWorkerFleet {
         this.binding.host.assertModelProvenance(predecessor.modelId, predecessor.modelProvider, predecessor.modelFactVersion);
         this.binding.host.recordAttempt(attempt);
         const config = this.binding.workspace(admitted.command, workerId, attempt);
+        if (config.destination !== plannedConfig.destination || config.owner.attemptId !== plannedConfig.owner.attemptId || config.owner.generation !== plannedConfig.owner.generation || config.owner.expiresAt !== plannedConfig.owner.expiresAt) throw new Error('fork destination or owner changed after admission');
         if (config.destination === predecessor.workspace || config.baseSha !== validated.expectedHead || attempt.baseSha !== validated.expectedHead) throw new Error('fork must use a new worktree at the verified source head');
         const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
         const forked = await this.binding.fork!(admitted.command, workspace, predecessor.persistedSession!);

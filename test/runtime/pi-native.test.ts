@@ -64,7 +64,8 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
       fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: ['result.txt'], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' })),
     ]);
     const journal = await ArtifactJournal.open({ root: join(root, 'journal') });
-    worker = await PiNativeWorker.start({ commandId: 'attempt-command', attemptId: 'attempt-1', workspace, owner, workspaceManager: manager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel() });
+    worker = await PiNativeWorker.start({ commandId: 'attempt-command', attemptId: 'attempt-1', workspace, owner, workspaceManager: manager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel(), thinking: { level: 'low' } });
+    assert.deepEqual(worker.thinkingConfiguration, { requested: 'low', nativeSelected: 'off', providerEffective: 'unknown' }, 'Pi clamps an unsupported faux-model level and Helm records that native selection');
     const outcome = await worker.run('Write the requested file and finish with JSON.', 'Your terminal envelope was malformed. Return only a valid WorkerResult JSON object.');
     assert.equal(outcome.repaired, true); assert.equal(outcome.result.status, 'succeeded');
     assert.equal(modelEffects, 3, 'every native turn, including the automatic post-tool turn and correction, crosses the authority guard');
@@ -74,6 +75,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     const originalSession = worker.sessionId;
     const reopened = await worker.reopen(); assert.equal(reopened.sessionId, originalSession);
     assert.equal(reopened.contextOccupancy.state, 'known', 'reopen retains read-only occupancy inspection');
+    assert.deepEqual(reopened.thinkingConfiguration, { requested: 'low', nativeSelected: 'off', providerEffective: 'unknown' });
     await assert.rejects(authority.perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'attempt-command' }, async () => { throw new Error('must not reach provider'); }), /cap|budget/);
     assert.equal(modelEffects, 3, 'settled requests stay charged across reopen');
     assert.equal(await reopened.cancel(), 'stopped');

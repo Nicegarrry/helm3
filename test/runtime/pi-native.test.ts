@@ -23,6 +23,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
   const { InMemoryCredentialStore, fauxAssistantMessage, fauxProvider, fauxToolCall } = await import('@earendil-works/pi-ai');
   let host: ReturnType<typeof openKernel>['host'] | undefined;
   let worker: PiNativeWorker | undefined;
+  let modelEffects = 0;
   try {
     const repo = join(root, 'repo'); await mkdir(repo); await exec('git', ['init', repo]);
     await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']); await exec('git', ['-C', repo, 'config', 'user.name', 'Test']);
@@ -35,6 +36,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     host.issueAutonomyLease({ leaseId: 'lease-1', revision: 1, issuedBy: 'human', parentAuthorityId: 'approval', scope: { repositoryId: 'repo-1', mapNodeIds: ['node-1'] }, allowedActions: ['pi.effect'], issuedAt: now, expiresAt: later, maxConcurrency: 4, maxAttemptsPerNode: 4, poolLimits: [], protectedReserves: [] });
     const authority: PiAuthority = {
       async perform(effect, action) {
+        if (effect.kind === 'model.request') modelEffects += 1;
         const payload = { effectId: effect.effectId, kind: effect.kind };
         host!.admit({ schemaVersion: 1, commandId: effect.effectId, kind: 'pi.effect', idempotencyKey: effect.effectId, payloadHash: sha(payload), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'untrusted-worker', runId: 'run-1', origin: 'worker', leaseId: 'lease-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] }, { actorId: 'trusted-pi-runtime', allowedOrigins: ['worker'] });
         const claim = host!.claim(effect.effectId, { executorId: 'pi-session-1' }, later);
@@ -55,6 +57,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     worker = await PiNativeWorker.start({ commandId: 'attempt-command', attemptId: 'attempt-1', workspace, owner, workspaceManager: manager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel() });
     const outcome = await worker.run('Write the requested file and finish with JSON.', 'Your terminal envelope was malformed. Return only a valid WorkerResult JSON object.');
     assert.equal(outcome.repaired, true); assert.equal(outcome.result.status, 'succeeded');
+    assert.equal(modelEffects, 3, 'every native turn, including the automatic post-tool turn and correction, crosses the authority guard');
     assert.equal(await readFile(join(workspace.root, 'result.txt'), 'utf8'), 'native Pi wrote this\n');
     assert.ok(outcome.artifacts.length >= 2, 'native event stream and envelope are durable artifacts');
     const reopened = await worker.reopen(); assert.equal(reopened.sessionId, worker.sessionId); reopened.dispose(); worker = undefined;

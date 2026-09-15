@@ -51,6 +51,23 @@ function parseTerminalEnvelope(text: string): WorkerResult | undefined {
   try { return workerResultSchema.parse(JSON.parse(text)); } catch { return undefined; }
 }
 
+/** The SDK calls `streamSimple` for every turn, including automatic turns after
+ * a tool result.  Delay the trusted guard until the lazy stream is consumed. */
+async function guardedModelRuntime(input: PiWorkerInput): Promise<any> {
+  const { lazyStream } = await import('@earendil-works/pi-ai');
+  return new Proxy(input.modelRuntime as object, { get(target, property, receiver) {
+    if (property !== 'streamSimple') return Reflect.get(target, property, receiver);
+    const original = Reflect.get(target, property, receiver) as (model: unknown, context: unknown, options?: object) => any;
+    return (model: any, context: unknown, options?: object) => lazyStream(model, async () => {
+      let stream: any;
+      await input.authority.perform({ effectId: `model:${randomUUID()}`, kind: 'model.request', commandId: input.commandId }, async () => {
+        stream = original.call(target, model, context, { ...options, maxRetries: 0 });
+      });
+      return stream;
+    });
+  } });
+}
+
 export class PiNativeWorker {
   private constructor(
     private readonly input: PiWorkerInput,
@@ -84,7 +101,7 @@ export class PiNativeWorker {
       },
     };
     const created = await createAgentSession({
-      cwd: input.workspace.root, agentDir, modelRuntime: input.modelRuntime as any, model: input.model as any,
+      cwd: input.workspace.root, agentDir, modelRuntime: await guardedModelRuntime(input), model: input.model as any,
       sessionManager: SessionManager.create(input.workspace.root, sessionDir),
       noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()) as any,
     });
@@ -99,16 +116,12 @@ export class PiNativeWorker {
 
   /** Prompts and a bounded correction remain in this same native Pi session. */
   async run(prompt: string, correction: string): Promise<{ result: WorkerResult; artifacts: RawArtifactRef[]; repaired: boolean }> {
-    await this.input.authority.perform({ effectId: `model:${randomUUID()}`, kind: 'model.request', commandId: this.input.commandId }, async () => {
-      await this.session.prompt(prompt);
-    });
+    await this.session.prompt(prompt);
     let result = parseTerminalEnvelope(this.lastAssistantText());
     let repaired = false;
     if (!result) {
       repaired = true;
-      await this.input.authority.perform({ effectId: `model:${randomUUID()}`, kind: 'model.request', commandId: this.input.commandId }, async () => {
-        await this.session.prompt(correction, { streamingBehavior: 'followUp' });
-      });
+      await this.session.prompt(correction, { streamingBehavior: 'followUp' });
       result = parseTerminalEnvelope(this.lastAssistantText());
     }
     if (!result) throw new Error('Pi session did not produce a valid terminal WorkerResult after bounded correction');
@@ -149,7 +162,7 @@ export class PiNativeWorker {
         catch (error) { return toolResult(`refused: ${(error as Error).message}`, true); }
       },
     };
-    const reopened = await createAgentSession({ cwd: this.input.workspace.root, modelRuntime: this.input.modelRuntime as any, model: this.input.model as any,
+    const reopened = await createAgentSession({ cwd: this.input.workspace.root, modelRuntime: await guardedModelRuntime(this.input), model: this.input.model as any,
       sessionManager: SessionManager.open(stats.sessionFile, join(this.input.stateRoot, 'sessions'), this.input.workspace.root), noTools: 'builtin', tools: ['helm_write'], customTools: [writeTool], resourceLoader: noResources(createExtensionRuntime()) as any });
     const id = reopened.session.getSessionStats().sessionId;
     if (id !== this.sessionId) throw new Error('reopened Pi session identity changed');

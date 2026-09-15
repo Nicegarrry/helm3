@@ -40,7 +40,7 @@ export type PiWorkerInput = Readonly<{
  * Host-only continuation evidence.  A persisted Pi transcript is useful only
  * when the host can prove that reopening it preserves this exact native ID.
  */
-export type PiPersistedSession = Readonly<{ sessionId: string; sessionFile: string; historyHash: string }>;
+export type PiPersistedSession = Readonly<{ sessionId: string; sessionFile: string; historyHash: string; branchDigest: string }>;
 /** Caller-selected immutable evidence only; this API never discovers transcripts or tracker state. */
 export type PiCheckpointEvidence = Readonly<{ sourceIdentity: string; raw: RawArtifactRef }>;
 export type PiManualCheckpoint = Readonly<{ objective: PiCheckpointEvidence; acceptance: PiCheckpointEvidence; brief: PiCheckpointEvidence; map: PiCheckpointEvidence; decisions: readonly PiCheckpointEvidence[]; handoffs: readonly PiCheckpointEvidence[] }>;
@@ -99,7 +99,8 @@ export class PiNativeWorker {
   async persistedSession(): Promise<PiPersistedSession> {
     const stats = this.session.getSessionStats();
     if (!stats.sessionFile || !stats.sessionId) throw new Error('Pi has not persisted this session yet');
-    return Object.freeze({ sessionId: stats.sessionId, sessionFile: stats.sessionFile, historyHash: `sha256:${createHash('sha256').update(await readFile(stats.sessionFile)).digest('hex')}` });
+    const branchDigest = `sha256:${createHash('sha256').update(JSON.stringify(this.session.sessionManager.getBranch())).digest('hex')}`;
+    return Object.freeze({ sessionId: stats.sessionId, sessionFile: stats.sessionFile, historyHash: `sha256:${createHash('sha256').update(await readFile(stats.sessionFile)).digest('hex')}`, branchDigest });
   }
 
   static async start(input: PiWorkerInput): Promise<PiNativeWorker> {
@@ -116,7 +117,7 @@ export class PiNativeWorker {
    * carries authority from the earlier wrapper across an invocation boundary.
    */
   static async rehydrate(input: PiWorkerInput, persisted: PiPersistedSession): Promise<PiNativeWorker> {
-    if (!persisted.sessionId.trim() || !persisted.sessionFile.trim() || !/^sha256:[0-9a-f]{64}$/.test(persisted.historyHash)) throw new Error('Pi persisted session identity is required');
+    if (!persisted.sessionId.trim() || !persisted.sessionFile.trim() || !/^sha256:[0-9a-f]{64}$/.test(persisted.historyHash) || !/^sha256:[0-9a-f]{64}$/.test(persisted.branchDigest)) throw new Error('Pi persisted session identity is required');
     input.workspaceManager.assertOwner(input.workspace, input.owner);
     await mkdir(input.stateRoot, { recursive: true, mode: 0o700 });
     const stateRoot = await realpath(input.stateRoot);
@@ -132,6 +133,11 @@ export class PiNativeWorker {
     if (worker.sessionId !== persisted.sessionId) {
       worker.dispose();
       throw new Error('reopened Pi session identity changed');
+    }
+    const branchDigest = `sha256:${createHash('sha256').update(JSON.stringify(worker.session.sessionManager.getBranch())).digest('hex')}`;
+    if (branchDigest !== persisted.branchDigest) {
+      worker.dispose();
+      throw new Error('reopened Pi session branch changed');
     }
     return worker;
   }
@@ -241,8 +247,12 @@ export class PiNativeWorker {
     try { this.artifacts.push(...await this.eventSpool.drain()); }
     catch (error) { this.eventError ??= error; }
   }
-  private async saveTerminal(invocation: string, phase: string): Promise<WorkerResult | undefined> {
-    const text = this.lastAssistantText();
+  private async saveTerminal(invocation: string, phase: string, afterMessage: number): Promise<WorkerResult | undefined> {
+    // A reopened native session retains prior terminal messages. Only an
+    // assistant turn appended by this invocation may satisfy its new command;
+    // otherwise a no-op prompt could replay an earlier WorkerResult without a
+    // fresh model effect or correction.
+    const text = this.lastAssistantText(afterMessage);
     const result = parseEnvelope(text);
     const ref = await this.input.journal.append({ source: 'pi.envelope', sourceIdentity: `pi-envelope:${this.input.attemptId}:${invocation}:${phase}`,
       mediaType: 'text/plain; charset=utf-8', bytes: Buffer.from(text) });
@@ -256,14 +266,18 @@ export class PiNativeWorker {
     if (this.running) throw new Error('Pi worker already has an active invocation');
     this.running = true;
     const invocation = randomUUID(); let saved = false;
+    // Automatic compaction is disabled for this worker, so this boundary is a
+    // stable invocation marker even when the wrapper was rehydrated.
+    const invocationMessage = this.session.messages.length;
     try {
       await this.session.prompt(prompt);
-      let result = await this.saveTerminal(invocation, 'initial'); saved = true;
+      let result = await this.saveTerminal(invocation, 'initial', invocationMessage); saved = true;
       const repaired = !result;
       if (!result && (this.input.access?.correctionAllowed ?? true)) {
         this.assertActive();
+        const correctionMessage = this.session.messages.length;
         await this.session.prompt(correction, { streamingBehavior: 'followUp' });
-        result = await this.saveTerminal(invocation, 'correction');
+        result = await this.saveTerminal(invocation, 'correction', correctionMessage);
       }
       if (!result) throw new Error('Pi session did not produce a valid terminal WorkerResult after bounded correction');
       const changed = await this.input.workspaceManager.changedFiles(this.input.workspace);
@@ -276,7 +290,7 @@ export class PiNativeWorker {
           observedTokens: this.session.getSessionStats().tokens, contextOccupancy, cost: { state: 'unknown' } })) }));
       return { result, artifacts: [...this.artifacts], repaired };
     } catch (error) {
-      if (!saved) await this.saveTerminal(invocation, 'interrupted');
+      if (!saved) await this.saveTerminal(invocation, 'interrupted', invocationMessage);
       await this.flushEvents();
       throw error;
     } finally { this.running = false; }
@@ -400,8 +414,8 @@ export class PiNativeWorker {
     if (this.running || this.activeRequests.size) throw new Error('cancel and observe the worker before disposing');
     this.disposed = true; this.unsubscribe(); this.session.dispose();
   }
-  private lastAssistantText(): string {
-    const last = [...this.session.messages].reverse().find((message) => message.role === 'assistant');
+  private lastAssistantText(afterMessage = 0): string {
+    const last = this.session.messages.slice(afterMessage).reverse().find((message) => message.role === 'assistant');
     return last && 'content' in last && Array.isArray(last.content) ? last.content.filter((entry) => entry.type === 'text').map((entry) => entry.type === 'text' ? entry.text : '').join('') : '';
   }
 }

@@ -5,8 +5,8 @@ import type { HelmToolExecutionContext, HelmToolRegistry } from '../runtime/orch
 
 const boundPorts = new WeakMap<Server, number>();
 
-function reply(response: ServerResponse, status: number, body: string, type: string): void {
-  response.writeHead(status, { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+function reply(response: ServerResponse, status: number, body: string, type: string, historical = false): void {
+  response.writeHead(status, { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", ...(historical ? { "x-helm-projection": "historical-untrusted" } : {}) });
   response.end(body);
 }
 
@@ -56,8 +56,8 @@ export function createOperatorServer(source: SnapshotSource, reads?: OperatorRea
         reply(response, 200, JSON.stringify(outcome), "application/json; charset=utf-8"); return;
       }
       const snapshot = await readOperatorSnapshot(source);
-      if (request.url === "/api/operator/snapshot") { reply(response, 200, formatOperatorJson(snapshot), "application/json; charset=utf-8"); return; }
-      if (request.url === "/") { reply(response, 200, renderOperatorHtml(snapshot), "text/html; charset=utf-8"); return; }
+      if (request.url === "/api/operator/snapshot") { reply(response, 200, formatOperatorJson(snapshot), "application/json; charset=utf-8", source.presentation?.mode === "historical-untrusted"); return; }
+      if (request.url === "/") { reply(response, 200, renderOperatorHtml(snapshot, source.presentation), "text/html; charset=utf-8", source.presentation?.mode === "historical-untrusted"); return; }
       reply(response, 404, "not found\n", "text/plain; charset=utf-8");
     } catch {
       reply(response, 500, "snapshot unavailable\n", "text/plain; charset=utf-8");

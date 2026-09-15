@@ -71,7 +71,7 @@ test('Fable uses real typed Claude SDK tool and in-process MCP construction with
     content: [{ type: 'text', text: JSON.stringify({ state: 'refused', reason: 'Consultant sessions cannot issue Helm tool effects' }) }],
   });
   const unknown = new HelmToolRegistry([{ name: 'effect', description: 'May have started an effect.', input: {}, async execute() { throw new Error('effect outcome was not observed'); } }]);
-  assert.deepEqual(await unknown.invoke('effect', {}), { state: 'unknown', reason: 'effect outcome was not observed' });
+  assert.deepEqual(await unknown.invoke('effect', {}, { runId: 'run-1', sessionId, mode: 'primary' }), { state: 'unknown', reason: 'effect outcome was not observed' });
 });
 
 test('Fable records an observed terminal error result as failed rather than successful', async () => {

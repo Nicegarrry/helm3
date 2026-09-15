@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-09-16T20:18:58Z",
+  "scope": "Accepted PR 91 and bounded paid peer attempt",
+  "repository": {
+    "repository": "Nicegarrry/helm3",
+    "mergedMain": "4970c0c0951f34bc289b77e7443bc938a5fcfa9f"
+  },
+  "acceptedPullRequest": {
+    "number": 91,
+    "reviewedHead": "c222c02c3b79980584d968e7db5b34f71d221e0f",
+    "mergedHead": "4970c0c0951f34bc289b77e7443bc938a5fcfa9f",
+    "mergedAt": "2026-09-16T20:18:58Z",
+    "independentReviews": {
+      "spec": "passed",
+      "standards": "passed",
+      "specEvidence": "/private/tmp/helm3-pr91-spec.md",
+      "standardsEvidence": "/private/tmp/helm3-pr91-standards.md"
+    },
+    "rootGate": {
+      "state": "passed",
+      "tests": "225/225",
+      "typecheck": "passed",
+      "startedAt": "2026-09-16T20:08:53.674Z",
+      "completedAt": "2026-09-16T20:10:02.175Z",
+      "resultSha256": "fc8eae584df5e9a32d6759bf68d1d77455e8070f3efc49b45e59cfebcfea9f70",
+      "testsSha256": "282b2d3361e841f5ec62a21954a0792da9fe408a88383ec918c8b022aaa3b05d"
+    },
+    "ci": { "checksPassed": 6, "state": "passed" },
+    "claim": "Provider-free actual HostCore/PiWorkerFleet close-and-reopen replay keeps success quiet, requests judgement for valid failed/partial results, and emits no completion signal for missing, corrupt or ambiguous terminal evidence.",
+    "limits": [
+      "Does not prove physical process discovery, retries, live frontier wakes or full issue 17 closure.",
+      "The prior seven-root-startup-failure environment finding is recorded in the PR body."
+    ]
+  },
+  "paidPeerAttempt": {
+    "attemptId": "pi-wave10-terminal-peer-a01530d4-ebba-4176-949f-6b9aa5560f9d",
+    "provider": "OpenCodeGo",
+    "model": "kimi-k2.7-code",
+    "requests": 1,
+    "bound": "one bounded request",
+    "endedAt": "2026-09-16T20:14:26Z",
+    "terminalObservation": "empty terminal envelope with assistant stop error",
+    "outcome": "unknown",
+    "verifiedWorkerResult": false,
+    "findings": false,
+    "acceptanceEvidence": false,
+    "retried": false,
+    "nextNativeFork": "in progress; not accepted evidence"
+  },
+  "economy": {
+    "fullReservationHeldUsd": 1.34742016,
+    "combinedGuardUsd": 5.42051699,
+    "combinedLimitUsd": 10,
+    "unknownReservations": 4,
+    "settledNominalUsd": 0.03083635,
+    "actualIncrementalBilling": "unknown",
+    "providerHeadroom": "unknown",
+    "zeroSdkUsageIsNotProofOfZeroCharge": true,
+    "newPaidCallsAfterAttempt": 0
+  },
+  "externalEffects": {
+    "githubMapMutations": 0,
+    "userStopAt": "2026-09-15T22:00:00Z",
+    "credentialsRawTranscriptsOrPrivateSdkArtifactsRecorded": false
+  }
+}

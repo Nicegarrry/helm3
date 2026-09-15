@@ -94,7 +94,7 @@ test('a disposed wrapper rehydrates the same persisted Pi session only under a f
       f.ai.fauxAssistantMessage(envelope(['README.md'])),
     ]);
     await f.worker.run('first-session-objective', 'repair');
-    const persisted = f.worker.persistedSession;
+    const persisted = await f.worker.persistedSession();
     const successor = { attemptId: 'follow-up-attempt', generation: 2, expiresAt: '2099-01-01T00:00:00Z' };
     const transferred = f.manager.transfer(f.workspace, 1, successor);
     f.worker.dispose();

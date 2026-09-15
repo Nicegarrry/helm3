@@ -119,6 +119,56 @@ export class PiWorkerFleet {
     return { workerId, attemptId: record.attemptId, sessionId: record.sessionId, state: 'ready' };
   }
 
+  /**
+   * A continuation is deliberately a new command and attempt.  It may use a
+   * persisted transcript only after the old invocation is durably terminal,
+   * the exact clean head is re-observed, and ownership is transferred to a
+   * fresh generation.  The old record is never reopened or rewritten.
+   */
+  async steer(context: HelmToolExecutionContext, input: WorkerSteerInput): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'ready'; predecessorWorkerId: string }> {
+    if (!this.binding.steerCommand || !this.binding.rehydrate) throw new Error('same-session continuation is not configured by this host');
+    const predecessor = await this.durableRecord(context.runId, input.workerId) ?? this.#records.get(input.workerId);
+    if (!predecessor || predecessor.state !== 'terminal' || predecessor.cancellationRequested || !predecessor.persistedSession) throw new Error('worker is not a recoverable idle same-session continuation');
+    if (this.#live.has(input.workerId) || predecessor.sessionId !== input.expectedSessionId || predecessor.persistedSession.sessionId !== input.expectedSessionId) throw new Error('worker is active or session identity changed');
+    const artifacts = this.binding.host.artifactsFor(context);
+    await Promise.all([artifacts.readText(input.objectiveRef), ...input.evidenceRefs.map((ref) => artifacts.readText(ref))]);
+    const oldWorkspace = this.binding.workspaceManager.reservation(predecessor.workspace);
+    await this.binding.workspaceManager.assertExactHead(oldWorkspace, input.expectedHead);
+    const workerId = `worker-${randomUUID()}`;
+    const attemptId = `attempt-${workerId}`;
+    const command = this.binding.steerCommand(Object.freeze({ ...input, evidenceRefs: Object.freeze([...input.evidenceRefs]) }), predecessor, attemptId, context);
+    const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId, attemptId);
+    const attempt = this.binding.attempt(admitted.command, workerId);
+    let record: StoredWorker | undefined;
+    const effect: KernelEffect = {
+      effectId: `host:worker-steer:${workerId}`,
+      execute: async () => {
+        this.binding.host.recordAttempt(attempt);
+        const config = this.binding.workspace(admitted.command, workerId, attempt);
+        if (config.destination !== predecessor.workspace || config.baseSha !== input.expectedHead || attempt.baseSha !== input.expectedHead) throw new Error('continuation does not preserve the verified workspace head');
+        const workspace = this.binding.workspaceManager.transfer(oldWorkspace, oldWorkspace.owner.generation, config.owner);
+        const worker = await this.binding.rehydrate!(admitted.command, workspace, predecessor.persistedSession!);
+        if (worker.sessionId !== predecessor.sessionId) { worker.dispose(); throw new Error('continuation native session changed'); }
+        record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
+          workspace: workspace.root, state: 'ready', inputDigest: digest(input), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+        this.#records.set(workerId, record);
+        this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
+      },
+      observe: async () => {
+        if (!record) return { commandId: admitted.command.commandId, effectId: `host:worker-steer:${workerId}`, state: 'unknown', source: 'host.worker_fleet', observedAt: now(), evidenceRefs: [`worker:${workerId}:steer-missing`] };
+        const ref = await artifacts.writeEffect('host.worker_fleet.steer', JSON.stringify({ ...record, predecessorWorkerId: predecessor.workerId, predecessorAttemptId: predecessor.attemptId, expectedHead: input.expectedHead }));
+        const persisted = Object.freeze({ ...record, evidenceRefs: Object.freeze([ref]) }); this.#records.set(workerId, persisted);
+        const live = this.#live.get(workerId); if (live) this.#live.set(workerId, Object.freeze({ ...live, record: persisted }));
+        this.binding.host.appendFleetEvent(event('worker.steered', persisted, context.runId, { predecessorWorkerId: predecessor.workerId, predecessorAttemptId: predecessor.attemptId, expectedHead: input.expectedHead, evidenceRefs: input.evidenceRefs }));
+        return { commandId: admitted.command.commandId, effectId: `host:worker-steer:${workerId}`, state: 'succeeded', source: 'host.worker_fleet', observedAt: now(), evidenceRefs: [ref] };
+      },
+    };
+    const observed = await this.binding.host.performAdmitted(admitted.command.commandId, this.binding.executor, this.binding.claimExpiresAt(), this.binding.readFact, effect);
+    if (observed.state !== 'succeeded' || !record) throw new Error('worker continuation was not durably observed');
+    const live = this.#live.get(workerId)!; const run = this.run(workerId, live).catch(async () => { await this.persistUnknown(workerId, live); }); this.#runs.set(workerId, run);
+    return { workerId, attemptId: record.attemptId, sessionId: record.sessionId, state: 'ready', predecessorWorkerId: predecessor.workerId };
+  }
+
   /** Test/controlled-host hook; normal orchestration must use inspect/events. */
   async waitForTerminal(workerId: string): Promise<void> { await this.#runs.get(workerId); }
 
@@ -126,7 +176,7 @@ export class PiWorkerFleet {
     let terminal: StoredWorker | undefined;
     try {
       const outcome = await live.worker.run(this.binding.prompt(live.command), this.binding.correction(live.command));
-      const completed = Object.freeze({ ...live.record, state: 'terminal' as const, persistedSession: live.worker.persistedSession, evidenceRefs: Object.freeze([...live.record.evidenceRefs, ...outcome.artifacts.map((item) => item.ref)]) });
+      const completed = Object.freeze({ ...live.record, state: 'terminal' as const, persistedSession: await live.worker.persistedSession(), evidenceRefs: Object.freeze([...live.record.evidenceRefs, ...outcome.artifacts.map((item) => item.ref)]) });
       // Write a disposition before updating the query projection. A completed
       // agent may disappear between these operations; its evidence must not.
       terminal = await this.persistRecord(live.context, completed, 'terminal');
@@ -218,10 +268,11 @@ export class PiWorkerFleet {
     const live = this.#live.get(workerId);
     if (!record) throw new Error('unknown worker');
     this.#records.set(workerId, record);
-    if (!live) return { ...record, live: 'unknown', state: record.state === 'terminal' ? 'terminal' : 'unknown', evidenceRefs: record.evidenceRefs };
+    const { persistedSession: _privateSession, ...publicRecord } = record;
+    if (!live) return { ...publicRecord, live: 'unknown', state: record.state === 'terminal' ? 'terminal' : 'unknown', evidenceRefs: record.evidenceRefs };
     // Liveness is an observation of the local process only; durable outcome,
     // cancellation intent and evidence remain authoritative for the worker.
-    return { ...record, state: record.state === 'ready' && live.worker.isActive ? 'running' : record.state, live: 'known', contextOccupancy: live.worker.contextOccupancy, evidenceRefs: record.evidenceRefs };
+    return { ...publicRecord, state: record.state === 'ready' && live.worker.isActive ? 'running' : record.state, live: 'known', contextOccupancy: live.worker.contextOccupancy, evidenceRefs: record.evidenceRefs };
   }
 
   async stop(context: HelmToolExecutionContext, workerId: string): Promise<{ state: 'stopped' | 'pending' | 'unknown'; evidenceRefs: readonly string[] }> {

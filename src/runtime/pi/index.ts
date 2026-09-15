@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, realpath } from 'node:fs/promises';
+import { mkdir, realpath, readFile } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
@@ -40,7 +40,7 @@ export type PiWorkerInput = Readonly<{
  * Host-only continuation evidence.  A persisted Pi transcript is useful only
  * when the host can prove that reopening it preserves this exact native ID.
  */
-export type PiPersistedSession = Readonly<{ sessionId: string; sessionFile: string }>;
+export type PiPersistedSession = Readonly<{ sessionId: string; sessionFile: string; historyHash: string }>;
 /** Caller-selected immutable evidence only; this API never discovers transcripts or tracker state. */
 export type PiCheckpointEvidence = Readonly<{ sourceIdentity: string; raw: RawArtifactRef }>;
 export type PiManualCheckpoint = Readonly<{ objective: PiCheckpointEvidence; acceptance: PiCheckpointEvidence; brief: PiCheckpointEvidence; map: PiCheckpointEvidence; decisions: readonly PiCheckpointEvidence[]; handoffs: readonly PiCheckpointEvidence[] }>;
@@ -96,10 +96,10 @@ export class PiNativeWorker {
    * A durable host record may retain this identity after this wrapper is
    * disposed.  It is deliberately unavailable until Pi has a session file.
    */
-  get persistedSession(): PiPersistedSession {
+  async persistedSession(): Promise<PiPersistedSession> {
     const stats = this.session.getSessionStats();
     if (!stats.sessionFile || !stats.sessionId) throw new Error('Pi has not persisted this session yet');
-    return Object.freeze({ sessionId: stats.sessionId, sessionFile: stats.sessionFile });
+    return Object.freeze({ sessionId: stats.sessionId, sessionFile: stats.sessionFile, historyHash: `sha256:${createHash('sha256').update(await readFile(stats.sessionFile)).digest('hex')}` });
   }
 
   static async start(input: PiWorkerInput): Promise<PiNativeWorker> {
@@ -116,7 +116,7 @@ export class PiNativeWorker {
    * carries authority from the earlier wrapper across an invocation boundary.
    */
   static async rehydrate(input: PiWorkerInput, persisted: PiPersistedSession): Promise<PiNativeWorker> {
-    if (!persisted.sessionId.trim() || !persisted.sessionFile.trim()) throw new Error('Pi persisted session identity is required');
+    if (!persisted.sessionId.trim() || !persisted.sessionFile.trim() || !/^sha256:[0-9a-f]{64}$/.test(persisted.historyHash)) throw new Error('Pi persisted session identity is required');
     input.workspaceManager.assertOwner(input.workspace, input.owner);
     await mkdir(input.stateRoot, { recursive: true, mode: 0o700 });
     const stateRoot = await realpath(input.stateRoot);
@@ -126,6 +126,7 @@ export class PiNativeWorker {
     const sessionFile = await realpath(persisted.sessionFile);
     const sessionPath = relative(sessionRoot, sessionFile);
     if (isAbsolute(sessionPath) || sessionPath === '..' || sessionPath.startsWith('../')) throw new Error('Pi persisted session is outside the trusted state root');
+    if (`sha256:${createHash('sha256').update(await readFile(sessionFile)).digest('hex')}` !== persisted.historyHash) throw new Error('persisted Pi session history changed');
     const worker = new PiNativeWorker({ ...input, stateRoot });
     await worker.initialize(sessionFile);
     if (worker.sessionId !== persisted.sessionId) {

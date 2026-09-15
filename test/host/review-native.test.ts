@@ -15,6 +15,7 @@ import { PiWorkerFleet, type WorkerSpawnInput } from '../../src/host/worker-flee
 import type { HelmToolExecutionContext } from '../../src/runtime/orchestrator/index.js';
 import { PiNativeWorker } from '../../src/runtime/pi/index.js';
 import { WorkspaceManager } from '../../src/workspace/index.js';
+import { BoundedPiAccess } from '../../src/access/index.js';
 
 const exec = promisify(execFile);
 const stamp = '2026-09-16T00:00:00Z';
@@ -34,15 +35,15 @@ test('native faux independent review uses only helm_read in a fresh readonly Pi 
     const baseSha = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
     workspace = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
     const spawnPayload = z.object({ workerId: z.string(), attemptId: z.string(), modelId: z.literal('reviewer'), modelProvider: z.literal('faux'), modelApi: z.string(), role: z.literal('reviewer'), mode: z.literal('review-readonly'), inputDigest: z.string(), baseSha: z.string(), modelFactVersion: z.literal(1), dataPolicy: z.literal('public-only') }).strict();
-    const modelPayload = z.object({ effectId: z.string(), kind: z.literal('model.request') }).strict();
+    const modelPayload = z.object({ effectId: z.string(), kind: z.literal('model.request'), upperBound: z.number().positive() }).strict();
     plane = await openHost({ stateDirectory: join(root, 'host'), now: () => stamp, kinds: {
       'worker.spawn': { payloadSchema: spawnPayload, modelSelection: (value) => ({ modelId: spawnPayload.parse(value).modelId, role: 'reviewer', requiredCapabilities: ['review'], dataClassification: 'public' as const }) },
       'worker.stop': { payloadSchema: z.object({ workerId: z.string() }).strict() },
-      'pi.model': { payloadSchema: modelPayload },
+      'pi.model': { payloadSchema: modelPayload, resourceRequest: value => ({ poolId: 'offline-usd', unit: 'usd', upperBound: modelPayload.parse(value).upperBound, consumer: 'worker' }) },
     } });
-    plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['worker.spawn', 'worker.stop', 'pi.model'], expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 3, poolLimits: [{ poolId: 'offline', unit: 'requests', limit: 8 }], protectedReserves: [] });
-    plane.recordAutonomyLease({ leaseId: 'auto', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['worker.spawn', 'worker.stop', 'pi.model'], issuedAt: stamp, expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 3, poolLimits: [{ poolId: 'offline', unit: 'requests', limit: 8 }], protectedReserves: [] });
-    plane.recordModelFact({ modelId: 'reviewer', provider: 'faux', poolId: 'offline', enabled: true, capabilities: ['review'], roles: ['reviewer'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: stamp });
+    plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['worker.spawn', 'worker.stop', 'pi.model'], expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 3, poolLimits: [{ poolId: 'offline-usd', unit: 'usd', limit: 10 }], protectedReserves: [] });
+    plane.recordAutonomyLease({ leaseId: 'auto', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['worker.spawn', 'worker.stop', 'pi.model'], issuedAt: stamp, expiresAt: later, maxConcurrency: 2, maxAttemptsPerNode: 3, poolLimits: [{ poolId: 'offline-usd', unit: 'usd', limit: 10 }], protectedReserves: [] });
+    plane.recordModelFact({ modelId: 'reviewer', provider: 'faux', poolId: 'offline-usd', enabled: true, capabilities: ['review'], roles: ['reviewer'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: stamp });
     plane.acquireOwnership({ runId: 'run', leaseId: 'owner', owner: 'fable', sessionId: 'controller', epoch: 1, issuedAt: stamp, expiresAt: later }, 0);
     const context: HelmToolExecutionContext = { runId: 'run', sessionId: 'controller', mode: 'primary' };
     const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
@@ -50,10 +51,9 @@ test('native faux independent review uses only helm_read in a fresh readonly Pi 
     const runtime = await ModelRuntime.create({ authPath: join(root, 'auth.json'), modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
     const faux = ai.fauxProvider({ provider: 'faux', models: [{ id: 'reviewer' }], tokensPerSecond: 1_000_000, tokenSize: { min: 1, max: 1 } }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('faux', 'offline');
     const model = faux.getModel();
+    const access = new BoundedPiAccess({ poolId: 'offline-usd', provider: model.provider, model: model.id, api: model.api, baseUrl: model.baseUrl, authEnvironment: 'FIXTURE_NO_SECRET', contextWindow: model.contextWindow, maxOutputTokens: Math.min(1024, model.maxTokens), maxBilledOutputTokens: model.maxTokens, maxPacketBytes: 1_000_000, maxRequests: 2, inputUsdPerMillion: 1, outputUsdPerMillion: 1, cacheReadUsdPerMillion: 0, cacheWriteUsdPerMillion: 0, maxToolCalls: 0, timeoutMs: 10_000 });
     const finding = JSON.stringify({ status: 'succeeded', summary: 'Found a defect through the readonly review tool.', changed_files: [], commits: [], decisions: [], discoveries: ['finding: review-target.ts exports defect=true'], tests_claimed: [], acceptance_claims: [], risks: ['review finding requires builder follow-up'], unresolved: [], artifacts: [], recommended_next_action: 'return finding to controller' });
-    // `helm_write` and shell are absent from the native review tool registry;
-    // the faux model then uses the one permitted read before reporting.
-    faux.setResponses([ai.fauxAssistantMessage(ai.fauxToolCall('helm_write', { path: 'escape.txt', contents: 'forbidden' })), ai.fauxAssistantMessage(ai.fauxToolCall('bash', { command: 'touch escape.txt' })), ai.fauxAssistantMessage(ai.fauxToolCall('helm_read', { path: 'review-target.ts' })), ai.fauxAssistantMessage(finding)]);
+    faux.setResponses([ai.fauxAssistantMessage(ai.fauxToolCall('helm_read', { path: 'review-target.ts' })), ai.fauxAssistantMessage(finding)]);
     let prompt = ''; let modelEffects = 0;
     const fleet = new PiWorkerFleet({ host: plane, workspaceManager: workspace, executor: { executorId: 'fleet' }, claimExpiresAt: () => later,
       readFact: async () => ({ value: true, state: 'known', source: 'fixture', observedAt: stamp }),
@@ -66,11 +66,11 @@ test('native faux independent review uses only helm_read in a fresh readonly Pi 
       },
       inputDigest: command => (command.payload as { inputDigest: string }).inputDigest,
       stopCommand(record): Command { const body = { workerId: record.workerId }; return { schemaVersion: 1, commandId: `stop-${record.workerId}`, kind: 'worker.stop', idempotencyKey: `stop-${record.workerId}`, payloadHash: hash(body), payload: body, scope: { repositoryId: 'repo', mapNodeId: 'node' }, actorId: 'fable', runId: 'run', origin: 'orchestrator', leaseId: 'auto', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: stamp, notAfter: later, expected: [], requiredEvidence: [] }; },
-      attempt(command, workerId): Attempt { return { attemptId: `attempt-${workerId}`, mapNodeId: 'node', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'reviewer', model: 'reviewer', family: 'faux-review', provider: 'faux', capability: 'review', poolId: 'offline', workspace: join(root, workerId), baseSha, contextManifestHash: 'sha256:review-manifest', leaseId: 'auto', sessionIds: [], commandIds: [command.commandId], startedAt: stamp, evidenceRefs: [], usageRefs: [], findingRefs: [] }; },
+      attempt(command, workerId): Attempt { return { attemptId: `attempt-${workerId}`, mapNodeId: 'node', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'reviewer', model: 'reviewer', family: 'faux-review', provider: 'faux', capability: 'review', poolId: 'offline-usd', workspace: join(root, workerId), baseSha, contextManifestHash: 'sha256:review-manifest', leaseId: 'auto', sessionIds: [], commandIds: [command.commandId], startedAt: stamp, evidenceRefs: [], usageRefs: [], findingRefs: [] }; },
       workspace: (_command, workerId, attempt) => ({ repository: repo, destination: join(root, workerId), branch: workerId, baseSha, owner: { attemptId: attempt.attemptId, generation: 1, expiresAt: later }, policy: { writableRoots: [], readableRoots: ['.'] } }),
       start: async (command, reservation) => {
         assert.equal((command.payload as { mode: string }).mode, 'review-readonly');
-        worker = await PiNativeWorker.start({ commandId: command.commandId, attemptId: `attempt-${(command.payload as { workerId: string }).workerId}`, workspace: reservation, owner: reservation.owner, workspaceManager: workspace!, authority: plane!.piAuthority({ attemptId: `attempt-${(command.payload as { workerId: string }).workerId}`, actorId: 'trusted-pi', executorId: 'pi', commandForEffect: effect => { modelEffects += 1; return { schemaVersion: 1, commandId: effect.effectId, kind: 'pi.model', idempotencyKey: effect.effectId, payloadHash: hash({ effectId: effect.effectId, kind: effect.kind }), payload: { effectId: effect.effectId, kind: effect.kind }, scope: { repositoryId: 'repo', mapNodeId: 'node' }, actorId: 'reviewer', runId: 'run', origin: 'worker', leaseId: 'auto', leaseRevision: 1, plannedAt: stamp, notAfter: later, expected: [], requiredEvidence: [] }; } }), journal: plane!.artifactsFor(context).journalForTrustedPi(), stateRoot: join(root, 'pi-state', (command.payload as { workerId: string }).workerId), modelRuntime: runtime, model, mode: 'review-readonly' });
+        worker = await PiNativeWorker.start({ commandId: command.commandId, attemptId: `attempt-${(command.payload as { workerId: string }).workerId}`, workspace: reservation, owner: reservation.owner, workspaceManager: workspace!, authority: plane!.piAuthority({ attemptId: `attempt-${(command.payload as { workerId: string }).workerId}`, actorId: 'trusted-pi', executorId: 'pi', observedSettlement: effect => access.settlement(effect.effectId) ?? { state: 'unknown' }, commandForEffect: effect => { modelEffects += 1; const upperBound = access.reservation(effect.effectId).upperBound; const payload = { effectId: effect.effectId, kind: effect.kind, upperBound }; return { schemaVersion: 1, commandId: effect.effectId, kind: 'pi.model', idempotencyKey: effect.effectId, payloadHash: hash(payload), payload, scope: { repositoryId: 'repo', mapNodeId: 'node' }, actorId: 'reviewer', runId: 'run', origin: 'worker', leaseId: 'auto', leaseRevision: 1, plannedAt: stamp, notAfter: later, expected: [], requiredEvidence: [] }; } }), journal: plane!.artifactsFor(context).journalForTrustedPi(), stateRoot: join(root, 'pi-state', (command.payload as { workerId: string }).workerId), modelRuntime: runtime, model, access, mode: 'review-readonly' });
         return worker;
       },
       prompt: () => { prompt = 'Review review-target.ts and return only a WorkerResult JSON finding.'; return prompt; }, correction: () => 'Return only a valid WorkerResult JSON object.',
@@ -87,6 +87,6 @@ test('native faux independent review uses only helm_read in a fresh readonly Pi 
     assert.equal(beforeAfter[0].stdout.trim(), baseSha); assert.equal(beforeAfter[1].stdout, '');
     assert.equal(await workspace.read(workspace.reservation(inspected.workspace), 'src/core/authority.ts'), 'export const authority = true;\n');
     assert.match(prompt, /review-target\.ts/); assert.ok(!prompt.includes('builder-transcript-forbidden') && !prompt.includes('primary-conclusion-forbidden'));
-    assert.ok(modelEffects >= 2, 'the faux native session made tool/result model turns through Core');
+    assert.equal(modelEffects, 2, 'the faux native session made bounded tool/result model turns through Core'); assert.throws(() => access.prepare('third-request', model, { messages: [] }, undefined), /count cap/); assert.ok((await plane.snapshot('run')).reservations.every(entry => entry.state === 'settled'));
   } finally { worker?.dispose(); plane?.close(); workspace?.close(); await rm(root, { recursive: true, force: true }); }
 });

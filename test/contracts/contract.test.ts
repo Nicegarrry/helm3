@@ -12,7 +12,7 @@ import {
   usageRecordSchema,
   workerResultSchema,
 } from '../../src/contracts/index.js';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 
 const command = {
   schemaVersion: 1,

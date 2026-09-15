@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { openKernel } from '../../../src/core/index.js';
 
 const [databasePath, marker] = process.argv.slice(2);

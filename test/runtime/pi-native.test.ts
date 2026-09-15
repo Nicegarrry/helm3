@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { openKernel } from '../../src/core/index.js';
 import { ArtifactJournal } from '../../src/journal/index.js';
 import { PiNativeWorker, type PiAuthority } from '../../src/runtime/pi/index.js';

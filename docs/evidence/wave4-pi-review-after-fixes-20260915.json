@@ -7,7 +7,6 @@
   "model": "kimi-k2.7-code",
   "modelCommandId": "model:8d1a3533-98f9-4c96-902f-dcb1a9f612b1",
   "modelOutcome": "succeeded",
-  "attemptOutcome": "unknown",
   "reason": "Output limit reached with thinking content and no WorkerResult envelope",
   "stopReason": "length",
   "usage": {
@@ -32,5 +31,7 @@
     "state": "unknown"
   },
   "acceptedReview": false,
-  "coordinator": "Existing Codex conversation; not a Helm Astra SDK invocation"
+  "coordinator": "Existing Codex conversation; not a Helm Astra SDK invocation",
+  "workerCommandOutcome": "unknown",
+  "workerLifecycle": "finished"
 }

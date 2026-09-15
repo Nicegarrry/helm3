@@ -29,7 +29,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']); await exec('git', ['-C', repo, 'config', 'user.name', 'Test']);
     await writeFile(join(repo, 'README.md'), 'base\n'); await exec('git', ['-C', repo, 'add', '.']); await exec('git', ['-C', repo, 'commit', '-m', 'base']);
     const base = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
-    const manager = new WorkspaceManager();
+    const manager = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
     const owner = { attemptId: 'attempt-1', generation: 1, expiresAt: '2099-01-01T00:00:00Z' };
     const workspace = await manager.create(repo, join(root, 'worker'), 'pi-attempt-1', base, owner);
     const kernel = openKernel({ databasePath: join(root, 'helm.sqlite'), kinds: { 'pi.effect': { payloadSchema: z.object({ effectId: z.string(), kind: z.string() }).strict() } }, now: () => now }); host = kernel.host;

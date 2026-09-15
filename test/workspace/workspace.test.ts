@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, link, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -21,7 +21,7 @@ test('creates an exact-base worktree with one writer and refuses metadata and sy
     await writeFile(join(repository, 'README.md'), 'base\n');
     await exec('git', ['-C', repository, 'add', 'README.md']); await exec('git', ['-C', repository, 'commit', '-m', 'base']);
     const { stdout } = await exec('git', ['-C', repository, 'rev-parse', 'HEAD']);
-    const manager = new WorkspaceManager();
+    const manager = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
     const worktree = await manager.create(repository, join(root, 'worker'), 'worker-attempt-1', stdout.trim(), owner);
     await manager.write(worktree, owner, 'result.txt', 'owned write\n');
     assert.equal(await readFile(join(worktree.root, 'result.txt'), 'utf8'), 'owned write\n');
@@ -31,5 +31,31 @@ test('creates an exact-base worktree with one writer and refuses metadata and sy
     await symlink(root, join(worktree.root, 'safe', 'escape'));
     await assert.rejects(manager.write(worktree, owner, 'safe/escape/outside.txt', 'bad'), WorkspaceRefusal);
     assert.throws(() => manager.assertOwner(worktree, { ...owner, generation: 2 }), WorkspaceRefusal);
+    await assert.rejects(manager.write(worktree, owner, './src/core/backdoor.ts', 'bad'), WorkspaceRefusal);
+    await assert.rejects(manager.write(worktree, owner, join(worktree.root, '.github/workflows/bad.yml'), 'bad'), WorkspaceRefusal);
+    await manager.write(worktree, owner, 'README.md', 'edited');
+    await manager.write(worktree, owner, 'README.md', 'base\n');
+    assert.equal((await manager.changedFiles(worktree)).includes('README.md'), false, 'reverted bytes are not a changed-file claim');
+    await manager.write(worktree, owner, 'nested/new.txt', 'nested');
+    assert.ok((await manager.changedFiles(worktree)).includes('nested/new.txt'));
+    await writeFile(join(root, 'outside'), 'outside');
+    await link(join(root, 'outside'), join(worktree.root, 'hardlink'));
+    await assert.rejects(manager.write(worktree, owner, 'hardlink', 'bad'), WorkspaceRefusal);
+    assert.equal(await readFile(join(root, 'outside'), 'utf8'), 'outside');
+    const second = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
+    second.assertOwner(worktree, owner);
+    await assert.rejects(second.create(repository, worktree.root, 'other-branch', stdout.trim(), owner), /durable owner/);
+    const nextOwner = { ...owner, attemptId: 'replacement', generation: 2 };
+    const next = second.transfer(worktree, 1, nextOwner);
+    assert.throws(() => manager.assertOwner(worktree, owner), /generation/);
+    assert.throws(() => manager.transfer(worktree, 1, { ...nextOwner, generation: 2 }), /generation/);
+    second.close(); manager.close();
+    const restarted = new WorkspaceManager({ stateRoot: join(root, 'workspace-state') });
+    restarted.assertOwner(next, nextOwner);
+    assert.throws(() => restarted.assertOwner(next, { ...nextOwner, expiresAt: '2100-01-01T00:00:00Z' }), /generation/);
+    restarted.close();
+    const expired = new WorkspaceManager({ stateRoot: join(root, 'workspace-state'), now: () => Date.parse('2100-01-01T00:00:00Z') });
+    assert.throws(() => expired.assertOwner(next, nextOwner), /expired/);
+    expired.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

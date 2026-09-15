@@ -1,107 +1,175 @@
 import { execFile } from 'node:child_process';
-import { lstat, mkdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmodSync, mkdirSync, readFileSync, realpathSync, renameSync } from 'node:fs';
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const exec = promisify(execFile);
-
+type DB = { exec(sql: string): void; prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[]; run(...args: unknown[]): unknown }; close(): void };
+const { DatabaseSync } = createRequire(__filename)('node:sqlite') as { DatabaseSync: new (path: string) => DB };
 export type WorktreeOwner = Readonly<{ attemptId: string; generation: number; expiresAt: string }>;
-export type WorktreeReservation = Readonly<{ repository: string; root: string; owner: WorktreeOwner; writableRoots: readonly string[] }>;
-
+export type WorktreeReservation = Readonly<{ repository: string; root: string; owner: WorktreeOwner; writableRoots: readonly string[]; protectedRoots: readonly string[] }>;
 export class WorkspaceRefusal extends Error {}
+type OwnershipRow = { bytes: string; status: string };
 
 function inside(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return path === '' || (!path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path));
 }
 
-/** Canonicalize each extant ancestor so a symlink cannot redirect a later write. */
-async function canonicalPath(root: string, requested: string): Promise<string> {
-  if (requested.includes('\0')) throw new WorkspaceRefusal('NUL is not a path');
-  const absolute = resolve(root, requested);
-  if (!inside(root, absolute)) throw new WorkspaceRefusal('path escapes assigned worktree');
-  let cursor = absolute;
-  const missing: string[] = [];
-  while (true) {
-    try {
-      const details = await lstat(cursor);
-      if (details.isSymbolicLink()) throw new WorkspaceRefusal('symlink path component is refused');
-      const canonical = await realpath(cursor);
-      const canonicalRoot = await realpath(root);
-      if (!inside(canonicalRoot, canonical)) throw new WorkspaceRefusal('canonical path escapes assigned worktree');
-      return resolve(canonical, ...missing.reverse());
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      missing.push(cursor.split(sep).at(-1)!);
-      const parent = dirname(cursor);
-      if (parent === cursor) throw new WorkspaceRefusal('cannot resolve path');
-      cursor = parent;
+/** One trusted host store, outside writable worktrees, shared across managers. */
+export class WorkspaceManager {
+  private readonly db: DB;
+  private readonly stateRoot: string;
+  private readonly now: () => number;
+  constructor(options: { stateRoot: string; now?: () => number }) {
+    mkdirSync(options.stateRoot, { recursive: true, mode: 0o700 });
+    this.stateRoot = realpathSync(options.stateRoot);
+    this.now = options.now ?? Date.now;
+    const path = join(this.stateRoot, 'ownership.sqlite');
+    this.db = new DatabaseSync(path); chmodSync(path, 0o600);
+    this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+      CREATE TABLE IF NOT EXISTS workspace_ownership(root TEXT PRIMARY KEY, bytes TEXT NOT NULL, status TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workspace_writes(root TEXT NOT NULL, path TEXT NOT NULL, baseline_hash TEXT NOT NULL, PRIMARY KEY(root,path));`);
+  }
+  close(): void { this.db.close(); }
+  private transaction<T>(action: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try { const result = action(); this.db.exec('COMMIT'); return result; }
+    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  private validOwner(owner: WorktreeOwner): void {
+    if (!owner.attemptId || !Number.isSafeInteger(owner.generation) || owner.generation < 1
+      || !Number.isFinite(Date.parse(owner.expiresAt)) || Date.parse(owner.expiresAt) <= this.now()) {
+      throw new WorkspaceRefusal('invalid or expired ownership');
     }
   }
-}
-
-export class WorkspaceManager {
-  private readonly reservations = new Map<string, WorktreeReservation>();
-
-  async create(repository: string, destination: string, branch: string, baseSha: string, owner: WorktreeOwner): Promise<WorktreeReservation> {
+  async create(repository: string, destination: string, branch: string, baseSha: string, owner: WorktreeOwner, policy: { writableRoots: readonly string[]; protectedRoots?: readonly string[] } = { writableRoots: ['.'] }): Promise<WorktreeReservation> {
+    this.validOwner(owner);
     const repo = await realpath(repository);
-    const root = resolve(destination);
-    if (this.reservations.has(root)) throw new WorkspaceRefusal('worktree already has an owner');
-    await mkdir(dirname(root), { recursive: true });
+    await mkdir(dirname(resolve(destination)), { recursive: true });
+    const root = join(await realpath(dirname(resolve(destination))), resolve(destination).split(sep).at(-1)!);
+    if (inside(root, this.stateRoot)) throw new WorkspaceRefusal('ownership store must be outside the worktree');
     if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new WorkspaceRefusal('base must be an exact commit SHA');
     const { stdout } = await exec('git', ['-C', repo, 'rev-parse', `${baseSha}^{commit}`]);
     if (stdout.trim() !== baseSha) throw new WorkspaceRefusal('base SHA did not resolve exactly');
-    await exec('git', ['-C', repo, 'worktree', 'add', '-b', branch, root, baseSha]);
-    const canonicalRoot = await realpath(root);
-    const reservation = Object.freeze({ repository: repo, root: canonicalRoot, owner: Object.freeze({ ...owner }), writableRoots: Object.freeze(['.']) });
-    this.reservations.set(canonicalRoot, reservation);
-    return reservation;
+    await exec('git', ['check-ref-format', '--branch', branch]);
+    if (branch.startsWith('-')) throw new WorkspaceRefusal('invalid branch');
+    const normalizePolicyPath = (path: string) => {
+      if (isAbsolute(path) || path.includes('\0') || !inside(root, resolve(root, path))) throw new WorkspaceRefusal('invalid policy path');
+      return relative(root, resolve(root, path)).split(sep).join('/') || '.';
+    };
+    const writableRoots = policy.writableRoots.map(normalizePolicyPath);
+    const protectedRoots = ['.git', '.github', '.pi', 'src/core', 'src/runtime', 'test', 'scripts', 'docs/protocol.md', 'docs/brief.md', 'docs/design-original.md', 'docs/design-addendum.md', 'docs/design-source.md', 'AGENTS.md', ...(policy.protectedRoots ?? []).map(normalizePolicyPath)];
+    const reservation = Object.freeze({ repository: repo, root, owner: Object.freeze({ ...owner }), writableRoots: Object.freeze(writableRoots), protectedRoots: Object.freeze(protectedRoots) });
+    this.transaction(() => {
+      this.validOwner(owner);
+      if (this.db.prepare('SELECT root FROM workspace_ownership WHERE root=?').get(root)) throw new WorkspaceRefusal('worktree already has a durable owner');
+      this.db.prepare('INSERT INTO workspace_ownership VALUES(?,?,?)').run(root, JSON.stringify(reservation), 'creating');
+    });
+    try {
+      await exec('git', ['-C', repo, 'worktree', 'add', '-b', branch, root, baseSha]);
+      this.db.prepare('UPDATE workspace_ownership SET status=? WHERE root=?').run('active', root);
+      this.assertOwner(reservation, owner);
+      return reservation;
+    } catch (error) {
+      this.db.prepare('UPDATE workspace_ownership SET status=? WHERE root=?').run('failed', root);
+      throw error; // Preserve both the record and any created worktree for inspection.
+    }
   }
-
   assertOwner(reservation: WorktreeReservation, owner: WorktreeOwner): void {
-    const current = this.reservations.get(reservation.root);
-    if (!current || current.owner.attemptId !== owner.attemptId || current.owner.generation !== owner.generation) {
+    const row = this.db.prepare('SELECT bytes,status FROM workspace_ownership WHERE root=?').get(reservation.root) as OwnershipRow | undefined;
+    if (!row || row.status !== 'active') throw new WorkspaceRefusal('no active durable worktree ownership');
+    const current = JSON.parse(row.bytes) as WorktreeReservation;
+    if (current.repository !== reservation.repository || current.owner.attemptId !== owner.attemptId
+      || current.owner.generation !== owner.generation || current.owner.expiresAt !== owner.expiresAt
+      || JSON.stringify(current.writableRoots) !== JSON.stringify(reservation.writableRoots)
+      || JSON.stringify(current.protectedRoots) !== JSON.stringify(reservation.protectedRoots)) {
       throw new WorkspaceRefusal('worker does not own this worktree generation');
     }
-    if (Date.parse(owner.expiresAt) <= Date.now()) throw new WorkspaceRefusal('worktree ownership expired');
+    this.validOwner(current.owner);
   }
-
+  /** Trusted host takeover; the old generation is fenced across all managers. */
+  transfer(reservation: WorktreeReservation, expectedGeneration: number, owner: WorktreeOwner): WorktreeReservation {
+    return this.transaction(() => {
+      this.validOwner(owner);
+      const row = this.db.prepare('SELECT bytes,status FROM workspace_ownership WHERE root=?').get(reservation.root) as OwnershipRow | undefined;
+      if (!row || row.status !== 'active') throw new WorkspaceRefusal('worktree is not available for transfer');
+      const current = JSON.parse(row.bytes) as WorktreeReservation;
+      if (current.owner.generation !== expectedGeneration || owner.generation !== expectedGeneration + 1) throw new WorkspaceRefusal('stale worktree ownership generation');
+      const next = Object.freeze({ ...current, owner: Object.freeze({ ...owner }) });
+      this.db.prepare('UPDATE workspace_ownership SET bytes=? WHERE root=?').run(JSON.stringify(next), current.root);
+      return next;
+    });
+  }
+  private relativePath(reservation: WorktreeReservation, requested: string): string {
+    if (requested.includes('\0')) throw new WorkspaceRefusal('NUL is not a path');
+    const target = resolve(reservation.root, requested);
+    if (!inside(reservation.root, target)) throw new WorkspaceRefusal('path escapes assigned worktree');
+    const path = relative(reservation.root, target).split(sep).join('/');
+    if (!reservation.writableRoots.some((entry) => entry === '.' || path === entry || path.startsWith(`${entry}/`))) throw new WorkspaceRefusal('path is outside assigned write scope');
+    if (!path || reservation.protectedRoots.some((entry) => path === entry || path.startsWith(`${entry}/`))) throw new WorkspaceRefusal('control path is protected');
+    return path;
+  }
+  private async safePath(reservation: WorktreeReservation, requested: string): Promise<string> {
+    const path = this.relativePath(reservation, requested);
+    if (await realpath(reservation.root) !== reservation.root) throw new WorkspaceRefusal('worktree root changed');
+    let cursor = reservation.root;
+    for (const part of path.split('/')) {
+      cursor = join(cursor, part);
+      const entry = await lstat(cursor).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error; });
+      if (entry?.isSymbolicLink()) throw new WorkspaceRefusal('symlink path component is refused');
+      if (entry?.isFile() && entry.nlink > 1) throw new WorkspaceRefusal('hard-linked target is refused');
+    }
+    return cursor;
+  }
   async read(reservation: WorktreeReservation, path: string): Promise<string> {
-    const target = await this.safePath(reservation, path, false);
-    return (await import('node:fs/promises')).readFile(target, 'utf8');
+    this.assertOwner(reservation, reservation.owner);
+    return readFile(await this.safePath(reservation, path), 'utf8');
   }
-
   async write(reservation: WorktreeReservation, owner: WorktreeOwner, path: string, contents: string): Promise<void> {
     this.assertOwner(reservation, owner);
-    const target = await this.safePath(reservation, path, true);
-    const existing = await stat(target).catch((error: NodeJS.ErrnoException) => error.code === 'ENOENT' ? undefined : Promise.reject(error));
-    if (existing && existing.nlink > 1) throw new WorkspaceRefusal('hard-linked target is refused');
+    const target = await this.safePath(reservation, path);
     await mkdir(dirname(target), { recursive: true });
-    // Publish a complete replacement, rather than making existing tracked files unwritable.
-    // Re-check ownership after every await before the externally visible rename.
-    const temporary = `${target}.helm-${owner.attemptId}-${owner.generation}.tmp`;
+    await this.safePath(reservation, path);
+    const staged = join(dirname(target), `.helm-write-${randomUUID()}`);
     try {
-      await writeFile(temporary, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      this.assertOwner(reservation, owner);
-      await rename(temporary, target);
-    } finally { await unlink(temporary).catch(() => undefined); }
+      await writeFile(staged, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      await this.safePath(reservation, path);
+      const normalized = this.relativePath(reservation, path);
+      this.transaction(() => {
+        this.assertOwner(reservation, owner);
+        let baseline = 'absent';
+        try { baseline = createHash('sha256').update(readFileSync(target)).digest('hex'); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        this.db.prepare('INSERT OR IGNORE INTO workspace_writes VALUES(?,?,?)').run(reservation.root, normalized, baseline);
+      });
+      // The attempted path survives a crash; synchronous owner check encloses the final local effect.
+      this.transaction(() => {
+        this.assertOwner(reservation, owner);
+        // Same-host trusted tools are the only writers; no shell is exposed.
+        renameSync(staged, target);
+      });
+    } finally { await rm(staged, { force: true }); }
   }
-
   async changedFiles(reservation: WorktreeReservation): Promise<string[]> {
-    const { stdout } = await exec('git', ['-C', reservation.root, 'status', '--porcelain=v1', '-z']);
-    return stdout.split('\0').filter(Boolean).map((entry) => entry.slice(3)).sort();
-  }
-
-  private async safePath(reservation: WorktreeReservation, path: string, writing: boolean): Promise<string> {
-    const lexical = relative(reservation.root, resolve(reservation.root, path)).split(sep).join('/');
-    if (lexical === '.git' || lexical.startsWith('.git/')) throw new WorkspaceRefusal('Git metadata is protected');
-    if (lexical === '.github' || lexical.startsWith('.github/') || lexical === 'src/core' || lexical.startsWith('src/core/') || lexical === 'docs/protocol.md' || lexical.startsWith('docs/protocol/')) throw new WorkspaceRefusal('control path is protected');
-    const target = await canonicalPath(reservation.root, path);
-    if (!inside(reservation.root, target)) throw new WorkspaceRefusal('path is outside assigned worktree');
-    const relativeTarget = relative(reservation.root, target).split(sep).join('/');
-    if (relativeTarget === '.git' || relativeTarget.startsWith('.git/')) throw new WorkspaceRefusal('Git metadata is protected');
-    if (relativeTarget === '.github' || relativeTarget.startsWith('.github/') || relativeTarget === 'src/core' || relativeTarget.startsWith('src/core/') || relativeTarget === 'docs/protocol.md' || relativeTarget.startsWith('docs/protocol/')) throw new WorkspaceRefusal('control path is protected');
-    if (!writing) return target;
-    return target;
+    const { stdout } = await exec('git', ['-C', reservation.root, 'status', '--porcelain=v1', '-z', '--untracked-files=all']);
+    const records = stdout.split('\0').filter(Boolean);
+    const paths = new Set<string>();
+    for (let index = 0; index < records.length; index++) {
+      const entry = records[index]; paths.add(entry.slice(3));
+      if (/[RC]/.test(entry.slice(0, 2)) && records[index + 1]) paths.add(records[++index]);
+    }
+    for (const row of this.db.prepare('SELECT path,baseline_hash FROM workspace_writes WHERE root=?').all(reservation.root) as { path: string; baseline_hash: string }[]) {
+      const target = await this.safePath(reservation, row.path);
+      let current = 'absent';
+      try { current = createHash('sha256').update(await readFile(target)).digest('hex'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (current !== row.baseline_hash) paths.add(row.path);
+    }
+    for (const path of paths) this.relativePath(reservation, path); // Detective scope check includes ignored tool writes.
+    return [...paths].sort();
   }
 }

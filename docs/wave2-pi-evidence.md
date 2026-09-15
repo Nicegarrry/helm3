@@ -1,21 +1,13 @@
 # Wave 2 Pi native runtime evidence
 
-`test/runtime/pi-native.test.ts` runs Pi 0.85.1 with its packaged faux provider
-and in-memory credentials. It creates an exact-base Git worktree, starts a real
-Pi session with all built-ins disabled, and exposes only `helm_write`.
+This is native Pi 0.85.1 execution with its packaged local faux provider and in-memory fake credentials. No remote model request, login or subscription interoperability is established by these tests.
 
-Each faux model request and the write tool pass through a real Helm kernel
-admit/claim/perform lifecycle. The test observes the native write, Pi event
-artifacts plus a terminal envelope artifact, a malformed envelope repaired by
-one same-session follow-up, and persistence/reopen with the same Pi session ID.
+The runtime exposes one controlled `helm_write` tool. Its trusted resource loader and in-memory settings disable ambient extensions, built-in tools, automatic retries and automatic compaction. Every native `streamSimple` request, including a tool-result turn and envelope correction, crosses the injected authority boundary. The guard remains in flight until the provider stream terminates; constructing a lazy stream alone cannot settle a command. Pi-native stream events continue to flow during that guarded effect.
 
-The worker uses an empty trusted Pi resource loader, so repository and user
-extensions, context files, settings, shell tools, credential reads, and network
-tools are unavailable. Workspace paths refuse Git/control paths, traversal,
-symlink components, and hard-linked write targets. The terminal `changed_files`
-claim is compared to the observed Git diff.
+`test/runtime/pi-native.test.ts` exercises real kernel admission, claims and effect observation. `test/runtime/pi-boundaries.test.ts` separately proves existing-file edits, malformed-envelope correction, exact terminal text retention, missing-envelope disposition, persistence/reopen followed by another edit and new semantic journal events, and rejection of a second provider request when authority expires after a tool. A deliberately abort-ignoring faux provider produces `unknown` at the local cancellation deadline, then `stopped` only after it drains. These are injected local failures, not observations of a remote provider's cancellation guarantees.
 
-This is a local faux-provider proof only. It makes no provider request and does
-not establish a shell or process containment boundary because this slice exposes
-no shell or subprocess tool. Worktree ownership is currently process-local;
-durable reservation/fencing is supplied by the authority slice at integration.
+`WorkspaceManager` requires a trusted `stateRoot` outside writable worktrees. SQLite records one owner, generation, expiry and write policy; two managers and restart observe the same record. Trusted compare-and-swap transfer fences the old generation. Creation and failures remain recorded for inspection. Writes normalize and validate paths, refuse protected Git/control/Brief paths and symlink/hard-link escapes, and atomically replace allowed existing files after a fresh owner check. Assigned write roots and additional protected paths are host-supplied. Attempted write paths and their original hashes are durable so ignored writes cannot disappear from the post-attempt audit. Git status is read with individual untracked paths and rename handling; claims are compared against observed changes.
+
+The workspace regression exercises independent managers, takeover, reopen, expiry and forged expiry, protected relative/absolute path forms, existing-file repair, individual nested untracked files, and hard-link/symlink refusal. An untrusted repository extension fixture remains unloaded.
+
+This slice has no shell or subprocess tool and claims no OS process sandbox. Its files and SQLite store are protected from the constrained model tools, not from arbitrary processes already running with the host user's privileges. The one native worker still needs a real subscription receipt before PI-SLICE #11 can close. Complete driver interchange, full session topology, automatic failover and the full feature acceptance remain later evidence.

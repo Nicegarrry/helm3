@@ -5,6 +5,7 @@ import type { HostControlPlane } from './index.js';
 import { PiWorkerFleet } from './worker-fleet.js';
 import type { WorkspaceManager } from '../workspace/index.js';
 import type { ReviewContextPurpose } from './review-context.js';
+import { observeReviewTerminal } from './review-observer.js';
 
 export type ReviewRequest = Readonly<{
   sourceWorkerId: string;
@@ -71,6 +72,7 @@ export type ReviewServiceBinding = Readonly<{
   spawn(input: IndependentReviewSpawnInput): Promise<Readonly<{ workerId: string; attemptId: string; sessionId: string; spawnCommandId?: string; modelId?: string; family?: string; poolId?: string }>>;
   /** Durable registry projection. `prepare` completes before any native spawn. */
   durability: ReviewDurabilityStore;
+  observeTerminal?(review: DurableReviewRecord): Promise<ReviewOutcome | undefined>;
 }>;
 
 const sha = /^[0-9a-f]{40}$/;
@@ -132,6 +134,7 @@ export class IndependentReviewService {
       if (!spawned.workerId || !spawned.attemptId || !spawned.sessionId || spawned.attemptId === source.attemptId || spawned.sessionId === source.sessionId) throw new Error('reviewer did not receive distinct native provenance');
       launched = frozenRecord({ ...planned, state: 'launched', reviewer: { requestedModelId: request.reviewerModelId, workerId: spawned.workerId, attemptId: spawned.attemptId, sessionId: spawned.sessionId, ...(spawned.spawnCommandId ? { spawnCommandId: spawned.spawnCommandId } : {}), modelId: spawned.modelId ?? request.reviewerModelId, ...(spawned.family ? { family: spawned.family } : {}), ...(spawned.poolId ? { poolId: spawned.poolId } : {}) } });
       await this.binding.durability.append(launched);
+      if (this.binding.observeTerminal) void this.binding.observeTerminal(launched).then(async outcome => { if (outcome) await this.recordTerminal(launched!.reviewId, launched!.idempotencyKey, outcome); }).catch(() => undefined);
       return launched;
     } catch (error) {
       const unknown = frozenRecord({ ...(launched ?? planned), state: 'unknown', failure: { reason: launched ? 'persistence-unknown' : 'spawn-unknown' } });
@@ -177,6 +180,7 @@ export function createFleetIndependentReviewService(input: Readonly<{
   return new IndependentReviewService({ source, readArtifact: (ref) => input.host.artifactsFor(input.context).readText(ref), assertReviewContext: (ref, purpose, text) => input.host.reviewContextFor(input.context).assertApproved(ref, purpose, text),
     inspectSource: async (value) => { const reservation = input.workspaceManager.reservation(value.workspace); await input.workspaceManager.assertExactHead(reservation, value.head); return { head: value.head, clean: true }; },
     authorize: input.authorize, durability: input.durability,
+    observeTerminal: async review => { if (!review.reviewer.workerId) return undefined; await input.fleet.waitForTerminal(review.reviewer.workerId); return observeReviewTerminal({ fleet: input.fleet, workspaceManager: input.workspaceManager, journal: input.host.reviewJournalForObservation({ runId: input.context.runId, reviewerAttemptId: review.reviewer.attemptId!, spawnCommandId: review.reviewer.spawnCommandId! }), context: input.context, review }); },
     spawn: async request => {
       const spawned = await input.fleet.spawn(input.context, request);
       const inspected = await input.fleet.inspect(input.context, spawned.workerId);

@@ -4,6 +4,7 @@ import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js'
 import type { WorkspaceManager } from '../workspace/index.js';
 import type { DurableReviewRecord, ReviewOutcome } from './review.js';
 import type { PiWorkerFleet, WorkerTerminalJournal } from './worker-fleet.js';
+import { workerResultSchema } from '../contracts/index.js';
 
 type GitSnapshot = Readonly<{
   schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string;
@@ -21,10 +22,7 @@ function parseGitSnapshot(bytes: Buffer): GitSnapshot | undefined {
   } catch { return undefined; }
 }
 function validWorkerResult(bytes: Buffer): boolean {
-  try {
-    const value = JSON.parse(bytes.toString('utf8')) as { status?: unknown };
-    return typeof value === 'object' && value !== null && typeof value.status === 'string' && value.status.length > 0;
-  } catch { return false; }
+  try { workerResultSchema.parse(JSON.parse(bytes.toString('utf8'))); return true; } catch { return false; }
 }
 function validEvent(bytes: Buffer, terminal: WorkerTerminalJournal): boolean {
   try {
@@ -81,7 +79,7 @@ export async function observeReviewTerminal(input: Readonly<{
   let after: Awaited<ReturnType<WorkspaceManager['inspectGitReadonly']>>;
   try { after = await input.workspaceManager.inspectGitReadonly(reservation); } catch { return undefined; }
   if (after.head !== beforeSnapshot.head || after.status !== beforeSnapshot.status || after.clean !== beforeSnapshot.clean) return undefined;
-  const afterRaw = await input.journal.appendAfter(Buffer.from(JSON.stringify({ ...beforeSnapshot, owner: after.owner }), 'utf8')).catch(() => undefined);
+  const afterRaw = await input.journal.appendAfter(Buffer.from(JSON.stringify({ schemaVersion: 1, workerId: terminal.workerId, attemptId: terminal.attemptId, spawnCommandId: terminal.spawnCommandId, repository: reservation.repository, workspace: reservation.root, head: after.head, clean: after.clean, status: after.status, owner: after.owner }), 'utf8')).catch(() => undefined);
   if (!afterRaw) return undefined;
   return Object.freeze({ resultRef: result.raw.ref, rawEventRefs: Object.freeze(events.map(entry => entry.raw.ref)), readonlyObservation: Object.freeze({ beforeRef: before.raw.ref, afterRef: afterRaw.ref }) });
 }

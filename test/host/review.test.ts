@@ -1,30 +1,57 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { IndependentReviewService } from '../../src/host/review.js';
+import { IndependentReviewService, type DurableReviewRecord } from '../../src/host/review.js';
 import { createHostReviewToolRegistry } from '../../src/host/review-tools.js';
 import { AstraLoopbackMcpTransport, FableDriver, type OrchestratorArtifacts } from '../../src/runtime/orchestrator/index.js';
 
 const head = 'a'.repeat(40);
 function fixture(overrides: Partial<ConstructorParameters<typeof IndependentReviewService>[0]> = {}) {
   let spawns = 0;
+  const records = new Map<string, DurableReviewRecord>();
   const source = { workerId: 'builder-1', attemptId: 'attempt-builder', sessionId: 'session-builder', modelId: 'builder', family: 'fable', provider: 'faux', api: 'responses', repository: 'fixture/repo', workspace: '/fixture/workspace', runId: 'run-1', head, clean: true, contextRefs: ['builder-transcript-forbidden'] };
   const service = new IndependentReviewService({
     source: async () => source,
     readArtifact: async (ref) => `immutable:${ref}`,
     inspectSource: async () => ({ head, clean: true }),
     authorize: async (actual, model) => { assert.equal(actual.family, 'fable'); assert.equal(model, 'reviewer'); },
-    spawn: async input => { spawns++; assert.equal(input.role, 'reviewer'); assert.equal(input.modelId, 'reviewer'); return { workerId: 'reviewer-1', attemptId: 'attempt-reviewer', sessionId: 'session-reviewer' }; },
+    spawn: async input => { spawns++; assert.equal(input.role, 'reviewer'); assert.equal(input.modelId, 'reviewer'); assert.match(input.label ?? '', /^independent-review:review-[0-9a-f]+:sha256:/); return { workerId: 'reviewer-1', attemptId: 'attempt-reviewer', sessionId: 'session-reviewer' }; },
+    durability: { reopen: async key => records.get(key), prepare: async record => { if (records.has(record.idempotencyKey)) throw new Error('duplicate intent'); records.set(record.idempotencyKey, record); }, append: async record => { records.set(record.idempotencyKey, record); } },
     ...overrides,
   });
-  return { service, count: () => spawns };
+  return { service, count: () => spawns, records };
 }
 
 test('independent review freezes only caller-authorized context before a distinct reviewer launch', async () => {
   const { service, count } = fixture();
   const launch = await service.request({ sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: ['brief', 'code'], reviewerModelId: 'reviewer' });
-  assert.equal(count(), 1); assert.equal(launch.source.sessionId, 'session-builder'); assert.equal(launch.sessionId, 'session-reviewer');
+  assert.equal(count(), 1); assert.equal(launch.source.sessionId, 'session-builder'); assert.equal(launch.reviewer.sessionId, 'session-reviewer');
   assert.equal(launch.manifest.entries.length, 4); assert.ok(launch.manifest.entries.every(entry => entry.hash.startsWith('sha256:')));
   assert.ok(!launch.manifest.entries.some(entry => entry.ref.includes('transcript')));
+});
+
+test('review persists a stable pre-spawn intent and reopens it without a duplicate model request', async () => {
+  const { service, count, records } = fixture();
+  const input = { sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: ['brief'], reviewerModelId: 'reviewer' };
+  const first = await service.request(input); const second = await service.request(input);
+  assert.equal(count(), 1); assert.equal(first.reviewId, second.reviewId); assert.equal(first.idempotencyKey, second.idempotencyKey);
+  assert.equal(records.get(first.idempotencyKey)?.state, 'launched');
+  assert.equal(first.manifest.entries[0]?.ref, 'objective');
+});
+
+test('review keeps a reconciliation identity after a post-spawn uncertainty and never blind-retries', async () => {
+  const { service, count, records } = fixture({ spawn: async () => { throw new Error('transport stopped after native effect'); } });
+  const input = { sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' };
+  await assert.rejects(service.request(input), /reconcile review-/); const reopened = await service.request(input);
+  assert.equal(count(), 0); assert.equal([...records.values()][0]?.state, 'unknown');
+  assert.equal(reopened.state, 'unknown');
+});
+
+test('only a trusted runtime completion can attach result, raw, and readonly observation refs', async () => {
+  const { service } = fixture();
+  const launch = await service.request({ sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' });
+  const terminal = await service.recordTerminal(launch.reviewId, launch.idempotencyKey, { resultRef: 'host-result', rawEventRefs: ['raw-event'], readonlyObservation: { beforeRef: 'git-before', afterRef: 'git-after' } });
+  assert.equal(terminal.state, 'terminal'); assert.equal(terminal.outcome?.readonlyObservation.afterRef, 'git-after');
+  await assert.rejects(service.recordTerminal(launch.reviewId, launch.idempotencyKey, { rawEventRefs: [], readonlyObservation: {} }));
 });
 
 test('common review registry never exposes approval or controller mutation tools', async () => {

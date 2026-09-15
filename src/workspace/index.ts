@@ -123,11 +123,23 @@ export class WorkspaceManager {
   /** Trusted host observation for a completed worker handoff; it grants no ownership or write capability. */
   async inspectGit(reservation: WorktreeReservation): Promise<Readonly<{ head: string; clean: boolean }>> {
     this.assertOwner(reservation, reservation.owner);
+    return this.inspectGitReadonly(reservation);
+  }
+  /**
+   * Host observation only. Unlike `inspectGit`, this deliberately does not
+   * renew or require a live lease: a terminal evidence reader must still be
+   * able to inspect an owned checkout after its worker lease expires or is
+   * transferred. The reservation is reloaded from durable ownership first,
+   * so a caller cannot substitute a path or repository.
+   */
+  async inspectGitReadonly(reservation: WorktreeReservation): Promise<Readonly<{ head: string; clean: boolean; status: string; owner: WorktreeOwner }>> {
+    const current = this.reservation(reservation.root);
+    if (current.repository !== reservation.repository || current.root !== reservation.root) throw new WorkspaceRefusal('workspace identity changed before readonly observation');
     const [{ stdout: head }, { stdout: status }] = await Promise.all([
-      exec('git', ['-C', reservation.root, 'rev-parse', 'HEAD']),
-      exec('git', ['-C', reservation.root, 'status', '--porcelain', '--untracked-files=all']),
+      exec('git', ['-C', current.root, 'rev-parse', 'HEAD']),
+      exec('git', ['-C', current.root, 'status', '--porcelain', '--untracked-files=all']),
     ]);
-    return Object.freeze({ head: head.trim(), clean: status === '' });
+    return Object.freeze({ head: head.trim(), clean: status === '', status, owner: Object.freeze({ ...current.owner }) });
   }
   /** Trusted host takeover; the old generation is fenced across all managers. */
   transfer(reservation: WorktreeReservation, expectedGeneration: number, owner: WorktreeOwner): WorktreeReservation {

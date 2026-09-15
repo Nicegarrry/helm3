@@ -58,6 +58,7 @@ test('creates an exact-base worktree with one writer and refuses metadata and sy
     restarted.close();
     const expired = new WorkspaceManager({ stateRoot: join(root, 'workspace-state'), now: () => Date.parse('2100-01-01T00:00:00Z') });
     assert.throws(() => expired.assertOwner(next, nextOwner), /expired/);
+    assert.equal((await expired.inspectGitReadonly(next)).head, stdout.trim(), 'historical Git observation remains available after the former owner lease expires');
     expired.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });

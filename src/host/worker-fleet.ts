@@ -18,9 +18,15 @@ export type WorkerInspect = Readonly<{
   activeRequests?: number; contextOccupancy?: unknown; eventCursor?: string;
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
+/** Read-only terminal provenance for a native worker. It is deliberately not a model tool surface. */
+export type WorkerTerminalJournal = Readonly<{
+  workerId: string; attemptId: string; sessionId: string; spawnCommandId: string; workspace: string;
+  owner: WorktreeOwner; modelId: string; modelProvider: string; modelApi: string;
+  evidenceRefs: readonly string[]; reviewBeforeRef: string;
+}>;
 type SpawnProvenance = Readonly<{ modelId: string; modelProvider: string; modelApi: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
 /** v1 launch/terminal records predate continuation provenance. They remain readable, but cannot be steered. */
-type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; modelId?: string; modelProvider?: string; modelApi?: string; modelFactVersion?: number; dataPolicy?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
+type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; modelId?: string; modelProvider?: string; modelApi?: string; modelFactVersion?: number; dataPolicy?: string; reviewBeforeRef?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
 type ContinuationWorker = StoredWorker & Readonly<{ owner: WorktreeOwner; modelId: string; modelProvider: string; modelApi: string; modelFactVersion: number; dataPolicy: string; persistedSession: PiPersistedSession }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
 export class WorkerSteerUnknownError extends Error {
@@ -33,7 +39,7 @@ function storedWorker(value: unknown): StoredWorker | undefined {
   const item = value as Partial<StoredWorker>;
   if (item.schemaVersion !== 1 || typeof item.workerId !== 'string' || typeof item.attemptId !== 'string' || typeof item.spawnCommandId !== 'string'
     || typeof item.sessionId !== 'string' || typeof item.workspace !== 'string' || typeof item.inputDigest !== 'string'
-    || (item.modelId !== undefined && typeof item.modelId !== 'string') || (item.modelProvider !== undefined && typeof item.modelProvider !== 'string') || (item.modelApi !== undefined && typeof item.modelApi !== 'string') || (item.modelFactVersion !== undefined && (!Number.isInteger(item.modelFactVersion) || item.modelFactVersion < 1)) || (item.dataPolicy !== undefined && typeof item.dataPolicy !== 'string')
+    || (item.modelId !== undefined && typeof item.modelId !== 'string') || (item.modelProvider !== undefined && typeof item.modelProvider !== 'string') || (item.modelApi !== undefined && typeof item.modelApi !== 'string') || (item.modelFactVersion !== undefined && (!Number.isInteger(item.modelFactVersion) || item.modelFactVersion < 1)) || (item.dataPolicy !== undefined && typeof item.dataPolicy !== 'string') || (item.reviewBeforeRef !== undefined && typeof item.reviewBeforeRef !== 'string')
     || (item.owner !== undefined && (typeof item.owner.attemptId !== 'string' || !Number.isInteger(item.owner.generation) || typeof item.owner.expiresAt !== 'string'))
     || (item.state !== 'ready' && item.state !== 'running' && item.state !== 'terminal' && item.state !== 'unknown')
     || !Array.isArray(item.evidenceRefs) || !item.evidenceRefs.every((ref) => typeof ref === 'string') || typeof item.cancellationRequested !== 'boolean') return undefined;
@@ -124,13 +130,21 @@ export class PiWorkerFleet {
         }
         const workspace = await this.binding.workspaceManager.create(config.repository, config.destination, config.branch, config.baseSha, config.owner, config.policy);
         this.binding.host.assertModelProvenance(provenance.modelId, provenance.modelProvider, provenance.modelFactVersion);
+        // This is the last trusted observation before a reviewer's native
+        // request can begin. Persist it before creating the native worker;
+        // later terminal observation compares these bytes instead of inferring
+        // a before-state from the requested SHA or the after-state.
+        const before = review ? await this.binding.workspaceManager.inspectGitReadonly(workspace) : undefined;
+        const reviewBeforeRef = before
+          ? (await this.binding.host.artifactsFor(context).journalForTrustedPi().append({ source: 'host.review.git.before', sourceIdentity: `host-review-git-before:${context.runId}:${attemptId}`, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, workerId, attemptId, spawnCommandId: admitted.command.commandId, repository: workspace.repository, workspace: workspace.root, head: before.head, clean: before.clean, status: before.status }), 'utf8'), classification: 'sensitive' }, { permitSensitive: true })).ref
+          : undefined;
         const worker = await this.binding.start(admitted.command, workspace);
         if (worker.modelIdentity.modelId !== provenance.modelId || worker.modelIdentity.provider !== provenance.modelProvider || worker.modelIdentity.api !== provenance.modelApi) {
           worker.dispose();
           throw new Error('Pi runtime model does not match the admitted worker model');
         }
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
-          workspace: workspace.root, owner: workspace.owner, modelId: provenance.modelId, modelProvider: provenance.modelProvider, modelApi: provenance.modelApi, modelFactVersion: provenance.modelFactVersion, dataPolicy: provenance.dataPolicy, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+          workspace: workspace.root, owner: workspace.owner, modelId: provenance.modelId, modelProvider: provenance.modelProvider, modelApi: provenance.modelApi, modelFactVersion: provenance.modelFactVersion, dataPolicy: provenance.dataPolicy, ...(reviewBeforeRef ? { reviewBeforeRef } : {}), state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
         this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },
@@ -322,6 +336,16 @@ export class PiWorkerFleet {
     // Liveness is an observation of the local process only; durable outcome,
     // cancellation intent and evidence remain authoritative for the worker.
     return { ...publicRecord, state: record.state === 'ready' && live.worker.isActive ? 'running' : record.state, live: 'known', contextOccupancy: live.worker.contextOccupancy, evidenceRefs: record.evidenceRefs };
+  }
+
+  /**
+   * Reconstructs terminal provenance from the durable fleet journal. It does
+   * not await, start, stop, steer, claim, or otherwise affect a worker.
+   */
+  async terminalJournal(context: HelmToolExecutionContext, workerId: string): Promise<WorkerTerminalJournal | undefined> {
+    const record = await this.durableRecord(context.runId, workerId);
+    if (!record || record.state !== 'terminal' || record.cancellationRequested || !record.owner || !record.modelId || !record.modelProvider || !record.modelApi || !record.reviewBeforeRef) return undefined;
+    return Object.freeze({ workerId: record.workerId, attemptId: record.attemptId, sessionId: record.sessionId, spawnCommandId: record.spawnCommandId, workspace: record.workspace, owner: Object.freeze({ ...record.owner }), modelId: record.modelId, modelProvider: record.modelProvider, modelApi: record.modelApi, evidenceRefs: Object.freeze([...record.evidenceRefs]), reviewBeforeRef: record.reviewBeforeRef });
   }
 
   async stop(context: HelmToolExecutionContext, workerId: string): Promise<{ state: 'stopped' | 'pending' | 'unknown'; evidenceRefs: readonly string[] }> {

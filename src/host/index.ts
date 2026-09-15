@@ -40,6 +40,12 @@ type ArtifactKind = 'text' | 'invocation' | 'recovery_bundle' | 'recovery_state'
 type ArtifactScope = Readonly<{ runId: string; sessionId: string }>;
 type StoredArtifactRef = Readonly<{ schemaVersion: 1; kind: ArtifactKind; runId: string; sessionId: string; sourceIdentity: string; raw: RawArtifactRef }>;
 type StoredArtifactEnvelope = Readonly<{ schemaVersion: 1; kind: ArtifactKind; runId: string; sessionId: string; text: string }>;
+/** Historical, reviewer-bound evidence access. It cannot admit or execute any command. */
+export type HistoricalReviewObservationJournal = Readonly<{
+  metadata(): Promise<readonly ArtifactMetadata[]>;
+  read(raw: RawArtifactRef, sourceIdentity: string): Promise<Buffer>;
+  appendAfter(bytes: Uint8Array): Promise<RawArtifactRef>;
+}>;
 
 function encodeRef(value: StoredArtifactRef): string { return JSON.stringify(value); }
 function isArtifactKind(value: unknown): value is ArtifactKind {
@@ -451,6 +457,28 @@ export class HostControlPlane {
     }
     const artifacts = new HostArtifactStore(this.journal, () => ({ runId: input.runId, sessionId: `fleet:${input.attemptId}` }));
     return artifacts.writeEffect(`host.worker_fleet.${input.phase}`, input.text, `host-worker-${input.phase}:${input.runId}:${input.attemptId}`);
+  }
+
+  /**
+   * Reopens only the immutable journal belonging to an already-admitted
+   * readonly reviewer. This historical observation capability intentionally
+   * bypasses the former controller lease, but exposes neither artifactsFor nor
+   * any command/claim/model/write authority.
+   */
+  reviewJournalForObservation(input: Readonly<{ runId: string; reviewerAttemptId: string; spawnCommandId: string }>): HistoricalReviewObservationJournal {
+    const snapshot = this.kernel.host.readRun(input.runId);
+    const record = snapshot.commands.find(entry => entry.command.commandId === input.spawnCommandId);
+    const payload = record?.command.payload as { attemptId?: unknown; mode?: unknown } | undefined;
+    if (!record || record.command.kind !== 'worker.spawn' || payload?.attemptId !== input.reviewerAttemptId || payload?.mode !== 'review-readonly') {
+      throw new Error('historical observation is not bound to an admitted readonly reviewer');
+    }
+    if (!snapshot.attempts.some(attempt => attempt.attemptId === input.reviewerAttemptId && attempt.commandIds.includes(input.spawnCommandId))) throw new Error('historical observation reviewer attempt is absent');
+    const afterIdentity = `host-review-git-after:${input.runId}:${input.reviewerAttemptId}`;
+    return Object.freeze({
+      metadata: () => this.journal.metadata(),
+      read: (raw, sourceIdentity) => this.journal.read(raw, sourceIdentity, { permitSensitive: true }),
+      appendAfter: (bytes) => this.journal.append({ source: 'host.review.git.after', sourceIdentity: afterIdentity, mediaType: 'application/json', bytes, classification: 'sensitive' }, { permitSensitive: true }),
+    });
   }
 
   /**

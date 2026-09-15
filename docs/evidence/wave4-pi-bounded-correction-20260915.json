@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "checkpoint": "2026-09-15T13:20:00Z",
+  "attemptId": "pi-supervisor-review-39427181-2f02-4c71-a18b-5a9797f0bec1",
+  "runtimeHead": "d289c6c1c6a8e470049807aeb2a4a2d3767ee0f4",
+  "model": "opencode-go/kimi-k2.7-code",
+  "policy": {
+    "maxRequests": 2,
+    "maxOutputTokens": 8192,
+    "maxPacketBytes": 64000,
+    "allowCorrection": true,
+    "timeoutMs": 120000
+  },
+  "modelCommands": [
+    {
+      "id": "model:92a9dd18-0b73-450d-9d99-9c05b0ed13bd",
+      "outcome": "unknown",
+      "reservedUsd": 1.34742016
+    },
+    {
+      "id": "model:b192eb73-fead-48cd-8fb5-1497557bb8b2",
+      "outcome": "unknown",
+      "reservedUsd": 1.34742016
+    }
+  ],
+  "workerCommandOutcome": "unknown",
+  "workerLifecycle": "unknown",
+  "localHostProcessExitCode": 0,
+  "acceptedReview": false,
+  "cumulativeGuard": {
+    "limitUsd": 10,
+    "settledNominalUsd": 0.00905755,
+    "retainedUncertainUsd": 4.04226048,
+    "committedUsd": 4.05131803
+  },
+  "quota": {
+    "state": "unknown"
+  },
+  "incrementalBilling": {
+    "state": "unknown"
+  },
+  "furtherApiDispatch": "paused_pending_offline_findings_and_recovery"
+}

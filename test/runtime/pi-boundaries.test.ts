@@ -136,3 +136,27 @@ test('manual compaction checkpoints immutable handoff facts, runs as a distinct 
     assert.equal(f.worker.contextOccupancy.state, 'unknown');
   } finally { await f.cleanup(); }
 });
+
+test('manual compaction refuses missing or invalid durable handoff evidence before any provider request', async () => {
+  const f = await setup();
+  try {
+    const raw = await f.journal.append({ source: 'fixture', sourceIdentity: 'one', mediaType: 'application/json', bytes: Buffer.from('{}') });
+    const entry = { sourceIdentity: 'one', raw };
+    await assert.rejects(f.worker.manualCompact({ commandId: 'compact-refuse', effectId: 'compact-refuse-effect', checkpoint: { objective: entry, acceptance: entry, brief: entry, map: entry, decisions: [], handoffs: [] } }), /handoff/);
+    await assert.rejects(f.worker.manualCompact({ commandId: 'compact-bad-ref', effectId: 'compact-bad-ref-effect', checkpoint: { objective: entry, acceptance: entry, brief: entry, map: entry, decisions: [], handoffs: [{ sourceIdentity: 'wrong', raw }] } }), /duplicate|metadata/);
+    assert.equal(f.faux.state.callCount, 0); assert.equal(f.effects.filter((x) => x.startsWith('pi.compact')).length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('a failed summary leaves a prepared checkpoint but no successful compaction artifact', async () => {
+  const f = await setup();
+  try {
+    f.faux.setResponses([f.ai.fauxAssistantMessage(envelope([])), async () => { throw new Error('fixture summary failure'); }]);
+    await f.worker.run('context '.repeat(8_000), 'repair');
+    const make = async (name: string) => ({ sourceIdentity: name, raw: await f.journal.append({ source: 'fixture', sourceIdentity: name, mediaType: 'application/json', bytes: Buffer.from('{}') }) });
+    const checkpoint = { objective: await make('failure-objective'), acceptance: await make('failure-acceptance'), brief: await make('failure-brief'), map: await make('failure-map'), decisions: [], handoffs: [await make('failure-handoff')] };
+    await assert.rejects(f.worker.manualCompact({ commandId: 'compact-failure', effectId: 'compact-failure-effect', checkpoint }));
+    const artifacts = await f.artifacts(); assert.ok(artifacts.some((entry) => entry.metadata.source === 'pi.checkpoint'));
+    assert.equal(artifacts.some((entry) => entry.metadata.source === 'pi.compaction'), false);
+  } finally { await f.cleanup(); }
+});

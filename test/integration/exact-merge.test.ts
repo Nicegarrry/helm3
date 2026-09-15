@@ -77,6 +77,13 @@ test('certificate expiry and changed acceptance version refuse before an effect'
   await assert.rejects(mergeIntegration(prepared, { kernel: kernel(), command: record(), executor: { executorId: 'host' }, claimExpiresAt: expires, gateway: fixture.gateway, effectId: 'version', assertIntegrationExecutor: async () => {}, assertAuthority: async () => {} }), /precondition/);
 });
 
+test('a target-only move and a callback-time CI mutation refuse before merge', async () => {
+  await assert.rejects(prepareIntegration(gateway(facts({ targetHead: 'd'.repeat(40) })).gateway, 8, requirements), /target/);
+  const fixture = gateway(); const prepared = await prepareIntegration(fixture.gateway, 8, requirements);
+  const result = await mergeIntegration(prepared, { kernel: kernel(), command: record(), executor: { executorId: 'host' }, claimExpiresAt: expires, gateway: fixture.gateway, effectId: 'callback-mutation', assertAuthority: async () => { fixture.state = facts({ checks: [{ source: 'check_run', name: 'gate', appId: '1', status: 'completed', conclusion: 'failure' }] }); }, assertIntegrationExecutor: async () => {} });
+  assert.equal(result.state, 'unknown'); assert.equal(fixture.mergeCalls, 0);
+});
+
 test('production direct REST merge refuses before transport', async () => {
   let calls = 0; const live = createGitHubIntegrationGateway({ repository: 'acme/helm', receipts: () => [receipt], acceptanceEvidence: () => [{ ref: 'gate:8', head, acceptanceVersion: 'acceptance-v1' }], transport: async () => { calls++; return { ok: true, stdout: '{}', stderr: '' }; } });
   await assert.rejects(live.merge(command().payload as any), /lacks atomic target-ref/); assert.equal(calls, 0);

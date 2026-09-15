@@ -33,13 +33,13 @@ function exactCommandHash(command: Command): string {
   return `sha256:${createHash('sha256').update(JSON.stringify(command)).digest('hex')}`;
 }
 function validFacts(facts: IntegrationFacts, required: readonly RequiredCheck[] = []): string | null {
-  if (!repository.safeParse(facts.repository).success || !positive.safeParse(facts.pr).success || !sha.safeParse(facts.head).success || !sha.safeParse(facts.baseHead).success || !facts.baseRef.trim()) return 'Invalid PR identity, base, or exact head';
+  if (!repository.safeParse(facts.repository).success || !positive.safeParse(facts.pr).success || !sha.safeParse(facts.head).success || !sha.safeParse(facts.baseHead).success || !sha.safeParse(facts.targetHead).success || facts.targetHead !== facts.baseHead || !facts.baseRef.trim()) return 'Invalid PR identity, base, target, or exact head';
   if (facts.state !== 'OPEN' || facts.mergeable !== 'MERGEABLE') return 'PR is not freshly open and mergeable';
   const ci = classifyCi(facts.checks);
   if (ci.state !== 'green') return `CI is not green on the exact head (${ci.state})`;
   if (new Set(required.map(item => `${item.name}\u0000${item.appId}\u0000${item.source}`)).size !== required.length || required.some(item => !item.name.trim() || !item.appId.trim() || !facts.checks.some(check => check.name === item.name && check.appId === item.appId && check.source === item.source && check.status === 'completed' && check.conclusion === item.conclusion))) return 'Required exact check identities are absent or not successful';
   const receipt = facts.reviewReceipts.find(receipt => receipt.pr === facts.pr && receipt.head === facts.head && receipt.verdict === 'approved'
-    && receipt.builder.attemptId.length > 0 && receipt.builder.sessionId.length > 0 && receipt.reviewer.attemptId.length > 0 && receipt.reviewer.sessionId.length > 0
+    && receipt.receiptId.trim() === receipt.receiptId && receipt.receiptId.length > 0 && receipt.builder.attemptId.trim() === receipt.builder.attemptId && receipt.builder.attemptId.length > 0 && receipt.builder.sessionId.trim() === receipt.builder.sessionId && receipt.builder.sessionId.length > 0 && receipt.builder.family.trim() === receipt.builder.family && receipt.builder.family.length > 0 && receipt.reviewer.attemptId.trim() === receipt.reviewer.attemptId && receipt.reviewer.attemptId.length > 0 && receipt.reviewer.sessionId.trim() === receipt.reviewer.sessionId && receipt.reviewer.sessionId.length > 0 && receipt.reviewer.family.trim() === receipt.reviewer.family && receipt.reviewer.family.length > 0
     && receipt.builder.attemptId !== receipt.reviewer.attemptId && receipt.builder.sessionId !== receipt.reviewer.sessionId && receipt.builder.family !== receipt.reviewer.family);
   if (!receipt) return 'No trusted independent review receipt is bound to the exact head';
   return facts.acceptanceEvidence.length > 0 && facts.acceptanceEvidence.every(item => item.ref.length > 0 && item.head === facts.head) ? null : 'No trusted acceptance evidence is bound to the exact head';
@@ -111,6 +111,7 @@ export async function mergeIntegration(prepared: IntegrationPreparation, input: 
       payloadFor(command); await fresh();
       await input.assertAuthority(command, commandHash);
       await input.assertIntegrationExecutor(command, input.executor);
+      await fresh();
       effectAttempted = true;
       await input.gateway.merge(payload);
     },

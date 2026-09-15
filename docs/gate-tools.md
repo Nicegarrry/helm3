@@ -19,8 +19,10 @@ each child. A red gate is durable evidence. A timeout, changed workspace,
 expired lease, failed evidence write, or interrupted effect is unknown.
 
 The provider-free connected Fable/Astra fixture exposes the same composed host
-registry including `gate.run`. It intentionally leaves the worker worktree
-dirty, so it proves registration and fencing but does not claim a green
-post-worker gate. A future acceptance run should commit or otherwise prepare a
-clean registered worker head, invoke the tool through a driver, and verify the
-resulted GateResult against that exact head.
+registry including `gate.run`. After its faux Pi worker produces the known
+`result.txt`, trusted fixture mechanics commit that generated file in the
+worker's isolated worktree. Each driver then invokes `gate.run` for the exact
+resulting SHA. The content check passes only when the committed file has the
+expected bytes, and the test reads the succeeded command's evidence references
+and bound SHA back from the durable Host projection. This is fixture-only
+mechanics, not an agent Git role or a prescribed production workflow.

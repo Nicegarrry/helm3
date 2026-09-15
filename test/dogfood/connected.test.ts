@@ -15,7 +15,11 @@ for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orches
     assert.ok(fixture.recoveryBundleRef.length > 0); assert.ok(fixture.recoveryStateRef.length > 0);
     assert.ok(fixture.rawRefs.length > 0); assert.ok(fixture.usageActions.modelRequests >= 1); assert.equal(fixture.usageActions.workspaceWrites, 1);
     assert.ok(fixture.toolNames.includes('gate.run'));
+    assert.match(fixture.gateHead, /^[0-9a-f]{40}$/); assert.equal(fixture.gateCommandState, 'succeeded'); assert.ok(fixture.gateEvidenceRefs.length >= 2);
     const snapshot = await fixture.host.recover(fixture.runId);
+    const gate = snapshot.commands.find((record) => record.command.kind === 'gate.run');
+    assert.equal((gate?.command.payload as { expectedHead?: string } | undefined)?.expectedHead, fixture.gateHead);
+    assert.ok(gate?.observations.some((observation) => observation.evidenceRefs.length >= 2));
     assert.equal(snapshot.commands.find((record) => record.command.commandId === 'fixture-worker-spawn')?.status, 'succeeded'); assert.equal(snapshot.attemptLifecycles.find((entry) => entry.attemptId === fixture!.attemptId)?.state, 'finished');
   } finally { await fixture?.close(); await rm(directory, { recursive: true, force: true }); }
 });
@@ -26,7 +30,12 @@ test('after-write fixture interruption recovers unknown effects and refuses repl
   try {
     const deadline = Date.now() + 15_000;
     while (true) { try { await readFile(marker); break; } catch { if (Date.now() > deadline) throw new Error('fixture did not reach after-write marker'); await new Promise((resolve) => setTimeout(resolve, 20)); } }
-    child.kill('SIGKILL'); await new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+      await new Promise<void>((resolve) => {
+        if (child.exitCode !== null) resolve(); else child.once('exit', () => resolve());
+      });
+    }
     const before = await readFile(join(stateDirectory, 'worker', 'result.txt'), 'utf8');
     const { openHost } = await import('../../src/host/index.js'); const { z } = await import('zod/v3');
     const host = await openHost({ stateDirectory: join(stateDirectory, 'host'), runtime: { async createEffect() { return { effectId: 'replay-fixture', async execute() {}, async observe() { return { commandId: 'fixture-worker-spawn', effectId: 'replay-fixture', state: 'succeeded' as const, source: 'fixture', observedAt: '2026-09-15T00:00:00.000Z', evidenceRefs: [] }; } }; } }, kinds: { 'worker.spawn': { payloadSchema: z.object({ path: z.literal('result.txt'), contents: z.literal('provider-free Pi fixture\n') }).strict() }, 'pi.model': { payloadSchema: z.object({ effectId: z.string(), kind: z.enum(['model.request', 'workspace.write']) }).strict(), resourceRequest: () => ({ poolId: 'fixture-requests', unit: 'requests', upperBound: 1, consumer: 'worker' as const }) }, 'pi.write': { payloadSchema: z.object({ effectId: z.string(), kind: z.enum(['model.request', 'workspace.write']) }).strict() } } });

@@ -45,3 +45,5 @@ npm test
 ```
 
 The economy tests cover native pool units, absent/unknown quota, disabled/policy/role/capability/unknown-availability refusal, separate build/review capabilities, Core model-fact projection, Core reservation delegation, and refusal of a forged reserve override.
+
+Core-bound model facts now preserve data policy. New policy-aware facts require a classified request; restricted context requires an explicit restricted-ok fact at admission and again at effect. Legacy facts remain compatible for unclassified legacy routes, but cannot authorise an explicitly restricted request. Missing roles in an explicit per-role capability map have no capability; they never inherit the union.

@@ -30,7 +30,7 @@ const roleFloorKind: KernelKind = {
   payloadSchema: z.object({ value: z.string(), upper: z.number().nonnegative(), modelId: z.string(), role: z.string(), capability: z.string() }).strict(),
   requiresResourceEnforcement: true,
   resourceRequest: (payload) => ({ ...pool, upperBound: (payload as { upper: number }).upper, consumer: 'worker' as const }),
-  modelSelection: (payload) => ({ modelId: (payload as { modelId: string }).modelId, requiredCapabilities: [(payload as { capability: string }).capability], role: (payload as { role: string }).role }),
+  modelSelection: (payload) => ({ modelId: (payload as { modelId: string }).modelId, requiredCapabilities: [(payload as { capability: string }).capability], role: (payload as { role: string }).role, dataClassification: 'restricted' }),
 };
 const plainWorkerKind: KernelKind = { payloadSchema: z.object({ value: z.string() }).strict() };
 
@@ -257,5 +257,19 @@ test('a confirmed stop only settles zero before an effect starts and never relea
   assert.throws(() => host.settleResource('command-1', { state: 'known', amount: 0 }), /may still spend/);
   release();
   await spending;
+  host.close();
+});
+
+test('Core refuses missing role floors, restricted context policy and policy-less selections before effects', () => {
+  const { host } = opened({ 'test.effect': roleFloorKind });
+  host.issueAutonomyLease(lease());
+  const base = { modelId: 'guarded', provider: 'p', poolId: 'pool-1', enabled: true, availability: 'known_available' as const, roles: ['builder', 'reviewer'], capabilities: ['build'], observedAt: now };
+  host.putModelFact({ ...base, factVersion: 1, capabilitiesByRole: { reviewer: ['build'] }, dataPolicy: 'restricted-ok' });
+  const intent = command({ payload: { value: 'x', upper: 1, modelId: 'guarded', role: 'builder', capability: 'build' } });
+  assert.throws(() => host.admit(intent, caller()), /required capability/);
+  host.putModelFact({ ...base, factVersion: 2, dataPolicy: 'public-only' });
+  assert.throws(() => host.admit(intent, caller()), /data policy/);
+  host.putModelFact({ ...base, factVersion: 3 });
+  assert.throws(() => host.admit(intent, caller()), /data policy/);
   host.close();
 });

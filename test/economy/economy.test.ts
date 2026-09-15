@@ -49,7 +49,7 @@ test('refuses disabled, policy, role and capability-ineligible selections', () =
 test('projects registry facts into the Core admission contract without adding a ledger', () => {
   assert.deepEqual(toCoreModelFact(snapshot.models[0]!, 3), {
     modelId: 'terra', provider: 'openai', poolId: 'chatgpt', enabled: true,
-    capabilities: ['security', 'typescript'], roles: ['builder', 'reviewer'], capabilitiesByRole: { builder: ['typescript'], reviewer: ['security'] }, availability: 'known_available', factVersion: 3, observedAt: '2026-09-15T00:00:00Z',
+    capabilities: ['security', 'typescript'], roles: ['builder', 'reviewer'], capabilitiesByRole: { builder: ['typescript'], reviewer: ['security'] }, dataPolicy: 'restricted-ok', availability: 'known_available', factVersion: 3, observedAt: '2026-09-15T00:00:00Z',
   });
 });
 

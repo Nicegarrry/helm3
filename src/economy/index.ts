@@ -56,7 +56,7 @@ export function toCoreModelFact(input: ModelProfile, factVersion: number): Model
   for (const item of profile.roles) capabilitiesByRole[item] = Object.freeze([...(item === 'reviewer' ? profile.reviewCapabilities : profile.buildCapabilities)]);
   return Object.freeze({
     modelId: profile.modelId, provider: profile.provider, poolId: profile.poolId, enabled: profile.enabled,
-    capabilities: [...new Set([...profile.buildCapabilities, ...profile.reviewCapabilities])].sort(), roles: [...profile.roles].sort(), capabilitiesByRole: Object.freeze(capabilitiesByRole),
+    capabilities: Object.freeze([...new Set([...profile.buildCapabilities, ...profile.reviewCapabilities])].sort()), roles: Object.freeze([...profile.roles].sort()), capabilitiesByRole: Object.freeze(capabilitiesByRole), dataPolicy: profile.dataPolicy,
     availability: profile.availability, factVersion, observedAt: profile.observedAt,
   });
 }

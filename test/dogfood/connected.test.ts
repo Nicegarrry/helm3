@@ -14,7 +14,8 @@ for (const orchestrator of ['fable', 'astra'] as const) test(`connected ${orches
     assert.equal(fixture.commandState, 'succeeded');  assert.equal(fixture.expiredRefusal, true);
     assert.ok(fixture.recoveryBundleRef.length > 0); assert.ok(fixture.recoveryStateRef.length > 0);
     assert.ok(fixture.rawRefs.length > 0); assert.equal(fixture.usageActions.modelRequests, 4); assert.equal(fixture.usageActions.workspaceWrites, 2);
-    assert.ok(fixture.toolNames.includes('gate.run')); assert.ok(fixture.toolNames.includes('worker.steer'));
+    assert.ok(fixture.toolNames.includes('gate.run')); assert.ok(fixture.toolNames.includes('worker.steer')); assert.ok(fixture.toolNames.includes('map.update')); assert.ok(fixture.toolNames.includes('map.close'));
+    assert.equal(fixture.mapUpdateState, 'succeeded'); assert.equal(fixture.mapCloseState, 'succeeded'); assert.equal(fixture.mapCommandIds.length, 2); assert.equal(fixture.mapReceiptRefs.length, 2);
     assert.match(fixture.gateHead, /^[0-9a-f]{40}$/); assert.equal(fixture.gateCommandState, 'succeeded'); assert.ok(fixture.gateEvidenceRefs.length >= 2);
     assert.match(fixture.redGateHead, /^[0-9a-f]{40}$/); assert.notEqual(fixture.redGateHead, fixture.gateHead); assert.ok(fixture.redGateEvidenceRefs.length >= 2);
     assert.equal(fixture.steerSessionId, fixture.workerSessionId); assert.equal(fixture.secondModelSawPriorContext, true);

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { openHost } from '../../src/host/index.js';
 import { appendHostMapTools, mapClosePayloadSchema, mapUpdatePayloadSchema } from '../../src/host/map-tools.js';
-import { HelmToolRegistry } from '../../src/runtime/orchestrator/index.js';
+import { AstraLoopbackMcpTransport, FableDriver, HelmToolRegistry, type HelmToolExecutionContext, type OrchestratorArtifacts } from '../../src/runtime/orchestrator/index.js';
 import type { TrackerCommandTransport } from '../../src/tracker/index.js';
 
 const before = '2026-09-15T00:00:00Z';
@@ -39,8 +39,10 @@ async function fixture(input: { failPatch?: boolean; evidenceFails?: boolean } =
   plane.recordAutonomyLease({ leaseId: 'autonomy', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'owner/repo', mapNodeIds: ['2'] }, allowedActions: ['map.update', 'map.close'], issuedAt: before, expiresAt: later, maxConcurrency: 1, maxAttemptsPerNode: 1, poolLimits: [], protectedReserves: [] });
   plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'fable', sessionId: context.sessionId, epoch: 1, issuedAt: before, expiresAt: later }, 0);
   const fake = transport(input); let validation = 0;
-  const tools = appendHostMapTools(new HelmToolRegistry([]), { context, authorize: async (actual) => { plane.artifactsFor(actual); }, host: plane, catalog: { async resolve(node) { if (node !== 'node-2') throw new Error('foreign'); return { node, repositoryId: 'owner/repo', parentIssue: 1, issueNumber: 2 }; } }, transport: fake.value, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: () => before, notAfter: () => later }, executor: { executorId: 'host-map' }, claimExpiresAt: () => later, closureEvidence: { async validate(value) { validation += 1; if (input.evidenceFails || value.target.issueNumber !== 2 || value.evidenceRefs.some((ref) => ref !== 'gate:accepted')) throw new Error('untrusted evidence'); } } });
-  return { directory, plane, tools, fake, validations: () => validation };
+  const registryFor = (actual: HelmToolExecutionContext, epoch = 1) => appendHostMapTools(new HelmToolRegistry([]), { context: actual, authorize: async (value) => { plane.artifactsFor(value); }, host: plane, catalog: { async resolve(node) { if (node !== 'node-2') throw new Error('foreign'); return { node, repositoryId: 'owner/repo', parentIssue: 1, issueNumber: 2 }; } }, transport: fake.value, command: { actorId: 'fable', leaseId: 'autonomy', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: epoch, plannedAt: () => before, notAfter: () => later }, executor: { executorId: 'host-map' }, claimExpiresAt: () => later, closureEvidence: { async validate(value) { validation += 1; if (input.evidenceFails || value.target.issueNumber !== 2 || value.evidenceRefs.some((ref) => ref !== 'gate:accepted')) throw new Error('untrusted evidence'); } } });
+  const tools = registryFor(context);
+  const driverTools = new HelmToolRegistry(tools.all().map((entry) => ({ ...entry, async execute(value, actual) { const owner = (await plane.snapshot(actual.runId)).ownership; return registryFor(actual, owner?.epoch ?? 0).invoke(entry.name, value, actual); } })));
+  return { directory, plane, tools, driverTools, fake, validations: () => validation };
 }
 
 test('map.update uses Core admission, mutator readback receipt, and stable durable idempotency', async () => {
@@ -68,4 +70,32 @@ test('map.close binds only verified evidence while invalid input and uncertain w
     const success = await closed.tools.invoke('map.close', { node: 'node-2', expectedRevision: before, rationale: 'Verified gate passed.', evidenceRefs: ['gate:accepted'], resolvedDependencies: ['owner/repo#9'] }, context);
     assert.equal(success.state, 'succeeded', JSON.stringify(success)); assert.equal(closed.fake.patches(), 1); assert.equal(closed.validations(), 2, 'closure evidence is checked before admission and again at effect time');
   } finally { for (const value of [evidence, unknown, closed]) { value.plane.close(); await rm(value.directory, { recursive: true, force: true }); } }
+});
+
+test('real Fable callbacks and Astra loopback invoke the same HostCore Map tools', async () => {
+  const fableFixture = await fixture(); const astraFixture = await fixture();
+  const artifacts: OrchestratorArtifacts = { async readText() { return 'objective'; }, async saveInvocation() { return 'invocation'; }, async saveRecoveryBundle() { return 'bundle'; }, async loadRecoveryBundle() { throw new Error('unused'); } };
+  try {
+    const claude = await import('@anthropic-ai/claude-agent-sdk'); let definitions: Array<{ name: string; handler(value: Record<string, unknown>, extra: unknown): Promise<unknown> }> = []; const fableResults: unknown[] = [];
+    const fable = new FableDriver(artifacts, fableFixture.driverTools, { async assertCurrent() {} }, { async capture() { return { recoveryStateRef: 'recovery' }; }, async restore() { return 'recovery'; } }, { env: { PATH: process.env.PATH ?? '' } }, {
+      ...claude, createSdkMcpServer(value) { definitions = value.tools as typeof definitions; return claude.createSdkMcpServer(value); }, query: (() => (async function* () { fableResults.push(await definitions.find((item) => item.name === 'map.update')!.handler({ node: 'node-2', expectedRevision: before, title: 'Fable update' }, {})); fableResults.push(await definitions.find((item) => item.name === 'map.close')!.handler({ node: 'node-2', expectedRevision: after, rationale: 'Fable evidence verified.', evidenceRefs: ['gate:accepted'], resolvedDependencies: ['owner/repo#9'] }, {})); yield { type: 'result', subtype: 'success', is_error: false }; })()) as never,
+    });
+    const started = await fable.start({ runId: context.runId, contextRefs: [], mode: 'primary' });
+    fableFixture.plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'fable', sessionId: started.sessionId, epoch: 2, issuedAt: before, expiresAt: later }, 1);
+    await fable.invoke({ sessionId: started.sessionId, objectiveRef: 'objective', contextRefs: [] });
+    assert.equal(definitions.length, 2); assert.match(JSON.stringify(fableResults), /succeeded/); assert.equal(fableFixture.fake.patches(), 2);
+
+    const astraContext = { ...context, sessionId: 'astra-loopback' };
+    astraFixture.plane.acquireOwnership({ runId: context.runId, leaseId: 'owner', owner: 'astra', sessionId: astraContext.sessionId, epoch: 2, issuedAt: before, expiresAt: later }, 1);
+    const bridge = await AstraLoopbackMcpTransport.open({ registry: astraFixture.driverTools, guard: { async assertCurrent() {} }, session: astraContext });
+    try {
+      const [{ Client }, { StreamableHTTPClientTransport }, { CallToolResultSchema }] = await Promise.all([import('@modelcontextprotocol/sdk/client/index.js'), import('@modelcontextprotocol/sdk/client/streamableHttp.js'), import('@modelcontextprotocol/sdk/types.js')]);
+      const [, token] = Object.entries(bridge.env)[0]!; const clientTransport = new StreamableHTTPClientTransport(new URL(bridge.config.mcp_servers.helm.url), { requestInit: { headers: { authorization: `Bearer ${token}` } } }); const client = new Client({ name: 'map-tools', version: '1' }); await client.connect(clientTransport);
+      try {
+        const update = await client.callTool({ name: 'map.update', arguments: { node: 'node-2', expectedRevision: before, title: 'Astra update' } }, CallToolResultSchema);
+        const close = await client.callTool({ name: 'map.close', arguments: { node: 'node-2', expectedRevision: after, rationale: 'Astra evidence verified.', evidenceRefs: ['gate:accepted'], resolvedDependencies: ['owner/repo#9'] } }, CallToolResultSchema);
+        assert.equal(update.isError, false); assert.equal(close.isError, false); assert.equal(astraFixture.fake.patches(), 2);
+      } finally { await clientTransport.close(); }
+    } finally { await bridge.close(); }
+  } finally { for (const value of [fableFixture, astraFixture]) { value.plane.close(); await rm(value.directory, { recursive: true, force: true }); } }
 });

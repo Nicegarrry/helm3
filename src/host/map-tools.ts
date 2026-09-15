@@ -5,7 +5,7 @@ import type { CommandRecord, EffectObservation, KernelEffect, TrustedExecutor } 
 import type { HostArtifactStore, HostSnapshot } from './index.js';
 import { HelmToolRegistry, type HelmTool, type HelmToolExecutionContext, type HelmToolResult } from '../runtime/orchestrator/index.js';
 import { GitHubMapMutator, type MapMutationReceipt } from '../tracker/mutations.js';
-import type { TrackerCommandTransport } from '../tracker/index.js';
+import { GitHubMapTracker, type TrackerCommandTransport } from '../tracker/index.js';
 
 const node = z.string().min(1).max(128).refine((value) => value.trim() === value);
 const revision = z.string().datetime({ offset: false });
@@ -38,7 +38,7 @@ export type HostMapToolOptions = Readonly<{ context: HelmToolExecutionContext; a
 type Intent = Readonly<{ action: 'update'; node: string; expectedRevision: string; title?: string; body?: string }> | Readonly<{ action: 'close'; node: string; expectedRevision: string; rationale: string; evidenceRefs: readonly string[]; resolvedDependencies: readonly string[] }>;
 type StoredReceipt = Readonly<{ command: Command; receipt: MapMutationReceipt }>;
 function hash(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
-function stableId(target: RegisteredMapTarget, intent: Intent): string { return `map-${hash({ repositoryId: target.repositoryId, issueNumber: target.issueNumber, intent }).slice('sha256:'.length)}`; }
+function stableId(runId: string, target: RegisteredMapTarget, intent: Intent): string { return `map-${hash({ runId, repositoryId: target.repositoryId, issueNumber: target.issueNumber, intent }).slice('sha256:'.length)}`; }
 function sameContext(actual: HelmToolExecutionContext, expected: HelmToolExecutionContext): boolean { return actual.runId === expected.runId && actual.sessionId === expected.sessionId && actual.mode === expected.mode; }
 function freezeIntent(value: Intent): Intent { return Object.freeze(value.action === 'close' ? { ...value, evidenceRefs: Object.freeze([...value.evidenceRefs]), resolvedDependencies: Object.freeze([...value.resolvedDependencies]) } : { ...value }); }
 function commandFor(options: HostMapToolOptions, target: RegisteredMapTarget, intent: Intent, id: string): Command {
@@ -50,7 +50,17 @@ function commandFor(options: HostMapToolOptions, target: RegisteredMapTarget, in
 function outcome(receipt: MapMutationReceipt): HelmToolResult {
   if (receipt.state === 'succeeded') return { state: 'succeeded', value: { commandId: receipt.commandId, receipt } };
   if (receipt.state === 'refused') return { state: 'refused', reason: receipt.reason ?? 'Map mutation was refused' };
-  return { state: 'unknown', reason: receipt.reason ?? `Map mutation ${receipt.commandId} needs reconciliation` };
+  return { state: 'unknown', reason: `Map mutation ${receipt.commandId} needs reconciliation${receipt.reason ? `: ${receipt.reason}` : ''}` };
+}
+async function trackerFact(target: RegisteredMapTarget, transport: TrackerCommandTransport, precondition: Precondition): Promise<Observation<boolean>> {
+  const observedAt = new Date().toISOString();
+  if (precondition.authority !== 'github' || precondition.subject !== `repos/${target.repositoryId}/issues/${target.issueNumber}`) return { state: 'unknown', value: null, source: 'host.map.tracker', observedAt, reason: 'precondition is outside the registered Map target' };
+  try {
+    const snapshot = await new GitHubMapTracker({ repo: target.repositoryId, parentIssue: target.parentIssue, transport }).snapshot();
+    const current = snapshot.nodes.find((item) => item.number === target.issueNumber);
+    if (snapshot.completeness !== 'complete' || !current) return { state: 'unknown', value: null, source: 'host.map.tracker', observedAt, reason: 'fresh Map target observation is unavailable' };
+    return { state: 'known', value: current.updatedAt === precondition.version, source: 'host.map.tracker', observedAt: snapshot.observedAt, subjectVersion: current.updatedAt };
+  } catch { return { state: 'unknown', value: null, source: 'host.map.tracker', observedAt, reason: 'fresh Map target observation is unavailable' }; }
 }
 async function storedOutcome(host: MapToolHost, context: HelmToolExecutionContext, record: CommandRecord): Promise<HelmToolResult> {
   if (record.status === 'unknown' || record.status === 'claimed' || record.status === 'effect_started' || record.status === 'observing' || record.status === 'queued') return { state: 'unknown', reason: `Map mutation ${record.command.commandId} requires reconciliation` };
@@ -65,19 +75,19 @@ function tool(options: HostMapToolOptions, action: Intent['action']): HelmTool {
   const input = action === 'update' ? mapUpdateToolInput : mapCloseToolInput;
   return { name: `map.${action}`, description: action === 'update' ? 'Update a registered Map node title or body.' : 'Close a registered Map node after host-verified evidence and dependency checks.', input,
     async execute(raw, actual) {
-      if (!sameContext(actual, bound.context) || actual.mode !== 'primary') return { state: 'refused', reason: 'map tool context is outside the trusted host binding' };
-      try { await bound.authorize(actual); } catch { return { state: 'refused', reason: 'map tool context is outside the trusted host binding' }; }
       const parsed = (action === 'update' ? updateIntentSchema.safeParse(raw) : closeIntentSchema.safeParse(raw));
       if (!parsed.success) return { state: 'refused', reason: 'map intent is malformed' };
       const value = parsed.data as Record<string, unknown>;
       const intent = freezeIntent(action === 'update'
         ? { action, node: value.node as string, expectedRevision: value.expectedRevision as string, ...(value.title === undefined ? {} : { title: value.title as string }), ...(value.body === undefined ? {} : { body: value.body as string }) }
         : { action, node: value.node as string, expectedRevision: value.expectedRevision as string, rationale: value.rationale as string, evidenceRefs: value.evidenceRefs as string[], resolvedDependencies: value.resolvedDependencies as string[] });
+      if (!sameContext(actual, bound.context) || actual.mode !== 'primary') return { state: 'refused', reason: 'map tool context is outside the trusted host binding' };
+      try { await bound.authorize(actual); } catch { return { state: 'refused', reason: 'map tool context is outside the trusted host binding' }; }
       let target: RegisteredMapTarget;
       try { target = Object.freeze({ ...(await bound.catalog.resolve(intent.node)) }); } catch { return { state: 'refused', reason: 'Map node is not registered for this host' }; }
       if (target.node !== intent.node) return { state: 'refused', reason: 'Map node is not registered for this host' };
       if (intent.action === 'close') try { await bound.closureEvidence.validate({ context: actual, target, evidenceRefs: intent.evidenceRefs }); } catch { return { state: 'refused', reason: 'closure evidence is not host-verified for this Map node' }; }
-      const id = stableId(target, intent); const existing = (await bound.host.snapshot(actual.runId)).commands.find((record) => record.command.commandId === id);
+      const id = stableId(actual.runId, target, intent); const existing = (await bound.host.snapshot(actual.runId)).commands.find((record) => record.command.commandId === id);
       if (existing) return storedOutcome(bound.host, actual, existing);
       let admitted: CommandRecord;
       try { admitted = bound.host.admitOrchestrator(commandFor(bound, target, intent, id), actual, bound.command.actorId); } catch { return { state: 'refused', reason: 'Map command was refused by current Helm authority' }; }
@@ -93,7 +103,7 @@ function tool(options: HostMapToolOptions, action: Intent['action']): HelmTool {
         receiptRef = await bound.host.artifactsFor(actual).writeEffect('host.map.mutation', JSON.stringify({ command, receipt }));
       }, observe: async () => ({ commandId: admitted.command.commandId, effectId: `host:map:${id}`, state: receipt?.state === 'succeeded' ? 'succeeded' : receipt?.state === 'refused' ? 'failed' : 'unknown', source: 'host.map.mutation', observedAt: receipt?.observedAt ?? new Date().toISOString(), evidenceRefs: [receiptRef ?? 'host:map-receipt-missing'], ...(receipt?.reason ? { detail: receipt.reason } : {}) }) };
       let observed: EffectObservation;
-      try { observed = await bound.host.performAdmitted(admitted.command.commandId, bound.executor, bound.claimExpiresAt(), async (precondition) => ({ state: 'known', value: true, source: 'host.map', observedAt: new Date().toISOString(), subjectVersion: precondition.version }), effect); } catch { return { state: 'unknown', reason: `Map mutation ${id} outcome is unavailable` }; }
+      try { observed = await bound.host.performAdmitted(admitted.command.commandId, bound.executor, bound.claimExpiresAt(), (precondition) => trackerFact(target, bound.transport, precondition), effect); } catch { return { state: 'unknown', reason: `Map mutation ${id} outcome is unavailable` }; }
       if (observed.state === 'unknown' || !receipt) return { state: 'unknown', reason: observed.detail ?? `Map mutation ${id} requires reconciliation` };
       return outcome(receipt);
     } };

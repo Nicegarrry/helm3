@@ -10,7 +10,7 @@
 - [PR #47](https://github.com/Nicegarrry/helm3/pull/47): native Pi 0.85.1 library integration, external durable worktree ownership, controlled writes, exact envelopes, semantic journal events, repair, session reopen and bounded cancellation observation. Check the PR for current integration status and final exact-head review. See [native evidence](wave2-pi-evidence.md).
 - [PR #49](https://github.com/Nicegarrry/helm3/pull/49): provider-free Fable and Astra driver library construction against pinned SDKs. It supplies a host-wired lifecycle/recovery seam, Fable's typed in-process MCP tool callback, and Astra's stream/thread adapter with its in-process tool bridge explicitly unsupported. See [driver evidence](orchestrator-driver-evidence.md).
 
-The combined local suite has 54 tests. Its native Pi test uses the SDK's packaged faux provider with in-memory fake credentials, not a remote model. Three provider requests cross real kernel authority and settle three request units under one attempt; a fourth is refused even after reopen. Local failure tests demonstrate unknown cancellation when a stream ignores abort, later observed stop, expiry between model turns, isolated workspace ownership and malformed-envelope preservation.
+The combined local suite has 56 tests. Its native Pi test uses the SDK's packaged faux provider with in-memory fake credentials, not a remote model. Three provider requests cross real kernel authority and settle three request units under one attempt; a fourth is refused even after reopen. Local failure tests demonstrate unknown cancellation when a stream ignores abort, later observed stop, expiry between model turns, isolated workspace ownership and malformed-envelope preservation.
 
 ## Remaining acceptance
 

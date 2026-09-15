@@ -19,7 +19,10 @@ contract schemas. This prevents a Zod v4 registry object from rejecting a
 valid domain v3 shape before the handler runs.
 
 Helm assigns a UUID-based session identity. A provider thread/session ID is
-recorded only after a matching SDK event is observed. A recovery bundle carries
+recorded only after a matching SDK event is observed. Invocation artifacts are
+`succeeded` only after the native success terminal event; native terminal
+errors are `failed`, and stream exhaustion or interruption without a terminal
+event remains `unknown`. A recovery bundle carries
 the run, Helm session, mode, context/event refs, observed provider ID and a
 required host recovery-state reference. Resume restores that host reference
 into the next prompt context; an SDK continuation is only a hint.
@@ -52,6 +55,9 @@ durability and the actual Brief/Map/Log recovery manifest.
 during an active invocation, late/revoked tool ownership, consultant refusal,
 failed durable checkpoint storage, Astra start/resume/abort and restoration
 context. `test/runtime/review-races.test.ts` covers cancellation during Fable
-setup, the final resume-guard race with a concurrent active invocation, and
-persistence of already-observed Fable events when the stream fails. All run
-against injected SDK seams or the local executable; neither test is live proof.
+setup, the final resume-guard race with a concurrent active invocation,
+terminal Fable/Codex failure classification, an incomplete Codex stream, and
+persistence of already-observed Fable events when the stream fails. It also
+distinguishes a terminal Fable success observed after cancellation intent from
+a failure or incomplete stream. All run against injected SDK seams or the
+local executable; neither test is live proof.

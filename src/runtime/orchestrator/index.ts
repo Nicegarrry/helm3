@@ -8,6 +8,8 @@ export type HelmToolResult =
   | { state: 'succeeded'; value: unknown }
   | { state: 'refused' | 'unsupported' | 'unknown'; reason: string };
 
+export type InvocationOutcome = 'succeeded' | 'failed' | 'unknown';
+
 export type HelmTool = {
   name: string;
   description: string;
@@ -51,7 +53,7 @@ export type RecoveryBundle = {
 
 export interface OrchestratorArtifacts {
   readText(ref: string): Promise<string>;
-  saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'unknown'; text: string }): Promise<string>;
+  saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; outcome: InvocationOutcome; text: string }): Promise<string>;
   saveRecoveryBundle(bundle: RecoveryBundle): Promise<string>;
   loadRecoveryBundle(ref: string): Promise<RecoveryBundle>;
 }
@@ -105,6 +107,19 @@ function providerSessionId(message: unknown): string | undefined {
   if (typeof message === 'object' && message !== null && 'session_id' in message && typeof message.session_id === 'string') return message.session_id;
   if (typeof message === 'object' && message !== null && 'thread_id' in message && typeof message.thread_id === 'string') return message.thread_id;
   return undefined;
+}
+function fableOutcome(messages: ClaudeSdk.SDKMessage[]): InvocationOutcome {
+  const terminal = [...messages].reverse().find((message) => message.type === 'result');
+  if (!terminal) return 'unknown';
+  return terminal.subtype === 'success' && !terminal.is_error ? 'succeeded' : 'failed';
+}
+function astraOutcome(events: ThreadEvent[]): InvocationOutcome {
+  let outcome: InvocationOutcome = 'unknown';
+  for (const event of events) {
+    if (event.type === 'turn.completed') outcome = 'succeeded';
+    if (event.type === 'turn.failed' || event.type === 'error') outcome = 'failed';
+  }
+  return outcome;
 }
 function requireSession(sessions: Map<string, Session>, sessionId: string): Session {
   const session = sessions.get(sessionId);
@@ -220,7 +235,7 @@ export class FableDriver extends BaseDriver {
       const stream = sdk.query({ prompt, options: { resume: session.providerSessionId, tools: [], permissionMode: 'dontAsk', mcpServers: { helm }, strictMcpConfig: true, env: this.host.env, cwd: this.host.cwd, model: this.host.model, settingSources: [] } });
       this.#queries.set(session.sessionId, stream);
       for await (const message of stream) { messages.push(message); session.providerSessionId ??= providerSessionId(message); }
-      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'succeeded', text: JSON.stringify(messages) });
+      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: fableOutcome(messages), text: JSON.stringify(messages) });
       return { resultRef };
     } catch (error) {
       await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'unknown', text: JSON.stringify({ messages, error: error instanceof Error ? error.message : 'Fable stream failed' }) });
@@ -292,7 +307,7 @@ export class AstraDriver extends BaseDriver {
       const { events } = await thread.runStreamed(prompt, { signal: controller.signal });
       for await (const event of events) { observed.push(event); session.providerSessionId ??= providerSessionId(event); }
       session.providerSessionId ??= thread.id ?? undefined;
-      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'succeeded', text: JSON.stringify(observed) });
+      const resultRef = await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: astraOutcome(observed), text: JSON.stringify(observed) });
       return { resultRef };
     } catch (error) {
       await this.artifacts.saveInvocation({ driver: this.provider, sessionId: session.sessionId, providerSessionId: session.providerSessionId, outcome: 'unknown', text: JSON.stringify({ events: observed, error: error instanceof Error ? error.message : 'Astra stream failed' }) });

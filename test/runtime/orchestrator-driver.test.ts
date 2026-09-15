@@ -15,12 +15,12 @@ import {
 class Fixtures implements OrchestratorArtifacts {
   readonly text = new Map<string, string>([['objective', 'make a local observation'], ['context', 'known context'], ['event', 'known event']]);
   readonly bundles = new Map<string, RecoveryBundle>();
-  readonly invocations: Array<{ driver: string; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'unknown'; text: string }> = [];
+  readonly invocations: Array<{ driver: string; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'failed' | 'unknown'; text: string }> = [];
   failBundle = false;
   restoreWait?: Promise<void>;
 
   async readText(ref: string): Promise<string> { return this.text.get(ref) ?? ref; }
-  async saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'unknown'; text: string }): Promise<string> {
+  async saveInvocation(input: { driver: 'fable' | 'astra'; sessionId: string; providerSessionId?: string; outcome: 'succeeded' | 'failed' | 'unknown'; text: string }): Promise<string> {
     this.invocations.push(input); return `invocation:${this.invocations.length}`;
   }
   async saveRecoveryBundle(bundle: RecoveryBundle): Promise<string> {
@@ -74,6 +74,46 @@ test('Fable uses real typed Claude SDK tool and in-process MCP construction with
   assert.deepEqual(await unknown.invoke('effect', {}), { state: 'unknown', reason: 'effect outcome was not observed' });
 });
 
+test('Fable records an observed terminal error result as failed rather than successful', async () => {
+  const claude = await import('@anthropic-ai/claude-agent-sdk');
+  const fixtures = new Fixtures();
+  const sdk = {
+    ...claude,
+    query: (() => (async function* () {
+      yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 'fable-failed' };
+    })()) as unknown as typeof claude.query,
+  };
+  const driver = new FableDriver(fixtures, new HelmToolRegistry([]), current, fixtures, { env: { PATH: process.env.PATH ?? '' } }, sdk);
+  const { sessionId } = await driver.start({ runId: 'failed', contextRefs: [], mode: 'primary' });
+  await driver.invoke({ sessionId, objectiveRef: 'objective', contextRefs: [] });
+  assert.equal(fixtures.invocations[0]?.outcome, 'failed');
+});
+
+test('an observed Fable success remains successful when it arrives after cancellation intent', async () => {
+  const claude = await import('@anthropic-ai/claude-agent-sdk');
+  const fixtures = new Fixtures();
+  let release!: () => void;
+  const terminalGate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const enteredGate = new Promise<void>((resolve) => { entered = resolve; });
+  let closeCalls = 0;
+  const stream = Object.assign((async function* () {
+    yield { type: 'system', subtype: 'init', session_id: 'fable-late-success' };
+    entered(); await terminalGate;
+    yield { type: 'result', subtype: 'success', is_error: false, session_id: 'fable-late-success' };
+  })(), { async interrupt() {}, close() { closeCalls += 1; } });
+  const sdk = { ...claude, query: (() => stream) as unknown as typeof claude.query };
+  const driver = new FableDriver(fixtures, new HelmToolRegistry([]), current, fixtures, { env: { PATH: process.env.PATH ?? '' } }, sdk);
+  const { sessionId } = await driver.start({ runId: 'late-success', contextRefs: [], mode: 'primary' });
+  const pending = driver.invoke({ sessionId, objectiveRef: 'objective', contextRefs: [] });
+  await enteredGate;
+  assert.deepEqual(await driver.stop({ sessionId }), { observed: 'unknown' });
+  release();
+  await pending;
+  assert.equal(closeCalls, 1);
+  assert.equal(fixtures.invocations[0]?.outcome, 'succeeded');
+});
+
 test('Astra maps the real pinned Codex SDK to local fixture lifecycle, durable recovery, and cancellation uncertainty', async () => {
   const root = await mkdtemp(join(tmpdir(), 'helm3-astra-driver-'));
   const executable = join(root, 'fake-codex.mjs');
@@ -88,6 +128,13 @@ if (input.includes('block')) {
   await appendFile(process.env.STATE_PATH, 'started\\n');
   console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-blocked' }));
   process.on('SIGTERM', () => process.exit(143)); setInterval(() => {}, 1000);
+} else if (input.includes('failed')) {
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-failed' }));
+  console.log(JSON.stringify({ type: 'turn.started' }));
+  console.log(JSON.stringify({ type: 'turn.failed', error: { message: 'fixture failure' } }));
+} else if (input.includes('incomplete')) {
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thread-incomplete' }));
+  console.log(JSON.stringify({ type: 'turn.started' }));
 } else {
   const resumed = args.includes('resume'); const id = resumed ? args[args.indexOf('resume') + 1] : 'thread-local';
   console.log(JSON.stringify({ type: 'thread.started', thread_id: id }));
@@ -114,6 +161,14 @@ if (input.includes('block')) {
     const recovered = new AstraDriver(fixtures, current, fixtures, sdk);
     assert.deepEqual(await recovered.resume({ sessionId, recoveryBundleRef: bundleRef }), { sessionId });
     assert.deepEqual(await recovered.invoke({ sessionId, objectiveRef: 'objective', contextRefs: [] }), { resultRef: 'invocation:2' });
+    fixtures.text.set('failed', 'failed');
+    const failed = await driver.start({ runId: 'run-failed', contextRefs: [], mode: 'primary' });
+    await driver.invoke({ sessionId: failed.sessionId, objectiveRef: 'failed', contextRefs: [] });
+    assert.equal(fixtures.invocations.at(-1)?.outcome, 'failed', 'an actual Codex turn.failed event is a known failed outcome');
+    fixtures.text.set('incomplete', 'incomplete');
+    const incomplete = await driver.start({ runId: 'run-incomplete', contextRefs: [], mode: 'primary' });
+    await driver.invoke({ sessionId: incomplete.sessionId, objectiveRef: 'incomplete', contextRefs: [] });
+    assert.equal(fixtures.invocations.at(-1)?.outcome, 'unknown', 'a stream without a terminal event cannot be called successful');
     const blocked = await driver.start({ runId: 'run-2', contextRefs: [], mode: 'primary' });
     fixtures.text.set('block', 'block');
     const pending = driver.invoke({ sessionId: blocked.sessionId, objectiveRef: 'block', contextRefs: [] });

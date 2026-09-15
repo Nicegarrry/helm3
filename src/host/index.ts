@@ -16,6 +16,7 @@ import {
   type TrustedExecutor,
 } from '../core/index.js';
 import { ArtifactJournal, type ArtifactMetadata } from '../journal/index.js';
+import { JournalReviewContextStore } from './review-context.js';
 import {
   EventDrivenSupervisor,
   EventSupervisor,
@@ -39,6 +40,12 @@ type ArtifactKind = 'text' | 'invocation' | 'recovery_bundle' | 'recovery_state'
 type ArtifactScope = Readonly<{ runId: string; sessionId: string }>;
 type StoredArtifactRef = Readonly<{ schemaVersion: 1; kind: ArtifactKind; runId: string; sessionId: string; sourceIdentity: string; raw: RawArtifactRef }>;
 type StoredArtifactEnvelope = Readonly<{ schemaVersion: 1; kind: ArtifactKind; runId: string; sessionId: string; text: string }>;
+/** Historical, reviewer-bound evidence access. It cannot admit or execute any command. */
+export type HistoricalReviewObservationJournal = Readonly<{
+  metadata(): Promise<readonly ArtifactMetadata[]>;
+  read(raw: RawArtifactRef, sourceIdentity: string): Promise<Buffer>;
+  appendAfter(bytes: Uint8Array): Promise<RawArtifactRef>;
+}>;
 
 function encodeRef(value: StoredArtifactRef): string { return JSON.stringify(value); }
 function isArtifactKind(value: unknown): value is ArtifactKind {
@@ -272,13 +279,18 @@ export class HostControlPlane {
   revokeAutonomyLease(leaseId: string): void { this.kernel.host.revokeAutonomyLease(leaseId); }
   /** Trusted runtime records immutable worker-attempt provenance before Pi begins effects. */
   recordAttempt(attempt: Attempt): void { this.kernel.host.appendAttempt(attempt); }
+  reviewContextFor(context: HelmToolExecutionContext): JournalReviewContextStore { this.assertSession(context); return new JournalReviewContextStore(this.journal, context.runId, ref => this.artifactsFor(context).readText(ref)); }
 
   piAuthority(options: PiEffectAuthorityOptions): PiAuthority {
     const binding = Object.freeze({ ...options });
     return {
       perform: async (effect, action) => {
         this.kernel.host.admit(binding.commandForEffect(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
-        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.now() + 60_000).toISOString());
+        // Core evaluates authority against its injected monotonic-safe clock.
+        // A native Pi effect must derive its claim expiry from that same clock;
+        // using the process clock can make a valid host-owned review appear
+        // expired in a recovered or deterministically tested control plane.
+        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.parse(this.now()) + 60_000).toISOString());
         const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: binding.executorId }, async () => { throw new Error('Pi effect has no external precondition'); }, {
           effectId: `host:${effect.effectId}`, execute: action,
           observe: () => ({ commandId: effect.effectId, effectId: `host:${effect.effectId}`, state: 'succeeded', source: 'host.pi_authority', observedAt: new Date().toISOString(), evidenceRefs: [`pi-effect:${effect.effectId}`] }),
@@ -289,7 +301,7 @@ export class HostControlPlane {
       },
       performCompact: binding.compactCommandForEffect ? async (effect, action) => {
         this.kernel.host.admit(binding.compactCommandForEffect!(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
-        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.now() + 60_000).toISOString());
+        const claim = this.kernel.host.claim(effect.effectId, { executorId: binding.executorId }, new Date(Date.parse(this.now()) + 60_000).toISOString());
         let evidenceRefs: readonly string[] | undefined;
         const observation = await this.kernel.host.perform(effect.effectId, claim, { executorId: binding.executorId }, async () => { throw new Error('Pi compact effect has no external precondition'); }, {
           effectId: `host:${effect.effectId}`,
@@ -445,6 +457,28 @@ export class HostControlPlane {
     }
     const artifacts = new HostArtifactStore(this.journal, () => ({ runId: input.runId, sessionId: `fleet:${input.attemptId}` }));
     return artifacts.writeEffect(`host.worker_fleet.${input.phase}`, input.text, `host-worker-${input.phase}:${input.runId}:${input.attemptId}`);
+  }
+
+  /**
+   * Reopens only the immutable journal belonging to an already-admitted
+   * readonly reviewer. This historical observation capability intentionally
+   * bypasses the former controller lease, but exposes neither artifactsFor nor
+   * any command/claim/model/write authority.
+   */
+  reviewJournalForObservation(input: Readonly<{ runId: string; reviewerAttemptId: string; spawnCommandId: string }>): HistoricalReviewObservationJournal {
+    const snapshot = this.kernel.host.readRun(input.runId);
+    const record = snapshot.commands.find(entry => entry.command.commandId === input.spawnCommandId);
+    const payload = record?.command.payload as { attemptId?: unknown; mode?: unknown } | undefined;
+    if (!record || record.command.kind !== 'worker.spawn' || payload?.attemptId !== input.reviewerAttemptId || payload?.mode !== 'review-readonly') {
+      throw new Error('historical observation is not bound to an admitted readonly reviewer');
+    }
+    if (!snapshot.attempts.some(attempt => attempt.attemptId === input.reviewerAttemptId && attempt.commandIds.includes(input.spawnCommandId))) throw new Error('historical observation reviewer attempt is absent');
+    const afterIdentity = `host-review-git-after:${input.runId}:${input.reviewerAttemptId}`;
+    return Object.freeze({
+      metadata: () => this.journal.metadata(),
+      read: (raw, sourceIdentity) => this.journal.read(raw, sourceIdentity, { permitSensitive: true }),
+      appendAfter: (bytes) => this.journal.append({ source: 'host.review.git.after', sourceIdentity: afterIdentity, mediaType: 'application/json', bytes, classification: 'sensitive' }, { permitSensitive: true }),
+    });
   }
 
   /**

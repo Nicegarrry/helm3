@@ -88,6 +88,29 @@ export type TrustedExecutor = { executorId: string };
 export type Claim = { commandId: string; executorId: string; token: string; generation: number; expiresAt: string };
 export type CommandStatus = 'queued' | 'claimed' | 'effect_started' | 'observing' | 'succeeded' | 'failed' | 'refused' | 'unknown';
 export type CommandRecord = { command: Command; status: CommandStatus; immutableHash: string; claim?: Claim; observations: EffectObservation[] };
+/**
+ * Trusted host read model for one run. This is deliberately a projection: it
+ * exposes parsed durable records without exposing SQLite or authority writes.
+ */
+export type KernelRunProjection = Readonly<{
+  ownership?: OrchestratorLease;
+  commands: readonly CommandRecord[];
+  attempts: readonly Attempt[];
+  autonomyLeases: readonly AutonomyLeaseProjection[];
+  reservations: readonly ResourceReservationProjection[];
+}>;
+export type ResourceReservationProjection = Readonly<{
+  commandId: string;
+  leaseId: string;
+  poolId: string;
+  unit: string;
+  reserved: number;
+  settledActual?: number;
+  state: string;
+  repositoryId?: string;
+  mapNodeId?: string;
+}>;
+export type AutonomyLeaseProjection = Readonly<{ lease: AutonomyLease; revoked: boolean }>;
 export const effectObservationSchema = z.object({
   commandId: z.string().min(1),
   effectId: z.string().min(1),
@@ -168,7 +191,14 @@ export class KernelHost {
     return this.core.acquireOwnership(orchestratorLeaseSchema.parse(lease), expectedEpoch);
   }
 
-  recoverAfterRestart(): void { this.core.recoverInterrupted(); }
+  assertCurrentOwner(lease: OrchestratorLease): OrchestratorLease {
+    return this.core.assertCurrentOwner(orchestratorLeaseSchema.parse(lease));
+  }
+
+  readRun(runId: string): KernelRunProjection { return this.core.readRun(runId); }
+
+  /** Pass a run ID for scoped host recovery; the no-argument legacy kernel operation remains global. */
+  recoverAfterRestart(runId?: string): void { this.core.recoverInterrupted(runId); }
   close(): void { this.core.close(); }
   admit(intent: unknown, caller: TrustedCaller): CommandRecord { return this.core.admit(intent, caller); }
   claim(commandId: string, executor: TrustedExecutor, expiresAt: string): Claim { return this.core.claim(commandId, executor, expiresAt); }
@@ -358,6 +388,34 @@ class Kernel {
     return row ? this.toRecord(row) : undefined;
   }
 
+  readRun(runId: string): KernelRunProjection {
+    z.string().min(1).parse(runId);
+    const ownershipRow = this.db.prepare(`SELECT bytes FROM ownership WHERE run_id = ?`).get(runId) as { bytes: string } | undefined;
+    const ownership = ownershipRow ? orchestratorLeaseSchema.parse(JSON.parse(ownershipRow.bytes)) : undefined;
+    const rows = this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id, lease_id, parent_authority_id, attempt_id, map_node_id FROM commands WHERE run_id = ? ORDER BY command_id`).all(runId);
+    const parsedRows = rows.map((row) => parseRow(row)!);
+    const commands = parsedRows.map((row) => this.toRecord(row));
+    const attemptIds = [...new Set(parsedRows.map((row) => row.attempt_id ?? undefined).filter((id): id is string => Boolean(id)))];
+    const attempts = attemptIds.flatMap((attemptId) => {
+      const row = this.db.prepare(`SELECT bytes FROM attempts WHERE attempt_id = ?`).get(attemptId) as { bytes: string } | undefined;
+      return row ? [attemptSchema.parse(JSON.parse(row.bytes))] : [];
+    });
+    const leaseIds = [...new Set(parsedRows.map((row) => row.lease_id ?? undefined).filter((id): id is string => Boolean(id)))];
+    const autonomyLeases = leaseIds.flatMap((leaseId) => {
+      const row = this.db.prepare(`SELECT bytes, revoked FROM autonomy_leases WHERE lease_id = ?`).get(leaseId) as { bytes: string; revoked: number } | undefined;
+      return row ? [{ lease: autonomyLeaseSchema.parse(JSON.parse(row.bytes)), revoked: row.revoked === 1 }] : [];
+    });
+    const reservationRows = this.db.prepare(`SELECT command_id, lease_id, pool_id, unit, reserved, settled_actual, state, repository_id, map_node_id FROM resource_reservations WHERE command_id IN (SELECT command_id FROM commands WHERE run_id = ?) ORDER BY command_id`).all(runId) as Array<{
+      command_id: string; lease_id: string; pool_id: string; unit: string; reserved: number; settled_actual: number | null; state: string; repository_id: string | null; map_node_id: string | null;
+    }>;
+    const reservations = reservationRows.map((row) => ({
+      commandId: row.command_id, leaseId: row.lease_id, poolId: row.pool_id, unit: row.unit, reserved: row.reserved,
+      ...(row.settled_actual === null ? {} : { settledActual: row.settled_actual }), state: row.state,
+      ...(row.repository_id ? { repositoryId: row.repository_id } : {}), ...(row.map_node_id ? { mapNodeId: row.map_node_id } : {}),
+    }));
+    return { ...(ownership ? { ownership } : {}), commands, attempts, autonomyLeases, reservations };
+  }
+
   storeLease(lease: AutonomyLease): void {
     if (Date.parse(lease.issuedAt) > Date.parse(this.safeNow())) throw new Error('autonomy lease issuance cannot be in the future');
     const bytes = JSON.stringify(lease);
@@ -471,9 +529,22 @@ class Kernel {
     });
   }
 
-  recoverInterrupted(): void {
+  assertCurrentOwner(input: OrchestratorLease): OrchestratorLease {
+    const stored = this.db.prepare(`SELECT bytes FROM ownership WHERE run_id = ?`).get(input.runId) as { bytes: string } | undefined;
+    if (!stored) throw new Error('orchestrator ownership is absent');
+    const current = orchestratorLeaseSchema.parse(JSON.parse(stored.bytes));
+    if (current.leaseId !== input.leaseId || current.owner !== input.owner || current.sessionId !== input.sessionId || current.epoch !== input.epoch) throw new Error('orchestrator ownership is stale');
+    const now = this.safeNow();
+    if (Date.parse(current.issuedAt) > Date.parse(now) || isExpired(current.expiresAt, now)) throw new Error('orchestrator ownership lease is inactive');
+    return current;
+  }
+
+  recoverInterrupted(runId?: string): void {
+    if (runId !== undefined) z.string().min(1).parse(runId);
     this.transaction(() => {
-      const rows = this.db.prepare(`SELECT command_id, status FROM commands WHERE status IN ('claimed', 'effect_started', 'observing')`).all() as Array<{ command_id: string; status: CommandStatus }>;
+      const rows = (runId === undefined
+        ? this.db.prepare(`SELECT command_id, status FROM commands WHERE status IN ('claimed', 'effect_started', 'observing')`).all()
+        : this.db.prepare(`SELECT command_id, status FROM commands WHERE run_id = ? AND status IN ('claimed', 'effect_started', 'observing')`).all(runId)) as Array<{ command_id: string; status: CommandStatus }>;
       for (const row of rows) {
         const next = row.status === 'claimed' ? 'queued' : 'unknown';
         this.db.prepare(`UPDATE commands SET status = ?, claim_token = NULL, claim_expires_at = NULL WHERE command_id = ?`).run(next, row.command_id);

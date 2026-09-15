@@ -62,12 +62,17 @@ export interface OrchestratorArtifacts {
 }
 
 export interface OrchestratorSessionGuard {
+  /**
+   * Runs before the first recovery capture. A durable host can bind the driver-
+   * generated session identity to a fenced ownership epoch here.
+   */
+  authorizeStart?(input: { driver: 'fable' | 'astra'; runId: string; sessionId: string; mode: 'primary' | 'consultant' }): Promise<void>;
   assertCurrent(input: { runId: string; sessionId: string; mode: 'primary' | 'consultant' }): Promise<void>;
 }
 
 /** The host supplies the authoritative Brief/Map/Log recovery manifest; SDK transcripts are only continuation hints. */
 export interface OrchestratorRecoveryState {
-  capture(input: { driver: 'fable' | 'astra'; runId: string; sessionId: string; mode: 'primary' | 'consultant' }): Promise<{ recoveryStateRef: string }>;
+  capture(input: { driver: 'fable' | 'astra'; runId: string; sessionId: string; mode: 'primary' | 'consultant'; contextRefs?: string[]; eventRefs?: string[] }): Promise<{ recoveryStateRef: string }>;
   restore(recoveryStateRef: string): Promise<string>;
 }
 
@@ -144,7 +149,8 @@ abstract class BaseDriver implements OrchestratorDriver {
 
   async start(input: { runId: string; contextRefs: string[]; mode: 'primary' | 'consultant' }): Promise<{ sessionId: string }> {
     const sessionId = helmSessionId(this.provider);
-    const captured = await this.recovery.capture({ driver: this.provider, runId: input.runId, sessionId, mode: input.mode });
+    await this.guard.authorizeStart?.({ driver: this.provider, runId: input.runId, sessionId, mode: input.mode });
+    const captured = await this.recovery.capture({ driver: this.provider, runId: input.runId, sessionId, mode: input.mode, contextRefs: [...input.contextRefs] });
     const session: Session = { runId: input.runId, sessionId, mode: input.mode, contextRefs: [...input.contextRefs], eventRefs: [], recoveryStateRef: captured.recoveryStateRef, state: 'idle', invocation: 0, cancellationRequested: false };
     await this.guard.assertCurrent(session);
     this.sessions.set(sessionId, session);
@@ -181,7 +187,7 @@ abstract class BaseDriver implements OrchestratorDriver {
   async checkpoint(input: { sessionId: string }): Promise<{ bundleRef: string }> {
     const session = requireSession(this.sessions, input.sessionId);
     await this.guard.assertCurrent(session);
-    const captured = await this.recovery.capture({ driver: this.provider, runId: session.runId, sessionId: session.sessionId, mode: session.mode });
+    const captured = await this.recovery.capture({ driver: this.provider, runId: session.runId, sessionId: session.sessionId, mode: session.mode, contextRefs: [...session.contextRefs], eventRefs: [...session.eventRefs] });
     await this.guard.assertCurrent(session);
     session.recoveryStateRef = captured.recoveryStateRef;
     const bundleRef = await this.artifacts.saveRecoveryBundle({ driver: this.provider, runId: session.runId, sessionId: session.sessionId, providerSessionId: session.providerSessionId, mode: session.mode, contextRefs: [...session.contextRefs], eventRefs: [...session.eventRefs], recoveryStateRef: session.recoveryStateRef });

@@ -279,6 +279,9 @@ export class ArtifactJournal {
 
   close(): void { this.index.close?.(); }
 
+  /** Trusted hosts may build projections from durable metadata without reading artifact bytes. */
+  async metadata(): Promise<readonly ArtifactMetadata[]> { return this.allMetadata(); }
+
   private rawPath(hash: string): string { return join(this.root, 'raw', 'sha256', hash); }
   private metadataPath(sourceIdentity: string): string {
     return join(this.root, 'metadata', `${metadataPathId(sourceIdentity)}.json`);

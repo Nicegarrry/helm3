@@ -126,7 +126,7 @@ test('fleet process liveness integration: identity storage, probe observation, a
       inputDigest: (command: Command) => (command.payload as { inputDigest: string }).inputDigest,
       stopCommand: () => { throw new Error('stop not used in test'); },
       attempt(command: Command, workerId: string): Attempt {
-        return { attemptId: `attempt-${workerId}`, mapNodeId: 'node', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'faux', capability: 'build', poolId: 'none', workspace: join(root, workerId), baseSha, contextManifestHash: 'sha256:context', leaseId: 'auto', sessionIds: [], commandIds: [command.commandId], startedAt: new Date().toISOString(), evidenceRefs: [], usageRefs: [], findingRefs: [] };
+        return { attemptId: `attempt-${workerId}`, mapNodeId: 'node', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'faux', capability: 'build', poolId: 'none', workspace: join(root, workerId), baseSha, contextManifestHash: 'sha256:context', leaseId: 'auto', sessionIds: [], commandIds: [], startedAt: new Date().toISOString(), evidenceRefs: [], usageRefs: [], findingRefs: [] };
       },
       workspace: (_command: Command, workerId: string, attempt: Attempt) => ({
         repository: repo,

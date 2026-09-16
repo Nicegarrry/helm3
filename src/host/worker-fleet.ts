@@ -618,7 +618,9 @@ export class PiWorkerFleet {
       const workerId = payload?.workerId;
       const attemptId = payload?.attemptId;
       if (typeof workerId !== 'string' || typeof attemptId !== 'string') continue;
-      const attempt = snapshot.attempts.find((a) => a.attemptId === attemptId && a.commandIds.includes(cmd.commandId));
+      // Attempt commandIds is historical metadata and can legitimately be empty.
+      // The trusted durable launch record below binds the command and attempt.
+      const attempt = snapshot.attempts.find((a) => a.attemptId === attemptId && a.mapNodeId === cmd.scope.mapNodeId);
       if (!attempt) continue;
       // 1. Read the durable record first.
       const record = await this.durableRecord(runId, workerId);

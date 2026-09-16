@@ -189,6 +189,11 @@ export class WorkspaceManager {
     if ((await stat(target)).size > maxBytes) throw new WorkspaceRefusal('read exceeds size bound');
     return readFile(target, 'utf8');
   }
+  async assertWriteAllowed(reservation: WorktreeReservation, owner: WorktreeOwner, path: string): Promise<void> {
+    this.assertOwner(reservation, owner);
+    await this.safePath(reservation, path, 'write');
+    this.assertOwner(reservation, owner);
+  }
   async write(reservation: WorktreeReservation, owner: WorktreeOwner, path: string, contents: string): Promise<void> {
     this.assertOwner(reservation, owner);
     const target = await this.safePath(reservation, path);

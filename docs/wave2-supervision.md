@@ -43,3 +43,9 @@ The configured run and primary session are captured once. Observations from anot
 This slice consumes trusted signals only. It does not infer process death, manufacture retry authority, select models, renew leases or call `Host.recover` over possibly live effects. Automatic process discovery, the source of verified retry facts and normal operational CLI bootstrap remain open. Existing deterministic retry commands still require their own fresh evidence and authority.
 
 Unit tests use a named replay double for loop boundaries and real Host/Kernel/dispatcher for effect boundaries. The fleet regression also exercises the runner with actual PiWorkerFleet replay and a provider-free worker fixture, including refusal of undelegated wake spending. Live Pi dogfooding is recorded separately; provider-free tests are not live Fable/Astra acceptance.
+
+## Write refusal before effect admission
+
+Dogfooding exposed a distinction between a known write-policy refusal and an uncertain admitted effect. Native Pi now performs a read-only workspace ownership/path preflight before submitting `pi.write`. A protected or out-of-scope path produces a durable Pi tool error without inventing an effect command; the same session can correct its request. The preflight creates no directories and grants no permission.
+
+Every original ownership and path check remains inside the actual write. A race or error after admission remains an unknown command requiring reconciliation. This does not reinterpret historical unknown commands or release their resource reservations. The native provider-free regression exercises the real Host/Kernel, semantic journal and attempt lifecycle; live provider work and production frontier acceptance remain separate evidence.

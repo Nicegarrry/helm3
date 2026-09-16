@@ -263,6 +263,8 @@ export class PiNativeWorker {
         this.input.access?.noteToolCall();
         await this.flushEvents();
         this.assertActive();
+        await this.input.workspaceManager.assertWriteAllowed(this.input.workspace, this.input.owner, params.path);
+        this.assertActive();
         await this.input.authority.perform({ effectId: `tool:${toolCallId}`, kind: 'workspace.write', commandId: this.input.commandId }, async () => {
           this.assertActive(); await this.input.workspaceManager.write(this.input.workspace, this.input.owner, params.path, params.contents);
         });

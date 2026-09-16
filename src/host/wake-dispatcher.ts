@@ -58,15 +58,15 @@ export class HostWakeDispatcher {
 
   constructor(private readonly binding: HostWakeDispatcherBinding) {}
 
-  dispatch(context: HelmToolExecutionContext): Promise<readonly DispatchOutcome[]> {
+  dispatch(context: HelmToolExecutionContext, signal?: AbortSignal): Promise<readonly DispatchOutcome[]> {
     const captured = Object.freeze({ ...context });
-    const result = this.tail.then(() => this.dispatchInternal(captured));
+    const result = this.tail.then(() => this.dispatchInternal(captured, signal));
     this.tail = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  private async dispatchInternal(context: HelmToolExecutionContext): Promise<readonly DispatchOutcome[]> {
-    if (context.mode !== 'primary') {
+  private async dispatchInternal(context: HelmToolExecutionContext, signal?: AbortSignal): Promise<readonly DispatchOutcome[]> {
+    if (signal?.aborted || context.mode !== 'primary') {
       return [];
     }
 
@@ -75,6 +75,7 @@ export class HostWakeDispatcher {
     const supervisor = new EventSupervisor(supervisorLog, this.binding.now);
 
     const snapshot = await host.snapshot(context.runId);
+    if (signal?.aborted) return [];
     const currentOwner = snapshot.ownership;
     if (!currentOwner || currentOwner.sessionId !== context.sessionId || currentOwner.runId !== context.runId) {
       return [];
@@ -128,6 +129,7 @@ export class HostWakeDispatcher {
 
     // Step 1: Recover already completed unacked commands BEFORE recomputing pending wakes
     for (const info of parsedExisting) {
+      if (signal?.aborted) return outcomes;
       if (!info.wake) continue;
       const rec = info.record;
       if (rec.status !== 'succeeded') continue;
@@ -193,6 +195,7 @@ export class HostWakeDispatcher {
 
     // Step 3: Process pending wakes
     for (const wake of pendingWakes) {
+      if (signal?.aborted) return outcomes;
       const hasUncertainOverlap = wake.causes.some((cause) => uncertainCauses.has(cause));
       if (hasUncertainOverlap) {
         outcomes.push({ wakeId: wake.wakeId, state: 'unknown' });
@@ -241,6 +244,7 @@ export class HostWakeDispatcher {
           contextRefs: [],
         };
 
+        if (signal?.aborted) return outcomes;
         const command = this.binding.commandFor(wake, currentOwner, payload);
         if (
           command.kind !== 'orchestrator.wake' ||
@@ -298,12 +302,15 @@ export class HostWakeDispatcher {
       const effect: KernelEffect = {
         effectId,
         execute: async () => {
+          signal?.throwIfAborted();
           await this.binding.driver.send_event({
             sessionId: context.sessionId,
             eventRef: payload.objectiveRef,
           });
 
+          signal?.throwIfAborted();
           const freshSnapshot = await host.snapshot(context.runId);
+          signal?.throwIfAborted();
           const freshOwner = freshSnapshot.ownership;
           if (
             !freshOwner ||
@@ -382,6 +389,7 @@ export class HostWakeDispatcher {
       };
 
       let observation: EffectObservation;
+      if (signal?.aborted) return outcomes;
       try {
         observation = await host.performAdmitted(
           commandRecord.command.commandId,

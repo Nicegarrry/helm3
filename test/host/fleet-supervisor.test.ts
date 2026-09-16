@@ -13,6 +13,8 @@ import { openHost } from '../../src/host/index.js';
 import { PiWorkerFleet, type WorkerSpawnInput } from '../../src/host/worker-fleet.js';
 import type { HelmToolExecutionContext } from '../../src/runtime/orchestrator/index.js';
 import type { PiNativeWorker } from '../../src/runtime/pi/index.js';
+import { HostSupervisorRunner } from '../../src/host/supervisor-runner.js';
+import { HostWakeDispatcher, wakeDeliveryPayloadSchema } from '../../src/host/wake-dispatcher.js';
 import { WorkspaceManager } from '../../src/workspace/index.js';
 
 const exec = promisify(execFile);
@@ -28,7 +30,7 @@ test('native fleet terminal events signal once, preserve a delivery fault for re
   try {
     await mkdir(repo); await exec('git', ['init', repo]); await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']); await exec('git', ['-C', repo, 'config', 'user.name', 'Test']); await writeFile(join(repo, 'README.md'), 'base\n'); await exec('git', ['-C', repo, 'add', '.']); await exec('git', ['-C', repo, 'commit', '-m', 'base']);
     const baseSha = (await exec('git', ['-C', repo, 'rev-parse', 'HEAD'])).stdout.trim();
-    const kinds = { 'worker.spawn': { payloadSchema: z.object({ workerId: z.string(), attemptId: z.string(), modelId: z.literal('offline'), modelProvider: z.literal('faux'), modelApi: z.literal('fixture'), role: z.literal('builder'), inputDigest: z.string(), baseSha: z.string(), modelFactVersion: z.literal(1), dataPolicy: z.literal('public-only') }).strict(), modelSelection: () => ({ modelId: 'offline', role: 'builder', requiredCapabilities: ['build'], dataClassification: 'public' as const }) } };
+    const kinds = { 'orchestrator.wake': { payloadSchema: wakeDeliveryPayloadSchema }, 'worker.spawn': { payloadSchema: z.object({ workerId: z.string(), attemptId: z.string(), modelId: z.literal('offline'), modelProvider: z.literal('faux'), modelApi: z.literal('fixture'), role: z.literal('builder'), inputDigest: z.string(), baseSha: z.string(), modelFactVersion: z.literal(1), dataPolicy: z.literal('public-only') }).strict(), modelSelection: () => ({ modelId: 'offline', role: 'builder', requiredCapabilities: ['build'], dataClassification: 'public' as const }) } };
     const open = async () => {
       plane = await openHost({ stateDirectory: state, now: () => stamp, kinds });
       workspace = new WorkspaceManager({ stateRoot: join(root, 'workspace') });
@@ -71,7 +73,16 @@ test('native fleet terminal events signal once, preserve a delivery fault for re
     outcomes = ['unknown']; const interrupted = new PiWorkerFleet(binding()); const unknown = await interrupted.spawn(context, { objectiveRef, acceptanceRef, contextRefs: [], modelId: 'offline', role: 'builder' }); await interrupted.waitForTerminal(unknown.workerId);
     assert.equal((await interrupted.inspect(context, unknown.workerId)).state, 'unknown', 'delivery failure cannot rewrite the native terminal-unknown evidence');
     plane.close(); workspace.close(); await open();
-    const restarted = new PiWorkerFleet(binding()); await plane.recover('run'); await restarted.replaySupervisorEvents('run'); await restarted.replaySupervisorEvents('run');
+    const restarted = new PiWorkerFleet(binding()); await plane.recover('run');
+    // Real fleet replay through the runner. This grant authorizes workers only,
+    // so fresh wake admission must refuse before this provider-free driver runs.
+    let invokes = 0;
+    const wakeDispatcher = new HostWakeDispatcher({ host: plane, driver: { async send_event() { throw new Error('wake was not delegated'); }, async invoke() { invokes++; throw new Error('wake was not delegated'); } },
+      commandFor(wake, owner, payload) { return { schemaVersion: 1, commandId: `wake:${wake.wakeId}`, kind: 'orchestrator.wake', idempotencyKey: `wake:${wake.wakeId}`, payloadHash: digest(payload), payload, scope: { repositoryId: 'repo', mapNodeId: 'node' }, actorId: 'supervisor-test', runId: 'run', origin: 'orchestrator', leaseId: 'auto', leaseRevision: 1, orchestratorLeaseId: owner.leaseId, orchestratorEpoch: owner.epoch, plannedAt: stamp, notAfter: later, expected: [], requiredEvidence: [] }; },
+      executor: { executorId: 'runner-test' }, claimExpiresAt: () => later, readFact: async () => { throw new Error('no facts planned'); }, verifyResult: async () => 'unknown', now: () => stamp });
+    const runner = new HostSupervisorRunner({ host: plane, context, fleet: restarted, wakeDispatcher, observe: async () => [], intervalMs: 100 });
+    const cycle = await runner.tick(new AbortController().signal); await runner.tick(new AbortController().signal);
+    assert.equal(cycle.deliveries.length, 3); assert.ok(cycle.deliveries.every(delivery => delivery.state === 'blocked')); assert.equal(invokes, 0);
     fleetEvents = plane.createSupervisor().log().readEvents('run').filter(event => event.source === 'host.worker_fleet'); signals = plane.createSupervisor().log().readEvents('supervisor:run').filter(event => event.kind === 'supervisor.signal');
     const wakes = plane.createSupervisor().log().readEvents('supervisor:run').filter(event => event.kind === 'supervisor.wake');
     const unknownEvent = fleetEvents.find(event => event.kind === 'worker.failed')!; const unknownSignal = signals.find(event => (event.payload as { sourceEventId: string }).sourceEventId === unknownEvent.eventId)!;

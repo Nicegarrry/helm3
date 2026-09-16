@@ -33,3 +33,13 @@ Continuous observation, process/session reconciliation, normal CLI bootstrap and
 Kernel claims prevent duplicate execution of the same command. Durable claims on individual causes also fence different commands created by concurrently changing wake groups. Claim conflicts and uncertain effects stay unresolved for reconciliation; this does not promise exactly-once provider execution or automatic replay. Successful observed commands can acknowledge their original causes after restart without invoking again.
 
 The Gemini implementation and tests were repaired using its retained Pi session. Coordinator verification corrected payload hashing, queue input capture, clock validation, recovery reporting and test API mismatches, and added actual two-connection race and authority-loss cases. Qwen's initial stub proposal was preserved but rejected. Worker envelopes and claims do not substitute for the coordinator's executed checks.
+
+## Continuous observation slice
+
+`HostSupervisorRunner` is a trusted host composition over real fleet event replay, observation callbacks, the existing supervisor and wake dispatcher. `run(AbortSignal)` repeats serialized cycles at a bounded interval; `tick(AbortSignal)` supports an explicit host lifecycle. A quiet cycle creates no model invocation. Observations and evidence continue after authority expiry, while the dispatcher refuses new spending.
+
+The configured run and primary session are captured once. Observations from another run are rejected before processing, and each signal-processing promise is awaited before dispatch. Cancellation stops further stages and is also checked inside dispatch before event delivery, before invocation and between wake groups. An already started provider call may finish; cancellation does not claim to undo it.
+
+This slice consumes trusted signals only. It does not infer process death, manufacture retry authority, select models, renew leases or call `Host.recover` over possibly live effects. Automatic process discovery, the source of verified retry facts and normal operational CLI bootstrap remain open. Existing deterministic retry commands still require their own fresh evidence and authority.
+
+Unit tests use a named replay double for loop boundaries and real Host/Kernel/dispatcher for effect boundaries. The fleet regression also exercises the runner with actual PiWorkerFleet replay and a provider-free worker fixture, including refusal of undelegated wake spending. Live Pi dogfooding is recorded separately; provider-free tests are not live Fable/Astra acceptance.

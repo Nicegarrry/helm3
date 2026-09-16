@@ -3,11 +3,12 @@ import { mkdir, realpath, readFile } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
+import { parseWorkerResult, workerResultInstructions, workerResultCorrection } from '../../host/worker-result-format.js';
 import { BoundedPiAccess } from '../../access/index.js';
 import { assertPiThinkingSupported } from '../../access/thinking-support.js';
 import { observePiContext } from '../../context/index.js';
 import { PiEventSpool } from './event-spool.js';
-import { rawArtifactRefSchema, workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
+import { rawArtifactRefSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
 import { z } from 'zod/v3';
@@ -65,9 +66,7 @@ function noResources(runtime: ExtensionRuntime): ResourceLoader {
 }
 /** Accept only direct JSON or one whole JSON fence; raw terminal bytes are journaled unchanged. */
 export function parseEnvelope(text: string): WorkerResult | undefined {
-  const fenced = text.match(/^```json\r?\n([\s\S]*)\r?\n```$/);
-  const candidate = fenced ? fenced[1] : text;
-  try { return workerResultSchema.parse(JSON.parse(candidate)); } catch { return undefined; }
+  return parseWorkerResult(text);
 }
 /** Provider error bodies can echo request data. Never put them in Pi events or the journal. */
 function errorMessage(model: Model<Api>): AssistantMessage {
@@ -335,13 +334,13 @@ export class PiNativeWorker {
     // stable invocation marker even when the wrapper was rehydrated.
     const invocationMessage = this.session.messages.length;
     try {
-      await this.session.prompt(prompt);
+      await this.session.prompt(`${prompt}\n\n${workerResultInstructions()}`);
       let result = await this.saveTerminal(invocation, 'initial', invocationMessage); saved = true;
       const repaired = !result;
       if (!result && (this.input.access?.correctionAllowed ?? true)) {
         this.assertActive();
         const correctionMessage = this.session.messages.length;
-        await this.session.prompt(correction, { streamingBehavior: 'followUp' });
+        await this.session.prompt(`${correction}\n\n${workerResultCorrection(this.lastAssistantText(invocationMessage))}`, { streamingBehavior: 'followUp' });
         result = await this.saveTerminal(invocation, 'correction', correctionMessage);
       }
       if (!result) throw new Error('Pi session did not produce a valid terminal WorkerResult after bounded correction');

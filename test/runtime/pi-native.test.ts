@@ -61,7 +61,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     const faux = fauxProvider({ provider: 'helm3-faux', models: [{ id: 'offline' }], tokensPerSecond: 1_000_000, tokenSize: { min: 1, max: 1 } }); runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('helm3-faux', 'offline');
     faux.setResponses([
       fauxAssistantMessage([fauxThinking('r'.repeat(1400)), fauxToolCall('helm_write', { path: 'result.txt', contents: 'native Pi wrote this\n' })]),
-      fauxAssistantMessage('not a WorkerResult'),
+      fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: ['result.txt'], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [{ secret: 'INVALID_ENVELOPE_SECRET' }], unresolved: [], artifacts: [], recommended_next_action: 'review' })),
       fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: ['result.txt'], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' })),
     ]);
     const journal = await ArtifactJournal.open({ root: join(root, 'journal') });
@@ -84,6 +84,13 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     const originalSession = worker.sessionId;
     const persisted = await worker.persistedSession();
     const sourceBytes = await readFile(persisted.sessionFile);
+    const sessionRows = sourceBytes.toString('utf8').trim().split('\n').map(line => JSON.parse(line) as { message?: { role?: string; content?: Array<{ type: string; text?: string }> } });
+    const userMessages = sessionRows.filter(row => row.message?.role === 'user').map(row => row.message!.content!.filter(part => part.type === 'text').map(part => part.text).join('\n'));
+    assert.match(userMessages[0], /acceptance_claims/, 'native initial prompt includes the complete terminal contract');
+    assert.match(userMessages[0], /criterionId/);
+    assert.match(userMessages[1], /risks\.0.*invalid_type.*string/, 'same-session correction identifies the concrete schema mismatch');
+    assert.ok(!userMessages[1].includes('INVALID_ENVELOPE_SECRET'), 'correction never reflects malformed values');
+    assert.ok(sourceBytes.toString('utf8').includes('INVALID_ENVELOPE_SECRET'), 'unmodified raw execution evidence remains durable');
     const forkOwner = { attemptId: 'attempt-fork', generation: 1, expiresAt: '2099-01-01T00:00:00Z' };
     const forkWorkspace = await manager.create(repo, join(root, 'fork-worker'), 'pi-attempt-fork', base, forkOwner);
     const forked = await PiNativeWorker.forkAtCurrentTip({ commandId: 'fork-command', attemptId: 'attempt-fork', workspace: forkWorkspace, owner: forkOwner, workspaceManager: manager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel(), thinking: { level: 'low' } }, persisted);

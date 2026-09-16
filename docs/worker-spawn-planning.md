@@ -1,0 +1,9 @@
+# Trusted worker spawn planning
+
+The host's private dogfood runner previously assembled command, attempt and workspace facts independently. `planWorkerSpawn` binds these facts once and returns a frozen plan for the existing `PiWorkerFleet` callbacks. `workerSpawnKind` supplies the matching strict payload schema and model-selection requirements to the kernel. This is a host library, not a new model tool, provider router or runnable CLI entry point.
+
+The caller supplies an observed model fact, selected role/capabilities, context references, exact repository head, workspace policy, active ownership and autonomy leases. The planner checks internal consistency and caps command lifetime at the earliest delegated expiry. Review constraints bind a read-only workspace to the requested repository and exact head. The caller keeps the plan by command ID and uses its command, attempt and workspace in the corresponding fleet callbacks.
+
+Planning grants no authority. The host still reads model provenance, verifies current ownership and leases, admits the immutable command and checks again at effects. Repository realpath and protected-write enforcement remain in the existing fleet/workspace/runtime boundaries. Provider credentials, request budgets, raw journals and native lifecycle composition remain trusted host configuration. The new planner can compose with `createBoundedFleetRuntime` in the separate lifecycle PR.
+
+Validation covers consistent command/attempt provenance, frozen inputs, refusal of conflicting review/lease/model facts, and real kernel admission rejecting a model fact or ownership epoch changed after planning. Live review through the planner is recorded separately from provider-free tests. The complete reusable CLI bootstrap, quality loop, role-tier import and full feature acceptance remain open.

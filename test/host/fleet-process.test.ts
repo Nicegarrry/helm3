@@ -18,6 +18,7 @@ import { wakeDeliveryPayloadSchema } from '../../src/host/wake-dispatcher.js';
 import { WorkspaceManager } from '../../src/workspace/index.js';
 import { EventSupervisor } from '../../src/supervisor/index.js';
 
+const runId = 'run-' + 'r'.repeat(100);
 const exec = promisify(execFile);
 const digest = (value: unknown) => `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 
@@ -60,7 +61,7 @@ test('fleet process liveness integration: identity storage, probe observation, a
   const root = mkdtempSync(join(tmpdir(), 'helm3-fleet-process-test-'));
   const repo = join(root, 'repo');
   const state = join(root, 'state');
-  const context: HelmToolExecutionContext = { runId: 'run', sessionId: 'session', mode: 'primary' };
+  const context: HelmToolExecutionContext = { runId: runId, sessionId: 'session', mode: 'primary' };
 
   const currentStamp = new Date().toISOString();
   let nowFn = () => new Date().toISOString();
@@ -103,12 +104,18 @@ test('fleet process liveness integration: identity storage, probe observation, a
     const leaseExpiry = new Date(Date.now() + 60000).toISOString();
 
     plane = await openHost({ stateDirectory: state, now: () => nowFn(), kinds });
+    let snapshotCalls = 0;
+    const instrument = (host: typeof plane) => {
+      const original = host.snapshot.bind(host);
+      host.snapshot = async (id: string) => { snapshotCalls++; return original(id); };
+    };
+    instrument(plane);
     workspace = new WorkspaceManager({ stateRoot: join(root, 'workspace') });
 
     plane.recordHumanAuthority({ authorityId: 'human', repositoryId: 'repo', mapNodeIds: ['node'], allowedActions: ['worker.spawn'], expiresAt: later, maxConcurrency: 8, maxAttemptsPerNode: 8, poolLimits: [], protectedReserves: [] });
     plane.recordAutonomyLease({ leaseId: 'auto', revision: 1, issuedBy: 'human', parentAuthorityId: 'human', scope: { repositoryId: 'repo', mapNodeIds: ['node'] }, allowedActions: ['worker.spawn'], issuedAt: currentStamp, expiresAt: leaseExpiry, maxConcurrency: 8, maxAttemptsPerNode: 8, poolLimits: [], protectedReserves: [] });
     plane.recordModelFact({ modelId: 'offline', provider: 'faux', poolId: 'none', enabled: true, capabilities: ['build'], roles: ['builder'], dataPolicy: 'public-only', availability: 'known_available', factVersion: 1, observedAt: currentStamp });
-    plane.acquireOwnership({ runId: 'run', leaseId: 'owner', owner: 'fable', sessionId: 'session', epoch: 1, issuedAt: currentStamp, expiresAt: later }, 0);
+    plane.acquireOwnership({ runId: runId, leaseId: 'owner', owner: 'fable', sessionId: 'session', epoch: 1, issuedAt: currentStamp, expiresAt: later }, 0);
 
     let activeWorkerInstance: { sessionId: string; isActive: boolean } | undefined;
 
@@ -121,7 +128,7 @@ test('fleet process liveness integration: identity storage, probe observation, a
       readFact: async () => ({ value: true, state: 'known' as const, source: 'fixture', observedAt: new Date().toISOString() }),
       spawnCommand(input: WorkerSpawnInput, workerId: string, attemptId: string): Command {
         const payload = { workerId, attemptId, modelId: input.modelId, modelProvider: 'faux' as const, modelApi: 'fixture' as const, role: input.role, inputDigest: digest({ ...input, contextRefs: [...input.contextRefs] }), baseSha, modelFactVersion: 1 as const, dataPolicy: 'public-only' as const };
-        return { schemaVersion: 1, commandId: `spawn-${workerId}`, kind: 'worker.spawn', idempotencyKey: `spawn-${workerId}`, payloadHash: digest(payload), payload, scope: { repositoryId: 'repo', mapNodeId: 'node' }, actorId: 'fable', runId: 'run', origin: 'orchestrator', leaseId: 'auto', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: new Date().toISOString(), notAfter: later, expected: [], requiredEvidence: [] };
+        return { schemaVersion: 1, commandId: `spawn-${workerId}`, kind: 'worker.spawn', idempotencyKey: `spawn-${workerId}`, payloadHash: digest(payload), payload, scope: { repositoryId: 'repo', mapNodeId: 'node' }, actorId: 'fable', runId: runId, origin: 'orchestrator', leaseId: 'auto', leaseRevision: 1, orchestratorLeaseId: 'owner', orchestratorEpoch: 1, plannedAt: new Date().toISOString(), notAfter: later, expected: [], requiredEvidence: [] };
       },
       inputDigest: (command: Command) => (command.payload as { inputDigest: string }).inputDigest,
       stopCommand: () => { throw new Error('stop not used in test'); },
@@ -148,10 +155,7 @@ test('fleet process liveness integration: identity storage, probe observation, a
             runs++;
             await hangingRunPromise;
             worker.isActive = false;
-            return {
-              result: { status: 'succeeded' as const, summary: 'done', changed_files: [], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'none' },
-              artifacts: [],
-            };
+            throw new Error('fixture exits without a valid terminal envelope');
           },
           async persistedSession() {
             return { sessionId: fixedSessionId, sessionFile: 'fixture', historyHash: `sha256:${'a'.repeat(64)}`, branchDigest: `sha256:${'b'.repeat(64)}` };
@@ -184,15 +188,17 @@ test('fleet process liveness integration: identity storage, probe observation, a
     assert.equal(runs, 1);
     assert.equal(activeWorkerInstance?.sessionId, worker1.sessionId);
 
-    const launchRef = (await plane.snapshot('run')).commands[0]!.observations[0]!.evidenceRefs[0]!;
-    const rawLaunchText = await plane.readFleetEffect('run', launchRef);
+    const launchRef = (await plane.snapshot(runId)).commands[0]!.observations[0]!.evidenceRefs[0]!;
+    const rawLaunchText = await plane.readFleetEffect(runId, launchRef);
     const parsedLaunch = JSON.parse(rawLaunchText);
     assert.ok(parsedLaunch.ownerProcess, 'ownerProcess identity stored in durable launch record');
     assert.equal(parsedLaunch.ownerProcess.hostId, 'test-host');
     assert.equal(parsedLaunch.ownerProcess.pid, 9999);
 
     // Case 2: Inspect exposes state not private identity; live stays known locally
+    const snapshotsBeforeInspect = snapshotCalls;
     const inspected = await fleet1.inspect(context, worker1.workerId);
+    assert.equal(snapshotCalls, snapshotsBeforeInspect, 'inspect avoids the broad artifact snapshot');
     assert.equal(inspected.live, 'known');
     assert.ok(inspected.ownerProcessObservation);
     assert.equal(inspected.ownerProcessObservation.state, 'same-process');
@@ -233,30 +239,34 @@ test('fleet process liveness integration: identity storage, probe observation, a
     assert.equal(runs, 1, 'no extra run');
 
     // observeProcesses with alive process and matching owner is quiet
-    await fleet2.observeProcesses('run');
-    let supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    await fleet2.observeProcesses(runId);
+    let supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 0, 'same-process observation with matching owner is quiet');
 
     // Case 4: Dead owner causes exactly one durable pending wake across repeat, new fleet, and second host connection to same DB
     plane2 = await openHost({ stateDirectory: state, now: () => nowFn(), kinds });
+    instrument(plane2);
     const fleetFromSecondHost = new PiWorkerFleet(binding(plane2));
     probe.observationResponse = { state: 'not-running', observedAt: new Date().toISOString(), reason: 'process exited' };
-    await Promise.all([fleet2.observeProcesses('run'), fleetFromSecondHost.observeProcesses('run')]);
-    assert.equal(plane.createSupervisor().log().readEvents('run').filter(ev => ev.kind === 'reconciliation.ambiguous').length, 1, 'two connections race to append one durable observation');
-    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    const snapshotsBeforeRace = snapshotCalls;
+    await Promise.all([fleet2.observeProcesses(runId), fleetFromSecondHost.observeProcesses(runId)]);
+    assert.equal(snapshotCalls, snapshotsBeforeRace, 'both observers avoid the broad artifact snapshot');
+    assert.deepEqual(plane2.readFleetProjection(runId), plane.readFleetProjection(runId), 'second connection sees fresh durable state');
+    assert.equal(plane.createSupervisor().log().readEvents(runId).filter(ev => ev.kind === 'reconciliation.ambiguous').length, 1, 'two connections race to append one durable observation');
+    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 1, 'dead process causes supervisor signal');
     assert.equal(supervisorSignals[0]!.kind, 'supervisor.signal');
     assert.equal((supervisorSignals[0]!.payload as { kind: string }).kind, 'reconciliation.ambiguous');
     assert.equal((supervisorSignals[0]!.payload as { needsJudgement: boolean }).needsJudgement, true);
 
-    const ownerLease = { runId: 'run', leaseId: 'owner', owner: 'fable' as const, sessionId: 'session', epoch: 1, issuedAt: currentStamp, expiresAt: later };
+    const ownerLease = { runId: runId, leaseId: 'owner', owner: 'fable' as const, sessionId: 'session', epoch: 1, issuedAt: currentStamp, expiresAt: later };
     let supervisor = new EventSupervisor(plane.createSupervisor().log(), () => new Date().toISOString());
     let wakes = supervisor.pending(ownerLease);
     assert.equal(wakes.length, 1, 'wake created for ambiguous dead process signal');
 
     // Repeat observation on same fleet
-    await fleet2.observeProcesses('run');
-    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    await fleet2.observeProcesses(runId);
+    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 1, 'repeated observation does not emit duplicate signal');
     supervisor = new EventSupervisor(plane.createSupervisor().log(), () => new Date().toISOString());
     wakes = supervisor.pending(ownerLease);
@@ -264,16 +274,16 @@ test('fleet process liveness integration: identity storage, probe observation, a
 
     // Repeat observation on new fleet instance (fleet3)
     const fleet3 = new PiWorkerFleet(binding(plane));
-    await fleet3.observeProcesses('run');
-    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    await fleet3.observeProcesses(runId);
+    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 1, 'new fleet instance does not duplicate signal');
     supervisor = new EventSupervisor(plane.createSupervisor().log(), () => new Date().toISOString());
     wakes = supervisor.pending(ownerLease);
     assert.equal(wakes.length, 1, 'wake count remains exactly one across new fleet instance');
 
     // Repeat observation via a SECOND host connection to SAME state DB
-    await fleetFromSecondHost.observeProcesses('run');
-    supervisorSignals = plane2.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    await fleetFromSecondHost.observeProcesses(runId);
+    supervisorSignals = plane2.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 1, 'second host connection sees exactly one signal');
     const supervisor2 = new EventSupervisor(plane2.createSupervisor().log(), () => new Date().toISOString());
     wakes = supervisor2.pending(ownerLease);
@@ -281,10 +291,10 @@ test('fleet process liveness integration: identity storage, probe observation, a
 
     // Concurrent observeProcesses across 2 fleet instances: same cause emits one event, no duplicate effects
     await Promise.all([
-      fleet2.observeProcesses('run'),
-      fleet3.observeProcesses('run'),
+      fleet2.observeProcesses(runId),
+      fleet3.observeProcesses(runId),
     ]);
-    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 1, 'concurrent observe across 2 fleets emits exactly one signal');
 
     // Case 5: Workspace ownership changed after await triggers question
@@ -298,8 +308,8 @@ test('fleet process liveness integration: identity storage, probe observation, a
     };
 
     // With owner mismatch, even if probe says same-process, it should emit reconciliation.ambiguous signal
-    await fleet3.observeProcesses('run');
-    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    await fleet3.observeProcesses(runId);
+    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 2, 'owner mismatch emits new reconciliation.ambiguous signal');
 
     // Legacy launches without identity remain readable and surface unknown.
@@ -309,28 +319,34 @@ test('fleet process liveness integration: identity storage, probe observation, a
     const legacyInspection = await fleet3.inspect(context, legacy.workerId);
     assert.equal(legacyInspection.ownerProcessObservation?.state, 'unknown');
     assert.equal(legacyInspection.ownerProcessObservation?.reason, 'no owner process identity recorded');
-    await fleet3.observeProcesses('run');
-    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:run').filter(ev => ev.kind === 'supervisor.signal');
+    await fleet3.observeProcesses(runId);
+    supervisorSignals = plane.createSupervisor().log().readEvents('supervisor:' + runId).filter(ev => ev.kind === 'supervisor.signal');
     assert.equal(supervisorSignals.length, 3, 'missing identity creates a distinct durable cause');
 
-    const beforeExpiry = await plane.snapshot('run');
-    const rawEventsCountBefore = plane.createSupervisor().log().readEvents('supervisor:run').length;
+    const beforeExpiry = await plane.snapshot(runId);
+    const rawEventsCountBefore = plane.createSupervisor().log().readEvents('supervisor:' + runId).length;
     const probesBefore = probe.observeCalls;
     // Monitoring after authority expiry reads new facts but grants no effects.
     const expiredStamp = new Date(Date.parse(leaseExpiry) + 1000).toISOString();
     nowFn = () => expiredStamp;
-    await fleet3.observeProcesses('run');
+    await fleet3.observeProcesses(runId);
     assert.ok(probe.observeCalls > probesBefore, 'monitoring still probes after expiry');
     assert.equal(starts, 2, 'monitoring after expired lease starts no workers');
     assert.equal(runs, 2, 'monitoring after expired lease starts no model runs');
-    const finalSnapshot = await plane.snapshot('run');
+    const finalSnapshot = await plane.snapshot(runId);
     assert.deepEqual(finalSnapshot.commands, beforeExpiry.commands, 'monitoring does not mutate commands or reservations');
     assert.deepEqual(finalSnapshot.attempts, beforeExpiry.attempts, 'monitoring does not clear lifecycle');
-    assert.equal(plane.createSupervisor().log().readEvents('supervisor:run').length, rawEventsCountBefore, 'unchanged causes remain deduplicated after expiry');
+    assert.equal(plane.createSupervisor().log().readEvents('supervisor:' + runId).length, rawEventsCountBefore, 'unchanged causes remain deduplicated after expiry');
 
     // Controlled clean resolution: resolve background runner, wait for terminal, then close both hosts cleanly
     hangingRunResolve?.();
     await Promise.all(terminalWaits);
+    assert.equal((await fleet3.inspect(context, worker1.workerId)).state, 'unknown');
+    await fleet3.observeProcesses(runId);
+    const references = plane.createSupervisor().log().readEvents('supervisor:' + runId)
+      .filter(ev => ev.kind === 'supervisor.signal')
+      .flatMap(ev => (ev.payload as { evidenceRefs: string[] }).evidenceRefs);
+    assert.ok(references.every(ref => ref.length <= 512), 'long scoped launch envelopes do not become signal IDs');
   } finally {
     hangingRunResolve?.();
     await Promise.allSettled(terminalWaits);

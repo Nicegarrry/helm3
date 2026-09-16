@@ -650,6 +650,12 @@ export class HostControlPlane {
     return results.length === 1 ? results[0] : undefined;
   }
 
+  /** Fresh fleet state without scanning unrelated execution artifacts. */
+  readFleetProjection(runId: string): Pick<HostSnapshot, 'commands' | 'attempts'> {
+    const projection = this.kernel.host.readRun(runId);
+    return { commands: projection.commands, attempts: projection.attempts };
+  }
+
   async snapshot(runId: string): Promise<HostSnapshot> {
     const projection = this.kernel.host.readRun(runId);
     const metadata = await this.journal.metadata();

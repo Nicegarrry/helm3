@@ -448,7 +448,7 @@ export class PiWorkerFleet {
       throw new Error('fleet event is not a terminal worker observation');
     }
     const runId = fleetEvent.correlationId;
-    const snapshot = await this.binding.host.snapshot(runId);
+    const snapshot = this.binding.host.readFleetProjection(runId);
     const admitted = snapshot.commands.find((entry) => entry.command.commandId === fleetEvent.commandId);
     const payload = admitted?.command.payload as { workerId?: unknown; attemptId?: unknown } | undefined;
     if (!admitted || (admitted.command.kind !== 'worker.spawn' && admitted.command.kind !== 'worker.steer')
@@ -507,7 +507,7 @@ export class PiWorkerFleet {
   }
 
   private async durableRecord(runId: string, workerId: string): Promise<StoredWorker | undefined> {
-    const snapshot = await this.binding.host.snapshot(runId);
+    const snapshot = this.binding.host.readFleetProjection(runId);
     const command = snapshot.commands.find((entry) => (entry.command.payload as { workerId?: unknown }).workerId === workerId);
     const attemptId = (command?.command.payload as { attemptId?: unknown } | undefined)?.attemptId;
     if (typeof attemptId === 'string') {
@@ -609,7 +609,7 @@ export class PiWorkerFleet {
   }
 
   async observeProcesses(runId: string): Promise<void> {
-    const snapshot = await this.binding.host.snapshot(runId);
+    const snapshot = this.binding.host.readFleetProjection(runId);
     for (const entry of snapshot.commands) {
       const cmd = entry.command;
       if (cmd.kind !== 'worker.spawn' && cmd.kind !== 'worker.steer') continue;
@@ -708,8 +708,9 @@ export class PiWorkerFleet {
         }
       }
       if (cmd.scope.mapNodeId !== undefined) {
-        // Reference the persisted observation event alongside prior evidence.
-        const evidenceRefs = [...new Set([...settled.evidenceRefs, `event:${fleetEvent.eventId}`])];
+        // The event binds this observation to the durable launch command. Scoped
+        // artifact envelopes may exceed signal ID limits; they are not IDs.
+        const evidenceRefs = [`event:${fleetEvent.eventId}`];
         await this.binding.host.createSupervisor().process({ signal: { runId, mapNodeId: cmd.scope.mapNodeId, source: 'host.worker_fleet', sourceEventId: fleetEvent.eventId, group: settled.workerId, observedAt: fleetEvent.occurredAt, kind: 'reconciliation.ambiguous', evidenceRefs, needsJudgement: true } });
       }
     }

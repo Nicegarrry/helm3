@@ -4,7 +4,7 @@ import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js'
 import type { WorkspaceManager } from '../workspace/index.js';
 import type { DurableReviewRecord, ReviewOutcome } from './review.js';
 import type { PiWorkerFleet, WorkerTerminalJournal } from './worker-fleet.js';
-import { workerResultSchema } from '../contracts/index.js';
+import { selectTrustedEnvelopeLineage } from './envelope-lineage.js';
 
 type GitSnapshot = Readonly<{
   schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string;
@@ -20,9 +20,6 @@ function parseGitSnapshot(bytes: Buffer): GitSnapshot | undefined {
       && /^[0-9a-f]{40}$/.test(value.head ?? '') && typeof value.clean === 'boolean' && typeof value.status === 'string'
       ? Object.freeze(value as GitSnapshot) : undefined;
   } catch { return undefined; }
-}
-function validWorkerResult(bytes: Buffer): boolean {
-  try { workerResultSchema.parse(JSON.parse(bytes.toString('utf8'))); return true; } catch { return false; }
 }
 function validEvent(bytes: Buffer, terminal: WorkerTerminalJournal): boolean {
   try {
@@ -61,15 +58,12 @@ export async function observeReviewTerminal(input: Readonly<{
     || beforeSnapshot.repository !== reservation.repository || beforeSnapshot.workspace !== reservation.root || beforeSnapshot.head !== review.requestedHead || !beforeSnapshot.clean || beforeSnapshot.status !== '') return undefined;
 
   const known = new Set(terminal.evidenceRefs);
-  const envelopes = metadata.filter(entry => known.has(entry.raw.ref) && entry.source === 'pi.envelope' && entry.sourceIdentity.startsWith(`pi-envelope:${terminal.attemptId}:`));
-  const validEnvelopes: ArtifactMetadata[] = [];
-  try {
-    for (const candidate of envelopes) if (validWorkerResult(await input.journal.read(candidate.raw, candidate.sourceIdentity))) validEnvelopes.push(candidate);
-  } catch { return undefined; }
-  // A bounded correction can leave an invalid initial envelope plus one valid
-  // terminal envelope. More than one valid result is ambiguous provenance.
-  if (validEnvelopes.length !== 1) return undefined;
-  const result = validEnvelopes[0]!;
+  const selected = await selectTrustedEnvelopeLineage({
+    attemptId: terminal.attemptId, commandId: terminal.spawnCommandId, sessionId: terminal.sessionId,
+    evidenceRefs: terminal.evidenceRefs, metadata,
+    read: (raw, sourceIdentity) => input.journal.read(raw, sourceIdentity),
+  }).catch(() => undefined);
+  if (!selected) return undefined;
   const events = metadata.filter(entry => known.has(entry.raw.ref) && entry.source === 'pi.event');
   if (!events.length) return undefined;
   try {
@@ -81,5 +75,5 @@ export async function observeReviewTerminal(input: Readonly<{
   if (after.head !== beforeSnapshot.head || after.status !== beforeSnapshot.status || after.clean !== beforeSnapshot.clean) return undefined;
   const afterRaw = await input.journal.appendAfter(Buffer.from(JSON.stringify({ schemaVersion: 1, workerId: terminal.workerId, attemptId: terminal.attemptId, spawnCommandId: terminal.spawnCommandId, repository: reservation.repository, workspace: reservation.root, head: after.head, clean: after.clean, status: after.status, owner: after.owner }), 'utf8')).catch(() => undefined);
   if (!afterRaw) return undefined;
-  return Object.freeze({ resultRef: result.raw.ref, rawEventRefs: Object.freeze(events.map(entry => entry.raw.ref)), readonlyObservation: Object.freeze({ beforeRef: before.raw.ref, afterRef: afterRaw.ref }) });
+  return Object.freeze({ resultRef: selected.resultRef, rawEventRefs: Object.freeze(events.map(entry => entry.raw.ref)), readonlyObservation: Object.freeze({ beforeRef: before.raw.ref, afterRef: afterRaw.ref }) });
 }

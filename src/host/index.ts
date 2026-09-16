@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { commandSchema, workerResultSchema, type Attempt, type AutonomyLease, type Command, type Event, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef, type WorkerResult } from '../contracts/index.js';
+import { commandSchema, type Attempt, type AutonomyLease, type Command, type Event, type Observation, type OrchestratorLease, type Precondition, type RawArtifactRef, type WorkerResult } from '../contracts/index.js';
 import {
   openKernel,
   type CommandRecord,
@@ -35,6 +35,7 @@ import type {
   RecoveryBundle,
 } from '../runtime/orchestrator/index.js';
 import type { PiAuthority, PiCompactEffect, PiEffect, PiNativeWorker } from '../runtime/pi/index.js';
+import { selectTrustedEnvelopeLineage } from './envelope-lineage.js';
 
 type ArtifactKind = 'text' | 'invocation' | 'recovery_bundle' | 'recovery_state' | 'effect';
 type ArtifactScope = Readonly<{ runId: string; sessionId: string }>;
@@ -631,23 +632,18 @@ export class HostControlPlane {
   }
 
   /**
-   * The worker result is meaningful only when one hash-checked Pi envelope in
-   * the terminal record proves the same immutable status. Invalid first-pass
-   * envelopes are allowed; more than one valid envelope is ambiguous.
+   * New terminals select one accepted report through hash-checked disposition
+   * lineage. Legacy terminals retain the exact-one-valid-envelope rule.
    */
-  async readFleetTerminalResult(input: Readonly<{ attemptId: string; evidenceRefs: readonly string[] }>): Promise<WorkerResult | undefined> {
-    const known = new Set(input.evidenceRefs);
-    const candidates = (await this.journal.metadata()).filter((entry) => known.has(entry.raw.ref)
-      && entry.source === 'pi.envelope' && entry.sourceIdentity.startsWith(`pi-envelope:${input.attemptId}:`));
-    const results: WorkerResult[] = [];
-    for (const candidate of candidates) {
-      try {
-        const raw = (await this.journal.read(candidate.raw, candidate.sourceIdentity)).toString('utf8');
-        const fenced = raw.match(/^```json\r?\n([\s\S]*)\r?\n```$/);
-        results.push(workerResultSchema.parse(JSON.parse(fenced ? fenced[1] : raw)));
-      } catch { /* An invalid first envelope is not a terminal result. */ }
-    }
-    return results.length === 1 ? results[0] : undefined;
+  async readFleetTerminalResult(input: Readonly<{ attemptId: string; evidenceRefs: readonly string[]; commandId?: string; sessionId?: string }>): Promise<WorkerResult | undefined> {
+    try {
+      const selected = await selectTrustedEnvelopeLineage({
+        attemptId: input.attemptId, commandId: input.commandId, sessionId: input.sessionId,
+        evidenceRefs: input.evidenceRefs, metadata: await this.journal.metadata(),
+        read: (raw, sourceIdentity) => this.journal.read(raw, sourceIdentity),
+      });
+      return selected?.result;
+    } catch { return undefined; }
   }
 
   /** Fresh fleet state without scanning unrelated execution artifacts. */

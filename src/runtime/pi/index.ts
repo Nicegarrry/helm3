@@ -3,7 +3,7 @@ import { mkdir, realpath, readFile } from 'node:fs/promises';
 import { join, relative, isAbsolute } from 'node:path';
 import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
-import { parseWorkerResult, workerResultInstructions, workerResultCorrection } from '../../host/worker-result-format.js';
+import { parseWorkerResult, workerResultInstructions, workerResultCorrection, workerResultChangedFilesCorrection } from '../../host/worker-result-format.js';
 import { BoundedPiAccess } from '../../access/index.js';
 import { assertPiThinkingSupported } from '../../access/thinking-support.js';
 import { observePiContext } from '../../context/index.js';
@@ -313,41 +313,57 @@ export class PiNativeWorker {
     try { this.artifacts.push(...await this.eventSpool.drain()); }
     catch (error) { this.eventError ??= error; }
   }
-  private async saveTerminal(invocation: string, phase: string, afterMessage: number): Promise<WorkerResult | undefined> {
+  private async saveTerminal(invocation: string, phase: 'initial' | 'correction' | 'interrupted', afterMessage: number): Promise<WorkerResult | undefined> {
     // A reopened native session retains prior terminal messages. Only an
     // assistant turn appended by this invocation may satisfy its new command;
     // otherwise a no-op prompt could replay an earlier WorkerResult without a
     // fresh model effect or correction.
     const text = this.lastAssistantText(afterMessage);
-    const result = parseEnvelope(text);
+    const parsed = parseEnvelope(text);
     const ref = await this.input.journal.append({ source: 'pi.envelope', sourceIdentity: `pi-envelope:${this.input.attemptId}:${invocation}:${phase}`,
       mediaType: 'text/plain; charset=utf-8', bytes: Buffer.from(text) });
     this.artifacts.push(ref);
-    if (!result) this.artifacts.push(await this.input.journal.append({ source: 'pi.envelope_disposition', sourceIdentity: `pi-envelope-disposition:${invocation}:${phase}`,
-      mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ status: text ? 'envelope_invalid' : 'envelope_missing', rawRef: ref, attemptId: this.input.attemptId })) }));
-    return result;
+    let changedFilesMatch = false;
+    if (parsed && phase !== 'interrupted') {
+      // An unavailable observation is unknown, not a false worker claim.
+      // Preserve the raw report above and let run() record the interruption.
+      const changed = await this.input.workspaceManager.changedFiles(this.input.workspace);
+      changedFilesMatch = JSON.stringify([...parsed.changed_files].sort()) === JSON.stringify([...changed].sort());
+    }
+    const accepted = parsed !== undefined && changedFilesMatch && phase !== 'interrupted';
+    const reason = phase === 'interrupted' ? 'interrupted' as const
+      : !parsed ? text ? 'envelope_invalid' as const : 'envelope_missing' as const
+      : changedFilesMatch ? 'accepted' as const : 'changed_files_mismatch' as const;
+    this.artifacts.push(await this.input.journal.append({ source: 'pi.envelope_disposition', sourceIdentity: `pi-envelope-disposition:${this.input.attemptId}:${invocation}:${phase}`,
+      mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId, invocation, phase,
+        envelopeSourceIdentity: `pi-envelope:${this.input.attemptId}:${invocation}:${phase}`, rawRef: ref, status: accepted ? 'accepted' : 'rejected', reason })) }));
+    return accepted ? parsed : undefined;
   }
   async run(prompt: string, correction: string): Promise<{ result: WorkerResult; artifacts: RawArtifactRef[]; repaired: boolean }> {
     this.assertActive();
     if (this.running) throw new Error('Pi worker already has an active invocation');
     this.running = true;
-    const invocation = randomUUID(); let saved = false;
+    const invocation = randomUUID(); let initialSaved = false; let correctionStarted = false; let correctionSaved = false;
     // Automatic compaction is disabled for this worker, so this boundary is a
     // stable invocation marker even when the wrapper was rehydrated.
     const invocationMessage = this.session.messages.length;
+    let correctionMessage = invocationMessage;
     try {
       await this.session.prompt(`${prompt}\n\n${workerResultInstructions()}`);
-      let result = await this.saveTerminal(invocation, 'initial', invocationMessage); saved = true;
+      let result = await this.saveTerminal(invocation, 'initial', invocationMessage); initialSaved = true;
       const repaired = !result;
       if (!result && (this.input.access?.correctionAllowed ?? true)) {
         this.assertActive();
-        const correctionMessage = this.session.messages.length;
-        await this.session.prompt(`${correction}\n\n${workerResultCorrection(this.lastAssistantText(invocationMessage))}`, { streamingBehavior: 'followUp' });
+        correctionMessage = this.session.messages.length;
+        correctionStarted = true;
+        const initialText = this.lastAssistantText(invocationMessage);
+        const initialParsed = parseEnvelope(initialText);
+        const feedback = initialParsed ? workerResultChangedFilesCorrection() : workerResultCorrection(initialText);
+        await this.session.prompt(correction + '\n\n' + feedback, { streamingBehavior: 'followUp' });
         result = await this.saveTerminal(invocation, 'correction', correctionMessage);
+        correctionSaved = true;
       }
       if (!result) throw new Error('Pi session did not produce a valid terminal WorkerResult after bounded correction');
-      const changed = await this.input.workspaceManager.changedFiles(this.input.workspace);
-      if (JSON.stringify([...result.changed_files].sort()) !== JSON.stringify(changed)) throw new Error('WorkerResult changed_files claim does not match observed changes');
       await this.flushEvents();
       if (this.eventError) throw new Error('Pi evidence persistence failed');
       const contextOccupancy = observePiContext(this.session);
@@ -356,7 +372,8 @@ export class PiNativeWorker {
           observedTokens: this.session.getSessionStats().tokens, contextOccupancy, cost: { state: 'unknown' } })) }));
       return { result, artifacts: [...this.artifacts], repaired };
     } catch (error) {
-      if (!saved) await this.saveTerminal(invocation, 'interrupted', invocationMessage);
+      if (!initialSaved) await this.saveTerminal(invocation, 'interrupted', invocationMessage).catch(() => undefined);
+      else if (correctionStarted && !correctionSaved) await this.saveTerminal(invocation, 'interrupted', correctionMessage).catch(() => undefined);
       await this.flushEvents();
       throw error;
     } finally { this.running = false; }

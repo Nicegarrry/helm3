@@ -226,6 +226,22 @@ export class HostArtifactStore implements OrchestratorArtifacts {
     return this.write('invocation', 'host.orchestrator.invocation', JSON.stringify(input));
   }
 
+  /** Read the durable invocation outcome, never infer success from a model's text. */
+  async readInvocation(ref: string): Promise<Readonly<Parameters<OrchestratorArtifacts['saveInvocation']>[0]>> {
+    const parsed: unknown = JSON.parse(await this.read(ref, 'invocation'));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('invalid durable invocation');
+    const value = parsed as Partial<Parameters<OrchestratorArtifacts['saveInvocation']>[0]>;
+    if ((value.driver !== 'fable' && value.driver !== 'astra')
+      || value.sessionId !== this.currentScope().sessionId
+      || (value.outcome !== 'succeeded' && value.outcome !== 'failed' && value.outcome !== 'unknown')
+      || typeof value.text !== 'string'
+      || (value.providerSessionId !== undefined && (typeof value.providerSessionId !== 'string' || !value.providerSessionId))) {
+      throw new Error('invalid durable invocation');
+    }
+    return Object.freeze({ driver: value.driver, sessionId: value.sessionId, outcome: value.outcome, text: value.text,
+      ...(value.providerSessionId !== undefined ? { providerSessionId: value.providerSessionId } : {}) });
+  }
+
   async saveRecoveryBundle(bundle: RecoveryBundle): Promise<string> {
     const scope = this.currentScope();
     if (bundle.runId !== scope.runId || bundle.sessionId !== scope.sessionId) throw new Error('recovery bundle does not match trusted artifact scope');

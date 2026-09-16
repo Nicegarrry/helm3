@@ -558,3 +558,25 @@ test('two host connections racing differently grouped wakes cannot invoke overla
     assert.equal(f.events.pending(f.ownership)[0]?.causes.length, 1);
   } finally { other.close(); await f.close(); }
 });
+
+test('abort stops new wake effects before admission, after event delivery and between groups', async () => {
+  for (const boundary of ['before', 'send-event', 'between-groups'] as const) {
+    const f = await fixture(); const stop = new AbortController(); let sent = 0; let invoked = 0;
+    try {
+      f.signal('first');
+      f.events.record({ runId: f.context.runId, mapNodeId: 'node', source: 'worker', sourceEventId: 'other-group', group: 'other-group', observedAt: nowStr, kind: 'worker.failed', evidenceRefs: [], needsJudgement: true });
+      const driver = { async send_event() { sent++; if (boundary === 'send-event') stop.abort(); }, async invoke() {
+        invoked++;
+        const resultRef = await f.host.artifactsFor(f.context).saveInvocation({ driver: 'astra', sessionId: f.context.sessionId, outcome: 'succeeded', text: 'done' });
+        if (boundary === 'between-groups') stop.abort();
+        return { resultRef };
+      } };
+      if (boundary === 'before') stop.abort();
+      await new HostWakeDispatcher(f.binding(driver)).dispatch(f.context, stop.signal);
+      assert.equal(sent, boundary === 'before' ? 0 : 1);
+      assert.equal(invoked, boundary === 'between-groups' ? 1 : 0);
+      assert.equal(f.events.pending(f.ownership).length, boundary === 'between-groups' ? 1 : 2);
+      if (boundary === 'before') assert.equal((await f.host.snapshot(f.context.runId)).commands.length, 0);
+    } finally { await f.close(); }
+  }
+});

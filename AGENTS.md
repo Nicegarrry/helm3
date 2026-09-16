@@ -41,7 +41,7 @@ Interactive Pi OAuth is deferred until the human returns, expected 2026-09-16. C
 
 ## Working method
 
-Use Terra for bounded implementation/investigation and Luna for mechanical tasks and documentation. Frontier coordination resolves interface decisions and acceptance. Prefer at most three workers plus coordinator, and increase only against demonstrated machine/provider capacity. Workers must report commands and observed results, distinguish mocks from live-provider evidence, and preserve WIP on interruption.
+Prefer native Pi Gemini/open-model workers for implementation, investigation and independent review. Any ChatGPT worker must be Luna; the coordinator may use frontier cognition for interface decisions, integration and acceptance. Prefer at most three workers plus coordinator, and increase only against demonstrated machine/provider capacity and delegated authority. Workers must report commands and observed results, distinguish mocks from live-provider evidence, and preserve WIP on interruption.
 
 Prefer codebase-memory-mcp for code discovery: search_graph, trace_path, get_code_snippet, query_graph, search_code. Run index_repository first when unindexed. Use file search for non-code/config/string literals or insufficient graph results. Predecessor indexing and inspection are now authorised against the recorded source baseline.
 

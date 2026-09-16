@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
-import type { Attempt, Command, Event, Observation, Precondition } from '../contracts/index.js';
+import { type Attempt, type Command, type Event, type Observation, type Precondition, utcTimestampSchema } from '../contracts/index.js';
 import type { KernelEffect, TrustedExecutor } from '../core/index.js';
 import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js';
+import { validProcessIdentity, type ProcessIdentity, type ProcessObservation, type ProcessProbe } from './process-liveness.js';
 import type { PiForkSourceSnapshot, PiNativeWorker, PiPersistedSession } from '../runtime/pi/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../workspace/index.js';
 import type { HostControlPlane } from './index.js';
@@ -16,7 +17,7 @@ export type WorkerSteerInput = Readonly<{ workerId: string; objectiveRef: string
 export type WorkerForkInput = Readonly<{ workerId: string; expectedSessionId: string; expectedHead: string }>;
 export type WorkerInspect = Readonly<{
   workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string;
-  state: 'ready' | 'running' | 'fork_ready' | 'terminal' | 'unknown'; live: 'known' | 'unknown';
+  state: 'ready' | 'running' | 'fork_ready' | 'terminal' | 'unknown'; live: 'known' | 'unknown'; ownerProcessObservation?: ProcessObservation;
   activeRequests?: number; contextOccupancy?: unknown; eventCursor?: string;
   evidenceRefs: readonly string[]; cancellationRequested: boolean;
 }>;
@@ -28,7 +29,7 @@ export type WorkerTerminalJournal = Readonly<{
 }>;
 type SpawnProvenance = Readonly<{ modelId: string; modelProvider: string; modelApi: string; inputDigest: string; baseSha: string; modelFactVersion: number; dataPolicy: string }>;
 /** v1 launch/terminal records predate continuation provenance. They remain readable, but cannot be steered. */
-type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; modelId?: string; modelProvider?: string; modelApi?: string; modelFactVersion?: number; dataPolicy?: string; reviewBeforeRef?: string; forkLeafId?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
+type StoredWorker = Readonly<{ schemaVersion: 1; workerId: string; attemptId: string; spawnCommandId: string; sessionId: string; workspace: string; owner?: WorktreeOwner; ownerProcess?: ProcessIdentity; modelId?: string; modelProvider?: string; modelApi?: string; modelFactVersion?: number; dataPolicy?: string; reviewBeforeRef?: string; forkLeafId?: string; state: WorkerInspect['state']; inputDigest: string; evidenceRefs: readonly string[]; cancellationRequested: boolean; persistedSession?: PiPersistedSession }>;
 type ContinuationWorker = StoredWorker & Readonly<{ owner: WorktreeOwner; modelId: string; modelProvider: string; modelApi: string; modelFactVersion: number; dataPolicy: string; persistedSession: PiPersistedSession }>;
 type LiveWorker = Readonly<{ worker: PiNativeWorker; record: StoredWorker; context: HelmToolExecutionContext; command: Command }>;
 export class WorkerSteerUnknownError extends Error {
@@ -36,6 +37,19 @@ export class WorkerSteerUnknownError extends Error {
 }
 
 function digest(value: unknown): string { return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
+const OBSERVATION_MAX_AGE_MS = 30_000;
+/** Bounded, generic reason. Never carries arbitrary probe/thrown text into a durable field. */
+function unknownObservation(reason: string): ProcessObservation {
+  return Object.freeze({ state: 'unknown', observedAt: utcTimestampSchema.parse(new Date().toISOString()), reason });
+}
+/** Shared capture: the single trusted host probe of "who owns me right now". */
+async function captureOwnerProcess(probe: ProcessProbe | undefined): Promise<ProcessIdentity | undefined> {
+  if (!probe) return undefined;
+  try {
+    const captured = await probe.capture();
+    return validProcessIdentity(captured) ? Object.freeze({ ...captured }) : undefined;
+  } catch { return undefined; }
+}
 function storedWorker(value: unknown): StoredWorker | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const item = value as Partial<StoredWorker>;
@@ -43,10 +57,11 @@ function storedWorker(value: unknown): StoredWorker | undefined {
     || typeof item.sessionId !== 'string' || typeof item.workspace !== 'string' || typeof item.inputDigest !== 'string'
     || (item.modelId !== undefined && typeof item.modelId !== 'string') || (item.modelProvider !== undefined && typeof item.modelProvider !== 'string') || (item.modelApi !== undefined && typeof item.modelApi !== 'string') || (item.modelFactVersion !== undefined && (!Number.isInteger(item.modelFactVersion) || item.modelFactVersion < 1)) || (item.dataPolicy !== undefined && typeof item.dataPolicy !== 'string') || (item.reviewBeforeRef !== undefined && typeof item.reviewBeforeRef !== 'string') || (item.forkLeafId !== undefined && typeof item.forkLeafId !== 'string')
     || (item.owner !== undefined && (typeof item.owner.attemptId !== 'string' || !Number.isInteger(item.owner.generation) || typeof item.owner.expiresAt !== 'string'))
+    || (item.ownerProcess !== undefined && !validProcessIdentity(item.ownerProcess))
     || (item.state !== 'ready' && item.state !== 'running' && item.state !== 'fork_ready' && item.state !== 'terminal' && item.state !== 'unknown')
     || !Array.isArray(item.evidenceRefs) || !item.evidenceRefs.every((ref) => typeof ref === 'string') || typeof item.cancellationRequested !== 'boolean') return undefined;
   if (item.persistedSession && (typeof item.persistedSession.sessionId !== 'string' || typeof item.persistedSession.sessionFile !== 'string' || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.historyHash) || !/^sha256:[0-9a-f]{64}$/.test(item.persistedSession.branchDigest))) return undefined;
-  return Object.freeze({ ...item, ...(item.owner ? { owner: Object.freeze({ ...item.owner }) } : {}), evidenceRefs: Object.freeze([...item.evidenceRefs]), ...(item.persistedSession ? { persistedSession: Object.freeze({ ...item.persistedSession }) } : {}) }) as StoredWorker;
+  return Object.freeze({ ...item, ...(item.owner ? { owner: Object.freeze({ ...item.owner }) } : {}), ...(item.ownerProcess ? { ownerProcess: Object.freeze({ ...item.ownerProcess }) } : {}), evidenceRefs: Object.freeze([...item.evidenceRefs]), ...(item.persistedSession ? { persistedSession: Object.freeze({ ...item.persistedSession }) } : {}) }) as StoredWorker;
 }
 function continuationWorker(record: StoredWorker | undefined): record is ContinuationWorker {
   return Boolean(record && (record.state === 'terminal' || record.state === 'fork_ready') && !record.cancellationRequested && record.persistedSession
@@ -71,6 +86,7 @@ function event(kind: string, record: StoredWorker, runId: string, payload: unkno
 export type WorkerFleetBinding = Readonly<{
   host: HostControlPlane;
   workspaceManager: WorkspaceManager;
+  processProbe?: ProcessProbe;
   executor: TrustedExecutor;
   claimExpiresAt(): string;
   /** Trusted host fact reader. It must return an observation, never a model claim. */
@@ -106,6 +122,33 @@ export class PiWorkerFleet {
   /** Process-local half of the one-fork-per-source fence; the command journal is its restart-safe half. */
   readonly #forkSources = new Set<string>();
   constructor(private readonly binding: WorkerFleetBinding) {}
+
+  /**
+   * Safe owner probe for a durable record. Validates the probe result's state,
+   * a bounded reason string, a strict UTC `observedAt`, and a fresh age in
+   * 0..OBSERVATION_MAX_AGE_MS against `new Date()`. Returns a copied frozen
+   * observation on success; every missing/failed/stale/future/malformed path
+   * yields an explicit unknown with a generic reason. Arbitrary thrown error
+   * text is never carried into the result or logged.
+   */
+  private async observeOwner(record: StoredWorker): Promise<ProcessObservation> {
+    if (!record.ownerProcess) return unknownObservation('no owner process identity recorded');
+    if (!this.binding.processProbe) return unknownObservation('process probe not configured');
+    let probeResult: ProcessObservation | undefined;
+    try { probeResult = await this.binding.processProbe.observe(record.ownerProcess); }
+    catch { return unknownObservation('owner process probe failed'); }
+    if (!probeResult || (probeResult.state !== 'same-process' && probeResult.state !== 'not-running' && probeResult.state !== 'unknown'))
+      return unknownObservation('owner process probe returned an unexpected state');
+    if (typeof probeResult.reason !== 'string' || probeResult.reason.length === 0 || probeResult.reason.length > 256)
+      return unknownObservation('owner process probe reason is not a bounded string');
+    let observedAt: string;
+    try { observedAt = utcTimestampSchema.parse(probeResult.observedAt); }
+    catch { return unknownObservation('owner process probe timestamp is malformed'); }
+    const age = Date.now() - Date.parse(observedAt);
+    if (age < 0) return unknownObservation('owner process probe observation is from the future');
+    if (age > OBSERVATION_MAX_AGE_MS) return unknownObservation('owner process probe observation is stale');
+    return Object.freeze({ state: probeResult.state, observedAt, reason: probeResult.reason });
+  }
 
   async spawn(context: HelmToolExecutionContext, input: WorkerSpawnInput): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'ready' }> {
     const validated = Object.freeze({ ...input, contextRefs: Object.freeze([...input.contextRefs]), ...(input.reviewConstraint ? { reviewConstraint: Object.freeze({ ...input.reviewConstraint }) } : {}) });
@@ -151,8 +194,10 @@ export class PiWorkerFleet {
           worker.dispose();
           throw new Error('Pi runtime model does not match the admitted worker model');
         }
+        // Freshly captured; never inherits a predecessor identity on steer/fork.
+        const ownerProcess = await captureOwnerProcess(this.binding.processProbe);
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
-          workspace: workspace.root, owner: workspace.owner, modelId: provenance.modelId, modelProvider: provenance.modelProvider, modelApi: provenance.modelApi, modelFactVersion: provenance.modelFactVersion, dataPolicy: provenance.dataPolicy, ...(reviewBeforeRef ? { reviewBeforeRef } : {}), state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+          workspace: workspace.root, owner: workspace.owner, ...(ownerProcess ? { ownerProcess } : {}), modelId: provenance.modelId, modelProvider: provenance.modelProvider, modelApi: provenance.modelApi, modelFactVersion: provenance.modelFactVersion, dataPolicy: provenance.dataPolicy, ...(reviewBeforeRef ? { reviewBeforeRef } : {}), state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
         this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },
@@ -222,8 +267,10 @@ export class PiWorkerFleet {
         const workspace = this.binding.workspaceManager.transfer(oldWorkspace, oldWorkspace.owner.generation, config.owner);
         const worker = await this.binding.rehydrate!(admitted.command, workspace, predecessor.persistedSession!);
         if (worker.sessionId !== predecessor.sessionId || worker.modelIdentity.modelId !== predecessor.modelId || worker.modelIdentity.provider !== predecessor.modelProvider || worker.modelIdentity.api !== predecessor.modelApi) { worker.dispose(); throw new Error('continuation native identity changed'); }
+        // Freshly captured; never inherits a predecessor identity on steer/fork.
+        const ownerProcess = await captureOwnerProcess(this.binding.processProbe);
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: worker.sessionId,
-          workspace: workspace.root, owner: workspace.owner, modelId: predecessor.modelId, modelProvider: predecessor.modelProvider, modelApi: predecessor.modelApi, modelFactVersion: predecessor.modelFactVersion, dataPolicy: predecessor.dataPolicy, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
+          workspace: workspace.root, owner: workspace.owner, ...(ownerProcess ? { ownerProcess } : {}), modelId: predecessor.modelId, modelProvider: predecessor.modelProvider, modelApi: predecessor.modelApi, modelFactVersion: predecessor.modelFactVersion, dataPolicy: predecessor.dataPolicy, state: 'ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false });
         this.#records.set(workerId, record);
         this.#live.set(workerId, Object.freeze({ worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },
@@ -293,7 +340,9 @@ export class PiWorkerFleet {
         const forked = await this.binding.fork!(admitted.command, workspace, predecessor.persistedSession!, source.leafId);
         if (forked.worker.sessionId === predecessor.sessionId || forked.successor.sessionId !== forked.worker.sessionId || forked.successor.branchDigest !== predecessor.persistedSession!.branchDigest
           || forked.leafId !== source.leafId || forked.worker.modelIdentity.modelId !== predecessor.modelId || forked.worker.modelIdentity.provider !== predecessor.modelProvider || forked.worker.modelIdentity.api !== predecessor.modelApi) { forked.worker.dispose(); throw new Error('fork native identity changed'); }
+        const ownerProcess = await captureOwnerProcess(this.binding.processProbe);
         record = Object.freeze({ schemaVersion: 1, workerId, attemptId: attempt.attemptId, spawnCommandId: admitted.command.commandId, sessionId: forked.worker.sessionId, workspace: workspace.root, owner: workspace.owner, modelId: predecessor.modelId, modelProvider: predecessor.modelProvider, modelApi: predecessor.modelApi, modelFactVersion: predecessor.modelFactVersion, dataPolicy: predecessor.dataPolicy, forkLeafId: forked.leafId, state: 'fork_ready', inputDigest: digest(validated), evidenceRefs: Object.freeze([]), cancellationRequested: false, persistedSession: forked.successor });
+        record = Object.freeze({ ...record, ...(ownerProcess ? { ownerProcess } : {}) });
         this.#records.set(workerId, record); this.#live.set(workerId, Object.freeze({ worker: forked.worker, record, context: Object.freeze({ ...context }), command: admitted.command }));
       },
       observe: async () => {
@@ -500,7 +549,12 @@ export class PiWorkerFleet {
     const live = this.#live.get(workerId);
     if (!record) throw new Error('unknown worker');
     this.#records.set(workerId, record);
-    const { persistedSession: _privateSession, owner: _privateOwner, modelId: _privateModelId, modelProvider: _privateModelProvider, modelApi: _privateModelApi, modelFactVersion: _privateModelFactVersion, dataPolicy: _privateDataPolicy, ...publicRecord } = record;
+    let ownerProcessObservation: ProcessObservation | undefined;
+    // Honest inspection: a failed probe yields an explicit unknown observation
+    // rather than silently omitting it.
+    ownerProcessObservation = await this.observeOwner(record);
+    const { persistedSession: _privateSession, owner: _privateOwner, ownerProcess: _privateOwnerProcess, modelId: _privateModelId, modelProvider: _privateModelProvider, modelApi: _privateModelApi, modelFactVersion: _privateModelFactVersion, dataPolicy: _privateDataPolicy, ...publicRecord } = record;
+    if (ownerProcessObservation) (publicRecord as { ownerProcessObservation?: ProcessObservation }).ownerProcessObservation = ownerProcessObservation;
     if (!live) return { ...publicRecord, live: 'unknown', state: record.state === 'terminal' || record.state === 'fork_ready' ? record.state : 'unknown', evidenceRefs: record.evidenceRefs };
     // Liveness is an observation of the local process only; durable outcome,
     // cancellation intent and evidence remain authoritative for the worker.
@@ -552,5 +606,128 @@ export class PiWorkerFleet {
       if (live && !live.worker.isActive) live.worker.dispose();
     } else this.#stopping.delete(workerId);
     return { state: observed.state === 'succeeded' ? 'stopped' : 'unknown', evidenceRefs: ref ? [ref] : [] };
+  }
+
+  async observeProcesses(runId: string): Promise<void> {
+    const snapshot = await this.binding.host.snapshot(runId);
+    for (const entry of snapshot.commands) {
+      const cmd = entry.command;
+      if (cmd.kind !== 'worker.spawn' && cmd.kind !== 'worker.steer') continue;
+      if (cmd.runId !== runId) continue;
+      const payload = cmd.payload as { workerId?: unknown; attemptId?: unknown } | undefined;
+      const workerId = payload?.workerId;
+      const attemptId = payload?.attemptId;
+      if (typeof workerId !== 'string' || typeof attemptId !== 'string') continue;
+      const attempt = snapshot.attempts.find((a) => a.attemptId === attemptId && a.commandIds.includes(cmd.commandId));
+      if (!attempt) continue;
+      // 1. Read the durable record first.
+      const record = await this.durableRecord(runId, workerId);
+      if (!record) continue;
+      if (record.attemptId !== attemptId || record.spawnCommandId !== cmd.commandId) continue;
+      // Skip settled records; monitoring never questions a durable disposition.
+      if (record.state === 'terminal' || record.state === 'fork_ready') continue;
+      // 2. Probe the owner freshly (safe, bounded, never leaks thrown text).
+      const observation = await this.observeOwner(record);
+      // 3. Re-read durable terminal/owner/generation AFTER the await, before
+      //    emitting, so a race cannot make us question an already-settled or
+      //    re-owned worker.
+      const settled = await this.durableRecord(runId, workerId);
+      if (!settled || settled.state === 'terminal' || settled.state === 'fork_ready') continue;
+      if (settled.workerId !== workerId || settled.attemptId !== attemptId || settled.spawnCommandId !== cmd.commandId || settled.sessionId !== record.sessionId || settled.workspace !== record.workspace) continue;
+      // A missing owner is an uncertain condition, not a silent skip.
+      let currentOwner: WorktreeOwner | undefined;
+      if (settled.workspace) {
+        try { currentOwner = this.binding.workspaceManager.reservation(settled.workspace).owner; }
+        catch { currentOwner = undefined; }
+      }
+      const ownerMatches = Boolean(
+        settled.owner
+        && currentOwner
+        && currentOwner.attemptId === settled.owner.attemptId
+        && currentOwner.generation === settled.owner.generation
+        && currentOwner.expiresAt === settled.owner.expiresAt
+      );
+      // Same process with the current owner is the only quiet case. Everything
+      // else merely raises a question; monitoring never stops, retries, or
+      // reports success.
+      if (observation.state === 'same-process' && ownerMatches) continue;
+      // 4. Stable semantic fingerprint: run + immutable worker/session binding
+      //    + process state/reason + the CURRENT owner identity.
+      const semanticFingerprint = digest({
+        runId,
+        workerId: settled.workerId,
+        attemptId: settled.attemptId,
+        sessionId: settled.sessionId,
+        spawnCommandId: settled.spawnCommandId,
+        processState: observation.state,
+        reason: observation.reason,
+        currentOwner: currentOwner ? { attemptId: currentOwner.attemptId, generation: currentOwner.generation, expiresAt: currentOwner.expiresAt } : null,
+      });
+      const deterministicSourceEventId = `process-obs:${settled.workerId}:${settled.attemptId}:${semanticFingerprint}`;
+      // 5. Reuse an exact persisted event across ticks/reopen; verify it; on a
+      //    concurrent append failure recover only if the exact event persisted.
+      const supervisorLog = this.binding.host.createSupervisor().log();
+      const priorEvent = supervisorLog.readEvents(runId).find((ev) => ev.source === 'host.worker_fleet' && ev.sourceEventId === deterministicSourceEventId);
+      let fleetEvent: Event;
+      if (priorEvent) {
+        fleetEvent = this.#verifyReusedEvent(priorEvent, deterministicSourceEventId, runId, settled, semanticFingerprint);
+      } else {
+        const eventOccurredAt = now();
+        const candidateEvent: Event = {
+          schemaVersion: 1,
+          eventId: deterministicSourceEventId,
+          kind: 'reconciliation.ambiguous',
+          source: 'host.worker_fleet',
+          sourceEventId: deterministicSourceEventId,
+          occurredAt: eventOccurredAt,
+          recordedAt: eventOccurredAt,
+          commandId: settled.spawnCommandId,
+          attemptId: settled.attemptId,
+          sessionId: settled.sessionId,
+          correlationId: runId,
+          payload: {
+            workerId: settled.workerId,
+            attemptId: settled.attemptId,
+            observation,
+            ownerMatches,
+            currentOwner: currentOwner ? { ...currentOwner } : undefined,
+            recordedOwner: settled.owner ? { ...settled.owner } : undefined,
+            semanticFingerprint,
+          },
+        };
+        try {
+          this.binding.host.appendFleetEvent(candidateEvent);
+          fleetEvent = candidateEvent;
+        } catch {
+          // Concurrent append: only recover when the exact matching event exists.
+          const raced = supervisorLog.readEvents(runId).find((ev) => ev.source === 'host.worker_fleet' && ev.sourceEventId === deterministicSourceEventId);
+          if (!raced) throw new Error('worker reconciliation observation was not durably recorded');
+          fleetEvent = this.#verifyReusedEvent(raced, deterministicSourceEventId, runId, settled, semanticFingerprint);
+        }
+      }
+      if (cmd.scope.mapNodeId !== undefined) {
+        // Reference the persisted observation event alongside prior evidence.
+        const evidenceRefs = [...new Set([...settled.evidenceRefs, `event:${fleetEvent.eventId}`])];
+        await this.binding.host.createSupervisor().process({ signal: { runId, mapNodeId: cmd.scope.mapNodeId, source: 'host.worker_fleet', sourceEventId: fleetEvent.eventId, group: settled.workerId, observedAt: fleetEvent.occurredAt, kind: 'reconciliation.ambiguous', evidenceRefs, needsJudgement: true } });
+      }
+    }
+  }
+
+  /** Verify a reused observation event; a malformed existing event throws. */
+  #verifyReusedEvent(event: Event, expectedSourceEventId: string, runId: string, record: StoredWorker, expectedFingerprint: string): Event {
+    const payload = event.payload as { workerId?: unknown; attemptId?: unknown; semanticFingerprint?: unknown } | undefined;
+    if (event.eventId !== expectedSourceEventId || event.sourceEventId !== expectedSourceEventId
+      || event.source !== 'host.worker_fleet'
+      || event.kind !== 'reconciliation.ambiguous'
+      || event.correlationId !== runId
+      || event.commandId !== record.spawnCommandId
+      || event.attemptId !== record.attemptId
+      || event.sessionId !== record.sessionId
+      || payload?.workerId !== record.workerId
+      || payload?.attemptId !== record.attemptId
+      || payload?.semanticFingerprint !== expectedFingerprint) {
+      throw new Error('persisted reconciliation observation is malformed');
+    }
+    return event;
   }
 }

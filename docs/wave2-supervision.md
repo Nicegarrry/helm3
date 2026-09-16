@@ -4,7 +4,7 @@ The user explicitly renewed execution on 16 September 2026: make Helm 3 public, 
 
 The repository is public. PR101–105 are merged after successful GitHub checks. The combined content passed an actual Helm gate with 282 tests and typecheck; final main `7991467` has identical content and green main-branch CI. These were coordinator-managed merges, not evidence that Helm's production integration gateway is complete.
 
-The renewed operational run expires at 2026-09-16T04:05:00Z. The daily combined OpenCode/Gemini ceiling remains US$20. All prior settled usage and unknown reservations remain in the same ledger; no accounting reset. The old grants reached their attempt caps and the new user instruction authorises a new bounded run. Preserve a 35% Codex reserve. Predominantly native Pi Gemini/Qwen workers perform implementation and review.
+The user renewed execution again at 05:05 UTC on 16 September: continue Wave 2 using more resources as needed. The current operational run expires at 2026-09-16T08:05:00Z, with 64 worker attempts and at most three concurrent workers. The daily combined OpenCode/Gemini ceiling remains US$20. All prior settled usage and unknown reservations remain in the same ledger; no accounting reset. The old grants reached their attempt caps and the new user instruction authorises a new bounded run. Preserve a 35% Codex reserve. Predominantly native Pi Gemini/Qwen workers perform implementation and review.
 
 ## Scope
 
@@ -49,3 +49,15 @@ Unit tests use a named replay double for loop boundaries and real Host/Kernel/di
 Dogfooding exposed a distinction between a known write-policy refusal and an uncertain admitted effect. Native Pi now performs a read-only workspace ownership/path preflight before submitting `pi.write`. A protected or out-of-scope path produces a durable Pi tool error without inventing an effect command; the same session can correct its request. The preflight creates no directories and grants no permission.
 
 Every original ownership and path check remains inside the actual write. A race or error after admission remains an unknown command requiring reconciliation. This does not reinterpret historical unknown commands or release their resource reservations. The native provider-free regression exercises the real Host/Kernel, semantic journal and attempt lifecycle; live provider work and production frontier acceptance remain separate evidence.
+
+## Process identity and restart observation slice
+
+Native Pi sessions execute inside their owning host process. Persist the host identity, boot identity, PID and process start token with each new worker invocation. A trusted local observer compares those facts freshly; PID existence alone is insufficient. Foreign hosts, inaccessible process information and legacy records without identity remain unknown. Process liveness is distinct from native worker/task state.
+
+A restarted fleet may observe the old owner process without possessing its native session handle. A matching process and workspace owner is quiet. A dead owner, missing identity or changed workspace ownership produces a durable, coalesced reconciliation question. Monitoring continues after authority expiry and does not authorize a retry, mark work complete or clear uncertain effects. Provider/file effects may have occurred before process death.
+
+Required proof: actual OS process identity and child-process death, PID reuse/error cases, real Host/Kernel fleet restart observations, stable causes across replay, expired-lease monitoring without spending and no automatic lifecycle clearance. This connects observations to supervision; verified absent-effect retry and operational bootstrap require separate evidence.
+
+The implementation uses `LocalProcessProbe` with a host identity supplied by trusted configuration. Linux uses boot ID and process start ticks; macOS uses boot time and `ps` start time (second precision). This is liveness evidence, not an exclusive execution lock or proof that remote effects are absent. New fleet records capture identity on spawn, continuation and fork; legacy records remain readable.
+
+Hosts can connect `fleet.observeProcesses(runId)` through the runner's trusted observation callback. Stable event identities deduplicate repeated observations and competing host connections. The original observation timestamp remains attached to the original cause. A missing session handle remains unknown even when its owner process exists. Normal CLI bootstrap and fresh absent-effect retry authorization are still separate outstanding work.

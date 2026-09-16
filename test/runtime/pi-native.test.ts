@@ -7,6 +7,9 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { z } from 'zod/v3';
+import { createBoundedFleetRuntime } from '../../src/host/bounded-fleet-runtime.js';
+import type { BoundedPiAccess } from '../../src/access/index.js';
+import type { Command } from '../../src/contracts/index.js';
 import { openKernel } from '../../src/core/index.js';
 import { ArtifactJournal } from '../../src/journal/index.js';
 import { PiNativeWorker, type PiAuthority } from '../../src/runtime/pi/index.js';
@@ -26,6 +29,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
   let worker: PiNativeWorker | undefined;
   let manager: WorkspaceManager | undefined;
   let modelEffects = 0;
+  let nativeAccess: BoundedPiAccess | undefined;
   try {
     const repo = join(root, 'repo'); await mkdir(repo); await exec('git', ['init', repo]);
     await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.invalid']); await exec('git', ['-C', repo, 'config', 'user.name', 'Test']);
@@ -45,6 +49,7 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     const authority: PiAuthority = {
       async perform(effect, action) {
         const isModel = effect.kind === 'model.request';
+        if (isModel && effect.effectId !== 'over-budget') assert.equal(nativeAccess!.reservation(effect.effectId).provider, 'helm3-faux', 'the factory attaches the real bounded provider guard before kernel effects');
         const payload = { effectId: effect.effectId, kind: effect.kind };
         host!.admit({ schemaVersion: 1, commandId: effect.effectId, kind: isModel ? 'pi.model' : 'pi.write', idempotencyKey: effect.effectId, payloadHash: sha(payload), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'untrusted-worker', runId: 'run-1', origin: 'worker', leaseId: 'lease-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload, requiredEvidence: [] }, { actorId: 'trusted-pi-runtime', attemptId: 'attempt-1', allowedOrigins: ['worker'] });
         if (isModel) modelEffects += 1;
@@ -65,7 +70,15 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
       fauxAssistantMessage(JSON.stringify({ status: 'succeeded', summary: 'done', changed_files: ['result.txt'], commits: [], decisions: [], discoveries: [], tests_claimed: [], acceptance_claims: [], risks: [], unresolved: [], artifacts: [], recommended_next_action: 'review' })),
     ]);
     const journal = await ArtifactJournal.open({ root: join(root, 'journal') });
-    worker = await PiNativeWorker.start({ commandId: 'attempt-command', attemptId: 'attempt-1', workspace, owner, workspaceManager: manager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel(), thinking: { level: 'low' } });
+    const model = faux.getModel();
+    const lifecycle = createBoundedFleetRuntime({
+      workerFor: () => ({ attemptId: owner.attemptId, owner, workspaceManager: manager!, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model, thinking: { level: 'low' } }),
+      policyFor: () => ({ poolId: 'fixture-money', provider: model.provider, model: model.id, api: model.api, baseUrl: model.baseUrl, authEnvironment: 'FAUX_TEST_KEY', contextWindow: model.contextWindow, maxOutputTokens: model.maxTokens, maxBilledOutputTokens: model.maxTokens, maxPacketBytes: 128 * 1024, maxRequests: 3, inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.1, cacheReadUsdPerMillion: 0, cacheWriteUsdPerMillion: 0, maxToolCalls: 1, timeoutMs: 10000, allowCorrection: true }),
+      authorityFor: (command, access) => { assert.ok(['attempt-command', 'continuation-command'].includes(command.commandId)); nativeAccess = access; return authority; },
+      journalFor: (command) => { assert.ok(['attempt-command', 'continuation-command'].includes(command.commandId)); return journal; },
+    });
+    const spawn: Command = { schemaVersion: 1, commandId: 'attempt-command', kind: 'worker.spawn', idempotencyKey: 'attempt-command', payloadHash: sha({}), scope: { repositoryId: 'repo-1', mapNodeId: 'node-1' }, actorId: 'fixture-host', runId: 'run-1', origin: 'human', leaseId: 'lease-1', leaseRevision: 1, plannedAt: now, notAfter: later, expected: [], payload: {}, requiredEvidence: [] };
+    worker = await lifecycle.start(spawn, workspace);
     assert.deepEqual(worker.thinkingConfiguration, { requested: 'low', nativeSelected: 'off', providerEffective: 'unknown' }, 'Pi clamps an unsupported faux-model level and Helm records that native selection');
     const outcome = await worker.run('Write the requested file and finish with JSON.', 'Your terminal envelope was malformed. Return only a valid WorkerResult JSON object.');
     assert.equal(outcome.repaired, true); assert.equal(outcome.result.status, 'succeeded');
@@ -92,7 +105,11 @@ test('native Pi faux session writes through kernel-guarded narrow tool, repairs 
     assert.deepEqual(await readFile(persisted.sessionFile), sourceBytes, 'native fork does not rewrite source session bytes');
     assert.equal(modelEffects, 3, 'forking a session makes no provider request');
     forked.worker.dispose();
-    const reopened = await worker.reopen(); assert.equal(reopened.sessionId, originalSession);
+    const originalAccess = nativeAccess;
+    worker.dispose();
+    const reopened = await lifecycle.rehydrate!({ ...spawn, commandId: 'continuation-command' }, workspace, persisted);
+    assert.equal(reopened.sessionId, originalSession, 'factory rehydrates the same native session');
+    assert.notEqual(nativeAccess, originalAccess, 'new command binds a fresh request guard');
     assert.equal(reopened.contextOccupancy.state, 'known', 'reopen retains read-only occupancy inspection');
     assert.deepEqual(reopened.thinkingConfiguration, { requested: 'low', nativeSelected: 'off', providerEffective: 'unknown' });
     await assert.rejects(authority.perform({ effectId: 'over-budget', kind: 'model.request', commandId: 'attempt-command' }, async () => { throw new Error('must not reach provider'); }), /cap|budget/);

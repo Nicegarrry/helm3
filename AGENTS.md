@@ -2,6 +2,8 @@
 
 ## Current authority
 
+On 2026-09-16 the human approved starting the remaining build waves and reporting between waves, using almost only open-model Pi workers, with Qwen, Meta Muse Spark 1.3, GLM, Kimi and Gemini 3.8 Flash selected as suitable. This supersedes the expired overnight stop and the older Terra/Luna preference. Preserve the original cumulative US$10 ceiling and every outstanding reservation; no purchases, top-ups, account-plan changes or contributor-training opt-in are authorised. The renewed Wave 0 execution lease ends at 2026-09-16T02:15:00Z. See [open-model build waves](docs/open-model-waves.md).
+
 Wave 4 and onward are now explicitly approved for overnight execution on 2026-09-15. The user asked to continue fairly autonomously, dogfood Helm with native Pi workers including available open models, and supplied temporary OpenCode/Gemini credentials separately. The user explicitly chose a **US$10 combined incremental API spending ceiling for the entire overnight run**. See [overnight authority](docs/overnight-authority.md). This supersedes older wave-only and no-live-probe restrictions within these bounds. Stop new autonomous work at 08:00 Australia/Sydney on 2026-09-16; monitor and preserve evidence thereafter. No purchases, top-ups, unrelated deployment or interactive account changes are authorised.
 
 

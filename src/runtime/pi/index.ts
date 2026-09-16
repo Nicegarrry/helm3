@@ -4,6 +4,7 @@ import { join, relative, isAbsolute } from 'node:path';
 import type { AgentSession, AgentSessionEvent, ExtensionRuntime, ModelRuntime, ResourceLoader, ToolDefinition } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Api, AssistantMessage, Model } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
 import { BoundedPiAccess } from '../../access/index.js';
+import { assertPiThinkingSupported } from '../../access/thinking-support.js';
 import { observePiContext } from '../../context/index.js';
 import { PiEventSpool } from './event-spool.js';
 import { rawArtifactRefSchema, workerResultSchema, type RawArtifactRef, type WorkerResult } from '../../contracts/index.js';
@@ -248,6 +249,8 @@ export class PiNativeWorker {
     } });
   }
   private async initialize(sessionFile?: string): Promise<void> {
+    const requestedThinking = piThinkingPolicySchema.parse(this.input.thinking ?? defaultPiThinkingPolicy).level;
+    assertPiThinkingSupported(this.input.model, requestedThinking);
     const { createAgentSession, SessionManager, SettingsManager, createExtensionRuntime } = await import('@earendil-works/pi-coding-agent');
     const { Type } = await import('typebox');
     const sessionDir = join(this.input.stateRoot, 'sessions');
@@ -278,7 +281,6 @@ export class PiNativeWorker {
         return { content: [{ type: 'text', text }], details: {} };
       },
     };
-    const requestedThinking = piThinkingPolicySchema.parse(this.input.thinking ?? defaultPiThinkingPolicy).level;
     const reviewReadonly = this.input.mode === 'review-readonly';
     const created = await createAgentSession({
       cwd: this.input.workspace.root, agentDir, modelRuntime: await this.guardedRuntime(), model: this.input.model,

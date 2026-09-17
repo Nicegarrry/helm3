@@ -12,6 +12,9 @@ import { rawArtifactRefSchema, type RawArtifactRef, type WorkerResult } from '..
 import type { ArtifactJournal } from '../../journal/index.js';
 import type { WorktreeOwner, WorktreeReservation, WorkspaceManager } from '../../workspace/index.js';
 import { z } from 'zod/v3';
+import { piModelDeliveryFailureReceiptSchema, piStoppedReceiptSchema, type PiModelDeliveryFailureProof } from './delivery.js';
+export { parsePiModelDeliveryFailureReceipt, piModelDeliveryFailureReceiptSchema, piStoppedReceiptSchema } from './delivery.js';
+export type { PiModelDeliveryFailureProof, PiModelDeliveryFailureReceipt, PiStoppedReceipt } from './delivery.js';
 
 export type PiEffect = Readonly<{ effectId: string; kind: 'model.request' | 'workspace.write'; commandId: string }>;
 export type PiCompactEffect = Readonly<{ effectId: string; commandId: string }>;
@@ -22,6 +25,8 @@ export interface PiAuthority {
   performCompact?(effect: PiCompactEffect, action: () => Promise<readonly RawArtifactRef[]>): Promise<void>;
   requestCancellation(commandId: string): Promise<void>;
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): Promise<void>;
+  /** Reconcile a fully drained native provider error after the model effect is unknown. */
+  reconcileModelDeliveryFailure?(proof: PiModelDeliveryFailureProof): Promise<void>;
 }
 const piThinkingLevelSchema = z.enum(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 export type PiThinkingLevel = z.infer<typeof piThinkingLevelSchema>;
@@ -83,7 +88,10 @@ export class PiNativeWorker {
   private eventError: unknown;
   private readonly artifacts: RawArtifactRef[] = [];
   private readonly activeRequests = new Set<Promise<void>>();
+  private stoppedReceiptRef?: RawArtifactRef;
+  private stoppedReceiptPersistence?: Promise<RawArtifactRef>;
   private cancelled = false;
+  private nativeTerminalFailure = false;
   private disposed = false;
   private running = false;
   private reviewReadCalls = 0;
@@ -209,6 +217,8 @@ export class PiNativeWorker {
         // SDK stream must never make the command/resource reservation successful.
         const work = Promise.resolve().then(async () => {
           let terminal: AssistantMessage | undefined;
+          let iteratorEnded = false;
+          let deliveryFailure: PiModelDeliveryFailureProof | undefined;
           try {
             this.assertActive();
             await this.flushEvents();
@@ -225,8 +235,43 @@ export class PiNativeWorker {
                   else if (event.type === 'error') terminal = event.error;
                   else output.push(event);
                 }
+                iteratorEnded = true;
                 terminal ??= await source.result();
-                if (terminal.stopReason === 'error' || terminal.stopReason === 'aborted') throw new Error('provider request did not complete');
+                if (terminal.stopReason === 'error') {
+                  this.nativeTerminalFailure = true;
+                  // Only a completely drained source with an explicit native
+                  // error can be reconciled. Iterator/setup throws and aborts
+                  // remain unknown, even when they happen after some output.
+                  if (iteratorEnded) {
+                    const receipt = piModelDeliveryFailureReceiptSchema.parse({
+                      schemaVersion: 1,
+                      kind: 'pi.model.delivery.failure',
+                      modelCommandId: effectId,
+                      effectId,
+                      parentCommandId: input.commandId,
+                      attemptId: input.attemptId,
+                      sessionId: this.sessionId,
+                      provider: model.provider,
+                      model: model.id,
+                      api: model.api,
+                      streamEnded: true,
+                      billing: 'unknown',
+                      observedAt: new Date().toISOString(),
+                    });
+                    const receiptRef = await input.journal.append({
+                      source: 'pi.model.delivery.failure',
+                      sourceIdentity: `pi-model-delivery-failure:${input.attemptId}:${effectId}`,
+                      mediaType: 'application/json',
+                      bytes: Buffer.from(JSON.stringify(receipt)),
+                    });
+                    deliveryFailure = Object.freeze({ receipt, receiptRef });
+                  }
+                  throw new Error('provider request did not complete');
+                }
+                if (terminal.stopReason === 'aborted') {
+                  this.nativeTerminalFailure = true;
+                  throw new Error('provider request did not complete');
+                }
                 input.access?.settle(effectId, terminal);
               } catch {
                 throw new Error('Pi provider request failed');
@@ -235,6 +280,18 @@ export class PiNativeWorker {
             if (!terminal) throw new Error('model stream completed without a terminal observation');
             output.push({ type: 'done', reason: terminal.stopReason as 'stop' | 'length' | 'toolUse', message: terminal });
           } catch (error) {
+            // Any exceptional native request boundary is non-reconcilable
+            // unless the explicit drained error branch above produced proof.
+            // In particular, iterator/setup/authority throws must not trigger
+            // an automatic correction request.
+            this.nativeTerminalFailure = true;
+            if (deliveryFailure) {
+              const reconcile = input.authority.reconcileModelDeliveryFailure;
+              if (reconcile) {
+                try { await reconcile(deliveryFailure); }
+                catch { /* A failed reconciliation keeps the Core effect unknown. */ }
+              }
+            }
             if (input.access?.hasReservation(effectId)) input.access.unknown(effectId, error instanceof Error ? error.message : 'provider request did not complete');
             output.push({ type: 'error', reason: 'error', error: errorMessage(model) });
           }
@@ -330,10 +387,12 @@ export class PiNativeWorker {
       const changed = await this.input.workspaceManager.changedFiles(this.input.workspace);
       changedFilesMatch = JSON.stringify([...parsed.changed_files].sort()) === JSON.stringify([...changed].sort());
     }
-    const accepted = parsed !== undefined && changedFilesMatch && phase !== 'interrupted';
+    // A native terminal failure poisons this invocation. Preserve the raw
+    // envelope for recovery evidence, but never let it become a worker claim.
+    const accepted = parsed !== undefined && changedFilesMatch && phase !== 'interrupted' && !this.nativeTerminalFailure;
     const reason = phase === 'interrupted' ? 'interrupted' as const
       : !parsed ? text ? 'envelope_invalid' as const : 'envelope_missing' as const
-      : changedFilesMatch ? 'accepted' as const : 'changed_files_mismatch' as const;
+      : changedFilesMatch && !this.nativeTerminalFailure ? 'accepted' as const : changedFilesMatch ? 'envelope_invalid' as const : 'changed_files_mismatch' as const;
     this.artifacts.push(await this.input.journal.append({ source: 'pi.envelope_disposition', sourceIdentity: `pi-envelope-disposition:${this.input.attemptId}:${invocation}:${phase}`,
       mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId, invocation, phase,
         envelopeSourceIdentity: `pi-envelope:${this.input.attemptId}:${invocation}:${phase}`, rawRef: ref, status: accepted ? 'accepted' : 'rejected', reason })) }));
@@ -343,6 +402,7 @@ export class PiNativeWorker {
     this.assertActive();
     if (this.running) throw new Error('Pi worker already has an active invocation');
     this.running = true;
+    this.nativeTerminalFailure = false;
     const invocation = randomUUID(); let initialSaved = false; let correctionStarted = false; let correctionSaved = false;
     // Automatic compaction is disabled for this worker, so this boundary is a
     // stable invocation marker even when the wrapper was rehydrated.
@@ -351,8 +411,12 @@ export class PiNativeWorker {
     try {
       await this.session.prompt(`${prompt}\n\n${workerResultInstructions()}`);
       let result = await this.saveTerminal(invocation, 'initial', invocationMessage); initialSaved = true;
+      // A native error terminal can leave partial or retained session text;
+      // saveTerminal preserved that evidence but deliberately could not
+      // accept it, so fail before any correction request is attempted.
+      if (this.nativeTerminalFailure) throw new Error('Pi native model delivery failed');
       const repaired = !result;
-      if (!result && (this.input.access?.correctionAllowed ?? true)) {
+      if (!result && !this.nativeTerminalFailure && (this.input.access?.correctionAllowed ?? true)) {
         this.assertActive();
         correctionMessage = this.session.messages.length;
         correctionStarted = true;
@@ -462,7 +526,41 @@ export class PiNativeWorker {
       new Promise<'unknown'>((resolve) => { timer = setTimeout(() => resolve('unknown'), timeoutMs); }),
     ]);
     clearTimeout(timer);
+    if (result === 'stopped' && !this.session.isStreaming && this.activeRequests.size === 0) {
+      try {
+        if (!this.stoppedReceiptRef) {
+          if (!this.stoppedReceiptPersistence) {
+            const persistence = this.persistStoppedReceipt();
+            this.stoppedReceiptPersistence = persistence.catch((error) => {
+              // A failed attempt may have published its metadata just before
+              // the error. Clear the memo so a later caller can safely retry;
+              // persistStoppedReceipt will reuse that immutable record.
+              this.stoppedReceiptPersistence = undefined;
+              throw error;
+            });
+          }
+          this.stoppedReceiptRef = await this.stoppedReceiptPersistence;
+        }
+      } catch {
+        return 'unknown';
+      }
+    }
     return result;
+  }
+
+  private async persistStoppedReceipt(): Promise<RawArtifactRef> {
+    const receipt = piStoppedReceiptSchema.parse({ schemaVersion: 1, kind: 'pi.worker.stop', commandId: this.input.commandId, attemptId: this.input.attemptId, sessionId: this.sessionId, stopped: true, observedAt: new Date().toISOString() });
+    const sourceIdentity = `pi-worker-stop:${this.input.attemptId}:${this.input.commandId}:${this.sessionId}`;
+    const existing = await this.input.journal.metadataFor(sourceIdentity);
+    if (existing) {
+      if (existing.source !== 'pi.worker.stop' || existing.raw.mediaType !== 'application/json') throw new Error('existing Pi stop receipt source changed');
+      const bytes = await this.input.journal.read(existing.raw, sourceIdentity);
+      const existingReceipt = piStoppedReceiptSchema.parse(JSON.parse(bytes.toString('utf8')));
+      if (bytes.toString('utf8') !== JSON.stringify(existingReceipt)
+        || existingReceipt.commandId !== receipt.commandId || existingReceipt.attemptId !== receipt.attemptId || existingReceipt.sessionId !== receipt.sessionId) throw new Error('existing Pi stop receipt binding changed');
+      return existing.raw;
+    }
+    return this.input.journal.append({ source: 'pi.worker.stop', sourceIdentity, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(receipt)) });
   }
   /**
    * A failed invocation has no trustworthy terminal effect observation yet.

@@ -75,3 +75,28 @@ test('Pi event spool reserves space for a buffered prefix and its unknown-tail m
   const marker = JSON.parse(entries.find(entry => entry.source === 'pi.event.overflow')!.bytes.toString('utf8'));
   assert.equal(marker.firstUnpersistedSequence, 4);
 });
+
+test('Pi event spool redacts assistant errors in every terminal message container without mutating SDK events', async () => {
+  const entries: Entry[] = [];
+  const spool = new PiEventSpool(fakeJournal(entries) as never, { commandId: 'command', attemptId: 'attempt', sessionId: 'session' });
+  const secret = 'private-provider-error-body';
+  const message = Object.freeze({ role: 'assistant', content: [{ type: 'text', text: 'preserved partial output' }], stopReason: 'error', errorMessage: secret, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } });
+  const events = [
+    { type: 'message_start', message },
+    { type: 'message_end', message },
+    { type: 'turn_end', message, toolResults: [] },
+    { type: 'agent_end', messages: [message] },
+    { type: 'message_update', message, assistantMessageEvent: { type: 'error', reason: 'error', error: message } },
+    { type: 'message_update', message, assistantMessageEvent: { type: 'done', reason: 'stop', message } },
+  ];
+  for (const event of events) spool.record(Object.freeze(event) as never);
+  await spool.drain();
+  const recorded = entries.filter(entry => entry.source === 'pi.event').flatMap(entry => JSON.parse(entry.bytes.toString('utf8')).events);
+  assert.equal(recorded.length, events.length);
+  for (const entry of recorded) {
+    assert.ok(!JSON.stringify(entry).includes(secret));
+    assert.ok(JSON.stringify(entry).includes('Helm model request failed'));
+    assert.ok(JSON.stringify(entry).includes('preserved partial output'));
+  }
+  assert.equal(message.errorMessage, secret, 'redaction must not mutate the native SDK message');
+});

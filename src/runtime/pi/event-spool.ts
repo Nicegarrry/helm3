@@ -8,12 +8,25 @@ export const PI_EVENT_MAX_BYTES = 1024 * 1024;
 export type PiEventBatch = Readonly<{ schemaVersion: 1; commandId: string; attemptId: string; sessionId: string; firstSequence: number; events: readonly Readonly<{ sequence: number; event: unknown }>[] }>;
 export type PiEventSpoolLimits = Readonly<{ maxBytes: number; maxEvents: number; maxQueuedBatches: number }>;
 
+function redactAssistantError(message: unknown): unknown {
+  if (typeof message !== 'object' || message === null) return message;
+  const value = message as Record<string, unknown>;
+  return value.role === 'assistant' && typeof value.errorMessage === 'string'
+    ? { ...value, errorMessage: 'Helm model request failed' }
+    : message;
+}
+
 /** Pi's public JSON mode removes the cumulative assistant snapshot from updates. Keep a local copy: that module is not exported by the pinned package. */
 export function serializePiEvent(event: AgentSessionEvent): unknown {
-  if (event.type !== 'message_update') return event;
+  // Pi echoes assistant messages both individually and in its final message
+  // array. Redact every native container without mutating the SDK's objects.
+  if (event.type === 'agent_end') return { ...event, messages: event.messages.map(redactAssistantError) };
+  if (event.type !== 'message_update') return 'message' in event ? { ...event, message: redactAssistantError(event.message) } : event;
   if (event.message.role !== 'assistant') throw new Error('Pi message update did not contain an assistant message');
   const assistantMessageEvent = event.assistantMessageEvent as Record<string, unknown>;
   const { partial: _partial, ...delta } = assistantMessageEvent;
+  if ('message' in delta) delta.message = redactAssistantError(delta.message);
+  if ('error' in delta) delta.error = redactAssistantError(delta.error);
   if (event.assistantMessageEvent.type === 'toolcall_start') {
     const tool = event.message.content[event.assistantMessageEvent.contentIndex];
     if (!tool || tool.type !== 'toolCall') throw new Error('Pi tool call update did not point at a tool call');

@@ -29,6 +29,7 @@ async function setup() {
   runtime.registerNativeProvider(faux.provider); await runtime.setRuntimeApiKey('helm-boundary', 'local-fake');
   const journal = await ArtifactJournal.open({ root: join(root, 'journal') });
   let revoked = false; let expireAfterWrite = false; let active = 0;
+  let deliveryProof: unknown;
   const stops: string[] = []; const effects: string[] = [];
   const authority: PiAuthority = {
     async perform(effect, action) {
@@ -40,6 +41,7 @@ async function setup() {
     async performCompact(effect, action) { if (revoked) throw new Error('lease expired'); effects.push(`pi.compact:${effect.commandId}`); await action(); },
     async requestCancellation() { revoked = true; },
     async reportWorkerStop(_id, result) { stops.push(result); },
+    async reconcileModelDeliveryFailure(proof) { deliveryProof = proof; },
   };
   const worker = await PiNativeWorker.start({ commandId: 'parent-command', attemptId: 'attempt', workspace, owner, workspaceManager: manager, authority, journal, stateRoot: join(root, 'pi-state'), modelRuntime: runtime, model: faux.getModel() });
   async function artifacts() {
@@ -50,6 +52,7 @@ async function setup() {
     }));
   }
   return { root, worker, manager, workspace, owner, runtime, faux, ai, journal, effects, stops, active: () => active,
+    deliveryProof: () => deliveryProof,
     expireAfterWrite: () => { expireAfterWrite = true; }, artifacts,
     async cleanup() { worker.dispose(); manager.close(); await journal.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -159,6 +162,8 @@ test('model authority remains in flight until provider completion; ignored abort
     assert.equal(await f.worker.cancel(20), 'unknown');
     assert.deepEqual(f.stops, ['unknown']);
     assert.equal(f.active(), 1, 'pending provider remains in flight after local cancellation deadline');
+    assert.equal(await f.worker.stopLocal(20), 'unknown');
+    assert.equal((await f.artifacts()).filter((entry) => entry.metadata.source === 'pi.worker.stop').length, 0, 'a pending request cannot produce a durable stop proof');
     release(); await run;
     assert.equal(f.active(), 0);
     assert.equal(await f.worker.cancel(100), 'stopped');
@@ -171,9 +176,71 @@ test('provider error text is not forwarded into Pi output or journal artifacts',
   try {
     f.faux.setResponses([async () => { throw new Error('provider-body-must-not-be-journalled'); }]);
     await assert.rejects(f.worker.run('fail', 'repair'));
+    assert.equal(f.faux.state.callCount, 1);
     const artifacts = await f.artifacts();
     assert.ok(artifacts.length > 0);
+    assert.equal(artifacts.filter((entry) => entry.metadata.source === 'pi.model.delivery.failure').length, 1);
     assert.ok(artifacts.every((entry) => !entry.text.includes('provider-body-must-not-be-journalled')));
+  } finally { await f.cleanup(); }
+});
+
+test('aborted native response remains unknown without a delivery proof or correction', async () => {
+  const f = await setup();
+  try {
+    f.faux.setResponses([f.ai.fauxAssistantMessage('partial', { stopReason: 'aborted', errorMessage: 'abort-body' })]);
+    await assert.rejects(f.worker.run('abort', 'repair'));
+    assert.equal(f.faux.state.callCount, 1);
+    const artifacts = await f.artifacts();
+    assert.equal(artifacts.filter((entry) => entry.metadata.source === 'pi.model.delivery.failure').length, 0);
+    assert.ok(artifacts.every((entry) => !entry.text.includes('abort-body')));
+  } finally { await f.cleanup(); }
+});
+
+test('stream construction failure remains unknown without a delivery proof', async () => {
+  const f = await setup();
+  try {
+    const runtime = f.runtime as unknown as { streamSimple: (...args: never[]) => never };
+    const original = runtime.streamSimple;
+    runtime.streamSimple = () => { throw new Error('stream construction failed'); };
+    await assert.rejects(f.worker.run('setup failure', 'repair'));
+    runtime.streamSimple = original;
+    assert.equal(f.faux.state.callCount, 0);
+    assert.equal(f.deliveryProof(), undefined);
+    const artifacts = await f.artifacts();
+    assert.equal(artifacts.filter((entry) => entry.metadata.source === 'pi.model.delivery.failure').length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('concurrent and repeated local stops reuse one immutable stop receipt', async () => {
+  const f = await setup();
+  try {
+    const results = await Promise.all([f.worker.stopLocal(), f.worker.stopLocal(), f.worker.stopLocal()]);
+    assert.deepEqual(results, ['stopped', 'stopped', 'stopped']);
+    const receipts = (await f.artifacts()).filter((entry) => entry.metadata.source === 'pi.worker.stop');
+    assert.equal(receipts.length, 1);
+    const first = receipts[0].text;
+    assert.equal(await f.worker.stopLocal(), 'stopped');
+    const after = (await f.artifacts()).filter((entry) => entry.metadata.source === 'pi.worker.stop');
+    assert.equal(after.length, 1);
+    assert.equal(after[0].text, first);
+  } finally { await f.cleanup(); }
+});
+
+test('fully drained native error records one redacted delivery receipt and never corrects', async () => {
+  const f = await setup();
+  try {
+    const secret = 'provider-native-body-must-not-be-journalled';
+    f.faux.setResponses([f.ai.fauxAssistantMessage('', { stopReason: 'error', errorMessage: secret })]);
+    await assert.rejects(f.worker.run('fail', 'repair'));
+    assert.equal(f.faux.state.callCount, 1);
+    const proof = f.deliveryProof() as { receipt: Record<string, unknown> };
+    assert.equal(proof.receipt.kind, 'pi.model.delivery.failure');
+    assert.equal(proof.receipt.modelCommandId, proof.receipt.effectId);
+    assert.equal(proof.receipt.streamEnded, true);
+    assert.equal(proof.receipt.billing, 'unknown');
+    const artifacts = await f.artifacts();
+    assert.equal(artifacts.filter((entry) => entry.metadata.source === 'pi.model.delivery.failure').length, 1);
+    assert.ok(artifacts.every((entry) => !entry.text.includes(secret)));
   } finally { await f.cleanup(); }
 });
 

@@ -6,6 +6,7 @@ import { commandSchema, type Attempt, type AutonomyLease, type Command, type Eve
 import {
   openKernel,
   type CommandRecord,
+  type CommandAttemptBinding,
   type EffectObservation,
   type KernelEffect,
   type EventMetadata,
@@ -35,6 +36,7 @@ import type {
   RecoveryBundle,
 } from '../runtime/orchestrator/index.js';
 import type { PiAuthority, PiCompactEffect, PiEffect, PiNativeWorker } from '../runtime/pi/index.js';
+import { parsePiModelDeliveryFailureReceipt, piStoppedReceiptSchema, type PiModelDeliveryFailureProof, type PiStoppedReceipt } from '../runtime/pi/delivery.js';
 import { selectTrustedEnvelopeLineage } from './envelope-lineage.js';
 
 type ArtifactKind = 'text' | 'invocation' | 'recovery_bundle' | 'recovery_state' | 'effect';
@@ -302,7 +304,9 @@ export class HostControlPlane {
     const binding = Object.freeze({ ...options });
     return {
       perform: async (effect, action) => {
-        this.kernel.host.admit(binding.commandForEffect(effect), { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
+        const command = commandSchema.parse(binding.commandForEffect(effect));
+        if (command.commandId !== effect.effectId) throw new Error('Pi effect command identity must equal its effect identity');
+        this.kernel.host.admit(command, { actorId: binding.actorId, attemptId: binding.attemptId, allowedOrigins: ['worker'] });
         // Core evaluates authority against its injected monotonic-safe clock.
         // A native Pi effect must derive its claim expiry from that same clock;
         // using the process clock can make a valid host-owned review appear
@@ -332,7 +336,147 @@ export class HostControlPlane {
       } : undefined,
       requestCancellation: async (commandId) => this.kernel.host.requestCancellation(commandId),
       reportWorkerStop: async (_commandId, observed) => this.kernel.host.reportAttemptStop(binding.attemptId, observed),
+      reconcileModelDeliveryFailure: async (proof) => this.reconcilePiModelDeliveryFailure(proof),
     };
+  }
+
+  /**
+   * Convert one exact, redacted native provider error receipt into a failed
+   * model command after Kernel has conservatively recorded that command as
+   * unknown.  The receipt never settles its resource reservation.
+   */
+  async reconcilePiModelDeliveryFailure(proof: PiModelDeliveryFailureProof): Promise<void> {
+    const receipt = parsePiModelDeliveryFailureReceipt(proof.receipt);
+    const expectedSourceIdentity = `pi-model-delivery-failure:${receipt.attemptId}:${receipt.effectId}`;
+    const metadata = await this.journal.metadataFor(expectedSourceIdentity);
+    if (metadata && (metadata.source !== 'pi.model.delivery.failure'
+      || metadata.raw.ref !== proof.receiptRef.ref || metadata.raw.hash !== proof.receiptRef.hash || metadata.raw.mediaType !== proof.receiptRef.mediaType)) throw new Error('native delivery receipt metadata is not bound to its deterministic identity');
+    if (!metadata) throw new Error('native delivery receipt metadata is not bound to its deterministic identity');
+    const bytes = await this.journal.read(metadata.raw, metadata.sourceIdentity);
+    if (bytes.toString('utf8') !== JSON.stringify(receipt)) throw new Error('native delivery receipt bytes changed after validation');
+
+    const modelRecord = this.kernel.kernel.getCommand(receipt.modelCommandId);
+    const modelBinding = this.kernel.host.commandAttempt(receipt.modelCommandId);
+    const parentRecord = this.kernel.kernel.getCommand(receipt.parentCommandId);
+    const parentBinding = this.kernel.host.commandAttempt(receipt.parentCommandId);
+    if (!modelRecord || !modelBinding || !parentRecord || !parentBinding
+      || modelRecord.command.kind !== 'pi.model'
+      || modelBinding.attemptId !== receipt.attemptId || parentBinding.attemptId !== receipt.attemptId
+      || modelBinding.runId !== parentRecord.command.runId || parentRecord.command.runId !== modelRecord.command.runId
+      || modelBinding.repositoryId !== parentRecord.command.scope.repositoryId
+      || modelBinding.mapNodeId !== parentRecord.command.scope.mapNodeId
+      || parentRecord.command.kind !== 'worker.spawn' && parentRecord.command.kind !== 'worker.steer'
+      || parentRecord.status !== 'succeeded'
+      || !['effect_started', 'observing', 'unknown', 'failed'].includes(modelRecord.status)) {
+      throw new Error('native delivery receipt command and attempt binding is invalid');
+    }
+    const launch = await this.launchRecord(parentRecord, receipt.attemptId);
+    if (!launch || launch.sessionId !== receipt.sessionId || launch.attemptId !== receipt.attemptId
+      || launch.spawnCommandId !== receipt.parentCommandId
+      || launch.modelId !== receipt.model || launch.modelProvider !== receipt.provider || launch.modelApi !== receipt.api
+      || launch.modelFactVersion === undefined) throw new Error('native delivery receipt session or model provenance is invalid');
+    const parentPayload = parentRecord.command.payload as { attemptId?: unknown; modelId?: unknown; modelProvider?: unknown; modelApi?: unknown; modelFactVersion?: unknown };
+    if (parentPayload.attemptId !== receipt.attemptId || parentPayload.modelId !== receipt.model
+      || parentPayload.modelProvider !== receipt.provider || parentPayload.modelApi !== receipt.api
+      || parentPayload.modelFactVersion !== launch.modelFactVersion) throw new Error('native delivery receipt does not match immutable launch payload');
+    if (receipt.modelCommandId !== receipt.effectId) throw new Error('native delivery receipt model command and effect differ');
+    const expectedEffectId = `host:${receipt.effectId}`;
+    if (modelRecord.observations.some((item) => item.effectId === expectedEffectId && item.state === 'failed' && item.source === 'pi.model.delivery.failure' && item.evidenceRefs.includes(proof.receiptRef.ref))) return;
+    if (modelRecord.status === 'failed') throw new Error('native delivery receipt conflicts with the existing terminal outcome');
+    // A crash can follow the durable receipt but precede Kernel's catch. Keep
+    // that unobserved interval explicit; never fabricate an absent provider
+    // effect or settle its reservation. Core also checks the real effect ID.
+    if (!modelRecord.observations.some((item) => item.effectId === expectedEffectId && item.state === 'unknown')) {
+      this.kernel.host.recordObservation(receipt.modelCommandId, { commandId: receipt.modelCommandId, effectId: expectedEffectId, state: 'unknown', source: 'pi.model.delivery.recovery', observedAt: receipt.observedAt, evidenceRefs: [proof.receiptRef.ref], detail: 'effect outcome was unobserved before durable receipt reconciliation' });
+    }
+    this.kernel.host.recordObservation(receipt.modelCommandId, { commandId: receipt.modelCommandId, effectId: expectedEffectId, state: 'failed', source: 'pi.model.delivery.failure', observedAt: receipt.observedAt, evidenceRefs: [proof.receiptRef.ref], detail: 'native provider error terminal' });
+  }
+
+  /** Replay all valid native failure receipts for a run without starting or retrying anything. */
+  async reconcilePiModelDeliveryFailures(runId: string, attemptId?: string): Promise<number> {
+    const projection = this.kernel.host.readRun(runId);
+    let reconciled = 0;
+    const candidates = projection.commands.filter((record) => record.command.kind === 'pi.model'
+      && (!attemptId || this.kernel.host.commandAttempt(record.command.commandId)?.attemptId === attemptId));
+    for (const candidate of candidates) {
+      try {
+        const binding = this.kernel.host.commandAttempt(candidate.command.commandId);
+        if (!binding) continue;
+        const sourceIdentity = `pi-model-delivery-failure:${binding.attemptId}:${candidate.command.commandId}`;
+        const entry = await this.journal.metadataFor(sourceIdentity);
+        if (!entry || entry.source !== 'pi.model.delivery.failure') continue;
+        const receipt = parsePiModelDeliveryFailureReceipt(JSON.parse((await this.journal.read(entry.raw, sourceIdentity)).toString('utf8')));
+        const parent = projection.commands.find((item) => item.command.commandId === receipt.parentCommandId);
+        if (!parent || parent.command.runId !== runId || receipt.modelCommandId !== candidate.command.commandId) continue;
+        await this.reconcilePiModelDeliveryFailure({ receipt, receiptRef: entry.raw });
+        reconciled++;
+      } catch { /* Foreign, incomplete or corrupt receipts remain unknown. */ }
+    }
+    return reconciled;
+  }
+
+  /** Validate a native stop proof and finish capacity only when every bound command is terminal. */
+  async reconcilePiStoppedReceipt(input: Readonly<{ receipt: PiStoppedReceipt; receiptRef: RawArtifactRef }>): Promise<void> {
+    const receipt = piStoppedReceiptSchema.parse(input.receipt);
+    const expectedSourceIdentity = `pi-worker-stop:${receipt.attemptId}:${receipt.commandId}:${receipt.sessionId}`;
+    const metadata = await this.journal.metadataFor(expectedSourceIdentity);
+    if (metadata && (metadata.source !== 'pi.worker.stop'
+      || metadata.raw.ref !== input.receiptRef.ref || metadata.raw.hash !== input.receiptRef.hash || metadata.raw.mediaType !== input.receiptRef.mediaType)) throw new Error('native stop receipt metadata is not bound to its deterministic identity');
+    if (!metadata) throw new Error('native stop receipt metadata is not bound to its deterministic identity');
+    const bytes = await this.journal.read(metadata.raw, metadata.sourceIdentity);
+    if (bytes.toString('utf8') !== JSON.stringify(receipt)) throw new Error('native stop receipt bytes changed after validation');
+    const parent = this.kernel.kernel.getCommand(receipt.commandId);
+    const binding = this.kernel.host.commandAttempt(receipt.commandId);
+    if (!parent || !binding || (parent.command.kind !== 'worker.spawn' && parent.command.kind !== 'worker.steer')
+      || parent.status !== 'succeeded' || binding.attemptId !== receipt.attemptId) throw new Error('native stop receipt command and attempt binding is invalid');
+    const launch = await this.launchRecord(parent, receipt.attemptId);
+    if (!launch || launch.sessionId !== receipt.sessionId) throw new Error('native stop receipt session is not bound to the succeeded launch');
+    const parentPayload = parent.command.payload as { attemptId?: unknown; modelId?: unknown; modelProvider?: unknown; modelApi?: unknown; modelFactVersion?: unknown };
+    if (parentPayload.attemptId !== receipt.attemptId || parentPayload.modelId !== launch.modelId
+      || parentPayload.modelProvider !== launch.modelProvider || parentPayload.modelApi !== launch.modelApi
+      || parentPayload.modelFactVersion !== launch.modelFactVersion) throw new Error('native stop receipt does not match immutable launch payload');
+    const commands = this.kernel.host.readRun(parent.command.runId).commands.filter((record) => this.kernel.host.commandAttempt(record.command.commandId)?.attemptId === receipt.attemptId);
+    if (commands.length === 0 || !commands.every((record) => record.status === 'succeeded' || record.status === 'failed' || record.status === 'refused')) throw new Error('native stop proof cannot finish an attempt with non-terminal commands');
+    this.kernel.host.reportAttemptStop(receipt.attemptId, 'stopped');
+  }
+
+  /** Restart hook for stop proofs; it never infers process death or starts an effect. */
+  async reconcilePiStoppedReceipts(runId: string, attemptId?: string): Promise<number> {
+    const projection = this.kernel.host.readRun(runId);
+    const candidates = projection.commands.filter((record) => (record.command.kind === 'worker.spawn' || record.command.kind === 'worker.steer')
+      && (!attemptId || this.kernel.host.commandAttempt(record.command.commandId)?.attemptId === attemptId));
+    let reconciled = 0;
+    for (const candidate of candidates) {
+      try {
+        const binding = this.kernel.host.commandAttempt(candidate.command.commandId);
+        if (!binding) continue;
+        const launch = await this.launchRecord(candidate, binding.attemptId);
+        if (!launch) continue;
+        const sourceIdentity = `pi-worker-stop:${binding.attemptId}:${candidate.command.commandId}:${launch.sessionId}`;
+        const entry = await this.journal.metadataFor(sourceIdentity);
+        if (!entry || entry.source !== 'pi.worker.stop') continue;
+        const receipt = piStoppedReceiptSchema.parse(JSON.parse((await this.journal.read(entry.raw, sourceIdentity)).toString('utf8')));
+        if (receipt.commandId !== candidate.command.commandId || receipt.attemptId !== binding.attemptId) continue;
+        await this.reconcilePiStoppedReceipt({ receipt, receiptRef: entry.raw });
+        reconciled++;
+      } catch { /* Foreign, missing, corrupt or incomplete stop proofs remain held. */ }
+    }
+    return reconciled;
+  }
+
+  private async launchRecord(parent: CommandRecord, attemptId: string): Promise<Readonly<{ attemptId: string; spawnCommandId: string; sessionId: string; modelId?: string; modelProvider?: string; modelApi?: string; modelFactVersion?: number }> | undefined> {
+    for (const ref of parent.observations.flatMap((item) => item.evidenceRefs)) {
+      try {
+        const text = await this.readFleetEffect(parent.command.runId, ref);
+        const value: unknown = JSON.parse(text);
+        if (typeof value !== 'object' || value === null) continue;
+        const item = value as Record<string, unknown>;
+        if (item.attemptId === attemptId && item.spawnCommandId === parent.command.commandId && typeof item.sessionId === 'string') {
+          return { attemptId, spawnCommandId: parent.command.commandId, sessionId: item.sessionId, ...(typeof item.modelId === 'string' ? { modelId: item.modelId } : {}), ...(typeof item.modelProvider === 'string' ? { modelProvider: item.modelProvider } : {}), ...(typeof item.modelApi === 'string' ? { modelApi: item.modelApi } : {}), ...(typeof item.modelFactVersion === 'number' ? { modelFactVersion: item.modelFactVersion } : {}) };
+        }
+      } catch { /* The next exact parent observation may be the launch proof. */ }
+    }
+    return undefined;
   }
 
   acquireOwnership(lease: OrchestratorLease, expectedEpoch: number): OrchestratorLease {
@@ -651,6 +795,9 @@ export class HostControlPlane {
     const projection = this.kernel.host.readRun(runId);
     return { commands: projection.commands, attempts: projection.attempts };
   }
+
+  /** Trusted relation for lifecycle accounting; independent of Attempt.commandIds history. */
+  commandAttempt(commandId: string): CommandAttemptBinding | undefined { return this.kernel.host.commandAttempt(commandId); }
 
   async snapshot(runId: string): Promise<HostSnapshot> {
     const projection = this.kernel.host.readRun(runId);

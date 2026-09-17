@@ -10,7 +10,7 @@ import { planWorkerSpawn, type WorkerSpawnPlan } from './worker-spawn-plan.js';
 import type { WorkerSpawnIdentity, WorkerSpawnInput } from './worker-fleet.js';
 import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js';
 import type { ModelFact } from '../core/index.js';
-import type { BoundedPiAccessPolicy } from '../access/index.js';
+import { BoundedPiAccess, type BoundedPiAccessPolicy } from '../access/index.js';
 import { settlementForBoundedPiEffect } from '../access/live.js';
 import { createBoundedFleetRuntime } from './bounded-fleet-runtime.js';
 import { PiWorkerFleet } from './worker-fleet.js';
@@ -88,7 +88,12 @@ export const nativeCommandConfigSchema = z.object({
     timeoutMs: z.number().int().positive(),
     allowCorrection: z.boolean().optional(),
   }).strict(),
-}).strict();
+}).strict().superRefine((config, context) => {
+  if (config.policy.maxOutputTokens > config.policy.maxBilledOutputTokens) context.addIssue({ code: z.ZodIssueCode.custom, message: 'output cap exceeds billed output bound' });
+  if (config.policy.baseUrl !== config.modelBaseUrl || config.policy.authEnvironment !== config.credentialEnvironment) context.addIssue({ code: z.ZodIssueCode.custom, message: 'policy endpoint or credential identity differs from model configuration' });
+  const bound = (config.policy.contextWindow * (config.policy.inputUsdPerMillion + config.policy.cacheReadUsdPerMillion + config.policy.cacheWriteUsdPerMillion) + config.policy.maxBilledOutputTokens * config.policy.outputUsdPerMillion) / 1_000_000;
+  if (!Number.isFinite(bound)) context.addIssue({ code: z.ZodIssueCode.custom, message: 'resource upper bound is not finite' });
+});
 export type NativeCommandConfig = Readonly<z.infer<typeof nativeCommandConfigSchema>>;
 
 type Manifest = Readonly<{ schemaVersion: 1; digest: string; config: NativeCommandConfig }>;
@@ -339,6 +344,8 @@ export function createNativeCommandEnvironment(config: NativeCommandConfig, opti
 }>): NativeCommandEnvironment & Readonly<{ fleet: PiWorkerFleet }> {
   nativeCommandConfigSchema.parse(config);
   const policy: BoundedPiAccessPolicy = { ...config.policy, provider: config.modelProvider, model: config.modelId, api: config.modelApi as BoundedPiAccessPolicy['api'], baseUrl: config.modelBaseUrl };
+  new BoundedPiAccess(policy); // Validate all policy bounds before command admission or workspace effects.
+  if (options.model.id !== config.modelId || options.model.provider !== config.modelProvider || options.model.api !== config.modelApi || options.model.baseUrl !== config.modelBaseUrl || options.model.contextWindow !== config.policy.contextWindow || options.model.maxTokens < config.policy.maxBilledOutputTokens) throw new Error('native model differs from pinned configuration');
   const planFor = (input: WorkerSpawnInput, workerId: string, attemptId: string, context: HelmToolExecutionContext): WorkerSpawnPlan => planWorkerSpawn({
     input, workerId, attemptId, commandId: `native-worker-spawn-${digest({ runId: config.runId, taskId: config.taskId }).slice('sha256:'.length, 'sha256:'.length + 32)}`, actorId: `native-command:${config.taskId}`, context,
     autonomyLease: options.autonomyLease, ownership: options.ownership, plannedAt: config.plannedAt, notAfter: config.notAfter, repositoryId: config.repositoryId, mapNodeId: config.mapNodeId, mapNodeRevision: config.mapNodeRevision, objectiveVersion: config.objectiveVersion, acceptanceVersion: config.acceptanceVersion,

@@ -133,3 +133,15 @@ test('native command refuses changed durable configuration and concurrent caller
     await assert.rejects(runNativeCommand({ ...fixture.config, destination: join(fixture.root, 'different-worktree') }, fixture.environment), /manifest/);
   } finally { await fixture.close(); }
 });
+
+
+test('native command refuses contradictory resource bounds before admission', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helm3-native-invalid-'));
+  try {
+    const commands: Array<{ command: any; status: string; observations: any[] }> = [];
+    const value = config(root);
+    await assert.rejects(runNativeCommand({ ...value, policy: { ...value.policy, maxOutputTokens: 129, maxBilledOutputTokens: 128 } }, environment(commands)), /output cap/);
+    await assert.rejects(runNativeCommand({ ...value, policy: { ...value.policy, baseUrl: 'https:\/\/different.invalid' } }, environment(commands)), /endpoint/);
+    assert.equal(commands.length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

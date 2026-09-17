@@ -15,8 +15,7 @@ const MAX_ISSUES = 8;
 
 /**
  * Internal illustrative example, validated through the canonical schema so any
- * schema drift fails loudly at module load. Not exported: only the three
- * requested functions are public.
+ * schema drift fails loudly at module load. The example stays private.
  */
 const WORKER_RESULT_EXAMPLE: WorkerResult = workerResultSchema.parse({
   status: 'succeeded',
@@ -173,4 +172,14 @@ export function workerResultCorrection(text: string): string {
   }
 
   return 'Your terminal result already validates against the result contract. Do not rewrite it; re-send it unchanged.';
+}
+
+/** Generic feedback for a valid envelope whose changed_files claim was not observed. */
+export function workerResultChangedFilesCorrection(): string {
+  return [
+    'Your terminal result was rejected because changed_files did not match the',
+    'fresh host observation. Re-send exactly one JSON object matching the result',
+    'contract, with changed_files containing the complete observed file list.',
+    'Do not include prose, extra keys, or a fence.',
+  ].join(' ');
 }

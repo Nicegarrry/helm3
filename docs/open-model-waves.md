@@ -6,7 +6,7 @@ Current bounded run: 06:05:35–10:05:35 UTC on 17 September. The combined US$20
 
 ## Next acceptance wave
 
-1. Qualify the explicit public-only free Nemotron route (#132), keep its cost class separate from capability, and update the [model roster](model-roster.md) from real evidence. OpenRouter/DeepSeek integration is merged in PR131; full live task completion remains open in #130 after shared-pool429 failures.
+1. Record the tested public-only free Nemotron route (#132), keep its cost class separate from capability, and update the [model roster](model-roster.md) from real evidence. OpenRouter/DeepSeek integration is merged in PR131; full live task completion remains open in #130 after shared-pool429 failures.
 2. Finish operational work that reduces coordinator intervention: host-owned review publication (#112), trusted local-gate merge evidence (#111), pause/stop/resume (#115), and machine-resource admission (#116). Retain normal native-command acceptance (#126) and dispatch explanation (#114).
 3. Continue the remaining quality/integration, orchestrator interchange/takeover, cockpit/calibration and full-feature soak waves below. Report accepted outcomes and remaining gaps between waves; do not equate helper completion with end-to-end acceptance.
 

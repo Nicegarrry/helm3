@@ -133,6 +133,9 @@ test('public-training-allowed is an explicit zero-cost NVIDIA Nemotron route wit
   assert.deepEqual(payload.messages.slice(1).map((message: any) => message.role), ['user', 'assistant', 'tool']);
   assert.equal(prepared.reservation.upperBound, 0);
   assert.equal(prepared.reservation.openRouterDataPolicy, 'public-training-allowed');
+  for (const malformed of [{}, { messages: 'private prompt' }, { messages: [null] }, { messages: [{ role: 'function', content: 'unclassified' }] }, { messages: [{ content: 'missing role' }] }]) {
+    await assert.rejects(async () => prepared.options.onPayload!(malformed, selected), /public OpenRouter/);
+  }
 });
 
 test('public-training-allowed refuses missing attestation, paid rates, or widened provider', () => {

@@ -178,10 +178,12 @@ export class BoundedPiAccess {
             if (!callerPayload || typeof callerPayload !== 'object' || Array.isArray(callerPayload)) throw new Error('OpenRouter payload is not an object');
             if (['models', 'route', 'plugins', 'service_tier'].some(key => key in callerPayload)) throw new Error('OpenRouter auxiliary routing or billable features are not authorised');
             const { max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...rest } = callerPayload as Record<string, unknown>;
-            if (this.policy.openRouterDataPolicy === 'public-training-allowed' && Array.isArray(rest.messages)) {
+            if (this.policy.openRouterDataPolicy === 'public-training-allowed') {
+              if (!Array.isArray(rest.messages)) throw new Error('public OpenRouter messages must be an array');
               const messages = (rest.messages as readonly unknown[]).filter((message) => {
-                if (!message || typeof message !== 'object' || Array.isArray(message)) return true;
+                if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error('public OpenRouter message is invalid');
                 const role = (message as { role?: unknown }).role;
+                if (!['system', 'developer', 'user', 'assistant', 'tool'].includes(role as string)) throw new Error('public OpenRouter message role is not permitted');
                 return role !== 'system' && role !== 'developer';
               });
               rest.messages = [{ role: 'system', content: PUBLIC_FREE_SYSTEM_MESSAGE }, ...messages];

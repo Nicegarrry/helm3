@@ -334,12 +334,11 @@ export function createNativeCommandEnvironment(config: NativeCommandConfig, opti
   context: HelmToolExecutionContext;
   executorId: string;
   readFact(precondition: Precondition): Promise<Observation<boolean>>;
-  policy?: BoundedPiAccessPolicy;
   thinking?: { level: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' };
   now?: () => string;
 }>): NativeCommandEnvironment & Readonly<{ fleet: PiWorkerFleet }> {
   nativeCommandConfigSchema.parse(config);
-  const policy: BoundedPiAccessPolicy = options.policy ?? { ...config.policy, provider: config.modelProvider, model: config.modelId, api: config.modelApi as BoundedPiAccessPolicy['api'], baseUrl: config.modelBaseUrl };
+  const policy: BoundedPiAccessPolicy = { ...config.policy, provider: config.modelProvider, model: config.modelId, api: config.modelApi as BoundedPiAccessPolicy['api'], baseUrl: config.modelBaseUrl };
   const planFor = (input: WorkerSpawnInput, workerId: string, attemptId: string, context: HelmToolExecutionContext): WorkerSpawnPlan => planWorkerSpawn({
     input, workerId, attemptId, commandId: `native-worker-spawn-${digest({ runId: config.runId, taskId: config.taskId }).slice('sha256:'.length, 'sha256:'.length + 32)}`, actorId: `native-command:${config.taskId}`, context,
     autonomyLease: options.autonomyLease, ownership: options.ownership, plannedAt: config.plannedAt, notAfter: config.notAfter, repositoryId: config.repositoryId, mapNodeId: config.mapNodeId, mapNodeRevision: config.mapNodeRevision, objectiveVersion: config.objectiveVersion, acceptanceVersion: config.acceptanceVersion,

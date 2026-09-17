@@ -2,10 +2,13 @@
   "name": "helm3",
   "private": true,
   "version": "0.0.0",
-  "engines": { "node": "22.22.2" },
+  "engines": {
+    "node": "22.22.2"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/**/*.test.ts"
+    "test": "tsx --test test/**/*.test.ts",
+    "native": "tsx src/cli/native.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.270",

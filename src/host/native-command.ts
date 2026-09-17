@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod/v3';
-import type { Attempt, AutonomyLease, Command } from '../contracts/index.js';
+import type { Attempt, AutonomyLease, Command, Observation, Precondition } from '../contracts/index.js';
 import type { KernelKind } from '../core/index.js';
 import { workerSpawnKind } from './worker-spawn-plan.js';
 import type { HostControlPlane } from './index.js';
@@ -21,6 +21,14 @@ import type { ModelRuntime } from '@earendil-works/pi-coding-agent' with { 'reso
 const absolutePath = z.string().min(1).refine((value) => value.startsWith('/'), 'must be an absolute path');
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 const timestamp = z.string().datetime({ offset: false });
+// Endpoint identity is durable config.  Reject URL components that could
+// carry credentials or mutable request material into the manifest/log path.
+const endpointUrl = z.string().url().refine((value) => {
+  try {
+    const parsed = new URL(value);
+    return parsed.username.length === 0 && parsed.password.length === 0 && parsed.search.length === 0 && parsed.hash.length === 0;
+  } catch { return false; }
+}, 'endpoint URL must not contain credentials, query, or fragment');
 
 /** Strict, versioned input for one native command. It contains references and
  * identities only; credential values are intentionally not representable. */
@@ -47,7 +55,7 @@ export const nativeCommandConfigSchema = z.object({
   modelId: z.string().min(1).max(256),
   modelProvider: z.string().min(1).max(256),
   modelApi: z.string().min(1).max(256),
-  modelBaseUrl: z.string().url(),
+  modelBaseUrl: endpointUrl,
   modelFamily: z.string().min(1).max(256),
   modelFactVersion: z.number().int().positive(),
   requiredCapabilities: z.array(z.string().min(1)).min(1).max(32),
@@ -65,7 +73,7 @@ export const nativeCommandConfigSchema = z.object({
   plannedAt: timestamp,
   policy: z.object({
     poolId: z.string().min(1).max(256),
-    baseUrl: z.string().url(),
+    baseUrl: endpointUrl,
     authEnvironment: z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/),
     contextWindow: z.number().int().positive(),
     maxOutputTokens: z.number().int().positive(),
@@ -107,6 +115,8 @@ export type NativeCommandEnvironment = Readonly<{
     runId: string; leaseId: string; owner: 'fable' | 'astra'; sessionId: string; epoch: number; issuedAt: string; expiresAt: string;
   }>;
   modelFact: ModelFact;
+  /** Fresh host-owned precondition reads; config cannot manufacture facts. */
+  readFact(precondition: Precondition): Promise<Observation<boolean>>;
   now?: () => string;
   /** The trusted composition seam: implementation must call PiWorkerFleet,
    * whose binding supplies createBoundedFleetRuntime and native Pi. */
@@ -120,12 +130,8 @@ const stableIds = (runId: string, taskId: string): WorkerSpawnIdentity => {
   const key = digest({ runId, taskId }).slice('sha256:'.length, 'sha256:'.length + 32);
   return { workerId: `worker-native-${key}`, attemptId: `attempt-worker-native-${key}` };
 };
+const commandIdentity = (runId: string, taskId: string): string => `native-worker-spawn-${digest({ runId, taskId }).slice('sha256:'.length, 'sha256:'.length + 32)}`;
 const manifestPath = (config: NativeCommandConfig): string => join(config.stateDirectory, `native-command-${digest({ runId: config.runId, taskId: config.taskId }).slice('sha256:'.length, 'sha256:'.length + 32)}.manifest.json`);
-const safeState = (value: unknown): NativeCommandResult['state'] => {
-  if (value === 'succeeded' || value === 'queued' || value === 'running' || value === 'unknown' || value === 'failed' || value === 'cancelled') return value;
-  return 'unknown';
-};
-
 async function bindManifest(config: NativeCommandConfig): Promise<string> {
   const configDigest = digest(config);
   const path = manifestPath(config);
@@ -153,19 +159,48 @@ async function bindManifest(config: NativeCommandConfig): Promise<string> {
 async function existingResult(config: NativeCommandConfig, configDigest: string, command: { command: Command; status: string; observations: readonly { evidenceRefs: readonly string[] }[] }, host: HostControlPlane): Promise<NativeCommandResult> {
   const payload = command.command.payload as { workerId?: unknown; attemptId?: unknown };
   if (typeof payload.workerId !== 'string' || typeof payload.attemptId !== 'string') throw new Error('durable native command has malformed worker identity');
+  const expectedIdentity = stableIds(config.runId, config.taskId);
+  if (payload.workerId !== expectedIdentity.workerId || payload.attemptId !== expectedIdentity.attemptId) throw new Error('durable native command identity is not bound to its stable run and task');
   const refs = command.observations.flatMap((item) => item.evidenceRefs);
-  const known = await host.readFleetEffectByIdentity(config.runId, `host-worker-terminal-known:${config.runId}:${payload.attemptId}`);
-  const unknown = await host.readFleetEffectByIdentity(config.runId, `host-worker-terminal-unknown:${config.runId}:${payload.attemptId}`);
-  const stopped = await host.readFleetEffectByIdentity(config.runId, `host-worker-stop-confirmed:${config.runId}:${payload.attemptId}`);
-  const snapshot = await host.snapshot(config.runId);
-  const result = await host.readFleetTerminalResult({ attemptId: payload.attemptId, commandId: command.command.commandId, evidenceRefs: snapshot.commands.find((entry) => entry.command.commandId === command.command.commandId)?.observations.flatMap((observation) => observation.evidenceRefs) ?? [] });
+  const [known, unknown, stopped, stopUnknown] = await Promise.all([
+    host.readFleetEffectRecordByIdentity(config.runId, `host-worker-terminal-known:${config.runId}:${payload.attemptId}`),
+    host.readFleetEffectRecordByIdentity(config.runId, `host-worker-terminal-unknown:${config.runId}:${payload.attemptId}`),
+    host.readFleetEffectRecordByIdentity(config.runId, `host-worker-stop-confirmed:${config.runId}:${payload.attemptId}`),
+    host.readFleetEffectRecordByIdentity(config.runId, `host-worker-stop-unknown:${config.runId}:${payload.attemptId}`),
+  ]);
+  const terminalRecord = (entry: { text: string; evidenceRef: string } | undefined): { evidenceRefs: readonly string[]; sessionId?: string } | undefined => {
+    if (!entry) return undefined;
+    try {
+      const parsed = JSON.parse(entry.text) as { evidenceRefs?: unknown; sessionId?: unknown };
+      if (!Array.isArray(parsed.evidenceRefs) || !parsed.evidenceRefs.every((ref) => typeof ref === 'string' && ref.length > 0)) return undefined;
+      return { evidenceRefs: parsed.evidenceRefs, ...(typeof parsed.sessionId === 'string' ? { sessionId: parsed.sessionId } : {}) };
+    } catch { return undefined; }
+  };
+  const knownTerminal = terminalRecord(known);
+  const unknownTerminal = terminalRecord(unknown);
+  const stoppedTerminal = terminalRecord(stopped);
+  const stopUnknownTerminal = terminalRecord(stopUnknown);
+  const terminal = knownTerminal ?? unknownTerminal ?? stoppedTerminal ?? stopUnknownTerminal;
+  const result = terminal ? await host.readFleetTerminalResult({ attemptId: payload.attemptId, commandId: command.command.commandId, evidenceRefs: terminal.evidenceRefs, ...(terminal.sessionId ? { sessionId: terminal.sessionId } : {}) }) : undefined;
   let state: NativeCommandResult['state'] = command.status === 'queued' ? 'queued' : command.status === 'failed' || command.status === 'refused' ? 'failed' : 'unknown';
   if (result) state = result.status === 'succeeded' ? 'succeeded' : result.status === 'cancelled' ? 'cancelled' : 'failed';
-  else if (stopped) state = 'cancelled';
-  else if (known) state = 'unknown';
-  else if (unknown) state = 'unknown';
-  else if (command.status === 'succeeded') state = 'running';
-  return Object.freeze({ schemaVersion: 1, state, runId: config.runId, taskId: config.taskId, commandId: command.command.commandId, workerId: payload.workerId, attemptId: payload.attemptId, configDigest, commandStatus: command.status, evidenceRefs: Object.freeze([...new Set(refs)]), ...(result ? { result } : {}) });
+  else if (stoppedTerminal) state = 'cancelled';
+  else if (known || unknown) state = 'unknown';
+  else if (command.status === 'succeeded') state = 'unknown';
+  const terminalRefs = [ ...(known?.evidenceRef ? [known.evidenceRef] : []), ...(unknown?.evidenceRef ? [unknown.evidenceRef] : []), ...(stopped?.evidenceRef ? [stopped.evidenceRef] : []), ...(stopUnknown?.evidenceRef ? [stopUnknown.evidenceRef] : []) ];
+  return Object.freeze({ schemaVersion: 1, state, runId: config.runId, taskId: config.taskId, commandId: command.command.commandId, workerId: payload.workerId, attemptId: payload.attemptId, configDigest, commandStatus: command.status, evidenceRefs: Object.freeze([...new Set([...refs, ...terminalRefs, ...(terminal?.evidenceRefs ?? [])])]), ...(result ? { result } : {}) });
+}
+
+/** Observe the immutable command and terminal selectors without constructing a
+ * model runtime or checking credentials. This is the CLI restart path. */
+export async function observeNativeCommand(rawConfig: unknown, host: HostControlPlane): Promise<NativeCommandResult | undefined> {
+  const config = nativeCommandConfigSchema.parse(rawConfig);
+  const configDigest = await bindManifest(config);
+  const command = host.readFleetProjection(config.runId).commands.find((entry) => entry.command.commandId === commandIdentity(config.runId, config.taskId));
+  if (!command) return undefined;
+  const payload = command.command.payload as { label?: unknown };
+  if (payload.label !== configDigest) throw new Error('durable native command identity is bound to a different configuration');
+  return existingResult(config, configDigest, command, host);
 }
 
 /** Execute one bounded native worker command. Existing immutable commands are
@@ -175,13 +210,18 @@ export async function runNativeCommand(rawConfig: unknown, environment: NativeCo
   const configDigest = await bindManifest(config);
   if (environment.context.runId !== config.runId || environment.context.mode !== 'primary') throw new Error('native command context does not match its run');
   const identity = stableIds(config.runId, config.taskId);
-  const commandId = `native-worker-spawn-${digest({ runId: config.runId, taskId: config.taskId }).slice('sha256:'.length, 'sha256:'.length + 32)}`;
+  const commandId = commandIdentity(config.runId, config.taskId);
   const before = environment.host.readFleetProjection(config.runId).commands.find((entry) => entry.command.commandId === commandId);
   if (before) {
     const payload = before.command.payload as { label?: unknown };
     if (payload.label !== configDigest) throw new Error('durable native command identity is bound to a different configuration');
     return existingResult(config, configDigest, before, environment.host);
   }
+
+  // A cancellation observed before the immutable command exists is only a
+  // local caller disposition.  It must not acquire leases, resolve a model,
+  // or create a stop command for a worker that was never launched.
+  if (options.signal?.aborted) return Object.freeze({ schemaVersion: 1, state: 'cancelled', runId: config.runId, taskId: config.taskId, commandId, workerId: identity.workerId, attemptId: identity.attemptId, configDigest, commandStatus: 'not-dispatched', evidenceRefs: [] });
 
   if (environment.ownership.runId !== config.runId || environment.ownership.leaseId !== config.ownershipLeaseId || environment.ownership.owner !== config.ownershipOwner || environment.ownership.epoch !== config.ownershipEpoch || environment.ownership.sessionId !== config.ownershipSessionId || environment.ownership.issuedAt !== config.ownershipIssuedAt || environment.ownership.expiresAt !== config.ownershipExpiresAt) throw new Error('native command ownership does not match durable configuration');
   if (environment.autonomyLease.leaseId !== config.autonomyLeaseId || environment.autonomyLease.revision !== config.autonomyLeaseRevision) throw new Error('native command autonomy lease does not match durable configuration');
@@ -192,45 +232,93 @@ export async function runNativeCommand(rawConfig: unknown, environment: NativeCo
   const input: WorkerSpawnInput = Object.freeze({ objectiveRef: config.objectiveRef, acceptanceRef: config.acceptanceRef, contextRefs: Object.freeze([...config.contextRefs]), modelId: config.modelId, role: 'builder', label: configDigest });
   const plan = planWorkerSpawn({ input, workerId: identity.workerId, attemptId: identity.attemptId, commandId, actorId: `native-command:${config.taskId}`, context: environment.context, autonomyLease: environment.autonomyLease, ownership: environment.ownership, plannedAt: config.plannedAt, notAfter: config.notAfter, repositoryId: config.repositoryId, mapNodeId: config.mapNodeId, mapNodeRevision: config.mapNodeRevision, objectiveVersion: config.objectiveVersion, acceptanceVersion: config.acceptanceVersion, model: { fact: environment.modelFact, api: config.modelApi, family: config.modelFamily }, requiredCapabilities: config.requiredCapabilities, dataClassification: config.dataClassification, workspace: { repository: config.repository, destination: config.destination, branch: config.branch, baseSha: config.baseSha, owner: { attemptId: identity.attemptId, generation: 1, expiresAt: config.notAfter }, policy: { writableRoots: config.writableRoots, ...(config.readableRoots ? { readableRoots: config.readableRoots } : {}), ...(config.protectedRoots ? { protectedRoots: config.protectedRoots } : {}) } } });
 
-  let stopped = false;
-  const onAbort = async (): Promise<void> => { if (!stopped && environment.stop) await environment.stop(identity.workerId, environment.context); };
-  if (options.signal?.aborted) { await onAbort(); return Object.freeze({ schemaVersion: 1, state: 'cancelled', runId: config.runId, taskId: config.taskId, commandId, workerId: identity.workerId, attemptId: identity.attemptId, configDigest, commandStatus: 'cancelled', evidenceRefs: [] }); }
-  const abortListener = options.signal ? () => { void onAbort(); } : undefined;
+  let finished = false;
+  let launch: Readonly<{ workerId: string; attemptId: string; sessionId: string; state: 'ready' }> | undefined;
+  let abortPending = false;
+  let abortObservation: Readonly<{ state: string; evidenceRefs: readonly string[] }> | undefined;
+  const onAbort = async (): Promise<void> => {
+    if (finished) return;
+    if (!launch) { abortPending = true; return; }
+    if (!environment.stop) { abortObservation = { state: 'unknown', evidenceRefs: [] }; return; }
+    try { abortObservation = await environment.stop(launch.workerId, environment.context); }
+    catch { abortObservation = { state: 'unknown', evidenceRefs: [] }; }
+  };
+  let abortPromise: Promise<void> | undefined;
+  const abortListener = options.signal ? () => { abortPromise = onAbort(); void abortPromise.catch(() => undefined); } : undefined;
   options.signal?.addEventListener('abort', abortListener!, { once: true });
   try {
-    const launch = await environment.dispatch(plan, identity, environment.context);
+    launch = await environment.dispatch(plan, identity, environment.context);
+    if (abortPending) await onAbort();
     if (environment.waitForTerminal) await environment.waitForTerminal(launch.workerId);
+    // An abort callback may still be admitting/observing worker.stop while
+    // terminal wait completes.  Join it before reading or closing host state.
+    if (abortPromise) await abortPromise;
     const record = environment.host.readFleetProjection(config.runId).commands.find((entry) => entry.command.commandId === commandId);
     if (!record) throw new Error('native command dispatch was not durably recorded');
     if (record.command.payload && (record.command.payload as { label?: unknown }).label !== configDigest) throw new Error('native command dispatch changed its immutable configuration');
-    const snapshot = await environment.host.snapshot(config.runId);
-    const result = await environment.host.readFleetTerminalResult({ attemptId: identity.attemptId, evidenceRefs: snapshot.commands.find((entry) => entry.command.commandId === commandId)?.observations.flatMap((observation) => observation.evidenceRefs) ?? [], commandId, sessionId: launch.sessionId });
-    const status = record.status === 'succeeded' && result ? 'succeeded' : safeState(record.status);
-    return Object.freeze({ schemaVersion: 1, state: status, runId: config.runId, taskId: config.taskId, commandId, workerId: launch.workerId, attemptId: launch.attemptId, sessionId: launch.sessionId, configDigest, commandStatus: record.status, evidenceRefs: Object.freeze(record.observations.flatMap((observation) => observation.evidenceRefs)), ...(result ? { result } : {}) });
-  } finally {
-    stopped = true;
+    const observed = await existingResult(config, configDigest, record, environment.host);
+    // The terminal selector read above is asynchronous.  Join an abort that
+    // arrived during that read before detaching the listener, so a stop
+    // admission cannot race a caller closing the host after this resolves.
+    if (abortPromise) await abortPromise;
+    const cancellationRefs = abortObservation?.evidenceRefs ?? [];
+    const cancellationState: NativeCommandResult['state'] = abortObservation?.state === 'stopped' && cancellationRefs.length > 0 ? 'cancelled' : abortObservation ? 'unknown' : observed.state;
+    const output = Object.freeze({ ...observed, state: observed.result ? observed.state : cancellationState, workerId: launch.workerId, attemptId: launch.attemptId, ...(observed.sessionId ? {} : { sessionId: launch.sessionId }), evidenceRefs: Object.freeze([...new Set([...observed.evidenceRefs, ...cancellationRefs])]) });
+    // No await follows this point.  Marking finished and removing the
+    // listener synchronously closes the cancellation race for this command.
+    finished = true;
     if (options.signal && abortListener) options.signal.removeEventListener('abort', abortListener);
+    return output;
+  } finally {
+    finished = true;
+    if (options.signal && abortListener) options.signal.removeEventListener('abort', abortListener);
+    if (abortPromise) await abortPromise;
   }
 }
 
 export { digest as nativeCommandDigest, stableIds as nativeCommandIdentity };
 
 const piEffectPayloadSchema = z.object({ effectId: z.string().min(1), kind: z.enum(['model.request', 'workspace.write']), attemptId: z.string().min(1) }).strict();
+const workerStopPayloadSchema = z.object({ workerId: z.string().min(1) }).strict();
 /** Kernel registrations required by an opened native command host. */
 export function nativeCommandKinds(config: NativeCommandConfig): Readonly<Record<string, KernelKind>> {
   const upperBound = (config.policy.contextWindow * (config.policy.inputUsdPerMillion + config.policy.cacheReadUsdPerMillion + config.policy.cacheWriteUsdPerMillion) + config.policy.maxBilledOutputTokens * config.policy.outputUsdPerMillion) / 1_000_000;
   return Object.freeze({
     'worker.spawn': workerSpawnKind,
+    'worker.stop': { payloadSchema: workerStopPayloadSchema },
     'pi.model': { payloadSchema: piEffectPayloadSchema, resourceRequest: () => ({ poolId: config.policy.poolId, unit: 'usd', upperBound, consumer: 'worker' as const }) },
     'pi.write': { payloadSchema: piEffectPayloadSchema },
   });
 }
 const piEffectCommand = (config: NativeCommandConfig, effect: { effectId: string; kind: 'model.request' | 'workspace.write' }, attemptId: string, executorId: string): Command => ({
   schemaVersion: 1, commandId: effect.effectId, kind: effect.kind === 'model.request' ? 'pi.model' : 'pi.write', idempotencyKey: effect.effectId,
-  payloadHash: digest({ effectId: effect.effectId, kind: effect.kind }), scope: { repositoryId: config.repositoryId, mapNodeId: config.mapNodeId }, actorId: executorId,
+  payloadHash: digest({ effectId: effect.effectId, kind: effect.kind, attemptId }), scope: { repositoryId: config.repositoryId, mapNodeId: config.mapNodeId }, actorId: executorId,
   runId: config.runId, origin: 'worker', leaseId: config.autonomyLeaseId, leaseRevision: config.autonomyLeaseRevision, plannedAt: config.plannedAt, notAfter: config.notAfter,
   expected: [], payload: { effectId: effect.effectId, kind: effect.kind, attemptId }, requiredEvidence: [],
 });
+const workerStopCommand = (config: NativeCommandConfig, workerId: string, context: HelmToolExecutionContext): Command => {
+  const payload = { workerId };
+  return {
+    schemaVersion: 1,
+    commandId: `native-worker-stop-${workerId}`,
+    kind: 'worker.stop',
+    idempotencyKey: `native-worker-stop-${workerId}`,
+    payloadHash: digest(payload),
+    scope: { repositoryId: config.repositoryId, mapNodeId: config.mapNodeId },
+    actorId: `native-command:${config.taskId}`,
+    runId: context.runId,
+    origin: 'orchestrator',
+    leaseId: config.autonomyLeaseId,
+    leaseRevision: config.autonomyLeaseRevision,
+    orchestratorLeaseId: config.ownershipLeaseId,
+    orchestratorEpoch: config.ownershipEpoch,
+    plannedAt: config.plannedAt,
+    notAfter: config.notAfter,
+    expected: [],
+    payload,
+    requiredEvidence: [],
+  };
+};
 
 /** Native host composition used by the shipped CLI and provider-free fixture.
  * It is deliberately a constructor, not a workflow: all policy, model,
@@ -245,6 +333,7 @@ export function createNativeCommandEnvironment(config: NativeCommandConfig, opti
   ownership: NativeCommandEnvironment['ownership'];
   context: HelmToolExecutionContext;
   executorId: string;
+  readFact(precondition: Precondition): Promise<Observation<boolean>>;
   policy?: BoundedPiAccessPolicy;
   thinking?: { level: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' };
   now?: () => string;
@@ -265,16 +354,16 @@ export function createNativeCommandEnvironment(config: NativeCommandConfig, opti
   });
   let fleet!: PiWorkerFleet;
   const binding = {
-    host: options.host, workspaceManager: options.workspaceManager, executor: { executorId: options.executorId }, claimExpiresAt: () => config.notAfter, readFact: async () => ({ value: true, state: 'known' as const, source: 'native-command', observedAt: config.plannedAt }),
+    host: options.host, workspaceManager: options.workspaceManager, executor: { executorId: options.executorId }, claimExpiresAt: () => config.notAfter, readFact: options.readFact,
     spawnCommand: (input: WorkerSpawnInput, workerId: string, attemptId: string, context: HelmToolExecutionContext) => planFor(input, workerId, attemptId, context).command,
     inputDigest: (command: Command) => (command.payload as { inputDigest: string }).inputDigest,
     attempt: (command: Command, workerId: string): Attempt => ({ attemptId: (command.payload as { attemptId: string }).attemptId, mapNodeId: config.mapNodeId, mapNodeRevision: config.mapNodeRevision, objectiveVersion: config.objectiveVersion, acceptanceVersion: config.acceptanceVersion, role: 'builder', model: config.modelId, family: config.modelFamily, provider: config.modelProvider, capability: config.requiredCapabilities.join(','), poolId: config.policy.poolId, workspace: config.destination, baseSha: config.baseSha, contextManifestHash: (command.payload as { inputDigest: string }).inputDigest, leaseId: config.autonomyLeaseId, sessionIds: [], commandIds: [command.commandId], startedAt: config.plannedAt, evidenceRefs: [], usageRefs: [], findingRefs: [] }),
     workspace: (_command: Command, _workerId: string, attempt: Attempt) => ({ repository: config.repository, destination: config.destination, branch: config.branch, baseSha: config.baseSha, owner: { attemptId: attempt.attemptId, generation: 1, expiresAt: config.notAfter }, policy: { writableRoots: config.writableRoots, ...(config.readableRoots ? { readableRoots: config.readableRoots } : {}), ...(config.protectedRoots ? { protectedRoots: config.protectedRoots } : {}) } }),
     start: lifecycle.start, rehydrate: lifecycle.rehydrate,
-    stopCommand: (record: { workerId: string; attemptId: string }) => piEffectCommand(config, { effectId: `native-worker-stop-${record.workerId}`, kind: 'workspace.write' }, record.attemptId, options.executorId),
+    stopCommand: (record: { workerId: string }, context: HelmToolExecutionContext) => workerStopCommand(config, record.workerId, context),
     prompt: async (command: Command) => { const artifacts = options.host.artifactsFor(options.context); const payload = command.payload as { objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[] }; return [await artifacts.readText(payload.objectiveRef), await artifacts.readText(payload.acceptanceRef), ...await Promise.all(payload.contextRefs.map((ref) => artifacts.readText(ref)))].join('\n\n'); },
     correction: () => 'Return only a valid WorkerResult JSON object.',
   };
   fleet = new PiWorkerFleet(binding);
-  return { host: options.host, context: options.context, autonomyLease: options.autonomyLease, ownership: options.ownership, modelFact: options.modelFact, now: options.now, fleet, dispatch: (plan, identity, context) => { const payload = plan.command.payload as { objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[]; modelId: string; role: string; label?: string }; return fleet.spawn(context, { objectiveRef: payload.objectiveRef, acceptanceRef: payload.acceptanceRef, contextRefs: payload.contextRefs, modelId: payload.modelId, role: payload.role, ...(payload.label ? { label: payload.label } : {}) }, identity); }, waitForTerminal: (workerId) => fleet.waitForTerminal(workerId), stop: (workerId, context) => fleet.stop(context, workerId) };
+  return { host: options.host, context: options.context, autonomyLease: options.autonomyLease, ownership: options.ownership, modelFact: options.modelFact, readFact: options.readFact, now: options.now, fleet, dispatch: (plan, identity, context) => { const payload = plan.command.payload as { objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[]; modelId: string; role: string; label?: string }; return fleet.spawn(context, { objectiveRef: payload.objectiveRef, acceptanceRef: payload.acceptanceRef, contextRefs: payload.contextRefs, modelId: payload.modelId, role: payload.role, ...(payload.label ? { label: payload.label } : {}) }, identity); }, waitForTerminal: (workerId) => fleet.waitForTerminal(workerId), stop: (workerId, context) => fleet.stop(context, workerId) };
 }

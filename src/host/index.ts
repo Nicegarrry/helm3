@@ -294,6 +294,7 @@ export class HostControlPlane {
   recordAutonomyLease(lease: AutonomyLease): void { this.kernel.host.issueAutonomyLease(lease); }
   /** Trusted model-registry ingestion; orchestration JSON only selects an existing fact. */
   recordModelFact(fact: ModelFact): void { this.kernel.host.putModelFact(fact); }
+  readModelFact(modelId: string): ModelFact | undefined { return this.kernel.host.readModelFact(modelId); }
   assertModelProvenance(modelId: string, provider: string, factVersion: number): void { this.kernel.host.assertModelProvenance(modelId, provider, factVersion); }
   revokeAutonomyLease(leaseId: string): void { this.kernel.host.revokeAutonomyLease(leaseId); }
   /** Trusted runtime records immutable worker-attempt provenance before Pi begins effects. */
@@ -861,5 +862,5 @@ export class HostControlPlane {
 
 export async function openHost(options: HostOptions): Promise<HostControlPlane> { return HostControlPlane.open(options); }
 
-export { nativeCommandConfigSchema, nativeCommandDigest, nativeCommandIdentity, nativeCommandKinds, runNativeCommand, createNativeCommandEnvironment } from './native-command.js';
+export { nativeCommandConfigSchema, nativeCommandDigest, nativeCommandIdentity, nativeCommandKinds, runNativeCommand, observeNativeCommand, createNativeCommandEnvironment } from './native-command.js';
 export type { NativeCommandConfig, NativeCommandEnvironment, NativeCommandResult } from './native-command.js';

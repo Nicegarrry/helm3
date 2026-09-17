@@ -208,6 +208,7 @@ export class KernelHost {
   }
 
   putModelFact(fact: ModelFact): void { this.core.putModelFact(fact); }
+  readModelFact(modelId: string): ModelFact | undefined { return this.core.readModelFact(modelId); }
   /** Host-only binding from immutable worker provenance to the current registry fact. */
   assertModelProvenance(modelId: string, provider: string, factVersion: number): void { this.core.assertModelProvenance(modelId, provider, factVersion); }
   requestCancellation(commandId: string): void { this.core.requestCancellation(commandId); }
@@ -595,6 +596,13 @@ class Kernel {
       if (!current) this.db.prepare(`INSERT INTO model_facts (model_id, bytes) VALUES (?, ?)`).run(fact.modelId, bytes);
       else if (fact.factVersion > currentVersion) this.db.prepare(`UPDATE model_facts SET bytes = ? WHERE model_id = ?`).run(bytes, fact.modelId);
     });
+  }
+
+  /** Read-only current model provenance for trusted host composition. */
+  readModelFact(modelId: string): ModelFact | undefined {
+    if (!z.string().min(1).safeParse(modelId).success) throw new Error('model fact id is invalid');
+    const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(modelId) as { bytes: string } | undefined;
+    return row ? modelFactSchema.parse(JSON.parse(row.bytes)) : undefined;
   }
 
   requestCancellation(commandId: string): void {

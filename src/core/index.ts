@@ -103,7 +103,7 @@ export type KernelRunProjection = Readonly<{
   ownership?: OrchestratorLease;
   commands: readonly CommandRecord[];
   attempts: readonly Attempt[];
-  attemptLifecycles: readonly Readonly<{ attemptId: string; state: string }>[];
+  attemptLifecycles: readonly Readonly<{ attemptId: string; state: string; executionReleased: boolean; stopEvidenceRef?: string }>[];
   autonomyLeases: readonly AutonomyLeaseProjection[];
   reservations: readonly ResourceReservationProjection[];
 }>;
@@ -218,6 +218,9 @@ export class KernelHost {
   reportWorkerStop(commandId: string, observed: 'stopped' | 'pending' | 'unknown'): void { this.core.reportWorkerStop(commandId, observed); }
   /** Releases worker capacity only after the trusted runtime confirms its whole attempt stopped. */
   reportAttemptStop(attemptId: string, observed: 'stopped' | 'pending' | 'unknown'): void { this.core.reportAttemptStop(attemptId, observed); }
+  /** Trusted host only: stop evidence releases execution, never effect outcomes or billing. */
+  releaseAttemptExecution(attemptId: string, evidenceRef: string): void { this.core.releaseAttemptExecution(attemptId, evidenceRef); }
+  readExecutionCapacity(authorityId: string) { return this.core.readExecutionCapacity(authorityId); }
   /** Known actual consumption releases only the unused upper bound; unknown stays reserved. */
   settleResource(commandId: string, actual: { state: 'known'; amount: number } | { state: 'unknown' | 'unavailable' }): void { this.core.settleResource(commandId, actual); }
 
@@ -288,6 +291,7 @@ class Kernel {
       CREATE INDEX IF NOT EXISTS events_correlation_metadata ON events(json_extract(bytes, '$.correlationId'));
     `);
     this.addColumn('commands', 'lease_id TEXT');
+    this.addColumn('attempt_lifecycle', 'stop_evidence_ref TEXT');
     this.addColumn('commands', 'parent_authority_id TEXT');
     this.addColumn('commands', 'attempt_id TEXT');
     this.addColumn('commands', 'map_node_id TEXT');
@@ -524,8 +528,8 @@ class Kernel {
       return row ? [attemptSchema.parse(JSON.parse(row.bytes))] : [];
     });
     const attemptLifecycles = attemptIds.flatMap((attemptId) => {
-      const row = this.db.prepare(`SELECT state FROM attempt_lifecycle WHERE attempt_id = ?`).get(attemptId) as { state: string } | undefined;
-      return row ? [{ attemptId, state: row.state }] : [];
+      const row = this.db.prepare(`SELECT state, stop_evidence_ref FROM attempt_lifecycle WHERE attempt_id = ?`).get(attemptId) as { state: string; stop_evidence_ref: string | null } | undefined;
+      return row ? [{ attemptId, state: row.state, executionReleased: row.state === 'finished' || row.stop_evidence_ref !== null, ...(row.stop_evidence_ref ? { stopEvidenceRef: row.stop_evidence_ref } : {}) }] : [];
     });
     const leaseIds = [...new Set(parsedRows.map((row) => row.lease_id ?? undefined).filter((id): id is string => Boolean(id)))];
     const autonomyLeases = leaseIds.flatMap((leaseId) => {
@@ -636,6 +640,30 @@ class Kernel {
       if (observed === 'pending' || observed === 'unknown') this.quarantineAttempt(commandId);
       this.appendGeneratedEvent(`worker.stop_${observed}`, commandId, {});
     });
+  }
+
+  releaseAttemptExecution(attemptId: string, evidenceRef: string): void {
+    z.string().min(1).parse(attemptId);
+    z.string().regex(/^raw:sha256:[a-f0-9]{64}$/).parse(evidenceRef);
+    this.transaction(() => {
+      const attempt = this.db.prepare(`SELECT state, stop_evidence_ref FROM attempt_lifecycle WHERE attempt_id = ?`).get(attemptId) as { state: string; stop_evidence_ref: string | null } | undefined;
+      if (!attempt) throw new Error('unknown worker attempt');
+      const inFlight = this.db.prepare(`SELECT COUNT(*) AS count FROM commands WHERE attempt_id = ? AND status IN ('claimed', 'effect_started', 'observing')`).get(attemptId) as { count: number };
+      if (inFlight.count) throw new Error('execution stop cannot release an in-flight command');
+      if (attempt.stop_evidence_ref) return;
+      // Fence old attempts permanently; preserve command outcomes and every reservation.
+      this.db.prepare(`UPDATE attempt_lifecycle SET stop_evidence_ref = ?, state = CASE WHEN state = 'finished' THEN state ELSE 'unknown' END WHERE attempt_id = ?`).run(evidenceRef, attemptId);
+    });
+  }
+
+  readExecutionCapacity(authorityId: string) {
+    const grant = this.loadGrant(authorityId);
+    const rows = this.db.prepare(`SELECT state, stop_evidence_ref FROM attempt_lifecycle WHERE parent_authority_id = ?`).all(authorityId) as Array<{ state: string; stop_evidence_ref: string | null }>;
+    const leases = (this.db.prepare(`SELECT bytes, revoked FROM autonomy_leases`).all() as Array<{ bytes: string; revoked: number }>).map(row => ({ lease: autonomyLeaseSchema.parse(JSON.parse(row.bytes)), revoked: row.revoked === 1 })).filter(row => row.lease.parentAuthorityId === authorityId);
+    return { authorityId, maximum: grant.maxConcurrency, source: 'human-authority' as const,
+      occupied: rows.filter(row => ['active', 'unknown'].includes(row.state) && !row.stop_evidence_ref).length,
+      stoppedUnresolved: rows.filter(row => row.state === 'unknown' && row.stop_evidence_ref).length,
+      leases: leases.map(row => ({ leaseId: row.lease.leaseId, maximum: row.lease.maxConcurrency, revoked: row.revoked, expiresAt: row.lease.expiresAt })) };
   }
 
   reportAttemptStop(attemptId: string, observed: 'stopped' | 'pending' | 'unknown'): void {
@@ -776,7 +804,7 @@ class Kernel {
   }
 
   private activeAttemptCount(where: string, values: unknown[]): number {
-    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM attempt_lifecycle al WHERE ${where} AND al.state IN ('active', 'unknown')`).get(...values) as { count: number };
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM attempt_lifecycle al WHERE ${where} AND al.state IN ('active', 'unknown') AND al.stop_evidence_ref IS NULL`).get(...values) as { count: number };
     return row.count;
   }
 
@@ -853,9 +881,9 @@ class Kernel {
     const activeForLease = this.activeAttemptCount('al.attempt_id IN (SELECT attempt_id FROM attempt_leases WHERE lease_id = ?)', [command.leaseId]);
     // A continuing active attempt consumes one slot in every lease it joins. It
     // may reuse its own existing slot, but cannot enlarge a narrower lease.
-    if (activeForLease > lease.maxConcurrency || (attempt?.state !== 'active' && activeForLease >= lease.maxConcurrency)) throw new Error('autonomy lease concurrency cap refuses command');
+    if (activeForLease > lease.maxConcurrency || (attempt?.state !== 'active' && activeForLease >= lease.maxConcurrency)) throw new Error(`autonomy lease concurrency cap refuses command: ${activeForLease}/${lease.maxConcurrency} occupied; lease ${lease.leaseId}`);
     const activeForAuthority = this.activeAttemptCount('al.parent_authority_id = ?', [lease.parentAuthorityId]);
-    if (attempt?.state !== 'active' && activeForAuthority >= grant.maxConcurrency) throw new Error('human authority concurrency cap refuses command');
+    if (attempt?.state !== 'active' && activeForAuthority >= grant.maxConcurrency) throw new Error(`human authority concurrency cap refuses command: ${activeForAuthority}/${grant.maxConcurrency} occupied; authority ${grant.authorityId}`);
   }
 
   private reserve(command: Command, input: ResourceRequest, attemptId: string | undefined): void {
@@ -986,7 +1014,7 @@ class Kernel {
   }
 
   /** Older Wave 2 databases can be opened without losing their durable rows. */
-  private addColumn(table: 'commands' | 'resource_reservations', definition: string): void {
+  private addColumn(table: 'commands' | 'resource_reservations' | 'attempt_lifecycle', definition: string): void {
     const name = definition.split(' ', 1)[0];
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (columns.some((column) => column.name === name)) return;

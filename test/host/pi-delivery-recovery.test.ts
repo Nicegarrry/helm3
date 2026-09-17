@@ -293,3 +293,54 @@ test('receipt written before Core observation is recovered with an explicit unkn
     assert.equal(fixture.faux.state.callCount, 1);
   } finally { await fixture.close(); }
 });
+
+test('verified native stop frees execution capacity while an unresolved model effect and cost stay held', async () => {
+  const fixture = await createFixture();
+  try {
+    const start = fixture.binding.start;
+    let queued = false;
+    (fixture.binding as { start: WorkerFleetBinding['start'] }).start = async (command, workspace) => {
+      const worker = await start(command, workspace);
+      if (!queued) {
+        queued = true;
+        const payload = { effectId: 'never-started', kind: 'workspace.write' };
+        fixture.host.admitOrchestrator({ ...command, commandId: 'queued-write', idempotencyKey: 'queued-write', kind: 'pi.write', payload, payloadHash: hash(payload) }, context, command.actorId, (command.payload as { attemptId: string }).attemptId);
+      }
+      return worker;
+    };
+    const journal = fixture.host.artifactsFor(context).journalForTrustedPi();
+    const append = journal.append.bind(journal);
+    journal.append = async (input, options) => {
+      if (input.source === 'pi.model.delivery.failure') throw new Error('fixture delivery evidence unavailable');
+      return append(input, options);
+    };
+    fixture.faux.setResponses([fixture.ai.fauxAssistantMessage('error', { stopReason: 'error', errorMessage: 'fixture error' })]);
+    const objectiveRef = await fixture.host.artifactsFor(context).writeText('test.slot.objective', 'uncertain billing');
+    const acceptanceRef = await fixture.host.artifactsFor(context).writeText('test.slot.acceptance', 'independent execution capacity');
+    const first = await fixture.fleet.spawn(context, { objectiveRef, acceptanceRef, contextRefs: [], modelId: 'offline', role: 'builder' });
+    await fixture.fleet.waitForTerminal(first.workerId);
+    const before = await fixture.host.snapshot('run');
+    const model = before.commands.find(entry => entry.command.kind === 'pi.model')!;
+    assert.equal(model.status, 'unknown');
+    assert.equal(before.commands.find(row => row.command.commandId === 'queued-write')?.status, 'queued');
+    assert.equal(before.reservations[0]?.state, 'reserved');
+    assert.equal((await fixture.fleet.inspect(context, first.workerId)).state, 'unknown');
+    fixture.faux.setResponses([fixture.ai.fauxAssistantMessage(workerEnvelope)]);
+    const second = await fixture.fleet.spawn(context, { objectiveRef, acceptanceRef, contextRefs: [], modelId: 'offline', role: 'builder' });
+    await fixture.fleet.waitForTerminal(second.workerId);
+    assert.equal((await fixture.fleet.inspect(context, second.workerId)).state, 'terminal', 'dead local worker must not retain execution slot');
+    const after = await fixture.host.snapshot('run');
+    assert.deepEqual(after.commands.find(entry => entry.command.commandId === model.command.commandId), model, 'stop does not relabel or replay the uncertain effect');
+    assert.deepEqual(after.reservations.find(entry => entry.commandId === model.command.commandId), before.reservations[0], 'unknown billing remains held');
+    assert.equal(fixture.faux.state.callCount, 2);
+    assert.equal(after.commands.find(row => row.command.commandId === 'queued-write')?.status, 'queued');
+    assert.equal(after.attemptLifecycles.find(row => row.attemptId === first.attemptId)?.executionReleased, true);
+    const capacity = fixture.host.readExecutionCapacity('human');
+    assert.equal(capacity.maximum, 1);
+    assert.equal(capacity.occupied, 0);
+    assert.equal(capacity.stoppedUnresolved, 1);
+    assert.equal(capacity.leases[0]?.maximum, 1);
+    assert.equal(await fixture.host.reconcilePiStoppedReceipts('run', first.attemptId), 1);
+    assert.deepEqual((await fixture.host.snapshot('run')).reservations, after.reservations);
+  } finally { await fixture.close(); }
+});

@@ -294,6 +294,7 @@ export class HostControlPlane {
   recordAutonomyLease(lease: AutonomyLease): void { this.kernel.host.issueAutonomyLease(lease); }
   /** Trusted model-registry ingestion; orchestration JSON only selects an existing fact. */
   recordModelFact(fact: ModelFact): void { this.kernel.host.putModelFact(fact); }
+  readExecutionCapacity(authorityId: string) { return this.kernel.host.readExecutionCapacity(authorityId); }
   readModelFact(modelId: string): ModelFact | undefined { return this.kernel.host.readModelFact(modelId); }
   /** Read a current, nonrevoked autonomy lease before a command references it. */
   readAutonomyLease(leaseId: string, revision: number): AutonomyLease | undefined { return this.kernel.host.readAutonomyLease(leaseId, revision); }
@@ -418,7 +419,7 @@ export class HostControlPlane {
     return reconciled;
   }
 
-  /** Validate a native stop proof and finish capacity only when every bound command is terminal. */
+  /** Release proven-stopped local execution independently of unresolved model billing. */
   async reconcilePiStoppedReceipt(input: Readonly<{ receipt: PiStoppedReceipt; receiptRef: RawArtifactRef }>): Promise<void> {
     const receipt = piStoppedReceiptSchema.parse(input.receipt);
     const expectedSourceIdentity = `pi-worker-stop:${receipt.attemptId}:${receipt.commandId}:${receipt.sessionId}`;
@@ -439,8 +440,10 @@ export class HostControlPlane {
       || parentPayload.modelProvider !== launch.modelProvider || parentPayload.modelApi !== launch.modelApi
       || parentPayload.modelFactVersion !== launch.modelFactVersion) throw new Error('native stop receipt does not match immutable launch payload');
     const commands = this.kernel.host.readRun(parent.command.runId).commands.filter((record) => this.kernel.host.commandAttempt(record.command.commandId)?.attemptId === receipt.attemptId);
-    if (commands.length === 0 || !commands.every((record) => record.status === 'succeeded' || record.status === 'failed' || record.status === 'refused')) throw new Error('native stop proof cannot finish an attempt with non-terminal commands');
-    this.kernel.host.reportAttemptStop(receipt.attemptId, 'stopped');
+    const terminal = (record: CommandRecord) => ['succeeded', 'failed', 'refused'].includes(record.status);
+    if (commands.length === 0 || !commands.every(record => terminal(record) || record.status === 'queued' || (record.status === 'unknown' && record.command.kind === 'pi.model'))) throw new Error('native stop proof cannot release unobserved non-model commands');
+    this.kernel.host.releaseAttemptExecution(receipt.attemptId, metadata.raw.ref);
+    if (commands.every(terminal)) this.kernel.host.reportAttemptStop(receipt.attemptId, 'stopped');
   }
 
   /** Restart hook for stop proofs; it never infers process death or starts an effect. */

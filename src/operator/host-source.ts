@@ -76,10 +76,12 @@ export function projectHostSnapshot(host: HostSnapshot, map: GitHubMapSnapshot |
     attempts: host.attempts.map((attempt) => {
       const commands = host.commands.filter((row) => attempt.commandIds.includes(row.command.commandId));
       const epochs = [...new Set(commands.flatMap((row) => row.command.origin === 'orchestrator' ? [row.command.orchestratorEpoch] : []))];
-      const lifecycle = host.attemptLifecycles.find((row) => row.attemptId === attempt.attemptId)?.state;
+      const execution = host.attemptLifecycles.find((row) => row.attemptId === attempt.attemptId);
+      const lifecycle = execution?.state;
+      if (execution?.executionReleased && lifecycle === 'unknown') unknowns.push(`Attempt ${attempt.attemptId} stopped locally; model outcome or billing remains unresolved.`);
       return {
         attemptId: attempt.attemptId, mapNodeId: attempt.mapNodeId, role: attempt.role,
-        state: attempt.outcome ?? (lifecycle === 'finished' ? 'stopped' : lifecycle === 'unknown' ? 'unknown' : commands.some((row) => row.status === 'effect_started' || row.status === 'observing') ? 'running' : lifecycle === 'ready' ? 'ready' : 'unknown'),
+        state: attempt.outcome ?? (execution?.executionReleased || lifecycle === 'finished' ? 'stopped' : lifecycle === 'unknown' ? 'unknown' : commands.some((row) => row.status === 'effect_started' || row.status === 'observing') ? 'running' : lifecycle === 'ready' ? 'ready' : 'unknown'),
         model: { id: attempt.model, family: attempt.family, pool: attempt.poolId },
         workspace: { path: attempt.workspace, baseSha: attempt.baseSha },
         startedAt: attempt.startedAt, endedAt: attempt.endedAt ?? null, outcome: attempt.outcome ?? null,

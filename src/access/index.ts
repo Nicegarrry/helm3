@@ -46,6 +46,8 @@ export type BoundedPiAccessPolicy = Readonly<{
   timeoutMs: number;
   /** Live access defaults to no automatic envelope-repair follow-up. */
   allowCorrection?: boolean;
+  /** Required for OpenRouter: final provider routing is enforced after Pi assembles the payload. */
+  openRouterRouting?: Readonly<Record<string, unknown>>;
 }>;
 
 export type RequestSettlement = { state: 'known'; amount: number } | { state: 'unknown'; reason: string };
@@ -78,7 +80,7 @@ export class BoundedPiAccess {
   private requestCount = 0;
 
   constructor(policy: BoundedPiAccessPolicy) {
-    const keys = ['poolId', 'provider', 'model', 'api', 'baseUrl', 'authEnvironment', 'contextWindow', 'maxOutputTokens', 'maxBilledOutputTokens', 'maxPacketBytes', 'maxRequests', 'inputUsdPerMillion', 'outputUsdPerMillion', 'cacheReadUsdPerMillion', 'cacheWriteUsdPerMillion', 'maxToolCalls', 'timeoutMs', 'allowCorrection'];
+    const keys = ['poolId', 'provider', 'model', 'api', 'baseUrl', 'authEnvironment', 'contextWindow', 'maxOutputTokens', 'maxBilledOutputTokens', 'maxPacketBytes', 'maxRequests', 'inputUsdPerMillion', 'outputUsdPerMillion', 'cacheReadUsdPerMillion', 'cacheWriteUsdPerMillion', 'maxToolCalls', 'timeoutMs', 'allowCorrection', 'openRouterRouting'];
     if (typeof policy !== 'object' || policy === null || Object.keys(policy).some((key) => !keys.includes(key))) throw new Error('bounded Pi access policy has unknown fields');
     if (typeof policy.poolId !== 'string' || typeof policy.provider !== 'string' || typeof policy.model !== 'string' || typeof policy.api !== 'string' || typeof policy.baseUrl !== 'string' || typeof policy.authEnvironment !== 'string' || typeof policy.allowCorrection !== 'undefined' && typeof policy.allowCorrection !== 'boolean') {
       throw new Error('bounded Pi access policy has invalid identity fields');
@@ -95,6 +97,22 @@ export class BoundedPiAccess {
     nonNegativeFinite(policy.cacheReadUsdPerMillion, 'cacheReadUsdPerMillion');
     nonNegativeFinite(policy.cacheWriteUsdPerMillion, 'cacheWriteUsdPerMillion');
     if (!policy.poolId || !policy.provider || !policy.model || !policy.api || !policy.baseUrl || !policy.authEnvironment) throw new Error('pool and frozen provider facts are required');
+    if (policy.provider === 'openrouter' && !policy.openRouterRouting) throw new Error('OpenRouter routing policy is required');
+    if (policy.provider !== 'openrouter' && policy.openRouterRouting) throw new Error('OpenRouter routing policy is only valid for OpenRouter');
+    let pinnedRoute: Readonly<Record<string, unknown>> | undefined;
+    if (policy.openRouterRouting) {
+      if (policy.api !== 'openai-completions' || policy.baseUrl !== 'https://openrouter.ai/api/v1') throw new Error('OpenRouter requires its pinned API and endpoint');
+      const route = policy.openRouterRouting;
+      const permitted = ['only', 'allow_fallbacks', 'require_parameters', 'data_collection', 'zdr', 'max_price', 'quantizations'];
+      if (Object.keys(route).some(key => !permitted.includes(key)) || route.allow_fallbacks !== false || route.require_parameters !== true || route.data_collection !== 'deny' || route.zdr !== true || !Array.isArray(route.only) || route.only.length === 0 || route.only.length > 8 || route.only.some(provider => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}(?:\/[a-z0-9-]+)?$/.test(provider))) throw new Error('OpenRouter routing policy is unsafe');
+      const prices = route.max_price as Record<string, unknown> | undefined;
+      if (!prices || Object.keys(prices).some(key => !['prompt', 'completion'].includes(key)) || typeof prices.prompt !== 'number' || !Number.isFinite(prices.prompt) || prices.prompt < 0 || prices.prompt > policy.inputUsdPerMillion || typeof prices.completion !== 'number' || !Number.isFinite(prices.completion) || prices.completion < 0 || prices.completion > policy.outputUsdPerMillion) throw new Error('OpenRouter price caps must fit the bounded policy');
+      const quantizations = route.quantizations;
+      if (quantizations !== undefined && (!Array.isArray(quantizations) || quantizations.length === 0 || quantizations.length > 8 || quantizations.some(value => !['int4', 'int8', 'fp4', 'fp6', 'fp8', 'fp16', 'bf16', 'fp32'].includes(value)))) throw new Error('OpenRouter quantization allowlist is invalid');
+      // Copy and freeze nested routing fields: caller-owned arrays or price
+      // objects must not widen an already admitted request later.
+      pinnedRoute = Object.freeze({ ...route, only: Object.freeze([...route.only]), max_price: Object.freeze({ ...prices }), ...(Array.isArray(quantizations) ? { quantizations: Object.freeze([...quantizations]) } : {}) });
+    }
     if (policy.maxOutputTokens > policy.maxBilledOutputTokens) throw new Error('hard output cap cannot exceed billed output bound');
     this.policy = Object.freeze({
       poolId: policy.poolId, provider: policy.provider, model: policy.model, api: policy.api, baseUrl: policy.baseUrl, authEnvironment: policy.authEnvironment,
@@ -103,6 +121,7 @@ export class BoundedPiAccess {
       outputUsdPerMillion: policy.outputUsdPerMillion, cacheReadUsdPerMillion: policy.cacheReadUsdPerMillion,
       cacheWriteUsdPerMillion: policy.cacheWriteUsdPerMillion, maxToolCalls: policy.maxToolCalls, timeoutMs: policy.timeoutMs,
       ...(policy.allowCorrection === undefined ? {} : { allowCorrection: policy.allowCorrection }),
+      ...(pinnedRoute === undefined ? {} : { openRouterRouting: pinnedRoute }),
     });
   }
 
@@ -124,7 +143,24 @@ export class BoundedPiAccess {
     this.requestCount += 1;
     return Object.freeze({
       reservation,
-      options: { ...options, maxRetries: 0, maxTokens: this.policy.maxOutputTokens, signal: combinedSignal(this.policy.timeoutMs, options?.signal) },
+      options: {
+        ...options,
+        maxRetries: 0,
+        maxTokens: this.policy.maxOutputTokens,
+        signal: combinedSignal(this.policy.timeoutMs, options?.signal),
+        ...(this.policy.openRouterRouting ? {
+          onPayload: async (payload: unknown, selectedModel: Model<Api>) => {
+            const replacement = await options?.onPayload?.(payload, selectedModel);
+            const callerPayload = replacement === undefined ? payload : replacement;
+            if (!callerPayload || typeof callerPayload !== 'object' || Array.isArray(callerPayload)) throw new Error('OpenRouter payload is not an object');
+            if (['models', 'route', 'plugins', 'service_tier'].some(key => key in callerPayload)) throw new Error('OpenRouter auxiliary routing or billable features are not authorised');
+            const { max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...rest } = callerPayload as Record<string, unknown>;
+            const finalPayload = { ...rest, model: this.policy.model, max_completion_tokens: this.policy.maxOutputTokens, provider: this.policy.openRouterRouting };
+            if (byteUpperBound(finalPayload) > this.policy.maxPacketBytes) throw new Error('OpenRouter final payload exceeds the packet cap');
+            return finalPayload;
+          },
+        } : {}),
+      },
     });
   }
 

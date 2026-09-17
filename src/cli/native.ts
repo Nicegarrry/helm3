@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import {
-  createNativeCommandEnvironment, nativeCommandConfigSchema, nativeCommandKinds,
+  createNativeCommandEnvironment, inlineOpenRouterModel, nativeCommandConfigSchema, nativeCommandKinds,
   observeNativeCommand, runNativeCommand, type NativeCommandEnvironment,
 } from '../host/native-command.js';
 import { openHost } from '../host/index.js';
@@ -29,7 +29,7 @@ export async function nativeCli(args: readonly string[], environment?: NativeCom
     if (previous) return `${JSON.stringify(previous)}\n`;
     if (options.signal?.aborted) throw new Error('native command interrupted before launch');
     const snapshot = await host.snapshot(config.runId);
-    const lease = snapshot.autonomyLeases.find((entry) => entry.lease.leaseId === config.autonomyLeaseId && entry.lease.revision === config.autonomyLeaseRevision)?.lease;
+    const lease = host.readAutonomyLease(config.autonomyLeaseId, config.autonomyLeaseRevision);
     if (!lease) throw new Error('native command autonomy lease is absent');
     const modelFact = host.readModelFact(config.modelId);
     if (!modelFact) throw new Error('native command registered model is absent');
@@ -39,6 +39,12 @@ export async function nativeCli(args: readonly string[], environment?: NativeCom
     const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
     const ai = await import('@earendil-works/pi-ai');
     const runtime = await ModelRuntime.create({ authPath: `${config.stateDirectory}/native-auth.json`, modelsPath: null, allowModelNetwork: false, refreshOnCreate: false, credentials: new ai.InMemoryCredentialStore() });
+    if (config.openRouterRouting) {
+      const { openrouterProvider } = await import('@earendil-works/pi-ai/providers/openrouter');
+      const builtIn = openrouterProvider();
+      const inline = inlineOpenRouterModel(config);
+      runtime.registerNativeProvider({ ...builtIn, getModels: () => [...builtIn.getModels().filter(model => model.id !== inline.id), inline] });
+    }
     const model = runtime.getModel(config.modelProvider, config.modelId);
     if (!model || model.api !== config.modelApi || model.baseUrl !== config.modelBaseUrl || model.id !== config.modelId || model.provider !== config.modelProvider) {
       throw new Error('native command model does not match its pinned endpoint and API');

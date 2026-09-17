@@ -30,6 +30,24 @@ const endpointUrl = z.string().url().refine((value) => {
   } catch { return false; }
 }, 'endpoint URL must not contain credentials, query, or fragment');
 
+/**
+ * OpenRouter routing is part of the immutable native-command input.  Keeping the
+ * provider selector here makes the route auditable and prevents Pi's catalog
+ * defaults from silently widening it (including fallback providers).
+ */
+export const openRouterRoutingSchema = z.object({
+  allow_fallbacks: z.literal(false),
+  require_parameters: z.literal(true),
+  data_collection: z.literal('deny'),
+  zdr: z.literal(true),
+  only: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/)).min(1).max(8),
+  quantizations: z.array(z.enum(['int4', 'int8', 'fp4', 'fp6', 'fp8', 'fp16', 'bf16', 'fp32'])).min(1).max(8).optional(),
+  max_price: z.object({ prompt: z.number().finite().nonnegative(), completion: z.number().finite().nonnegative() }).strict(),
+}).strict();
+export type OpenRouterRouting = Readonly<z.infer<typeof openRouterRoutingSchema>>;
+const openRouterModelSchema = z.object({ name: z.string().min(1).max(256), reasoning: z.boolean(), input: z.array(z.enum(['text', 'image'])).min(1).max(2) }).strict();
+export type OpenRouterModelDefinition = Readonly<z.infer<typeof openRouterModelSchema>>;
+
 /** Strict, versioned input for one native command. It contains references and
  * identities only; credential values are intentionally not representable. */
 export const nativeCommandConfigSchema = z.object({
@@ -58,6 +76,8 @@ export const nativeCommandConfigSchema = z.object({
   modelBaseUrl: endpointUrl,
   modelFamily: z.string().min(1).max(256),
   modelFactVersion: z.number().int().positive(),
+  openRouterRouting: openRouterRoutingSchema.optional(),
+  openRouterModel: openRouterModelSchema.optional(),
   requiredCapabilities: z.array(z.string().min(1)).min(1).max(32),
   dataClassification: z.enum(['public', 'restricted']),
   credentialEnvironment: z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/),
@@ -91,10 +111,29 @@ export const nativeCommandConfigSchema = z.object({
 }).strict().superRefine((config, context) => {
   if (config.policy.maxOutputTokens > config.policy.maxBilledOutputTokens) context.addIssue({ code: z.ZodIssueCode.custom, message: 'output cap exceeds billed output bound' });
   if (config.policy.baseUrl !== config.modelBaseUrl || config.policy.authEnvironment !== config.credentialEnvironment) context.addIssue({ code: z.ZodIssueCode.custom, message: 'policy endpoint or credential identity differs from model configuration' });
+  if (config.modelProvider === 'openrouter' && !config.openRouterRouting) context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter routing is required' });
+  if (config.openRouterRouting && config.modelBaseUrl !== 'https://openrouter.ai/api/v1') context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter endpoint must be pinned' });
+  if (config.openRouterRouting && config.modelProvider !== 'openrouter') context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter routing requires the openrouter provider' });
+  if (config.openRouterRouting && config.modelApi !== 'openai-completions') context.addIssue({ code: z.ZodIssueCode.custom, message: 'inline OpenRouter model requires openai-completions API' });
+  if (config.openRouterRouting && !config.openRouterModel) context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter routing requires an inline model definition' });
+  if (!config.openRouterRouting && config.openRouterModel) context.addIssue({ code: z.ZodIssueCode.custom, message: 'inline OpenRouter model requires routing policy' });
+  if (config.openRouterRouting?.max_price && (config.openRouterRouting.max_price.prompt > config.policy.inputUsdPerMillion || config.openRouterRouting.max_price.completion > config.policy.outputUsdPerMillion)) context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter price cap exceeds the bounded policy rate' });
   const bound = (config.policy.contextWindow * (config.policy.inputUsdPerMillion + config.policy.cacheReadUsdPerMillion + config.policy.cacheWriteUsdPerMillion) + config.policy.maxBilledOutputTokens * config.policy.outputUsdPerMillion) / 1_000_000;
   if (!Number.isFinite(bound)) context.addIssue({ code: z.ZodIssueCode.custom, message: 'resource upper bound is not finite' });
 });
 export type NativeCommandConfig = Readonly<z.infer<typeof nativeCommandConfigSchema>>;
+
+/** Construct the exact model absent from Pi's bundled catalog, using only the
+ * already validated native command fields and no external models.json input. */
+export function inlineOpenRouterModel(config: NativeCommandConfig): Model<Api> {
+  if (config.modelProvider !== 'openrouter' || !config.openRouterRouting || !config.openRouterModel) throw new Error('inline OpenRouter model configuration is absent');
+  return {
+    id: config.modelId, name: config.openRouterModel.name, api: config.modelApi as Api, provider: 'openrouter', baseUrl: config.modelBaseUrl,
+    reasoning: config.openRouterModel.reasoning, input: [...config.openRouterModel.input], contextWindow: config.policy.contextWindow, maxTokens: config.policy.maxBilledOutputTokens,
+    cost: { input: config.policy.inputUsdPerMillion, output: config.policy.outputUsdPerMillion, cacheRead: config.policy.cacheReadUsdPerMillion, cacheWrite: config.policy.cacheWriteUsdPerMillion },
+    compat: { openRouterRouting: config.openRouterRouting },
+  } as Model<Api>;
+}
 
 type Manifest = Readonly<{ schemaVersion: 1; digest: string; config: NativeCommandConfig }>;
 export type NativeCommandResult = Readonly<{
@@ -343,9 +382,14 @@ export function createNativeCommandEnvironment(config: NativeCommandConfig, opti
   now?: () => string;
 }>): NativeCommandEnvironment & Readonly<{ fleet: PiWorkerFleet }> {
   nativeCommandConfigSchema.parse(config);
-  const policy: BoundedPiAccessPolicy = { ...config.policy, provider: config.modelProvider, model: config.modelId, api: config.modelApi as BoundedPiAccessPolicy['api'], baseUrl: config.modelBaseUrl };
+  const policy: BoundedPiAccessPolicy = { ...config.policy, provider: config.modelProvider, model: config.modelId, api: config.modelApi as BoundedPiAccessPolicy['api'], baseUrl: config.modelBaseUrl, ...(config.openRouterRouting ? { openRouterRouting: config.openRouterRouting } : {}) };
   new BoundedPiAccess(policy); // Validate all policy bounds before command admission or workspace effects.
   if (options.model.id !== config.modelId || options.model.provider !== config.modelProvider || options.model.api !== config.modelApi || options.model.baseUrl !== config.modelBaseUrl || options.model.contextWindow !== config.policy.contextWindow || options.model.maxTokens < config.policy.maxBilledOutputTokens) throw new Error('native model differs from pinned configuration');
+  if (config.openRouterRouting) {
+    const compat = (options.model as Model<Api> & { compat?: { openRouterRouting?: unknown } }).compat;
+    const actual = compat?.openRouterRouting;
+    if (JSON.stringify(actual) !== JSON.stringify(config.openRouterRouting)) throw new Error('native model OpenRouter routing differs from pinned configuration');
+  }
   const planFor = (input: WorkerSpawnInput, workerId: string, attemptId: string, context: HelmToolExecutionContext): WorkerSpawnPlan => planWorkerSpawn({
     input, workerId, attemptId, commandId: `native-worker-spawn-${digest({ runId: config.runId, taskId: config.taskId }).slice('sha256:'.length, 'sha256:'.length + 32)}`, actorId: `native-command:${config.taskId}`, context,
     autonomyLease: options.autonomyLease, ownership: options.ownership, plannedAt: config.plannedAt, notAfter: config.notAfter, repositoryId: config.repositoryId, mapNodeId: config.mapNodeId, mapNodeRevision: config.mapNodeRevision, objectiveVersion: config.objectiveVersion, acceptanceVersion: config.acceptanceVersion,

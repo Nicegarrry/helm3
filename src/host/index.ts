@@ -295,6 +295,8 @@ export class HostControlPlane {
   /** Trusted model-registry ingestion; orchestration JSON only selects an existing fact. */
   recordModelFact(fact: ModelFact): void { this.kernel.host.putModelFact(fact); }
   readModelFact(modelId: string): ModelFact | undefined { return this.kernel.host.readModelFact(modelId); }
+  /** Read a current, nonrevoked autonomy lease before a command references it. */
+  readAutonomyLease(leaseId: string, revision: number): AutonomyLease | undefined { return this.kernel.host.readAutonomyLease(leaseId, revision); }
   assertModelProvenance(modelId: string, provider: string, factVersion: number): void { this.kernel.host.assertModelProvenance(modelId, provider, factVersion); }
   revokeAutonomyLease(leaseId: string): void { this.kernel.host.revokeAutonomyLease(leaseId); }
   /** Trusted runtime records immutable worker-attempt provenance before Pi begins effects. */

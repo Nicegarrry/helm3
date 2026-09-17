@@ -2,13 +2,13 @@
 
 OpenRouter is an additional paid API resource pool. A funded account is not a licence to spend its full balance: Helm still requires an existing human authority, expiring lease, registered model facts and a bounded request policy. Unknown earlier usage stays reserved. This integration does not resume a paused general build or automatically choose models.
 
-## Qualified route, 17 September 2026
+## Access-tested route, 17 September 2026
 
 The initial route is `deepseek/deepseek-v4.1-flash` through **Baseten**, at the observed OpenRouter endpoint prices of US$0.30 input / US$1.20 output per million tokens and US$0.03 cache-read tokens. The provider lists a 1,048,576-token context and 32,768-token maximum completion. These are dated route facts, not perpetual prices or model capability certification.
 
-A synthetic API test returned `HELM_ROUTE_OK` and identified the upstream provider as BaseTen. A separate Pi ModelRuntime request returned `HELM_PI_OK` with the final request constrained to Baseten. Each consumed 21 input and 6 output tokens, costing US$0.0000135. Fireworks was tested separately with no fallback and returned HTTP429; that route is not qualified as available by this run.
+A synthetic API test returned `HELM_ROUTE_OK` and identified the upstream provider as BaseTen. A separate Pi ModelRuntime request returned `HELM_PI_OK` with the final request constrained to Baseten. Each consumed 21 input and 6 output tokens, costing US$0.0000135. Fireworks also accepted a separate native-shaped streaming request, but both routes subsequently returned HTTP429 from their upstream shared capacity pools. The final bounded native Helm attempt captured a Fireworks shared-pool429. Full live-worker completion has not yet been qualified; access success does not establish sustained availability.
 
-The [OpenRouter provider directory](https://openrouter.ai/providers) lists US headquarters for Baseten and Fireworks, but its API returns no data-centre locations for either. **Provider selection is verified; physical inference geography is not.** Baseten documents optional region-locked environments separately. Do not label this generic OpenRouter endpoint as guaranteed US-only processing. Qualification used only synthetic/public content.
+The [OpenRouter provider directory](https://openrouter.ai/providers) lists US headquarters for Baseten and Fireworks, but its API returns no data-centre locations for either. **Provider selection is verified; physical inference geography is not.** Baseten documents optional region-locked environments separately. Do not label this generic OpenRouter endpoint as guaranteed US-only processing. Qualification used only synthetic/public content. The integration passed 370 tests, including provider-free native execution and replay. Failed live attempts remain visible in the ledger and their unknown monetary reservations remain held; a provider error is not treated as a completed engineering task.
 
 ## Pi setup
 

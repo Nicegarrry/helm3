@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { IndependentReviewService, type DurableReviewRecord } from '../../src/host/review.js';
+import { IndependentReviewService, MAX_REVIEW_CONTEXT_BYTES, type DurableReviewRecord } from '../../src/host/review.js';
 import { createHostReviewToolRegistry } from '../../src/host/review-tools.js';
 import { AstraLoopbackMcpTransport, FableDriver, type OrchestratorArtifacts } from '../../src/runtime/orchestrator/index.js';
 
@@ -197,4 +197,44 @@ for (const failure of ['dirty', 'stale', 'authorization', 'session-reuse'] as co
         : { spawn: async () => ({ workerId: 'reviewer', attemptId: 'attempt-builder', sessionId: 'session-builder' }) });
   await assert.rejects(service.request({ sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: [], reviewerModelId: 'reviewer' }));
   assert.equal(count(), 0);
+});
+
+const boundedRequest = { sourceWorkerId: 'builder-1', expectedHead: head, objectiveRef: 'objective', acceptanceRef: 'acceptance', contextRefs: ['code'], reviewerModelId: 'reviewer' };
+
+test('review context permits exactly the aggregate UTF-8 byte limit without truncation', async () => {
+  const text = 'x'.repeat(MAX_REVIEW_CONTEXT_BYTES - 2);
+  const approved: string[] = [];
+  const { service, count } = fixture({ readArtifact: async ref => ref === 'code' ? text : 'x', assertReviewContext: async (_ref, _purpose, value) => { approved.push(value); } });
+  const result = await service.request(boundedRequest);
+  assert.equal(count(), 1);
+  assert.deepEqual(approved, ['x', 'x', text]);
+  assert.equal(result.manifest.entries.length, 3);
+});
+
+for (const [name, texts, refs] of [
+  ['one byte over', { objective: 'x', acceptance: 'x', code: 'x'.repeat(MAX_REVIEW_CONTEXT_BYTES - 1) }, ['code']],
+  ['multibyte UTF-8', { objective: 'x', acceptance: 'x', code: 'é'.repeat(MAX_REVIEW_CONTEXT_BYTES / 2) }, ['code']],
+  ['individually small artifacts', { objective: 'x', acceptance: 'x', code: 'x'.repeat(32768), other: 'y'.repeat(32768) }, ['code', 'other']],
+  ['duplicate references', { objective: 'x', acceptance: 'x', code: 'x'.repeat(32768) }, ['code', 'code']],
+] as const) {
+  test(`review context refuses ${name} before durable intent or spawn`, async () => {
+    const { service, count, records } = fixture({ readArtifact: async ref => (texts as Record<string, string>)[ref]! });
+    await assert.rejects(service.request({ ...boundedRequest, contextRefs: [...refs] }), /review context exceeds byte limit/);
+    assert.equal(count(), 0);
+    assert.equal(records.size, 0);
+  });
+}
+
+test('oversized first review artifact stops later reads and approval', async () => {
+  const reads: string[] = [];
+  let approvals = 0;
+  const { service, count, records } = fixture({
+    readArtifact: async ref => { reads.push(ref); return 'x'.repeat(MAX_REVIEW_CONTEXT_BYTES + 1); },
+    assertReviewContext: async () => { approvals++; },
+  });
+  await assert.rejects(service.request(boundedRequest), /provide a bounded summary and retain full logs as artifacts/);
+  assert.deepEqual(reads, ['objective']);
+  assert.equal(approvals, 0);
+  assert.equal(count(), 0);
+  assert.equal(records.size, 0);
 });

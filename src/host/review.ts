@@ -7,6 +7,16 @@ import type { WorkspaceManager } from '../workspace/index.js';
 import type { ReviewContextPurpose } from './review-context.js';
 import { observeReviewTerminal } from './review-observer.js';
 
+/**
+ * Bounded aggregate UTF-8 text bytes for the host-approved context artifacts
+ * (objective, acceptance and every factual-context ref) of a single review
+ * request.  This is admission control only: it never truncates an artifact,
+ * rewrites a log, or changes what a reviewer publishes.  An oversized request
+ * must be replaced by a caller-authored bounded summary while the full logs
+ * stay available as artifacts.  There is intentionally no option to waive it.
+ */
+export const MAX_REVIEW_CONTEXT_BYTES = 64 * 1024;
+
 export type ReviewRequest = Readonly<{
   sourceWorkerId: string;
   expectedHead: string;
@@ -123,8 +133,20 @@ export class IndependentReviewService {
     // Copy the bytes and derive the digest before the async spawn effect.
     // HostArtifactStore rejects effect and invocation refs structurally; the
     // trusted caller remains responsible for selecting text refs that do not
-    // contain a builder transcript or primary conclusion.
-    const entries = await Promise.all(refs.map(async (item) => { const text = await this.binding.readArtifact(item.ref); await this.binding.assertReviewContext(item.ref, item.purpose, text); return Object.freeze({ ref: item.ref, purpose: item.purpose, hash: digest(text) }); }));
+    // contain a builder transcript or primary conclusion.  Reads are
+    // sequential so the aggregate UTF-8 byte budget is enforced against the
+    // exact texts that would actually enter reviewer context, before any
+    // durable claim or native spawn.  Every purpose counts and a ref listed
+    // more than once consumes its bytes twice.
+    const entries: Array<Readonly<{ ref: string; purpose: ReviewContextPurpose; hash: string }>> = [];
+    let consumedBytes = 0;
+    for (const item of refs) {
+      const text = await this.binding.readArtifact(item.ref);
+      consumedBytes += Buffer.byteLength(text, 'utf8');
+      if (consumedBytes > MAX_REVIEW_CONTEXT_BYTES) throw new Error('review context exceeds byte limit; provide a bounded summary and retain full logs as artifacts');
+      await this.binding.assertReviewContext(item.ref, item.purpose, text);
+      entries.push(Object.freeze({ ref: item.ref, purpose: item.purpose, hash: digest(text) }));
+    }
     const manifest = Object.freeze({ digest: digest(entries), entries: Object.freeze(entries) });
     const idempotencyKey = reviewKey(source, request);
     const planned = frozenRecord({ schemaVersion: 1, reviewId: stableReviewId(idempotencyKey), idempotencyKey, state: 'planned', source, requestedHead: request.expectedHead, manifest, reviewer: { requestedModelId: request.reviewerModelId } });

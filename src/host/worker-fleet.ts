@@ -386,14 +386,25 @@ export class PiWorkerFleet {
       // worker.stop.  If cancellation was not confirmed, this runner still
       // owns reconciliation: an ignored abort can later complete or fail.
       if (stop && await stop === 'stopped') return;
-      // Once completion is durably recorded it wins over a later projection or
-      // event failure. Never rewrite that stable terminal disposition as an
-      // unknown worker merely because a subsequent bookkeeping call failed.
+      // Completion may already be durable when a later projection or event
+      // operation throws. Do not add cancellation side effects in that case.
       if (terminal?.state === 'terminal') return;
+      // Runner failure is not a process-death inference. Ask the native
+      // runtime for its explicit local stop proof, then reconcile any fully
+      // drained model delivery failures before deciding attempt capacity.
+      let localStop: 'stopped' | 'unknown' = 'unknown';
+      try { localStop = await live.worker.stopLocal(); } catch { localStop = 'unknown'; }
+      try { await this.binding.host.reconcilePiModelDeliveryFailures(live.context.runId, live.record.attemptId); } catch { /* Invalid or absent receipts remain unknown. */ }
+      let stoppedProofs = 0;
+      if (localStop === 'stopped') {
+        try { stoppedProofs = await this.binding.host.reconcilePiStoppedReceipts(live.context.runId, live.record.attemptId); } catch { /* The stop proof is absent or not yet sufficient. */ }
+      }
       const unknown = Object.freeze({ ...live.record, state: 'unknown' as const });
       terminal = await this.persistRecord(live.context, unknown, 'terminal');
       this.#records.set(workerId, terminal);
-      this.binding.host.reportAttemptStop(live.record.attemptId, 'unknown');
+      // Only the validated durable stop proof may release attempt capacity.
+      const canFinish = stoppedProofs > 0;
+      try { this.binding.host.reportAttemptStop(live.record.attemptId, canFinish ? 'stopped' : 'unknown'); } catch { /* Preserve the worker unknown if lifecycle evidence is incomplete. */ }
       await this.appendAndDeliverSupervisorEvent(event('worker.failed', terminal, live.context.runId, { disposition: 'unknown' }));
     } finally {
       if (!this.#stopping.has(workerId)) {
@@ -418,6 +429,11 @@ export class PiWorkerFleet {
       // cannot be durably written; no success/terminal claim is manufactured.
       this.#records.set(workerId, unknown); this.#live.set(workerId, live);
     }
+  }
+
+  private attemptCommandsTerminal(runId: string, attemptId: string): boolean {
+    const commands = this.binding.host.readFleetProjection(runId).commands.filter((record) => this.binding.host.commandAttempt(record.command.commandId)?.attemptId === attemptId);
+    return commands.length > 0 && commands.every((record) => record.status === 'succeeded' || record.status === 'failed' || record.status === 'refused');
   }
 
   private async persistRecord(context: HelmToolExecutionContext, record: StoredWorker, phase: 'terminal' | 'stop'): Promise<StoredWorker> {
@@ -454,7 +470,7 @@ export class PiWorkerFleet {
     if (!admitted || (admitted.command.kind !== 'worker.spawn' && admitted.command.kind !== 'worker.steer')
       || admitted.command.runId !== runId || admitted.command.scope.mapNodeId === undefined
       || payload?.attemptId !== fleetEvent.attemptId || typeof payload.workerId !== 'string'
-      || !snapshot.attempts.some((attempt) => attempt.attemptId === fleetEvent.attemptId && attempt.commandIds.includes(admitted.command.commandId))) {
+      || this.binding.host.commandAttempt(admitted.command.commandId)?.attemptId !== fleetEvent.attemptId) {
       throw new Error('fleet event is not bound to an admitted worker attempt');
     }
     const phase = fleetEvent.kind === 'worker.completed' ? 'terminal-known' : 'terminal-unknown';
@@ -498,6 +514,10 @@ export class PiWorkerFleet {
    * workers, and replaying an event is deduplicated by its persisted ID.
    */
   async replaySupervisorEvents(runId: string): Promise<void> {
+    // Native delivery receipts are the same restart-safe observation hook used
+    // during a live runner catch. Replaying it performs no provider work.
+    await this.binding.host.reconcilePiModelDeliveryFailures(runId);
+    await this.binding.host.reconcilePiStoppedReceipts(runId);
     const events = this.binding.host.createSupervisor().log().readEvents(runId);
     for (const fleetEvent of events) {
       if (fleetEvent.source !== 'host.worker_fleet' || (fleetEvent.kind !== 'worker.completed' && fleetEvent.kind !== 'worker.failed')) continue;
@@ -599,9 +619,11 @@ export class PiWorkerFleet {
     };
     const observed = await this.binding.host.performAdmitted(admitted.command.commandId, this.binding.executor, this.binding.claimExpiresAt(), this.binding.readFact, effect);
     if (observed.state === 'succeeded') {
-      // Only after worker.stop itself is observed are all attempt commands
-      // terminal, so this is the point at which capacity can be released.
-      this.binding.host.reportAttemptStop(record.attemptId, 'stopped');
+      // Reconcile native failures before deciding whether the explicit stop
+      // proof covers every command in the attempt.
+      await this.binding.host.reconcilePiModelDeliveryFailures(context.runId, record.attemptId);
+      await this.binding.host.reconcilePiStoppedReceipts(context.runId, record.attemptId);
+      this.binding.host.reportAttemptStop(record.attemptId, this.attemptCommandsTerminal(context.runId, record.attemptId) ? 'stopped' : 'unknown');
       this.#live.delete(workerId); this.#runs.delete(workerId); this.#stopping.delete(workerId);
       if (live && !live.worker.isActive) live.worker.dispose();
     } else this.#stopping.delete(workerId);

@@ -93,6 +93,8 @@ export type TrustedExecutor = { executorId: string };
 export type Claim = { commandId: string; executorId: string; token: string; generation: number; expiresAt: string };
 export type CommandStatus = 'queued' | 'claimed' | 'effect_started' | 'observing' | 'succeeded' | 'failed' | 'refused' | 'unknown';
 export type CommandRecord = { command: Command; status: CommandStatus; immutableHash: string; claim?: Claim; observations: EffectObservation[] };
+/** Narrow trusted relation used by host recovery; it does not expose SQLite. */
+export type CommandAttemptBinding = Readonly<{ commandId: string; attemptId: string; runId: string; repositoryId: string; mapNodeId?: string; parentAuthorityId: string }>;
 /**
  * Trusted host read model for one run. This is deliberately a projection: it
  * exposes parsed durable records without exposing SQLite or authority writes.
@@ -227,6 +229,8 @@ export class KernelHost {
   assertEffectAuthority(commandId: string): void { this.core.assertEffectAuthority(commandId); }
 
   readRun(runId: string): KernelRunProjection { return this.core.readRun(runId); }
+  /** Read the durable command-to-attempt relation even when Attempt.commandIds is empty. */
+  commandAttempt(commandId: string): CommandAttemptBinding | undefined { return this.core.commandAttempt(commandId); }
 
   /** Pass a run ID for scoped host recovery; the no-argument legacy kernel operation remains global. */
   recoverAfterRestart(runId?: string): void { this.core.recoverInterrupted(runId); }
@@ -494,6 +498,14 @@ class Kernel {
   getCommand(commandId: string): CommandRecord | undefined {
     const row = parseRow(this.db.prepare(`SELECT command_id, immutable_json, immutable_hash, payload_json, payload_hash, status, claim_token, claim_executor_id, claim_generation, claim_expires_at, effect_id, lease_id, parent_authority_id, attempt_id, map_node_id FROM commands WHERE command_id = ?`).get(commandId));
     return row ? this.toRecord(row) : undefined;
+  }
+
+  commandAttempt(commandId: string): CommandAttemptBinding | undefined {
+    const row = this.db.prepare(`SELECT command_id, run_id, repository_id, map_node_id, parent_authority_id, attempt_id FROM commands WHERE command_id = ?`).get(commandId) as {
+      command_id: string; run_id: string; repository_id: string; map_node_id: string | null; parent_authority_id: string; attempt_id: string | null;
+    } | undefined;
+    if (!row?.attempt_id) return undefined;
+    return Object.freeze({ commandId: row.command_id, attemptId: row.attempt_id, runId: row.run_id, repositoryId: row.repository_id, ...(row.map_node_id ? { mapNodeId: row.map_node_id } : {}), parentAuthorityId: row.parent_authority_id });
   }
 
   readRun(runId: string): KernelRunProjection {

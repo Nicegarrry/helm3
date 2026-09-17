@@ -10,7 +10,13 @@ export type PiEventSpoolLimits = Readonly<{ maxBytes: number; maxEvents: number;
 
 /** Pi's public JSON mode removes the cumulative assistant snapshot from updates. Keep a local copy: that module is not exported by the pinned package. */
 export function serializePiEvent(event: AgentSessionEvent): unknown {
-  if (event.type !== 'message_update') return event;
+  // Native provider errors can be echoed on terminal session events. Keep the
+  // event shape and outcome, but never persist the provider supplied body.
+  const message = (event as unknown as { message?: { role?: unknown; stopReason?: unknown; errorMessage?: unknown } }).message;
+  const sanitized = message?.role === 'assistant' && typeof message.errorMessage === 'string'
+    ? { ...event, message: { ...message, errorMessage: 'Helm model request failed' } }
+    : event;
+  if (event.type !== 'message_update') return sanitized;
   if (event.message.role !== 'assistant') throw new Error('Pi message update did not contain an assistant message');
   const assistantMessageEvent = event.assistantMessageEvent as Record<string, unknown>;
   const { partial: _partial, ...delta } = assistantMessageEvent;

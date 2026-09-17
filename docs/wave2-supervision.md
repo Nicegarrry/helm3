@@ -65,3 +65,11 @@ Hosts can connect `fleet.observeProcesses(runId)` through the runner's trusted o
 Live dogfooding found that immutable attempt history may have empty command IDs. Observation therefore binds through the trusted launch record rather than requiring that optional history. The regression uses the same empty-history shape; removing the correction reproduces the missing observation.
 
 Monitoring uses a fresh Kernel command/attempt projection without scanning unrelated artifact payloads. Scoped launch evidence remains hash-checked when read. Supervisor signals reference the durable observation event, whose binding leads to the launch evidence; they do not embed arbitrarily long scoped artifact envelopes as evidence IDs. A native failed-review dogfood exposed both this size boundary and the broad snapshot cost.
+
+## Native model delivery recovery
+
+A fully drained native model stream with an explicit error now produces a redacted receipt bound to its model command, parent launch, attempt, session and immutable model selection. The Host validates the exact journal identity and bytes before recording failed delivery. It preserves the earlier unknown observation; if a crash occurred before that observation was written, recovery records the previously unobserved interval explicitly. Neither path means the provider did no work: uncertain monetary reservations remain held.
+
+Capacity needs separate native stop evidence and terminal observations for every command bound to the attempt. A missing process handle, dead process, ignored cancellation, pending stream or missing receipt cannot satisfy that requirement. Replaying receipts starts no provider call, grants no retry authority and does not require the historical model to remain enabled. Native errors do not trigger automatic envelope correction; partial response text remains rejected evidence.
+
+These are narrow execution and recovery primitives. They do not establish a successful worker result, settle billing, make historical failures with no receipt recoverable automatically, or complete the operational CLI and full live acceptance scenario.

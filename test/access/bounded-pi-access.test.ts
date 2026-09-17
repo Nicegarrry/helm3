@@ -65,3 +65,56 @@ test('takes an immutable strict policy snapshot and retains zero or inconsistent
   assert.deepEqual(gate.settlement('immutable'), { state: 'unknown', reason: 'provider token telemetry is zero, inconsistent, or exceeds a frozen cap' });
   assert.throws(() => new BoundedPiAccess({ ...access().policy, untrusted: true } as unknown as typeof original), /unknown fields/);
 });
+
+test('requires and reapplies the pinned OpenRouter route after caller payload hooks', async () => {
+  const route = { only: ['baseten'], allow_fallbacks: false, require_parameters: true, data_collection: 'deny', zdr: true, max_price: { prompt: 0.3, completion: 1.2 } };
+  const openRouter = { id: 'deepseek/deepseek-v4.1-flash', provider: 'openrouter', api: 'openai-completions', baseUrl: 'https://openrouter.ai/api/v1', contextWindow: 1048576, maxTokens: 32768 } as Model<Api>;
+  assert.throws(() => new BoundedPiAccess({ ...access().policy, provider: 'openrouter', model: openRouter.id, baseUrl: openRouter.baseUrl } as never), /routing policy is required/);
+  const gate = new BoundedPiAccess({ ...access().policy, provider: 'openrouter', model: openRouter.id, api: openRouter.api, baseUrl: openRouter.baseUrl, contextWindow: openRouter.contextWindow, maxOutputTokens: 512, maxBilledOutputTokens: 32768, openRouterRouting: route });
+  const prepared = gate.prepare('route-effect', openRouter, { messages: [] }, { maxTokens: 999, onPayload: () => ({ model: 'attacker/model', max_tokens: 1, provider: { only: ['fireworks'], allow_fallbacks: true } }) });
+  const payload = await prepared.options.onPayload?.({ model: openRouter.id, max_completion_tokens: 512 }, openRouter);
+  assert.deepEqual(payload, { model: openRouter.id, max_completion_tokens: 512, provider: route });
+});
+
+
+test('OpenRouter pins nested route values and refuses unpriced or auxiliary routing', async () => {
+  const route = { only: ['baseten'], allow_fallbacks: false, require_parameters: true, data_collection: 'deny', zdr: true, max_price: { prompt: 0.3, completion: 1.2 } };
+  const policy = { ...access().policy, provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', baseUrl: 'https://openrouter.ai/api/v1', openRouterRouting: route };
+  assert.throws(() => new BoundedPiAccess({ ...policy, openRouterRouting: { ...route, max_price: undefined } }), /price caps/);
+  assert.throws(() => new BoundedPiAccess({ ...policy, openRouterRouting: { ...route, max_price: { prompt: 999, completion: 1.2 } } }), /price caps/);
+  const gate = new BoundedPiAccess(policy);
+  route.only.push('deepseek'); route.max_price.prompt = 999;
+  const selected = { ...model, provider: 'openrouter', id: policy.model, baseUrl: policy.baseUrl } as Model<Api>;
+  const prepared = gate.prepare('mutated-route', selected, { messages: [] }, { onPayload: () => undefined });
+  const payload = await prepared.options.onPayload!({ model: selected.id, messages: [] }, selected) as any;
+  assert.deepEqual(payload.provider.only, ['baseten']);
+  assert.equal(payload.provider.max_price.prompt, 0.3);
+  for (const key of ['models', 'route', 'plugins', 'service_tier']) {
+    await assert.rejects(async () => prepared.options.onPayload!({ [key]: [] }, selected), /not authorised/);
+  }
+  await assert.rejects(async () => prepared.options.onPayload!({ messages: ['x'.repeat(2000)] }, selected), /packet cap/);
+});
+
+test('actual Pi OpenRouter HTTP payload preserves bounded routing after sampling overrides', async () => {
+  const { streamSimple } = await import('@earendil-works/pi-ai/api/openai-completions');
+  const originalFetch = globalThis.fetch;
+  let observed: any;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), 'https://openrouter.ai/api/v1/chat/completions');
+    observed = JSON.parse(String(init?.body));
+    return new Response('data: {"id":"synthetic-openrouter","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  };
+  try {
+    const route = { only: ['baseten'], allow_fallbacks: false, require_parameters: true, data_collection: 'deny', zdr: true, max_price: { prompt: 0.3, completion: 1.2 } };
+    const selected = { ...model, name: 'probe', provider: 'openrouter', id: 'deepseek/deepseek-v4.1-flash', baseUrl: 'https://openrouter.ai/api/v1', reasoning: false, input: ['text'], cost: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 }, compat: { openRouterRouting: route } } as Model<Api>;
+    const gate = new BoundedPiAccess({ ...access().policy, provider: selected.provider, model: selected.id, baseUrl: selected.baseUrl, openRouterRouting: route, maxPacketBytes: 8192 });
+    const context = { messages: [{ role: 'user' as const, content: 'Synthetic test', timestamp: 0 }] };
+    const prepared = gate.prepare('wire', selected, context, { apiKey: 'synthetic-no-account', samplingParams: { model: 'wrong/model', provider: { only: ['deepseek'], allow_fallbacks: true }, max_tokens: 999999, max_completion_tokens: 999999 } } as any);
+    const result = await streamSimple(selected as Model<'openai-completions'>, context, prepared.options).result();
+    assert.equal(result.stopReason, 'stop');
+    assert.equal(observed.model, selected.id);
+    assert.deepEqual(observed.provider, route);
+    assert.equal(observed.max_completion_tokens, 100);
+    assert.equal(observed.max_tokens, undefined);
+  } finally { globalThis.fetch = originalFetch; }
+});

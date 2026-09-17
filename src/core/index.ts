@@ -209,6 +209,8 @@ export class KernelHost {
 
   putModelFact(fact: ModelFact): void { this.core.putModelFact(fact); }
   readModelFact(modelId: string): ModelFact | undefined { return this.core.readModelFact(modelId); }
+  /** Read a current, nonrevoked lease before a command references it. */
+  readAutonomyLease(leaseId: string, revision: number): AutonomyLease | undefined { return this.core.readAutonomyLease(leaseId, revision); }
   /** Host-only binding from immutable worker provenance to the current registry fact. */
   assertModelProvenance(modelId: string, provider: string, factVersion: number): void { this.core.assertModelProvenance(modelId, provider, factVersion); }
   requestCancellation(commandId: string): void { this.core.requestCancellation(commandId); }
@@ -603,6 +605,14 @@ class Kernel {
     if (!z.string().min(1).safeParse(modelId).success) throw new Error('model fact id is invalid');
     const row = this.db.prepare(`SELECT bytes FROM model_facts WHERE model_id = ?`).get(modelId) as { bytes: string } | undefined;
     return row ? modelFactSchema.parse(JSON.parse(row.bytes)) : undefined;
+  }
+
+  /** Read-only authority lookup for trusted host composition before admission. */
+  readAutonomyLease(leaseId: string, revision: number): AutonomyLease | undefined {
+    if (!z.string().min(1).safeParse(leaseId).success || !Number.isSafeInteger(revision) || revision < 1) throw new Error('autonomy lease identity is invalid');
+    const row = this.db.prepare(`SELECT bytes, revision, revoked FROM autonomy_leases WHERE lease_id = ?`).get(leaseId) as { bytes: string; revision: number; revoked: number } | undefined;
+    if (!row || row.revoked === 1 || row.revision !== revision) return undefined;
+    return autonomyLeaseSchema.parse(JSON.parse(row.bytes));
   }
 
   requestCancellation(commandId: string): void {

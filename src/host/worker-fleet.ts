@@ -11,6 +11,7 @@ import type { HostControlPlane } from './index.js';
 /** Private host constraint used only by independent review; it is never a public tool field. */
 export type ReviewSpawnConstraint = Readonly<{ repository: string; expectedHead: string; mode: 'review-readonly' }>;
 export type WorkerSpawnInput = Readonly<{ objectiveRef: string; acceptanceRef: string; contextRefs: readonly string[]; modelId: string; role: string; label?: string; reviewConstraint?: ReviewSpawnConstraint }>;
+export type WorkerSpawnIdentity = Readonly<{ workerId: string; attemptId: string }>;
 /** A bounded, orchestrator-selected follow-up; all paths and authority remain host configured. */
 export type WorkerSteerInput = Readonly<{ workerId: string; objectiveRef: string; evidenceRefs: readonly string[]; /** When gate output is used, this immutable command identity binds its raw refs to the predecessor and exact head. */ gateCommandId?: string; expectedSessionId: string; expectedHead: string }>;
 /** Clone an idle terminal Pi branch; the resulting child is `fork_ready`, not completed. */
@@ -150,17 +151,30 @@ export class PiWorkerFleet {
     return Object.freeze({ state: probeResult.state, observedAt, reason: probeResult.reason });
   }
 
-  async spawn(context: HelmToolExecutionContext, input: WorkerSpawnInput): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'ready' }> {
+  async spawn(context: HelmToolExecutionContext, input: WorkerSpawnInput, identity?: WorkerSpawnIdentity): Promise<{ workerId: string; attemptId: string; sessionId: string; state: 'ready' }> {
     const validated = Object.freeze({ ...input, contextRefs: Object.freeze([...input.contextRefs]), ...(input.reviewConstraint ? { reviewConstraint: Object.freeze({ ...input.reviewConstraint }) } : {}) });
     const artifacts = this.binding.host.artifactsFor(context);
     await Promise.all([artifacts.readText(validated.objectiveRef), artifacts.readText(validated.acceptanceRef), ...validated.contextRefs.map((ref) => artifacts.readText(ref))]);
-    const workerId = `worker-${randomUUID()}`;
-    const attemptId = `attempt-${workerId}`;
+    const workerId = identity?.workerId ?? `worker-${randomUUID()}`;
+    const attemptId = identity?.attemptId ?? `attempt-${workerId}`;
+    if (!/^worker-[A-Za-z0-9._:-]{1,160}$/.test(workerId) || !/^attempt-[A-Za-z0-9._:-]{1,160}$/.test(attemptId)) throw new Error('worker identity is invalid');
     const command = this.binding.spawnCommand(validated, workerId, attemptId, context);
     const provenance = spawnProvenance(command);
     if (provenance.modelId !== validated.modelId || this.binding.inputDigest(command) !== digest(validated)) throw new Error('worker spawn command does not bind the validated input references');
     this.binding.host.assertModelProvenance(provenance.modelId, provenance.modelProvider, provenance.modelFactVersion);
     const admitted = this.binding.host.admitOrchestrator(command, context, command.actorId, attemptId);
+    // A stable command may be contended by multiple native command callers.
+    // Once Core has admitted one immutable command, a contender observes that
+    // command and returns its identity without constructing another worker.
+    if (admitted.status !== 'queued') {
+      if (admitted.status === 'succeeded') {
+        const existing = await this.durableRecord(context.runId, workerId);
+        if (existing?.state === 'terminal' || existing?.state === 'ready' || existing?.state === 'running') {
+          return { workerId, attemptId, sessionId: existing.sessionId, state: 'ready' };
+        }
+      }
+      throw new Error(`worker spawn command is already ${admitted.status}; reconcile before dispatch`);
+    }
     const attempt = this.binding.attempt(admitted.command, workerId);
     let record: StoredWorker | undefined;
     const effect: KernelEffect = {

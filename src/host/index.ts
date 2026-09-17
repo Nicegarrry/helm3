@@ -860,3 +860,6 @@ export class HostControlPlane {
 }
 
 export async function openHost(options: HostOptions): Promise<HostControlPlane> { return HostControlPlane.open(options); }
+
+export { nativeCommandConfigSchema, nativeCommandDigest, nativeCommandIdentity, nativeCommandKinds, runNativeCommand, createNativeCommandEnvironment } from './native-command.js';
+export type { NativeCommandConfig, NativeCommandEnvironment, NativeCommandResult } from './native-command.js';

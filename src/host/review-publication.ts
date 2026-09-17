@@ -53,15 +53,6 @@ export type PublicationBinding = Readonly<{
   readback(prepared: PreparedReviewPublication): Promise<PublicationReceipt | undefined>;
 }>;
 
-const MAX_REASON_BYTES = 512;
-
-function boundedReason(value: unknown): string {
-  const base = value instanceof Error ? value.message : typeof value === 'string' ? value : 'publication failed';
-  const cleaned = base.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 200) || 'publication failed';
-  const text = `publication ${cleaned}`;
-  return Buffer.byteLength(text, 'utf8') > MAX_REASON_BYTES ? text.slice(0, MAX_REASON_BYTES) : text;
-}
-
 function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -178,7 +169,7 @@ export class ReviewPublicationService {
 
   async publish(reviewId: string, target: PublicationTarget): Promise<PublicationRecord> {
     const review = await this.binding.loadReview(reviewId);
-    if (!review) throw new Error('durable review is unavailable');
+    if (!review || review.reviewId !== reviewId) throw new Error('durable review identity does not match request');
     const verdict = await this.binding.readVerifiedVerdict(review);
     // Format first: a nonterminal review or an invalid body never creates intent.
     const prepared = prepareReviewPublication(review, target, verdict);
@@ -202,7 +193,7 @@ export class ReviewPublicationService {
       const publisher = await this.binding.expectedPublisher();
       if (!publisher.trim()) throw new Error('expected publisher identity is unavailable');
     } catch (error) {
-      const denied: PublicationRecord = Object.freeze({ schemaVersion: 1, key, runId, state: 'denied' as const, prepared, reason: boundedReason(error) });
+      const denied: PublicationRecord = Object.freeze({ schemaVersion: 1, key, runId, state: 'denied' as const, prepared, reason: 'publication preflight refused' });
       try {
         await this.binding.store.append(denied);
       } catch {
@@ -270,12 +261,13 @@ export class ReviewPublicationService {
         /* Durable published state may already exist; the read below is authoritative. */
       }
       const durable = await this.binding.store.reopen(key);
-      return durable ?? published;
+      if (!durable) throw new Error('publication result is not durable');
+      return durable;
     }
 
     const unknown: PublicationRecord = Object.freeze({
       schemaVersion: 1 as const, key: current.key, runId: current.runId, state: 'unknown' as const, prepared,
-      reason: failure ? boundedReason(failure) : 'publication readback could not be verified',
+      reason: failure ? 'publication readback unavailable' : 'publication readback could not be verified',
     });
     if (current.state === 'planned') {
       try {

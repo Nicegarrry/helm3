@@ -81,7 +81,9 @@ function parseIntent(bytes: Buffer, runId: string, key: string): PublicationReco
   if (typeof value !== 'object' || value === null) throw new Error('publication intent bytes are malformed');
   const claim = value as IntentClaim;
   if (claim.schemaVersion !== 1 || !nonempty(claim.claimToken) || !claim.record) throw new Error('publication intent claim is malformed');
-  return parse(Buffer.from(JSON.stringify(claim.record)), runId, key);
+  const record = parse(Buffer.from(JSON.stringify(claim.record)), runId, key);
+  if (record.state !== 'planned') throw new Error('publication intent root must be planned');
+  return record;
 }
 
 function immutable(record: PublicationRecord): PublicationRecord {
@@ -125,7 +127,7 @@ export class JournalReviewPublicationStore implements PublicationStore {
   async reopen(key: string): Promise<PublicationRecord | undefined> {
     const values = await this.records(key);
     if (!values.length) return undefined;
-    if (values[0]!.version !== 0 || values[0]!.metadata.sourceIdentity !== id(this.runId, key, 'intent')) {
+    if (values[0]!.record.state !== 'planned' || values[0]!.version !== 0 || values[0]!.metadata.sourceIdentity !== id(this.runId, key, 'intent')) {
       throw new Error('publication has no immutable intent');
     }
     for (let index = 1; index < values.length; index++) {

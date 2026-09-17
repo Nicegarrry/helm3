@@ -79,3 +79,12 @@ test('does not let an orchestrator self-override a protected reserve', () => {
   assert.deepEqual(result, { eligible: false, code: 'unattested_human_override', detail: 'reserve override must be attested by the privileged host' });
   assert.equal(called, false);
 });
+
+
+test('free is a cost class and grants neither quota certainty nor a capability', () => {
+  const economy = createEconomy({ pools: [{ poolId: 'free', kind: 'free', unit: 'usd' }], models: [{ ...snapshot.models[2]!, poolId: 'free', reviewCapabilities: [] }], quota: [] }, authority());
+  assert.equal(economy.snapshot().pools[0]!.kind, 'free');
+  assert.equal(economy.quota('free').state, 'unknown');
+  assert.equal(refusalCode(economy.eligible({ modelId: 'public-only', role: 'reviewer', requiredCapabilities: ['security'], dataClassification: 'public' })), 'capability');
+  assert.equal(refusalCode(economy.eligible({ modelId: 'public-only', role: 'reviewer', requiredCapabilities: [], dataClassification: 'restricted' })), 'data_policy');
+});

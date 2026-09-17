@@ -1,7 +1,7 @@
 import { z } from 'zod/v3';
 import type { ModelFact, ResourceRequest } from '../core/index.js';
 
-export type PoolKind = 'subscription' | 'api' | 'topup';
+export type PoolKind = 'subscription' | 'api' | 'topup' | 'free';
 export type ModelRole = 'builder' | 'reviewer' | 'consultant' | 'orchestrator';
 export type DataClassification = 'public' | 'restricted';
 export type Availability = 'known_available' | 'known_unavailable' | 'unknown';
@@ -14,7 +14,7 @@ export type EconomySnapshot = Readonly<{ pools: readonly ResourcePool[]; models:
 const identifier = z.string().min(1);
 const instant = z.string().datetime({ offset: false });
 const role = z.enum(['builder', 'reviewer', 'consultant', 'orchestrator']);
-const poolSchema = z.object({ poolId: identifier, kind: z.enum(['subscription', 'api', 'topup']), unit: identifier }).strict();
+const poolSchema = z.object({ poolId: identifier, kind: z.enum(['subscription', 'api', 'topup', 'free']), unit: identifier }).strict();
 const modelSchema = z.object({ modelId: identifier, provider: identifier, family: identifier, poolId: identifier, enabled: z.boolean(), availability: z.enum(['known_available', 'known_unavailable', 'unknown']), roles: z.array(role).min(1), buildCapabilities: z.array(identifier), reviewCapabilities: z.array(identifier), dataPolicy: z.enum(['public-only', 'restricted-ok']), observedAt: instant }).strict();
 const quotaSchema = z.discriminatedUnion('state', [
   z.object({ poolId: identifier, state: z.literal('known'), remaining: z.number().finite().nonnegative(), resetAt: instant.optional(), observedAt: instant, detail: z.string().min(1).optional() }).strict(),

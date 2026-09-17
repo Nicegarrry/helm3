@@ -10,7 +10,7 @@ import { planWorkerSpawn, type WorkerSpawnPlan } from './worker-spawn-plan.js';
 import type { WorkerSpawnIdentity, WorkerSpawnInput } from './worker-fleet.js';
 import type { HelmToolExecutionContext } from '../runtime/orchestrator/index.js';
 import type { ModelFact } from '../core/index.js';
-import { BoundedPiAccess, type BoundedPiAccessPolicy } from '../access/index.js';
+import { BoundedPiAccess, OPENROUTER_PUBLIC_FREE_MODEL, OPENROUTER_PUBLIC_FREE_MODEL_DATED_ALIAS, type BoundedPiAccessPolicy, type OpenRouterDataPolicy } from '../access/index.js';
 import { settlementForBoundedPiEffect } from '../access/live.js';
 import { createBoundedFleetRuntime } from './bounded-fleet-runtime.js';
 import { PiWorkerFleet } from './worker-fleet.js';
@@ -45,6 +45,13 @@ export const openRouterRoutingSchema = z.object({
   max_price: z.object({ prompt: z.number().finite().nonnegative(), completion: z.number().finite().nonnegative() }).strict(),
 }).strict();
 export type OpenRouterRouting = Readonly<z.infer<typeof openRouterRoutingSchema>>;
+const publicOpenRouterRoutingSchema = z.object({
+  allow_fallbacks: z.literal(false), require_parameters: z.literal(true), data_collection: z.literal('allow'), zdr: z.literal(false),
+  only: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]{1,63}$/)).min(1).max(8),
+  quantizations: z.array(z.enum(['int4', 'int8', 'fp4', 'fp6', 'fp8', 'fp16', 'bf16', 'fp32'])).min(1).max(8).optional(),
+  max_price: z.object({ prompt: z.number().finite().nonnegative(), completion: z.number().finite().nonnegative() }).strict(),
+}).strict();
+const openRouterRoutingInputSchema = z.union([openRouterRoutingSchema, publicOpenRouterRoutingSchema]);
 const openRouterModelSchema = z.object({ name: z.string().min(1).max(256), reasoning: z.boolean(), input: z.array(z.enum(['text', 'image'])).min(1).max(2) }).strict();
 export type OpenRouterModelDefinition = Readonly<z.infer<typeof openRouterModelSchema>>;
 
@@ -76,7 +83,8 @@ export const nativeCommandConfigSchema = z.object({
   modelBaseUrl: endpointUrl,
   modelFamily: z.string().min(1).max(256),
   modelFactVersion: z.number().int().positive(),
-  openRouterRouting: openRouterRoutingSchema.optional(),
+  openRouterRouting: openRouterRoutingInputSchema.optional(),
+  openRouterDataPolicy: z.enum(['private', 'public-training-allowed']).optional(),
   openRouterModel: openRouterModelSchema.optional(),
   requiredCapabilities: z.array(z.string().min(1)).min(1).max(32),
   dataClassification: z.enum(['public', 'restricted']),
@@ -112,6 +120,14 @@ export const nativeCommandConfigSchema = z.object({
   if (config.policy.maxOutputTokens > config.policy.maxBilledOutputTokens) context.addIssue({ code: z.ZodIssueCode.custom, message: 'output cap exceeds billed output bound' });
   if (config.policy.baseUrl !== config.modelBaseUrl || config.policy.authEnvironment !== config.credentialEnvironment) context.addIssue({ code: z.ZodIssueCode.custom, message: 'policy endpoint or credential identity differs from model configuration' });
   if (config.modelProvider === 'openrouter' && !config.openRouterRouting) context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter routing is required' });
+  if (config.openRouterDataPolicy === 'public-training-allowed') {
+    if (config.modelProvider !== 'openrouter' || ![OPENROUTER_PUBLIC_FREE_MODEL, OPENROUTER_PUBLIC_FREE_MODEL_DATED_ALIAS].includes(config.modelId)) context.addIssue({ code: z.ZodIssueCode.custom, message: 'public-training-allowed requires the pinned NVIDIA Nemotron free model' });
+    if (config.dataClassification !== 'public' || config.contextRefs.length !== 0 || !config.readableRoots || config.readableRoots.length !== 0) context.addIssue({ code: z.ZodIssueCode.custom, message: 'public-training-allowed requires an empty public context attestation' });
+    const route = config.openRouterRouting;
+    if (!route || JSON.stringify(route.only) !== JSON.stringify(['nvidia']) || route.allow_fallbacks !== false || route.require_parameters !== true || route.data_collection !== 'allow' || route.zdr !== false || route.max_price.prompt !== 0 || route.max_price.completion !== 0) context.addIssue({ code: z.ZodIssueCode.custom, message: 'public-training-allowed OpenRouter route is unsafe' });
+    if (config.policy.inputUsdPerMillion !== 0 || config.policy.outputUsdPerMillion !== 0 || config.policy.cacheReadUsdPerMillion !== 0 || config.policy.cacheWriteUsdPerMillion !== 0) context.addIssue({ code: z.ZodIssueCode.custom, message: 'public-training-allowed requires zero declared costs' });
+  } else if (config.openRouterDataPolicy !== undefined && config.openRouterDataPolicy !== 'private') context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter data policy is invalid' });
+  if (config.openRouterRouting && config.openRouterDataPolicy !== 'public-training-allowed' && (config.openRouterRouting.data_collection !== 'deny' || config.openRouterRouting.zdr !== true)) context.addIssue({ code: z.ZodIssueCode.custom, message: 'private OpenRouter routing policy is unsafe' });
   if (config.openRouterRouting && config.modelBaseUrl !== 'https://openrouter.ai/api/v1') context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter endpoint must be pinned' });
   if (config.openRouterRouting && config.modelProvider !== 'openrouter') context.addIssue({ code: z.ZodIssueCode.custom, message: 'OpenRouter routing requires the openrouter provider' });
   if (config.openRouterRouting && config.modelApi !== 'openai-completions') context.addIssue({ code: z.ZodIssueCode.custom, message: 'inline OpenRouter model requires openai-completions API' });
@@ -382,7 +398,7 @@ export function createNativeCommandEnvironment(config: NativeCommandConfig, opti
   now?: () => string;
 }>): NativeCommandEnvironment & Readonly<{ fleet: PiWorkerFleet }> {
   nativeCommandConfigSchema.parse(config);
-  const policy: BoundedPiAccessPolicy = { ...config.policy, provider: config.modelProvider, model: config.modelId, api: config.modelApi as BoundedPiAccessPolicy['api'], baseUrl: config.modelBaseUrl, ...(config.openRouterRouting ? { openRouterRouting: config.openRouterRouting } : {}) };
+  const policy: BoundedPiAccessPolicy = { ...config.policy, provider: config.modelProvider, model: config.modelId, api: config.modelApi as BoundedPiAccessPolicy['api'], baseUrl: config.modelBaseUrl, ...(config.openRouterRouting ? { openRouterRouting: config.openRouterRouting } : {}), ...(config.openRouterDataPolicy ? { openRouterDataPolicy: config.openRouterDataPolicy as OpenRouterDataPolicy } : {}), dataClassification: config.dataClassification, contextRefs: config.contextRefs, readableRoots: config.readableRoots };
   new BoundedPiAccess(policy); // Validate all policy bounds before command admission or workspace effects.
   if (options.model.id !== config.modelId || options.model.provider !== config.modelProvider || options.model.api !== config.modelApi || options.model.baseUrl !== config.modelBaseUrl || options.model.contextWindow !== config.policy.contextWindow || options.model.maxTokens < config.policy.maxBilledOutputTokens) throw new Error('native model differs from pinned configuration');
   if (config.openRouterRouting) {

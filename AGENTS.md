@@ -2,6 +2,8 @@
 
 ## Current authority
 
+On 2026-09-17 at 06:05 UTC the user explicitly renewed autonomous building after model testing and requested the free Nemotron route be added to the roadmap and tiering list, while conserving ChatGPT usage. This supersedes the earlier paused/expired general run below. Current bounded continuation expires at **2026-09-17T10:05:35Z**. Preserve the cumulative US$20 ceiling and all unknown reservations. New maximum allocations are US$3.50 existing open/Gemini work, US$0.90 OpenRouter paid, and US$0 free inference, against inherited ledger liability US$15.476677786 plus US$0.04 external reserve. Prefer native Pi open/Gemini workers; any non-coordinator ChatGPT worker must be Luna. Free is a cost class, not a capability tier. NVIDIA's collecting free route is limited to curated public/synthetic context; no account-wide privacy changes or private-data export. See [current plan](docs/open-model-waves.md) and [model roster](docs/model-roster.md).
+
 
 On 2026-09-17 the user explicitly assumed unified ownership of Helm 3 and Helm CLI and requested every operational dogfooding issue be added to the Helm backlog. CLI issues are in scope; do not defer them solely because their original report lives in the CLI repository. Canonical operational work is tracked in [the unified backlog](docs/unified-helm-backlog.md), with original reports preserved and linked. Port useful behaviours and evidence without reintroducing the retired worker adapter architecture.
 

@@ -118,3 +118,31 @@ test('actual Pi OpenRouter HTTP payload preserves bounded routing after sampling
     assert.equal(observed.max_tokens, undefined);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('public-training-allowed is an explicit zero-cost NVIDIA Nemotron route with no file context', async () => {
+  const route = { only: ['nvidia'], allow_fallbacks: false, require_parameters: true, data_collection: 'allow', zdr: false, max_price: { prompt: 0, completion: 0 } };
+  const selected = { ...model, provider: 'openrouter', id: 'nvidia/nemotron-3-ultra-550b-a55b:free', baseUrl: 'https://openrouter.ai/api/v1', contextWindow: 1048576, maxTokens: 32768 } as Model<Api>;
+  const gate = new BoundedPiAccess({ poolId: 'free', provider: 'openrouter', model: selected.id, api: 'openai-completions', baseUrl: selected.baseUrl, authEnvironment: 'OPENROUTER_API_KEY', contextWindow: selected.contextWindow, maxOutputTokens: 512, maxBilledOutputTokens: 32768, maxPacketBytes: 8192, maxRequests: 1, inputUsdPerMillion: 0, outputUsdPerMillion: 0, cacheReadUsdPerMillion: 0, cacheWriteUsdPerMillion: 0, maxToolCalls: 0, timeoutMs: 1000, openRouterDataPolicy: 'public-training-allowed', dataClassification: 'public', contextRefs: [], readableRoots: [], openRouterRouting: route });
+  assert.equal(gate.policy.openRouterDataPolicy, 'public-training-allowed');
+  const prepared = gate.prepare('public-free', selected, { messages: [{ role: 'user', content: 'public objective' }] }, { samplingParams: { provider: { only: ['fireworks'], allow_fallbacks: true }, max_tokens: 9999 } } as any);
+  const payload = await prepared.options.onPayload!({ model: 'attacker', max_tokens: 9999, messages: [{ role: 'system', content: '/private/host/path' }, { role: 'developer', content: 'generated metadata' }, { role: 'user', content: 'public objective' }, { role: 'assistant', content: 'prior' }, { role: 'tool', content: 'result' }] }, selected) as any;
+  assert.equal(payload.model, selected.id);
+  assert.deepEqual(payload.provider, route);
+  assert.equal(payload.messages[0].role, 'system');
+  assert.equal(payload.messages[0].content.includes('/private/host/path'), false);
+  assert.deepEqual(payload.messages.slice(1).map((message: any) => message.role), ['user', 'assistant', 'tool']);
+  assert.equal(prepared.reservation.upperBound, 0);
+  assert.equal(prepared.reservation.openRouterDataPolicy, 'public-training-allowed');
+  for (const malformed of [{}, { messages: 'private prompt' }, { messages: [null] }, { messages: [{ role: 'function', content: 'unclassified' }] }, { messages: [{ content: 'missing role' }] }]) {
+    await assert.rejects(async () => prepared.options.onPayload!(malformed, selected), /public OpenRouter/);
+  }
+});
+
+test('public-training-allowed refuses missing attestation, paid rates, or widened provider', () => {
+  const route = { only: ['nvidia'], allow_fallbacks: false, require_parameters: true, data_collection: 'allow', zdr: false, max_price: { prompt: 0, completion: 0 } };
+  const base = { ...access().policy, poolId: 'free', provider: 'openrouter', model: 'nvidia/nemotron-3-ultra-550b-a55b:free', api: 'openai-completions', baseUrl: 'https://openrouter.ai/api/v1', contextWindow: 1048576, maxOutputTokens: 512, maxBilledOutputTokens: 32768, openRouterDataPolicy: 'public-training-allowed' as const, dataClassification: 'public' as const, contextRefs: [] as string[], readableRoots: [] as string[], openRouterRouting: route };
+  assert.throws(() => new BoundedPiAccess({ ...base, readableRoots: ['.'] }), /attestation/);
+  assert.throws(() => new BoundedPiAccess({ ...base, inputUsdPerMillion: 0.01 }), /zero declared costs/);
+  assert.throws(() => new BoundedPiAccess({ ...base, openRouterRouting: { ...route, only: ['fireworks'] } }), /route is unsafe/);
+  assert.throws(() => new BoundedPiAccess({ ...base, model: 'nvidia/other:free' }), /Nemotron/);
+});

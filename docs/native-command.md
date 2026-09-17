@@ -1,6 +1,6 @@
 # Native command
 
-`npm run native -- --config /absolute/path/config.json --json` is the public
+`npm run --silent native -- --config /absolute/path/config.json --json` is the public
 entry point for one bounded native worker. The command opens the existing Host
 ledger, reads an already admitted command before model or credential setup, and
 returns a JSON result. It never records a human grant, issues an autonomy
@@ -54,3 +54,24 @@ These tests create isolated temporary repositories and authority fixtures. The
 launch test injects the actual Pi faux provider into the same host composition;
 the replay test exercises the shipped CLI in a fresh process. No live account
 state, provider request or OAuth session is needed.
+
+To create a disposable native command and retain its state for inspection, run:
+
+```sh
+npm run --silent native:fixture
+```
+
+This creates a new temporary Git repository and Host ledger, records a
+synthetic local grant, runs the actual Pi faux provider through the shipped
+`nativeCli`, and prints one JSON object with `fixture: true`, the result, and
+absolute paths. The temporary directory remains available for public CLI
+observation:
+
+```sh
+npm run --silent native -- --config /tmp/path-from-fixture/native-command.json --json
+```
+
+The fixture uses no OAuth account, live provider, quota or billing endpoint.
+It refuses live state directories, paid providers, credential values, and
+configuration overrides. Remove the reported temporary root when inspection
+is complete.

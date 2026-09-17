@@ -1,11 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { execFile } from 'node:child_process';
-import { rm } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import test from 'node:test';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { nativeCli } from '../../src/cli/native.js';
+import { nativeCommandConfigSchema, nativeCommandKinds } from '../../src/host/native-command.js';
+import { openHost } from '../../src/host/index.js';
 import { createLiveNativeFixture, fixtureStamp, workerEnvelope } from './native-command-fixture.js';
 
 const args = (path: string): string[] => ['--config', path, '--json'];
@@ -18,6 +20,39 @@ async function runPublicCli(configPath: string, cwd: string) {
   delete env.FIXTURE_KEY;
   return exec(process.execPath, ['--import', tsxLoader, cliEntrypoint, ...args(configPath)], { cwd, env, timeout: 30_000 });
 }
+
+async function runFixtureExample() {
+  const env = { ...process.env };
+  delete env.FIXTURE_KEY;
+  return exec('npm', ['run', '--silent', 'native:fixture'], { cwd: process.cwd(), env, timeout: 30_000 });
+}
+
+test('native:fixture subprocess leaves a replayable public CLI state with one setup', async () => {
+  const example = JSON.parse((await runFixtureExample()).stdout) as {
+    fixture: boolean;
+    state: string;
+    commandId: string;
+    paths: { root: string; config: string; repository: string; stateDirectory: string; destination: string };
+    result?: { status: string };
+  };
+  assert.equal(example.fixture, true);
+  assert.equal(example.state, 'succeeded');
+  assert.equal(example.result?.status, 'succeeded');
+  try {
+    const replay = JSON.parse((await runPublicCli(example.paths.config, example.paths.repository)).stdout) as { state: string; commandId: string };
+    assert.equal(replay.state, 'succeeded');
+    assert.equal(replay.commandId, example.commandId);
+    const config = nativeCommandConfigSchema.parse(JSON.parse(await readFile(example.paths.config, 'utf8')));
+    const host = await openHost({ stateDirectory: config.stateDirectory, kinds: nativeCommandKinds(config) });
+    try {
+      const snapshot = await host.snapshot(config.runId);
+      assert.equal(snapshot.commands.filter((entry) => entry.command.kind === 'worker.spawn').length, 1);
+      assert.equal(snapshot.commands.filter((entry) => entry.command.kind === 'pi.model').length, 1);
+    } finally { host.close(); }
+  } finally {
+    await rm(example.paths.root, { recursive: true, force: true });
+  }
+});
 
 test('public native CLI composition launches the real provider-free Pi fixture and replay observes it', async () => {
   const fixture = await createLiveNativeFixture('task-live', { ownershipExpiresAt: '2026-09-17T00:00:01.000Z', hostNow: fixtureStamp });

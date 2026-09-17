@@ -56,7 +56,7 @@ test('tracker outage leaves durable host view readable and source refreshes on e
 
 test('a durable stop observation is visible without inventing an accepted attempt outcome', () => {
   const attempt = { attemptId: 'attempt', mapNodeId: 'node', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'faux', capability: 'fixture', poolId: 'requests', workspace: '/fixture', baseSha: 'abc', contextManifestHash: 'fixture', leaseId: 'lease', sessionIds: [], commandIds: [], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] };
-  const result = projectHostSnapshot({ ...host, attempts: [attempt], attemptLifecycles: [{ attemptId: 'attempt', state: 'finished' }] }, null, now, 'fixture');
+  const result = projectHostSnapshot({ ...host, attempts: [attempt], attemptLifecycles: [{ attemptId: 'attempt', state: 'finished', executionReleased: true }] }, null, now, 'fixture');
   assert.equal(result.attempts[0].state, 'stopped');
   assert.equal(result.attempts[0].outcome, null);
   assert.equal(result.attempts[0].endedAt, null);
@@ -75,4 +75,12 @@ test('CLI reads identical host projection through loopback API and refuses remot
     await assert.rejects(readOperatorApi(`http://127.0.0.1:${port}/other`), /explicit/);
     await assert.rejects(operatorCli(['--url', origin, '--write']), /Usage/);
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
+});
+
+test('released unknown execution displays stopped without inventing an outcome', () => {
+  const attempt = { attemptId: 'attempt', mapNodeId: 'node', mapNodeRevision: '1', objectiveVersion: '1', acceptanceVersion: '1', role: 'builder', model: 'offline', family: 'faux', provider: 'faux', capability: 'fixture', poolId: 'requests', workspace: '/fixture', baseSha: 'abc', contextManifestHash: 'fixture', leaseId: 'lease', sessionIds: [], commandIds: [], startedAt: now, evidenceRefs: [], usageRefs: [], findingRefs: [] };
+  const result = projectHostSnapshot({ ...host, attempts: [attempt], attemptLifecycles: [{ attemptId: 'attempt', state: 'unknown', executionReleased: true }] }, null, now, 'fixture');
+  assert.equal(result.attempts[0].state, 'stopped');
+  assert.equal(result.attempts[0].outcome, null);
+  assert.equal(result.attempts[0].endedAt, null);
 });

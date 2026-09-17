@@ -273,3 +273,34 @@ test('Core refuses missing role floors, restricted context policy and policy-les
   assert.throws(() => host.admit(intent, caller()), /data policy/);
   host.close();
 });
+
+test('execution release preserves unknown accounting, fences old work and survives restart', async () => {
+  const path = databasePath();
+  const { kernel, host } = opened({ 'test.effect': resourceKind }, grant({ maxConcurrency: 1 }), { databasePath: path });
+  host.issueAutonomyLease(lease({ maxConcurrency: 1 }));
+  host.admit(command(), caller());
+  host.admit(command({ commandId: 'queued-old', idempotencyKey: 'queued-old' }), caller());
+  const claim = host.claim('command-1', { executorId: 'worker' }, later);
+  const evidence = 'raw:sha256:' + 'a'.repeat(64);
+  assert.throws(() => host.releaseAttemptExecution('attempt-1', evidence), /in-flight/);
+  await host.perform('command-1', claim, { executorId: 'worker' }, async () => ({ value: true, state: 'known', source: 'test', observedAt: now }), {
+    effectId: 'uncertain', execute: async () => undefined, observe: async () => ({ ...observedSuccess('command-1', 'uncertain'), state: 'unknown' }),
+  });
+  const before = host.readRun('run-1');
+  host.releaseAttemptExecution('attempt-1', evidence);
+  host.releaseAttemptExecution('attempt-1', evidence);
+  assert.deepEqual(host.readRun('run-1').reservations, before.reservations);
+  assert.deepEqual(kernel.getCommand('command-1'), before.commands.find(row => row.command.commandId === 'command-1'));
+  assert.throws(() => host.claim('queued-old', { executorId: 'worker' }, later), /no longer active/);
+  assert.throws(() => host.admit(command({ commandId: 'new-old', idempotencyKey: 'new-old' }), caller()), /no longer active/);
+  assert.throws(() => host.admit(command({ commandId: 'overspend', idempotencyKey: 'overspend', payload: { value: 'x', upper: 9 } }), caller('next')), /cap/);
+  host.close();
+  const reopened = openKernel({ databasePath: path, kinds: { 'test.effect': resourceKind }, now: () => now });
+  try {
+    assert.equal(reopened.host.readExecutionCapacity('authority-1').occupied, 0);
+    assert.equal(reopened.host.readExecutionCapacity('authority-1').stoppedUnresolved, 1);
+    assert.deepEqual(reopened.host.readRun('run-1').reservations, before.reservations);
+    reopened.host.admit(command({ commandId: 'next', idempotencyKey: 'next' }), caller('next'));
+    assert.equal(reopened.host.claim('next', { executorId: 'worker-next' }, later).commandId, 'next');
+  } finally { reopened.host.close(); }
+});

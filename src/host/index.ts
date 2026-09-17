@@ -441,7 +441,7 @@ export class HostControlPlane {
       || parentPayload.modelFactVersion !== launch.modelFactVersion) throw new Error('native stop receipt does not match immutable launch payload');
     const commands = this.kernel.host.readRun(parent.command.runId).commands.filter((record) => this.kernel.host.commandAttempt(record.command.commandId)?.attemptId === receipt.attemptId);
     const terminal = (record: CommandRecord) => ['succeeded', 'failed', 'refused'].includes(record.status);
-    if (commands.length === 0 || !commands.every(record => terminal(record) || (record.status === 'unknown' && record.command.kind === 'pi.model'))) throw new Error('native stop proof cannot release unobserved non-model commands');
+    if (commands.length === 0 || !commands.every(record => terminal(record) || record.status === 'queued' || (record.status === 'unknown' && record.command.kind === 'pi.model'))) throw new Error('native stop proof cannot release unobserved non-model commands');
     this.kernel.host.releaseAttemptExecution(receipt.attemptId, metadata.raw.ref);
     if (commands.every(terminal)) this.kernel.host.reportAttemptStop(receipt.attemptId, 'stopped');
   }

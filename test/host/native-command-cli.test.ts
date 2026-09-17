@@ -148,3 +148,22 @@ test('fresh public CLI sees its unreferenced lease and resolves an inline model 
     await fixture.close().catch(() => undefined);
   }
 });
+
+
+test('free native configuration requires public context and refuses every paid or private widening', async () => {
+  const fixture = await createLiveNativeFixture('public-free-policy');
+  try {
+    const route = { only: ['nvidia'], allow_fallbacks: false, require_parameters: true, data_collection: 'allow', zdr: false, max_price: { completion: 0, prompt: 0 } };
+    const valid = { ...fixture.config, modelId: 'nvidia/nemotron-3-ultra-550b-a55b:free', modelProvider: 'openrouter', modelApi: 'openai-completions', modelBaseUrl: 'https://openrouter.ai/api/v1', openRouterModel: { name: 'synthetic public profile', reasoning: false, input: ['text'] }, openRouterRouting: route, openRouterDataPolicy: 'public-training-allowed', readableRoots: [], contextRefs: [], policy: { ...fixture.config.policy, baseUrl: 'https://openrouter.ai/api/v1' } };
+    assert.equal(nativeCommandConfigSchema.parse(valid).openRouterDataPolicy, 'public-training-allowed');
+    for (const change of [
+      { openRouterDataPolicy: undefined }, { dataClassification: 'restricted' },
+      { contextRefs: ['private-history'] }, { readableRoots: ['src'] }, { readableRoots: undefined },
+      { modelId: 'nvidia/nemotron-3-ultra-550b-a55b' },
+      { openRouterRouting: { ...route, only: ['nvidia', 'fireworks'] } },
+      { openRouterRouting: { ...route, allow_fallbacks: true } },
+      { openRouterRouting: { ...route, max_price: { prompt: 0, completion: 0.01 } } },
+      { policy: { ...valid.policy, cacheWriteUsdPerMillion: 0.01 } },
+    ]) assert.equal(nativeCommandConfigSchema.safeParse({ ...valid, ...change }).success, false, JSON.stringify(change));
+  } finally { await fixture.close(); }
+});

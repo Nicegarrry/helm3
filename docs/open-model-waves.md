@@ -1,3 +1,19 @@
+# Current continuation — 17 September 2026
+
+The user renewed autonomous building and asked to minimise ChatGPT usage. This section supersedes historical run deadlines, spending allocations and the old 35% coordination pause below. Use native Pi open/Gemini workers first; any ChatGPT worker must be Luna, with frontier use confined to coordination and consequential decisions.
+
+Current bounded run: 06:05:35–10:05:35 UTC on 17 September. The combined US$20 ceiling and all prior reservations remain intact. At renewal, conservative ledger liability was US$15.476677786 plus US$0.04 external-probe reserve. New pool allocations are US$3.50 for existing open/Gemini work, US$0.90 for OpenRouter paid work and US$0 for free inference. These are maximum commitments, not invoices. Earlier unresolved reservations are not reset or released. Shorter per-attempt leases apply, and expiry stops new spending/effects.
+
+## Next acceptance wave
+
+1. Qualify the explicit public-only free Nemotron route (#132), keep its cost class separate from capability, and update the [model roster](model-roster.md) from real evidence. OpenRouter/DeepSeek integration is merged in PR131; full live task completion remains open in #130 after shared-pool429 failures.
+2. Finish operational work that reduces coordinator intervention: host-owned review publication (#112), trusted local-gate merge evidence (#111), pause/stop/resume (#115), and machine-resource admission (#116). Retain normal native-command acceptance (#126) and dispatch explanation (#114).
+3. Continue the remaining quality/integration, orchestrator interchange/takeover, cockpit/calibration and full-feature soak waves below. Report accepted outcomes and remaining gaps between waves; do not equate helper completion with end-to-end acceptance.
+
+Free inference still needs bounded concurrency, request counts, authority expiry and measured quality. Do not change account-wide privacy settings or fall back to a paid model/provider. Public/synthetic-only consent does not permit exporting local transcripts or private source.
+
+---
+
 # Open-model build waves — 16 September 2026
 
 The human approved the proposed remaining-work plan and requested reports between waves. The original design and addendum remain authoritative. “Wave 0” below is the new qualification wave; historical numbered waves/PRs remain unchanged.

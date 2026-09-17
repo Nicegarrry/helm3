@@ -62,4 +62,10 @@ The runtime checks the final outgoing request after SDK payload construction. Ro
 
 For other OpenRouter models, independently qualify the exact model/provider route, current prices, tool support and data policy, then register appropriate role capabilities. No deterministic model router is introduced.
 
+## Explicit public free profile
+
+Helm also supports one opt-in training-allowed profile for public-only work. Set `openRouterDataPolicy` to `public-training-allowed` in the durable native command and access policy. The profile is pinned to `nvidia/nemotron-3-ultra-550b-a55b:free` (the dated `...-20260604:free` identity is accepted as an alias), OpenRouter provider `nvidia`, no fallback, required parameters, `data_collection: allow`, `zdr: false`, and zero prompt/completion price caps. Every declared input, output and cache rate must be zero, so its reservation is zero while unknown outcomes remain observable.
+
+This profile requires `dataClassification: public`, `contextRefs: []`, and `readableRoots: []`. Objective and acceptance artifacts remain the only host-supplied context; file-read context is denied. The final payload replaces SDK-generated system/developer metadata with a minimal public-safe Helm instruction while preserving curated user, assistant, and tool messages. The profile must be explicitly selected; an omitted data policy continues to mean the existing private deny/ZDR route.
+
 Sources: [model endpoints](https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash/endpoints), [provider routing](https://openrouter.ai/docs/guides/routing/provider-selection), [Baseten security practices](https://www.baseten.co/security-practices/), [Baseten regional environments](https://www.baseten.co/resources/changelog/regional-environments/).

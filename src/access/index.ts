@@ -18,7 +18,13 @@ export type MonetaryReservation = Readonly<{
   packetBytes: number;
   billedInputTokens: number;
   billedOutputTokens: number;
+  openRouterDataPolicy?: 'private' | 'public-training-allowed';
 }>;
+
+export type OpenRouterDataPolicy = 'private' | 'public-training-allowed';
+export const OPENROUTER_PUBLIC_FREE_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free';
+export const OPENROUTER_PUBLIC_FREE_MODEL_DATED_ALIAS = 'nvidia/nemotron-3-ultra-550b-a55b-20260604:free';
+const PUBLIC_FREE_SYSTEM_MESSAGE = 'You are a bounded Helm worker. Use only the supplied public objective and acceptance instructions. Return the requested result.';
 
 export type BoundedPiAccessPolicy = Readonly<{
   poolId: string;
@@ -48,6 +54,10 @@ export type BoundedPiAccessPolicy = Readonly<{
   allowCorrection?: boolean;
   /** Required for OpenRouter: final provider routing is enforced after Pi assembles the payload. */
   openRouterRouting?: Readonly<Record<string, unknown>>;
+  openRouterDataPolicy?: OpenRouterDataPolicy;
+  dataClassification?: 'public' | 'restricted';
+  contextRefs?: readonly string[];
+  readableRoots?: readonly string[];
 }>;
 
 export type RequestSettlement = { state: 'known'; amount: number } | { state: 'unknown'; reason: string };
@@ -80,7 +90,7 @@ export class BoundedPiAccess {
   private requestCount = 0;
 
   constructor(policy: BoundedPiAccessPolicy) {
-    const keys = ['poolId', 'provider', 'model', 'api', 'baseUrl', 'authEnvironment', 'contextWindow', 'maxOutputTokens', 'maxBilledOutputTokens', 'maxPacketBytes', 'maxRequests', 'inputUsdPerMillion', 'outputUsdPerMillion', 'cacheReadUsdPerMillion', 'cacheWriteUsdPerMillion', 'maxToolCalls', 'timeoutMs', 'allowCorrection', 'openRouterRouting'];
+    const keys = ['poolId', 'provider', 'model', 'api', 'baseUrl', 'authEnvironment', 'contextWindow', 'maxOutputTokens', 'maxBilledOutputTokens', 'maxPacketBytes', 'maxRequests', 'inputUsdPerMillion', 'outputUsdPerMillion', 'cacheReadUsdPerMillion', 'cacheWriteUsdPerMillion', 'maxToolCalls', 'timeoutMs', 'allowCorrection', 'openRouterRouting', 'openRouterDataPolicy', 'dataClassification', 'contextRefs', 'readableRoots'];
     if (typeof policy !== 'object' || policy === null || Object.keys(policy).some((key) => !keys.includes(key))) throw new Error('bounded Pi access policy has unknown fields');
     if (typeof policy.poolId !== 'string' || typeof policy.provider !== 'string' || typeof policy.model !== 'string' || typeof policy.api !== 'string' || typeof policy.baseUrl !== 'string' || typeof policy.authEnvironment !== 'string' || typeof policy.allowCorrection !== 'undefined' && typeof policy.allowCorrection !== 'boolean') {
       throw new Error('bounded Pi access policy has invalid identity fields');
@@ -99,12 +109,21 @@ export class BoundedPiAccess {
     if (!policy.poolId || !policy.provider || !policy.model || !policy.api || !policy.baseUrl || !policy.authEnvironment) throw new Error('pool and frozen provider facts are required');
     if (policy.provider === 'openrouter' && !policy.openRouterRouting) throw new Error('OpenRouter routing policy is required');
     if (policy.provider !== 'openrouter' && policy.openRouterRouting) throw new Error('OpenRouter routing policy is only valid for OpenRouter');
+    if (policy.openRouterDataPolicy !== undefined && policy.openRouterDataPolicy !== 'private' && policy.openRouterDataPolicy !== 'public-training-allowed') throw new Error('OpenRouter data policy is invalid');
+    if (policy.openRouterDataPolicy === 'public-training-allowed') {
+      if (policy.provider !== 'openrouter' || ![OPENROUTER_PUBLIC_FREE_MODEL, OPENROUTER_PUBLIC_FREE_MODEL_DATED_ALIAS].includes(policy.model)) throw new Error('public-training-allowed requires the pinned NVIDIA Nemotron free model');
+      if (policy.dataClassification !== 'public' || !Array.isArray(policy.contextRefs) || policy.contextRefs.length !== 0 || !Array.isArray(policy.readableRoots) || policy.readableRoots.length !== 0) throw new Error('public-training-allowed requires an empty public context attestation');
+      const route = policy.openRouterRouting;
+      if (!route || JSON.stringify(route.only) !== JSON.stringify(['nvidia']) || route.allow_fallbacks !== false || route.require_parameters !== true || route.data_collection !== 'allow' || route.zdr !== false || (route.max_price as Record<string, unknown> | undefined)?.prompt !== 0 || (route.max_price as Record<string, unknown> | undefined)?.completion !== 0) throw new Error('public-training-allowed OpenRouter route is unsafe');
+      if (policy.inputUsdPerMillion !== 0 || policy.outputUsdPerMillion !== 0 || policy.cacheReadUsdPerMillion !== 0 || policy.cacheWriteUsdPerMillion !== 0) throw new Error('public-training-allowed requires zero declared costs');
+    }
     let pinnedRoute: Readonly<Record<string, unknown>> | undefined;
     if (policy.openRouterRouting) {
       if (policy.api !== 'openai-completions' || policy.baseUrl !== 'https://openrouter.ai/api/v1') throw new Error('OpenRouter requires its pinned API and endpoint');
       const route = policy.openRouterRouting;
       const permitted = ['only', 'allow_fallbacks', 'require_parameters', 'data_collection', 'zdr', 'max_price', 'quantizations'];
-      if (Object.keys(route).some(key => !permitted.includes(key)) || route.allow_fallbacks !== false || route.require_parameters !== true || route.data_collection !== 'deny' || route.zdr !== true || !Array.isArray(route.only) || route.only.length === 0 || route.only.length > 8 || route.only.some(provider => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}(?:\/[a-z0-9-]+)?$/.test(provider))) throw new Error('OpenRouter routing policy is unsafe');
+      if (Object.keys(route).some(key => !permitted.includes(key)) || route.allow_fallbacks !== false || route.require_parameters !== true || !['deny', 'allow'].includes(route.data_collection as string) || typeof route.zdr !== 'boolean' || !Array.isArray(route.only) || route.only.length === 0 || route.only.length > 8 || route.only.some(provider => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}(?:\/[a-z0-9-]+)?$/.test(provider))) throw new Error('OpenRouter routing policy is unsafe');
+      if (policy.openRouterDataPolicy !== 'public-training-allowed' && (route.data_collection !== 'deny' || route.zdr !== true)) throw new Error('private OpenRouter routing policy is unsafe');
       const prices = route.max_price as Record<string, unknown> | undefined;
       if (!prices || Object.keys(prices).some(key => !['prompt', 'completion'].includes(key)) || typeof prices.prompt !== 'number' || !Number.isFinite(prices.prompt) || prices.prompt < 0 || prices.prompt > policy.inputUsdPerMillion || typeof prices.completion !== 'number' || !Number.isFinite(prices.completion) || prices.completion < 0 || prices.completion > policy.outputUsdPerMillion) throw new Error('OpenRouter price caps must fit the bounded policy');
       const quantizations = route.quantizations;
@@ -122,6 +141,10 @@ export class BoundedPiAccess {
       cacheWriteUsdPerMillion: policy.cacheWriteUsdPerMillion, maxToolCalls: policy.maxToolCalls, timeoutMs: policy.timeoutMs,
       ...(policy.allowCorrection === undefined ? {} : { allowCorrection: policy.allowCorrection }),
       ...(pinnedRoute === undefined ? {} : { openRouterRouting: pinnedRoute }),
+      ...(policy.openRouterDataPolicy === undefined ? {} : { openRouterDataPolicy: policy.openRouterDataPolicy }),
+      ...(policy.dataClassification === undefined ? {} : { dataClassification: policy.dataClassification }),
+      ...(policy.contextRefs === undefined ? {} : { contextRefs: Object.freeze([...policy.contextRefs]) }),
+      ...(policy.readableRoots === undefined ? {} : { readableRoots: Object.freeze([...policy.readableRoots]) }),
     });
   }
 
@@ -138,7 +161,7 @@ export class BoundedPiAccess {
     // from JSON bytes.
     const upperBound = (this.policy.contextWindow * (this.policy.inputUsdPerMillion + this.policy.cacheReadUsdPerMillion + this.policy.cacheWriteUsdPerMillion) + this.policy.maxBilledOutputTokens * this.policy.outputUsdPerMillion) / 1_000_000;
     if (!Number.isFinite(upperBound)) throw new Error('model request monetary bound is invalid');
-    const reservation: MonetaryReservation = Object.freeze({ poolId: this.policy.poolId, unit: 'usd', upperBound, provider: model.provider, model: model.id, api: model.api, baseUrl: model.baseUrl, authEnvironment: this.policy.authEnvironment, packetBytes, billedInputTokens: this.policy.contextWindow, billedOutputTokens: this.policy.maxBilledOutputTokens });
+    const reservation: MonetaryReservation = Object.freeze({ poolId: this.policy.poolId, unit: 'usd', upperBound, provider: model.provider, model: model.id, api: model.api, baseUrl: model.baseUrl, authEnvironment: this.policy.authEnvironment, packetBytes, billedInputTokens: this.policy.contextWindow, billedOutputTokens: this.policy.maxBilledOutputTokens, ...(this.policy.openRouterDataPolicy ? { openRouterDataPolicy: this.policy.openRouterDataPolicy } : {}) });
     this.reservations.set(effectId, reservation);
     this.requestCount += 1;
     return Object.freeze({
@@ -155,6 +178,14 @@ export class BoundedPiAccess {
             if (!callerPayload || typeof callerPayload !== 'object' || Array.isArray(callerPayload)) throw new Error('OpenRouter payload is not an object');
             if (['models', 'route', 'plugins', 'service_tier'].some(key => key in callerPayload)) throw new Error('OpenRouter auxiliary routing or billable features are not authorised');
             const { max_tokens: _maxTokens, max_completion_tokens: _maxCompletionTokens, ...rest } = callerPayload as Record<string, unknown>;
+            if (this.policy.openRouterDataPolicy === 'public-training-allowed' && Array.isArray(rest.messages)) {
+              const messages = (rest.messages as readonly unknown[]).filter((message) => {
+                if (!message || typeof message !== 'object' || Array.isArray(message)) return true;
+                const role = (message as { role?: unknown }).role;
+                return role !== 'system' && role !== 'developer';
+              });
+              rest.messages = [{ role: 'system', content: PUBLIC_FREE_SYSTEM_MESSAGE }, ...messages];
+            }
             const finalPayload = { ...rest, model: this.policy.model, max_completion_tokens: this.policy.maxOutputTokens, provider: this.policy.openRouterRouting };
             if (byteUpperBound(finalPayload) > this.policy.maxPacketBytes) throw new Error('OpenRouter final payload exceeds the packet cap');
             return finalPayload;

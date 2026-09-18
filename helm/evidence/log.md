@@ -76,3 +76,8 @@ this session may only push to its designated branch).
   otherwise. `GET /api/status` added. README updated for clone-on-demand, watching, and the
   sandbox caveat.
 - Final: 77 tests, typecheck clean; src 2,341 lines, tests 1,979 lines. Spend: US$0.
+
+## 2026-09-18 10:50Z  Close-out
+
+- Draft PR #138 opened from the branch with the repo's PR template sections filled in.
+- Worklist complete. Self-wake routine deleted after confirming CI on the final head.

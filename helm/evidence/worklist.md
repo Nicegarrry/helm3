@@ -15,8 +15,8 @@ or GitHub with credentials. Update the status column as items finish; each wake 
 | 6 | Wave C optional: `GET /` returns a small server-rendered HTML page (auto-refresh) with the same data as `helm ps` | done (plus GET /api/status) |
 | 7 | Add `helm/.mcp.example.json` and a root `README.md` pointer to `helm/` | done |
 | 8 | Confirm the `helm-harness` CI job is green on the branch; fix if red | done (Core validation runs 506, 507 green; re-check after final push) |
-| 9 | Open one draft PR titled "helm: one-shot harness (waves A to C)" as the brief instructs; do not merge | todo |
-| 10 | Final: update `report.md`, delete the self-wake routine | todo |
+| 9 | Open one draft PR titled "helm: one-shot harness (waves A to C)" as the brief instructs; do not merge | done (https://github.com/Nicegarrry/helm3/pull/138) |
+| 10 | Final: update `report.md`, delete the self-wake routine | done |
 
 Rules for each wake: run `npm test` and `npx tsc --noEmit` in `helm/` before every push;
 commit per item with a plain message; push to `claude/helm3-assessment-simplify-qsdefo`

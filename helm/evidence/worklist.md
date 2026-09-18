@@ -9,8 +9,8 @@ or GitHub with credentials. Update the status column as items finish; each wake 
 | --- | --- | --- |
 | 1 | Coordinator code review of `helm.ts`, `worker.ts`, `cli.ts`, `server.ts`, `store.ts`; fix real bugs found | todo |
 | 2 | Persist `contextPaths` and `allowWorkflows` on the worker row so steer and resume reuse them | done |
-| 3 | Verify `gh pr create` / `gh pr view --json` field names in `github.ts` against GitHub CLI docs (WebFetch); fix mismatches | todo |
-| 4 | `worker.spawn` accepts `owner/name`: clone into `$HELM_HOME/repos/<slug>` on first use, then treat as a local path | todo |
+| 3 | Verify `gh pr create` / `gh pr view --json` field names in `github.ts` against GitHub CLI docs (WebFetch); fix mismatches | done (docs blocked by egress; corroborated by web search; one mapping fix) |
+| 4 | `worker.spawn` accepts `owner/name`: clone into `$HELM_HOME/repos/<slug>` on first use, then treat as a local path | done |
 | 5 | Simplify pass on `helm.ts` and `cli.ts` toward their size targets without behaviour change | todo |
 | 6 | Wave C optional: `GET /` returns a small server-rendered HTML page (auto-refresh) with the same data as `helm ps` | todo |
 | 7 | Add `helm/.mcp.example.json` and a root `README.md` pointer to `helm/` | todo |

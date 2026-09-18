@@ -155,10 +155,8 @@ export class Helm {
       const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
       if (active >= this.config.maxWorkers) return refuse(`max workers reached (${this.config.maxWorkers})`);
       if (this.spendCapExceeded()) return refuse('spend cap reached');
-      if (!isAbsolute(input.repo) || !existsSync(input.repo) || !statSync(input.repo).isDirectory()) {
-        return refuse('repo must be a local path');
-      }
-      const repo = input.repo;
+      const repo = await this.resolveRepo(input.repo);
+      if (!repo) return refuse('repo must be an absolute local path or owner/name');
       const repoSlug = await this.repoSlugFor(repo);
       const baseRef = input.baseRef ?? (await this.workspace.defaultBranch(repo));
       const baseSha = await this.workspace.resolveSha(repo, baseRef);
@@ -425,6 +423,22 @@ export class Helm {
 
   private spendCapExceeded(): boolean {
     return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;
+  }
+
+  /** Absolute local paths are used as-is; `owner/name` is cloned once under $HELM_HOME/repos and fetched on later use. */
+  private async resolveRepo(repo: string): Promise<string | undefined> {
+    if (/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+      const dest = join(this.config.home, 'repos', repo.replace('/', '__'));
+      if (existsSync(join(dest, '.git'))) {
+        try { await this.workspace.fetch(dest); } catch { /* offline is fine; use what we have */ }
+      } else {
+        mkdirSync(dirname(dest), { recursive: true });
+        await this.workspace.clone(repo, dest);
+      }
+      return dest;
+    }
+    if (isAbsolute(repo) && existsSync(repo) && statSync(repo).isDirectory()) return repo;
+    return undefined;
   }
 
   private async repoSlugFor(repo: string): Promise<string> {

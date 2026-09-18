@@ -65,7 +65,7 @@ test('prStatus: maps gh pr view JSON to PrStatus, merged when mergedAt is set', 
 });
 
 test('prStatus: open state when not merged and not closed', async () => {
-  const sample = { number: 6, state: 'OPEN', headRefOid: 'b'.repeat(40), mergeable: null, url: 'u', statusCheckRollup: [], reviews: [] };
+  const sample = { number: 6, state: 'OPEN', headRefOid: 'b'.repeat(40), mergeable: 'UNKNOWN', url: 'u', statusCheckRollup: [], reviews: [] };
   const { exec } = fakeExec(() => ({ stdout: JSON.stringify(sample), stderr: '', code: 0 }));
   const github = ghGitHub(exec);
   const status = await github.prStatus('o/r', 6);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -123,7 +123,11 @@ function createFakeWorkspace() {
   const pushed: Array<{ path: string; branch: string }> = [];
   let shaCounter = 0;
 
+  const cloned: string[] = [];
+  const fetched: string[] = [];
   const workspace: Workspace = {
+    async clone(slug, dest) { cloned.push(`${slug} -> ${dest}`); mkdirSync(join(dest, '.git'), { recursive: true }); },
+    async fetch(repo) { fetched.push(repo); },
     async resolveSha(_repo, ref) {
       return `base-sha-${ref}`;
     },
@@ -162,6 +166,8 @@ function createFakeWorkspace() {
   return {
     workspace,
     pushed,
+    cloned,
+    fetched,
     markDirty(path: string): void {
       const wt = worktrees.get(path);
       if (wt) wt.clean = false;
@@ -265,7 +271,7 @@ function mkTempDir(prefix: string): string {
 
 function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub }> = {}) {
   const store = createFakeStore();
-  const { workspace, pushed, markDirty } = createFakeWorkspace();
+  const { workspace, pushed, cloned, fetched, markDirty } = createFakeWorkspace();
   const githubFake = createFakeGitHub();
   const config: HelmConfig = { home: mkTempDir('helm-home-'), spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 5000, ...overrides.config };
   const helm = new Helm({
@@ -277,7 +283,7 @@ function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: Work
     runner: overrides.runner ?? succeeded(),
     prompts: FAKE_PROMPTS,
   });
-  return { helm, store, workspace, pushed, markDirty, github: githubFake, config };
+  return { helm, store, workspace, pushed, cloned, fetched, markDirty, github: githubFake, config };
 }
 
 function spawnBody(repo: string, overrides: Partial<SpawnInput> = {}): SpawnInput {
@@ -297,6 +303,25 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   assert.equal(row?.state, 'succeeded');
   assert.ok(row?.head, 'head should be recorded after a successful commit');
   assert.equal(row?.result?.status, 'succeeded');
+});
+
+test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
+  const { helm, store, cloned, fetched, config } = makeHelm();
+  const first = await helm.spawn(spawnBody('acme/widgets'));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  await helm.settle(first.workerId);
+  const expectedRepo = join(config.home, 'repos', 'acme__widgets');
+  assert.deepEqual(cloned, [`acme/widgets -> ${expectedRepo}`]);
+  assert.equal(store.getWorker(first.workerId)?.repo, expectedRepo);
+  const second = await helm.spawn(spawnBody('acme/widgets'));
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  await helm.settle(second.workerId);
+  assert.equal(cloned.length, 1, 'no second clone');
+  assert.deepEqual(fetched, [expectedRepo]);
+  const bad = await helm.spawn(spawnBody('relative/path/not/a/slug'));
+  assert.equal(bad.ok, false);
 });
 
 test('spawn is idempotent via idempotencyKey', async () => {

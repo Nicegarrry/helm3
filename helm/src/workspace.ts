@@ -1,5 +1,6 @@
 /** Git worktree add/remove, commit, push, diff stat. See DESIGN.md. */
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import type { Workspace, WorktreeInfo } from './types.js';
 
@@ -78,6 +79,22 @@ export function gitWorkspace(): Workspace {
 
     async push(path: string, branch: string): Promise<void> {
       await git(path, ['push', '-u', 'origin', branch]);
+    },
+
+    async clone(slug: string, dest: string): Promise<void> {
+      if (!/^[\w.-]+\/[\w.-]+$/.test(slug)) throw new Error('clone expects owner/name');
+      try {
+        await exec('gh', ['repo', 'clone', slug, dest], { maxBuffer: 16 * 1024 * 1024 });
+      } catch (err) {
+        const code = (err as { code?: unknown }).code;
+        // gh missing or not authenticated: fall back to anonymous https.
+        if (code !== 'ENOENT' && typeof code === 'number' && existsSync(dest)) throw err;
+        await exec('git', ['clone', `https://github.com/${slug}.git`, dest], { maxBuffer: 16 * 1024 * 1024 });
+      }
+    },
+
+    async fetch(repo: string): Promise<void> {
+      await git(repo, ['fetch', '--prune', 'origin']);
     },
   };
 }

@@ -51,7 +51,7 @@ function mapPrStatus(json: PrViewJson): PrStatus {
     number: json.number,
     state,
     head: json.headRefOid,
-    mergeable: json.mergeable === null || json.mergeable === undefined ? null : json.mergeable === 'MERGEABLE',
+    mergeable: json.mergeable === 'MERGEABLE' ? true : json.mergeable === 'CONFLICTING' ? false : null,
     checks,
     reviews,
     url: json.url,

@@ -128,6 +128,10 @@ export interface Workspace {
   /** Stage everything and commit; returns new head. No-op (returns head) if nothing to commit. */
   commitAll(path: string, message: string): Promise<string>;
   push(path: string, branch: string): Promise<void>;
+  /** Clone `owner/name` into `dest`, preferring `gh repo clone` (uses gh auth) and falling back to https. */
+  clone(slug: string, dest: string): Promise<void>;
+  /** `git fetch --prune origin`; best effort for an already-cloned repo. */
+  fetch(repo: string): Promise<void>;
 }
 
 // ---------- Gates ----------

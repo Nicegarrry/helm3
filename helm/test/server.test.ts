@@ -95,3 +95,18 @@ test('serve http: a Host header mismatch is rejected with 403', async () => {
     assert.equal(res.status, 403);
   });
 });
+
+test('F12: a request body over 1 MiB is rejected with 413', async () => {
+  await withServer(async (port) => {
+    const bigBody = JSON.stringify({ pad: 'x'.repeat(1024 * 1024 + 10) });
+    const res = await postWithHost(port, '/tools/run.status', `127.0.0.1:${port}`, bigBody);
+    assert.equal(res.status, 413);
+  });
+});
+
+test('F12: an invalid JSON body returns 400, not 500', async () => {
+  await withServer(async (port) => {
+    const res = await postWithHost(port, '/tools/run.status', `127.0.0.1:${port}`, '{not valid json');
+    assert.equal(res.status, 400);
+  });
+});

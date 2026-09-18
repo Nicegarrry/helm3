@@ -181,8 +181,10 @@ export function openStore(path: string): Store {
     },
 
     updateWorker(workerId: string, patch: Partial<Omit<WorkerRow, 'workerId' | 'createdAt'>>): void {
-      const entries = Object.entries(patch);
-      if (entries.length === 0) return;
+      if (Object.keys(patch).length === 0) return;
+      // Always bump updatedAt so it reflects the last write, unless the caller supplied one itself.
+      const fullPatch = patch.updatedAt === undefined ? { ...patch, updatedAt: new Date().toISOString() } : patch;
+      const entries = Object.entries(fullPatch);
       const sets = entries.map(([key]) => `${key} = ?`).join(', ');
       const values = entries.map(([key, value]) => {
         if (key === 'result') return value ? JSON.stringify(value) : null;

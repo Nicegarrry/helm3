@@ -125,6 +125,8 @@ function createFakeWorkspace() {
 
   const cloned: string[] = [];
   const fetched: string[] = [];
+  const created: string[] = [];
+  const removed: string[] = [];
   const workspace: Workspace = {
     async clone(slug, dest) { cloned.push(`${slug} -> ${dest}`); mkdirSync(join(dest, '.git'), { recursive: true }); },
     async fetch(repo) { fetched.push(repo); },
@@ -135,10 +137,12 @@ function createFakeWorkspace() {
       return 'main';
     },
     async create(_repo, root, branch, baseSha) {
+      created.push(root);
       worktrees.set(root, { branch, baseSha, head: baseSha, clean: true });
       return { path: root, branch, baseSha };
     },
     async remove(_repo, path) {
+      removed.push(path);
       worktrees.delete(path);
     },
     async head(path) {
@@ -168,6 +172,8 @@ function createFakeWorkspace() {
     pushed,
     cloned,
     fetched,
+    created,
+    removed,
     markDirty(path: string): void {
       const wt = worktrees.get(path);
       if (wt) wt.clean = false;
@@ -239,16 +245,23 @@ function succeeded(summary = 'did the thing'): WorkerRunner {
 
 /** A runner whose turns stay pending until `resolveNext` is called, oldest turn first. */
 function createControllableRunner() {
-  const pending: Array<(outcome: WorkerRunOutcome) => void> = [];
+  const pending: Array<{ resolve: (outcome: WorkerRunOutcome) => void; hooks: WorkerHooks }> = [];
   const runner: WorkerRunner = {
-    run: () => new Promise<WorkerRunOutcome>((resolve) => pending.push(resolve)),
+    run: (_input, _message, hooks) => new Promise<WorkerRunOutcome>((resolve) => pending.push({ resolve, hooks })),
   };
   return {
     runner,
     resolveNext(outcome: WorkerRunOutcome): void {
-      const fn = pending.shift();
-      if (!fn) throw new Error('no pending turn to resolve');
-      fn(outcome);
+      const entry = pending.shift();
+      if (!entry) throw new Error('no pending turn to resolve');
+      entry.resolve(outcome);
+    },
+    /** The hooks object the oldest still-pending turn was called with, so a test can call
+     * hooks.shouldContinue() itself to simulate the runner checking it at a tool boundary. */
+    peekHooks(): WorkerHooks {
+      const entry = pending[0];
+      if (!entry) throw new Error('no pending turn');
+      return entry.hooks;
     },
   };
 }
@@ -269,9 +282,9 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub }> = {}) {
+function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number }> = {}) {
   const store = createFakeStore();
-  const { workspace, pushed, cloned, fetched, markDirty } = createFakeWorkspace();
+  const { workspace, pushed, cloned, fetched, created, removed, markDirty } = createFakeWorkspace();
   const githubFake = createFakeGitHub();
   const config: HelmConfig = { home: mkTempDir('helm-home-'), spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 5000, ...overrides.config };
   const helm = new Helm({
@@ -282,8 +295,9 @@ function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: Work
     github: overrides.github ?? githubFake.github,
     runner: overrides.runner ?? succeeded(),
     prompts: FAKE_PROMPTS,
+    stopTimeoutMs: overrides.stopTimeoutMs,
   });
-  return { helm, store, workspace, pushed, cloned, fetched, markDirty, github: githubFake, config };
+  return { helm, store, workspace, pushed, cloned, fetched, created, removed, markDirty, github: githubFake, config };
 }
 
 function spawnBody(repo: string, overrides: Partial<SpawnInput> = {}): SpawnInput {
@@ -343,6 +357,62 @@ test('spawn refuses once active workers reach maxWorkers', async () => {
   const second = await helm.spawn(spawnBody(repo));
   assert.equal(second.ok, false);
   if (!second.ok) assert.match(second.reason, /max workers/);
+});
+
+test('two concurrent spawns respect maxWorkers via the admission mutex (F6)', async () => {
+  const { runner } = createControllableRunner();
+  const { helm } = makeHelm({ config: { maxWorkers: 1 }, runner });
+  const repo = mkTempDir('helm-repo-');
+  const [first, second] = await Promise.all([
+    helm.spawn(spawnBody(repo)),
+    helm.spawn(spawnBody(repo)),
+  ]);
+  const oks = [first, second].filter((o) => o.ok);
+  assert.equal(oks.length, 1, 'exactly one concurrent spawn should be admitted under maxWorkers=1');
+});
+
+test('two concurrent spawns with the same idempotencyKey share one workerId and one worktree create (F6)', async () => {
+  const { runner } = createControllableRunner();
+  const { helm, created } = makeHelm({ runner });
+  const repo = mkTempDir('helm-repo-');
+  const [first, second] = await Promise.all([
+    helm.spawn(spawnBody(repo, { idempotencyKey: 'dup-1' })),
+    helm.spawn(spawnBody(repo, { idempotencyKey: 'dup-1' })),
+  ]);
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  if (first.ok && second.ok) assert.equal(second.workerId, first.workerId);
+  assert.equal(created.length, 1, 'worktree should be created exactly once');
+});
+
+test('spawn removes the worktree (best effort) if insertWorker throws (F6)', async () => {
+  const store = createFakeStore();
+  const originalInsertWorker = store.insertWorker.bind(store);
+  let failNextInsert = true;
+  store.insertWorker = (row) => {
+    if (failNextInsert) {
+      failNextInsert = false;
+      throw new Error('insert boom');
+    }
+    originalInsertWorker(row);
+  };
+  const { workspace, created, removed } = createFakeWorkspace();
+  const config: HelmConfig = { home: mkTempDir('helm-home-'), spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 5000 };
+  const helm = new Helm({
+    config,
+    store,
+    workspace,
+    gates: createFakeGates(),
+    github: createFakeGitHub().github,
+    runner: succeeded(),
+    prompts: FAKE_PROMPTS,
+  });
+  const repo = mkTempDir('helm-repo-');
+  const outcome = await helm.spawn(spawnBody(repo));
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.match(outcome.reason, /insert boom/);
+  assert.equal(created.length, 1, 'worktree was created before the failure');
+  assert.deepEqual(removed, created, 'the created worktree should have been removed');
 });
 
 test('spawn refuses once the spend cap is reached', async () => {
@@ -409,7 +479,57 @@ test('steer is refused while running and allowed once idle', async () => {
   await helm.settle(spawned.workerId);
 });
 
-test('stop marks a running worker stopped once its turn settles', async () => {
+test('two concurrent steer() calls on an idle worker: exactly one succeeds (F2)', async () => {
+  const { runner, resolveNext } = createControllableRunner();
+  const { helm } = makeHelm({ runner });
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  resolveNext({ result: { status: 'succeeded', summary: 'first turn done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
+  await helm.settle(spawned.workerId);
+
+  const [first, second] = await Promise.all([
+    helm.steer({ workerId: spawned.workerId, message: 'go again' }),
+    helm.steer({ workerId: spawned.workerId, message: 'also go again' }),
+  ]);
+  const oks = [first, second].filter((o) => o.ok);
+  assert.equal(oks.length, 1, 'exactly one concurrent steer should be accepted');
+});
+
+test('steer refuses once the spend cap is reached (F3)', async () => {
+  const { helm } = makeHelm({ config: { spendCapUsd: 0.005 } }); // succeeded() records $0.01 per turn
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+
+  const outcome = await helm.steer({ workerId: spawned.workerId, message: 'keep going' });
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.match(outcome.reason, /spend cap/);
+});
+
+test('stop marks a running worker stopped once its turn observes the stop and settles', async () => {
+  const { runner, resolveNext, peekHooks } = createControllableRunner();
+  const { helm, store } = makeHelm({ runner });
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+
+  const stopPromise = helm.stop({ workerId: spawned.workerId });
+  await new Promise((r) => setImmediate(r));
+  // Simulate the runner checking the stop flag at a tool-call boundary before settling.
+  assert.equal(peekHooks().shouldContinue(), false);
+  resolveNext({ result: { status: 'partial', summary: 'stopped', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
+  const stopped = await stopPromise;
+  assert.equal(stopped.ok, true);
+  if (stopped.ok) assert.equal(stopped.state, 'stopped');
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'stopped');
+});
+
+test('stop does not force "stopped" when the turn never observed the stop request (F7)', async () => {
   const { runner, resolveNext } = createControllableRunner();
   const { helm, store } = makeHelm({ runner });
   const repo = mkTempDir('helm-repo-');
@@ -419,11 +539,12 @@ test('stop marks a running worker stopped once its turn settles', async () => {
 
   const stopPromise = helm.stop({ workerId: spawned.workerId });
   await new Promise((r) => setImmediate(r));
-  resolveNext({ result: { status: 'partial', summary: 'stopped', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
+  // The turn completes on its own without ever calling hooks.shouldContinue().
+  resolveNext({ result: { status: 'succeeded', summary: 'finished before the stop was seen', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
   const stopped = await stopPromise;
   assert.equal(stopped.ok, true);
-  if (stopped.ok) assert.equal(stopped.state, 'stopped');
-  assert.equal(store.getWorker(spawned.workerId)?.state, 'stopped');
+  if (stopped.ok) assert.equal(stopped.state, 'succeeded');
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'succeeded');
 });
 
 test('stop refuses when the worker is not running', async () => {
@@ -434,6 +555,21 @@ test('stop refuses when the worker is not running', async () => {
   await helm.settle(spawned.workerId);
   const outcome = await helm.stop({ workerId: spawned.workerId });
   assert.equal(outcome.ok, false);
+});
+
+test('stop returns unknown and keeps the stop flag set when the turn never settles in time (F1)', async () => {
+  const { runner, peekHooks } = createControllableRunner();
+  const { helm } = makeHelm({ runner, stopTimeoutMs: 50 });
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+
+  const outcome = await helm.stop({ workerId: spawned.workerId });
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) assert.equal(outcome.state, 'unknown');
+  // The flag must still be set: shouldContinue() keeps returning false for this worker.
+  assert.equal(peekHooks().shouldContinue(), false);
 });
 
 test('review.request spawns a reviewer that posts its result as a PR comment', async () => {

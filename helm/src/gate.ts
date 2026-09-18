@@ -9,10 +9,24 @@ type CheckResult = { name: string; command: string; exitCode: number | null; out
 
 type ExecFileError = NodeJS.ErrnoException & { code?: number | string; signal?: string | null; killed?: boolean };
 
-function runCheck(cwd: string, check: GateCheck, logDir: string, timeoutMs: number): Promise<CheckResult> {
+/**
+ * `check.name` is attacker/author-controlled free text used to build a log file path;
+ * sanitize it before it ever reaches `outputPath` (F8). Anything outside
+ * [A-Za-z0-9._-] becomes a single '-', runs of '-' collapse, and leading dots are
+ * stripped (a name of just ".." would otherwise realize as the parent directory).
+ */
+function slugifyCheckName(name: string): string {
+  let slug = name.replace(/[^A-Za-z0-9._-]+/g, '-');
+  slug = slug.replace(/-{2,}/g, '-');
+  slug = slug.replace(/^\.+/, '');
+  slug = slug.replace(/^-+|-+$/g, '');
+  return slug.length > 0 ? slug : 'check';
+}
+
+function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: string, timeoutMs: number): Promise<CheckResult> {
   return new Promise((resolve) => {
     const start = Date.now();
-    const outputPath = join(logDir, `${check.name}.log`);
+    const outputPath = join(logDir, `${outputSlug}.log`);
     execFile('/bin/sh', ['-c', check.command], { cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       const durationMs = Date.now() - start;
       const err = error as ExecFileError | null;
@@ -31,8 +45,13 @@ export function gateRunner(): GateRunner {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const results: CheckResult[] = [];
+      const usedSlugs = new Map<string, number>();
       for (const check of checks) {
-        const result = await runCheck(cwd, check, logDir, timeoutMs);
+        const base = slugifyCheckName(check.name);
+        const seen = usedSlugs.get(base) ?? 0;
+        usedSlugs.set(base, seen + 1);
+        const outputSlug = seen === 0 ? base : `${base}-${seen}`;
+        const result = await runCheck(cwd, check, outputSlug, logDir, timeoutMs);
         results.push(result);
       }
       const passed = results.every((result) => result.exitCode === 0);

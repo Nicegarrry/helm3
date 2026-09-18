@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { piWorkerRunner, parseWorkerResult } from '../src/worker.js';
+import { piWorkerRunner, parseWorkerResult, classifyBash } from '../src/worker.js';
 import type { EventRow, WorkerHooks, WorkerRunInput, WorkerResult } from '../src/types.js';
 
 const exec = promisify(execFile);
@@ -205,6 +205,78 @@ test('reviewer role refuses edit/write and write-like bash', async () => {
   }
 });
 
+test('F4: a symlink inside the worktree to another dir does not let a not-yet-existing write escape', async () => {
+  const { root, worktree } = await makeWorktree();
+  const outsideDir = await mkdtemp(join(tmpdir(), 'helm-worker-outside-'));
+  try {
+    await symlink(outsideDir, join(worktree, 'evil'));
+    const { modelRuntime, ai, faux, model } = await makeFaux('helm-worker-symlink');
+    faux.setResponses([
+      ai.fauxAssistantMessage([ai.fauxToolCall('write', { path: 'evil/x.txt', content: 'x' })]),
+      ai.fauxAssistantMessage(JSON.stringify({ status: 'failed', summary: 'refused', changedFiles: [], commandsRun: [] })),
+    ]);
+    const runner = piWorkerRunner({ modelRuntime });
+    const { hooks, events } = collectHooks();
+    const input = baseInput({ worktree, model, sessionDir: join(root, 'sessions') });
+    await runner.run(input, 'do the thing', hooks);
+
+    const refused = events.filter((e) => e.kind === 'tool.refused');
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0]!.data.tool, 'write');
+    assert.equal(existsSync(join(outsideDir, 'x.txt')), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('F11: cd to a quoted absolute path outside the worktree is refused (double and single quotes)', async () => {
+  const { root, worktree } = await makeWorktree();
+  try {
+    const { modelRuntime, ai, faux, model } = await makeFaux('helm-worker-cdquoted');
+    faux.setResponses([
+      ai.fauxAssistantMessage([ai.fauxToolCall('bash', { command: 'cd "/etc" && ls' })]),
+      ai.fauxAssistantMessage([ai.fauxToolCall('bash', { command: "cd '/etc' && ls" })]),
+      ai.fauxAssistantMessage(JSON.stringify({ status: 'failed', summary: 'refused', changedFiles: [], commandsRun: [] })),
+    ]);
+    const runner = piWorkerRunner({ modelRuntime });
+    const { hooks, events } = collectHooks();
+    const input = baseInput({ worktree, model, sessionDir: join(root, 'sessions') });
+    await runner.run(input, 'do the thing', hooks);
+
+    const refused = events.filter((e) => e.kind === 'tool.refused');
+    assert.equal(refused.length, 2);
+    for (const event of refused) {
+      assert.equal(event.data.tool, 'bash');
+      assert.match(String(event.data.reason), /cd to an absolute path outside the worktree/);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('F9: shouldContinue()=false skips the correction turn and returns a null result with the first raw text', async () => {
+  const { root, worktree } = await makeWorktree();
+  try {
+    const { modelRuntime, ai, faux, model } = await makeFaux('helm-worker-shouldcontinue');
+    faux.setResponses([ai.fauxAssistantMessage('not json, still prose')]);
+    const runner = piWorkerRunner({ modelRuntime });
+    const { hooks, events } = collectHooks();
+    let continueCalls = 0;
+    const noCorrectionHooks: WorkerHooks = { ...hooks, shouldContinue: () => { continueCalls++; return false; } };
+    const input = baseInput({ worktree, model, sessionDir: join(root, 'sessions') });
+    const outcome = await runner.run(input, 'do the thing', noCorrectionHooks);
+
+    assert.equal(outcome.result, null);
+    assert.equal(outcome.rawText, 'not json, still prose');
+    assert.equal(continueCalls, 1);
+    assert.equal(events.filter((e) => e.kind === 'turn.start').length, 1);
+    assert.ok(events.some((e) => e.kind === 'result.invalid'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('still-invalid text after correction turn returns a null result with raw text saved', async () => {
   const { root, worktree } = await makeWorktree();
   try {
@@ -236,4 +308,46 @@ test('parseWorkerResult: strict JSON, fenced JSON (last wins), and invalid input
   assert.equal(parseWorkerResult('not json at all'), null);
   assert.equal(parseWorkerResult('{"status":"succeeded"}'), null);
   assert.equal(parseWorkerResult(JSON.stringify({ ...validResult, extra: 'field' })), null);
+});
+
+test('F10: parseWorkerResult tries fences from last to first, skipping a later fence that does not validate', () => {
+  const unrelated = JSON.stringify({ foo: 'bar', not: 'a worker result' });
+  const text = ['```json', JSON.stringify(validResult), '```', 'then some other unrelated json:', '```json', unrelated, '```'].join('\n');
+  assert.deepEqual(parseWorkerResult(text), validResult);
+});
+
+test('F5: classifyBash denies git commands bypassed with inserted flags', () => {
+  const denied = [
+    'git push origin main',
+    'git -C .. push',
+    'git --no-pager push',
+    'git -C ../.. worktree remove x',
+    'git -C .. checkout main',
+    'echo hi && git push',
+  ];
+  for (const command of denied) {
+    const verdict = classifyBash(command, 'builder');
+    assert.equal(verdict.allowed, false, `expected "${command}" to be denied`);
+  }
+});
+
+test('F5: classifyBash allows plain git reads and checkout -- <path>', () => {
+  const allowed = ['git status', 'git log -3', 'git checkout -- file.txt', 'git -C . diff'];
+  for (const command of allowed) {
+    const verdict = classifyBash(command, 'builder');
+    assert.equal(verdict.allowed, true, `expected "${command}" to be allowed, got: ${verdict.reason}`);
+  }
+});
+
+test('F5: classifyBash denies reviewer git writes (commit/add/reset/rebase/merge/push) even behind -C', () => {
+  for (const sub of ['commit', 'add', 'reset', 'rebase', 'merge', 'push']) {
+    const verdict = classifyBash(`git -C . ${sub}`, 'reviewer');
+    assert.equal(verdict.allowed, false, `expected reviewer "git ${sub}" to be denied`);
+  }
+  assert.equal(classifyBash('git -C . status', 'reviewer').allowed, true);
+});
+
+test('F5: classifyBash still denies gh and rm -rf /', () => {
+  assert.equal(classifyBash('gh pr create', 'builder').allowed, false);
+  assert.equal(classifyBash('rm -rf /', 'builder').allowed, false);
 });

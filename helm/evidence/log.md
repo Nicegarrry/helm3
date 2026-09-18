@@ -48,3 +48,23 @@ this session may only push to its designated branch).
   `POST /tools/worker.inspect` (not found -> ok:false), clean shutdown.
 - Final: 52/52 tests, typecheck clean. `python3 scripts/check-preparation.py` still valid.
 - Spend: US$0. No provider was contacted.
+
+## 2026-09-18 10:30Z  Continuation (owner cleared up to 12h; hourly self-wake routine set)
+
+- Item 2: `contextPaths` and `allowWorkflows` persisted on the worker row; steer/resume reuse them.
+- Item 3: `gh` usage verified. Docs sites are blocked by the egress proxy; corroborated via web
+  search. One real fix: `mergeable: UNKNOWN` was mapped to `false`, now `null`.
+- Item 4: `worker.spawn` accepts `owner/name`; clones once under `$HELM_HOME/repos` with
+  `gh repo clone` (https fallback), fetches on reuse.
+- Item 1: Sonnet adversarial review produced 14 confirmed findings. All fixed by two Sonnet
+  workers on disjoint files, each with a regression test. Highlights: stop signal lost on
+  timeout (F1); concurrent steer on one worktree (F2); spend cap not enforced on steer (F3);
+  symlink escape through the write tool for not-yet-existing paths (F4); git deny regexes
+  bypassed by inserted flags such as `git -C .. push`, replaced with a tokenizer (F5);
+  spawn admission races, now behind an in-process mutex (F6); stop overwrote a naturally
+  reached terminal state (F7); gate check names used unsanitised in log paths (F8);
+  correction turn ignored stop and cap (F9); result parser tried only the last fence (F10);
+  quoted `cd` bypass (F11); no HTTP body limit and 500 on bad JSON (F12); stale serve.json
+  and no single-instance guard (F13); `updatedAt` never refreshed (F14).
+- Items 7, 8: `.mcp.example.json`, root README pointer; CI green on the branch.
+- After fixes: 74 tests, typecheck clean; src 2,482 lines, tests 1,945 lines.

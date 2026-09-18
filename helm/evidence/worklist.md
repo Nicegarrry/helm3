@@ -7,14 +7,14 @@ or GitHub with credentials. Update the status column as items finish; each wake 
 
 | # | Item | Status |
 | --- | --- | --- |
-| 1 | Coordinator code review of `helm.ts`, `worker.ts`, `cli.ts`, `server.ts`, `store.ts`; fix real bugs found | todo |
+| 1 | Coordinator code review of `helm.ts`, `worker.ts`, `cli.ts`, `server.ts`, `store.ts`; fix real bugs found | done (14 findings, all fixed with regression tests) |
 | 2 | Persist `contextPaths` and `allowWorkflows` on the worker row so steer and resume reuse them | done |
 | 3 | Verify `gh pr create` / `gh pr view --json` field names in `github.ts` against GitHub CLI docs (WebFetch); fix mismatches | done (docs blocked by egress; corroborated by web search; one mapping fix) |
 | 4 | `worker.spawn` accepts `owner/name`: clone into `$HELM_HOME/repos/<slug>` on first use, then treat as a local path | done |
 | 5 | Simplify pass on `helm.ts` and `cli.ts` toward their size targets without behaviour change | todo |
 | 6 | Wave C optional: `GET /` returns a small server-rendered HTML page (auto-refresh) with the same data as `helm ps` | todo |
-| 7 | Add `helm/.mcp.example.json` and a root `README.md` pointer to `helm/` | todo |
-| 8 | Confirm the `helm-harness` CI job is green on the branch; fix if red | todo |
+| 7 | Add `helm/.mcp.example.json` and a root `README.md` pointer to `helm/` | done |
+| 8 | Confirm the `helm-harness` CI job is green on the branch; fix if red | done (Core validation runs 506, 507 green; re-check after final push) |
 | 9 | Open one draft PR titled "helm: one-shot harness (waves A to C)" as the brief instructs; do not merge | todo |
 | 10 | Final: update `report.md`, delete the self-wake routine | todo |
 

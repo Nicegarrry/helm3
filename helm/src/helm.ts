@@ -74,6 +74,8 @@ export type HelmDeps = Readonly<{
   runner: WorkerRunner;
   prompts: HelmPrompts;
   now?: () => Date;
+  /** How long `stop()` waits for a running turn to settle before giving up. Default 10s; tests may lower it. */
+  stopTimeoutMs?: number;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'succeeded', 'failed', 'interrupted']);
@@ -116,7 +118,13 @@ export class Helm {
   private readonly prompts: HelmPrompts;
   private readonly now?: () => Date;
   private readonly running = new Map<string, Promise<void>>();
+  /** Workers with a stop requested for their current turn; cleared only once that turn settles (see runTurn). */
   private readonly stopRequested = new Set<string>();
+  /** Workers whose current turn actually observed the stop request via hooks.shouldContinue(). */
+  private readonly stopObserved = new Set<string>();
+  private readonly stopTimeoutMs: number;
+  /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
+  private lock: Promise<void> = Promise.resolve();
 
   constructor(deps: HelmDeps) {
     this.config = deps.config;
@@ -127,6 +135,20 @@ export class Helm {
     this.runner = deps.runner;
     this.prompts = deps.prompts;
     this.now = deps.now;
+    this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
+  }
+
+  /** Runs `fn` exclusively with respect to every other call queued through this lock. */
+  private async withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.lock;
+    let release: () => void = () => {};
+    this.lock = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   /** Await a worker's in-flight turn, if any. Exposed for tests. */
@@ -144,6 +166,19 @@ export class Helm {
   }
 
   private async spawnInternal(
+    input: SpawnInput,
+    onDone?: OnDone,
+  ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string }>> {
+    try {
+      return await this.withLock(() => this.spawnLocked(input, onDone));
+    } catch (err) {
+      return refuse(errMessage(err));
+    }
+  }
+
+  /** The admission-and-create section of spawn, always run under `this.lock` so maxWorkers,
+   * idempotencyKey and worktree creation cannot race with a concurrent spawn/steer. */
+  private async spawnLocked(
     input: SpawnInput,
     onDone?: OnDone,
   ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string }>> {
@@ -189,7 +224,12 @@ export class Helm {
         createdAt,
         updatedAt: createdAt,
       };
-      this.store.insertWorker(row);
+      try {
+        this.store.insertWorker(row);
+      } catch (err) {
+        try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
+        throw err;
+      }
       this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model: input.model, baseRef, baseSha, branch, worktree });
       const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
       const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput) : this.prompts.builder(promptInput);
@@ -248,31 +288,40 @@ export class Helm {
 
   async steer(input: SteerInput): Promise<ToolOutcome<{ turn: number }>> {
     try {
-      const row = this.store.getWorker(input.workerId);
-      if (!row) return refuse('worker not found');
-      if (!STEERABLE_STATES.has(row.state)) return refuse(`worker is ${row.state}, not steerable`);
-      const priorTurns = this.store.listEvents(input.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
-      this.startRun(input.workerId, input.message);
-      return { ok: true, turn: priorTurns + 1 };
+      return await this.withLock(() => this.steerLocked(input));
     } catch (err) {
       return refuse(errMessage(err));
     }
   }
 
-  async stop(input: StopInput): Promise<ToolOutcome<{ state: 'stopped' | 'unknown' }>> {
+  private async steerLocked(input: SteerInput): Promise<ToolOutcome<{ turn: number }>> {
+    const row = this.store.getWorker(input.workerId);
+    if (!row) return refuse('worker not found');
+    if (!STEERABLE_STATES.has(row.state)) return refuse(`worker is ${row.state}, not steerable`);
+    if (this.running.has(input.workerId)) return refuse('worker already has a turn in flight');
+    if (this.spendCapExceeded()) return refuse('spend cap reached');
+    const priorTurns = this.store.listEvents(input.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
+    this.startRun(input.workerId, input.message);
+    return { ok: true, turn: priorTurns + 1 };
+  }
+
+  async stop(input: StopInput): Promise<ToolOutcome<{ state: WorkerState }>> {
     try {
       const row = this.store.getWorker(input.workerId);
       if (!row) return refuse('worker not found');
       if (row.state !== 'running') return refuse(`worker is not running (state: ${row.state})`);
       this.stopRequested.add(input.workerId);
       this.store.appendEvent(input.workerId, 'stop.requested');
-      const settled = await this.waitForSettle(input.workerId, 10_000);
-      this.stopRequested.delete(input.workerId);
-      const finalState: 'stopped' | 'unknown' = settled ? 'stopped' : 'unknown';
-      const prevState = this.store.getWorker(input.workerId)?.state ?? row.state;
-      this.store.updateWorker(input.workerId, { state: finalState });
-      this.store.appendEvent(input.workerId, 'state', { from: prevState, to: finalState });
-      return { ok: true, state: finalState };
+      const settled = await this.waitForSettle(input.workerId, this.stopTimeoutMs);
+      if (!settled) {
+        // The turn never settled: leave `stopRequested` set so the flag is not lost, and
+        // hooks.shouldContinue() keeps returning false for it if/when it does check again.
+        return { ok: true, state: 'unknown' };
+      }
+      // runTurn's completion path already cleared stopRequested/stopObserved and wrote the
+      // final state (forced to 'stopped' only if the turn actually observed the request).
+      const finalRow = this.store.getWorker(input.workerId);
+      return { ok: true, state: finalRow?.state ?? 'unknown' };
     } catch (err) {
       return refuse(errMessage(err));
     }
@@ -502,7 +551,13 @@ export class Helm {
       onUsage: (usage) => {
         this.store.addSpend({ ...usage, workerId, at: this.nowIso() });
       },
-      shouldContinue: () => !this.stopRequested.has(workerId) && !this.spendCapExceeded(),
+      shouldContinue: () => {
+        if (this.stopRequested.has(workerId)) {
+          this.stopObserved.add(workerId);
+          return false;
+        }
+        return !this.spendCapExceeded();
+      },
     };
     try {
       const outcome = await this.runner.run(runInput, message, hooks);
@@ -516,8 +571,13 @@ export class Helm {
           this.store.appendEvent(workerId, 'error', { message: `commit failed: ${errMessage(err)}` });
         }
       }
-      const nextState: WorkerState =
+      let nextState: WorkerState =
         result === null ? 'failed' : result.status === 'succeeded' ? 'succeeded' : result.status === 'failed' ? 'failed' : 'idle';
+      // Only report 'stopped' when this turn actually observed the stop request (via
+      // hooks.shouldContinue()); a turn that completed on its own keeps its real outcome.
+      if (this.stopObserved.has(workerId)) nextState = 'stopped';
+      this.stopRequested.delete(workerId);
+      this.stopObserved.delete(workerId);
       this.store.updateWorker(workerId, {
         state: nextState,
         sessionFile: outcome.sessionFile ?? row.sessionFile,
@@ -534,6 +594,8 @@ export class Helm {
         }
       }
     } catch (err) {
+      this.stopRequested.delete(workerId);
+      this.stopObserved.delete(workerId);
       this.store.updateWorker(workerId, { state: 'unknown' });
       this.store.appendEvent(workerId, 'error', { message: errMessage(err) });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: 'unknown' });

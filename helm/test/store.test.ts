@@ -82,6 +82,32 @@ test('insert, get, update a worker', () => {
   }
 });
 
+test('updateWorker always refreshes updatedAt unless the patch supplies its own (F14)', async () => {
+  const { dir, path } = tempDbPath();
+  const store = openStore(path);
+  try {
+    const row = makeWorker({ workerId: 'w-touch' });
+    store.insertWorker(row);
+    const before = store.getWorker('w-touch')?.updatedAt;
+    assert.equal(before, row.updatedAt);
+
+    // Wait long enough that a fresh ISO timestamp is guaranteed to differ.
+    await new Promise((r) => setTimeout(r, 10));
+    // A patch that touches nothing timestamp-related should still bump updatedAt.
+    store.updateWorker('w-touch', { state: 'running' });
+    const afterStateChange = store.getWorker('w-touch')?.updatedAt;
+    assert.ok(afterStateChange && afterStateChange > (before ?? ''), 'updatedAt should advance on any patch');
+
+    // An explicit updatedAt in the patch is respected as-is.
+    const explicit = new Date(0).toISOString();
+    store.updateWorker('w-touch', { state: 'idle', updatedAt: explicit });
+    assert.equal(store.getWorker('w-touch')?.updatedAt, explicit);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('listWorkers filters by repo and state', () => {
   const { dir, path } = tempDbPath();
   const store = openStore(path);

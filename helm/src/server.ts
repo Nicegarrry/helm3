@@ -101,7 +101,17 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
     const toolMatch = req.method === 'POST' ? url.pathname.match(/^\/tools\/([^/]+)$/) : null;
     if (toolMatch) {
       const name = decodeURIComponent(toolMatch[1] ?? '');
-      const input = await readJsonBody(req);
+      let input: unknown;
+      try {
+        input = await readJsonBody(req, res);
+      } catch (err) {
+        if (err instanceof PayloadTooLargeError) return; // 413 already sent, socket already torn down
+        if (err instanceof InvalidJsonBodyError) {
+          res.writeHead(400, { 'content-type': 'text/plain' }).end('invalid JSON body');
+          return;
+        }
+        throw err;
+      }
       const outcome = await registry.call(name, input);
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(outcome));
       return;
@@ -114,11 +124,34 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
   }
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB (F12)
+
+class PayloadTooLargeError extends Error {}
+class InvalidJsonBodyError extends Error {}
+
+/** Cap the body at 1 MiB (413 + socket teardown past that) and turn a parse failure into 400, not 500. */
+async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
+  let total = 0;
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.length;
+    if (total > MAX_BODY_BYTES) {
+      const socket = req.socket; // capture now: req.socket can go null once the request completes
+      res.writeHead(413, { 'content-type': 'text/plain' }).end('payload too large', () => {
+        socket?.destroy();
+      });
+      throw new PayloadTooLargeError('request body exceeds 1 MiB');
+    }
+    chunks.push(buf);
+  }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new InvalidJsonBodyError('invalid JSON body');
+  }
 }
 
 /** Plain-text worker table. Shared by GET / and `helm ps`, so both render identically. */

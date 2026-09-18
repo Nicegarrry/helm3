@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import test from 'node:test';
 import { gateRunner } from '../src/gate.js';
 
@@ -83,6 +83,44 @@ test('defaultChecks: falls back to package.json scripts', async () => {
       { name: 'test', command: 'npm test' },
       { name: 'typecheck', command: 'npm run typecheck' },
     ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('F8: a check name with path traversal characters is slugified and its log stays inside logDir', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
+  const logDir = join(dir, 'logs');
+  const runner = gateRunner();
+  try {
+    const result = await runner.run(dir, [{ name: 'unit/../x', command: 'echo hi' }], logDir);
+    const check = result.checks[0]!;
+    assert.equal(check.name, 'unit/../x'); // display name is preserved as-is
+    assert.ok(check.outputPath.startsWith(logDir + sep), `outputPath ${check.outputPath} should live inside ${logDir}`);
+    assert.ok(existsSync(check.outputPath));
+    assert.equal(readFileSync(check.outputPath, 'utf8').includes('hi'), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('F8: two checks that slugify to the same name get distinct, index-suffixed logs', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
+  const logDir = join(dir, 'logs');
+  const runner = gateRunner();
+  try {
+    const result = await runner.run(
+      dir,
+      [
+        { name: 'a/b', command: 'echo one' },
+        { name: 'a:b', command: 'echo two' },
+      ],
+      logDir,
+    );
+    const [first, second] = result.checks;
+    assert.notEqual(first!.outputPath, second!.outputPath);
+    assert.ok(readFileSync(first!.outputPath, 'utf8').includes('one'));
+    assert.ok(readFileSync(second!.outputPath, 'utf8').includes('two'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

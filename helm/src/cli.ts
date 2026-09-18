@@ -2,7 +2,7 @@
  * The `helm` command line. Reads (ps, logs, inspect, status) open the store directly;
  * writes POST to the running `helm serve --http` daemon. See DESIGN.md.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -67,16 +67,33 @@ function printOutcome(outcome: unknown, json: boolean): void {
   }
 }
 
+/** Reads serve.json and confirms its pid is actually alive, deleting a stale file if not. */
+function readLiveServeJson(serveJsonPath: string): { port: number; pid: number } | undefined {
+  if (!existsSync(serveJsonPath)) return undefined;
+  const parsed = JSON.parse(readFileSync(serveJsonPath, 'utf8')) as { port: number; pid: number };
+  try {
+    process.kill(parsed.pid, 0);
+    return parsed;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
+      try { rmSync(serveJsonPath, { force: true }); } catch { /* best effort */ }
+      return undefined;
+    }
+    // Some other error (e.g. EPERM: pid exists but owned by another user) - treat as alive.
+    return parsed;
+  }
+}
+
 async function postTool(name: string, body: unknown): Promise<unknown> {
   const config = loadConfig();
   const serveJsonPath = join(config.home, 'serve.json');
-  if (!existsSync(serveJsonPath)) {
+  const live = readLiveServeJson(serveJsonPath);
+  if (!live) {
     console.error('helm serve is not running (start it with: helm serve --http)');
     process.exitCode = 2;
     return undefined;
   }
-  const { port } = JSON.parse(readFileSync(serveJsonPath, 'utf8')) as { port: number };
-  const res = await fetch(`http://127.0.0.1:${port}/tools/${name}`, {
+  const res = await fetch(`http://127.0.0.1:${live.port}/tools/${name}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body ?? {}),
@@ -278,6 +295,12 @@ async function cmdServe(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { stdio: { type: 'boolean' }, http: { type: 'boolean' }, port: { type: 'string' } } });
   const config = loadConfig();
   ensureHome(config);
+  const live = readLiveServeJson(join(config.home, 'serve.json'));
+  if (live) {
+    console.error(`helm serve is already running (pid ${live.pid})`);
+    process.exitCode = 2;
+    return;
+  }
   const store = openStore(join(config.home, 'helm.sqlite'));
   const helm = new Helm({
     config,

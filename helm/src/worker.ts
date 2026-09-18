@@ -8,7 +8,7 @@
  * Pi packages are imported lazily, inside functions, never at module load time.
  */
 import { mkdir, realpath } from 'node:fs/promises';
-import { relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Model, Api } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
 import { workerResultSchema, type WorkerResult, type WorkerRole, type WorkerRunInput, type WorkerRunOutcome, type WorkerRunner, type WorkerHooks } from './types.js';
@@ -17,7 +17,12 @@ import { RESULT_INSTRUCTION } from './prompt.js';
 const CORRECTION_MESSAGE =
   'Your final message must be exactly one JSON object matching the WorkerResult schema. Reply with only that JSON.';
 
-/** Accept strict JSON or one ```json fenced block (last one wins if more than one appears). */
+/**
+ * Accept strict JSON or a ```json fenced block. Strict-JSON-whole-message is tried first;
+ * if that fails, fenced blocks are tried from last to first, returning the first one that
+ * validates against the schema (an unrelated JSON fence elsewhere in the message must not
+ * shadow a valid result fence).
+ */
 export function parseWorkerResult(text: string): WorkerResult | null {
   const attempt = (candidate: string): WorkerResult | null => {
     let data: unknown;
@@ -32,35 +37,115 @@ export function parseWorkerResult(text: string): WorkerResult | null {
   const direct = attempt(text.trim());
   if (direct) return direct;
   const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
-  if (fences.length === 0) return null;
-  const last = fences[fences.length - 1]?.[1] ?? '';
-  return attempt(last.trim());
+  for (let i = fences.length - 1; i >= 0; i--) {
+    const candidate = fences[i]?.[1] ?? '';
+    const parsed = attempt(candidate.trim());
+    if (parsed) return parsed;
+  }
+  return null;
 }
 
 // ---------- Protected-path policy (the whole tool_call hook) ----------
 
-const BASH_DENY: readonly RegExp[] = [
-  /\bgit\s+push\b/,
-  /\bgh\s/,
-  /\bgit\s+worktree\b/,
-  /\bgit\s+checkout\s+(?!--\s)\S/,
-  /\brm\s+-rf\s+\/(\s|$)/,
-];
-const REVIEWER_BASH_DENY = /(>\s*\S|\btee\b|\bsed\s+-i\b|\bmv\b|\bcp\b|\brm\b|\bgit\s+(commit|add|reset|rebase|merge)\b)/;
-const CD_ABSOLUTE = /\bcd\s+(\/[^\s;&|]+)/g;
+// gh and a bare `rm -rf /` are denied outright, for every role; everything else about git
+// goes through the classifyBash tokenizer below, which is not foolable by inserted flags.
+const GH_DENY = /\bgh\s/;
+const RM_RF_ROOT_DENY = /\brm\s+-rf\s+\/(\s|$)/;
+// Write-like bash for the reviewer role. git's own write subcommands (commit, add, reset,
+// rebase, merge, push) are handled by the tokenizer in classifyBash so `git -C .. commit`
+// cannot slip past a flat regex.
+const REVIEWER_BASH_DENY = /(>\s*\S|\btee\b|\bsed\s+-i\b|\bmv\b|\bcp\b|\brm\b)/;
+// cd to an absolute path outside the worktree, bare or quoted with " or '.
+const CD_ABSOLUTE = /\bcd\s+(?:"(\/[^"]*)"|'(\/[^']*)'|(\/[^\s;&|]+))/g;
+const REVIEWER_GIT_WRITE_SUBCOMMANDS: ReadonlySet<string> = new Set(['commit', 'add', 'reset', 'rebase', 'merge', 'push']);
+// Separators that end a git invocation: command separators, pipes, subshells and command
+// substitution. Splitting on these (as their own tokens) keeps `git`'s argument scan from
+// running past the end of its own command into the next one.
+const SHELL_SEPARATOR_RE = /(;|\|\||&&|\||\(|\)|`|\$\()/g;
+// git options that take a separate value argument; their value token must be skipped too
+// so the scan lands on the actual subcommand, not on `git -C ..` seeing `..` as the verb.
+const GIT_VALUE_OPTIONS: ReadonlySet<string> = new Set(['-C', '-c', '--git-dir', '--work-tree', '--exec-path', '--namespace', '--config-env']);
+
+function tokenizeShell(command: string): string[] {
+  return command
+    .replace(SHELL_SEPARATOR_RE, ' $1 ')
+    .split(/\s+/)
+    .filter((tok) => tok.length > 0);
+}
+
+/**
+ * Tokenizer-based classifier for bash commands, exported so it can be unit tested without a
+ * Pi session. Finds every `git` invocation in the command (across `;`, `&&`, `||`, `|`, `(
+ * )`, backticks and `$(`), skips its option tokens (and the value argument of options that
+ * take one) to find the actual subcommand, and denies push/worktree/checkout(without `--`
+ * for the reviewer or `switch`)/switch regardless of how many flags precede it. This closes
+ * the `git -C .. push`, `git --no-pager push`, `git -C .. worktree remove` style bypasses
+ * that a flat `/git\s+push/` regex misses.
+ */
+export function classifyBash(command: string, role: WorkerRole): { allowed: boolean; reason?: string } {
+  if (GH_DENY.test(command)) return { allowed: false, reason: 'gh CLI is not allowed' };
+  if (RM_RF_ROOT_DENY.test(command)) return { allowed: false, reason: 'refusing rm -rf /' };
+
+  const tokens = tokenizeShell(command);
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] !== 'git') continue;
+    let j = i + 1;
+    while (j < tokens.length) {
+      const tok = tokens[j]!;
+      if (!tok.startsWith('-')) break;
+      j += GIT_VALUE_OPTIONS.has(tok) ? 2 : 1;
+    }
+    const subcommand = tokens[j];
+    if (subcommand === undefined) continue; // bare `git` (or `git` followed only by options)
+    if (subcommand === 'push' || subcommand === 'worktree') {
+      return { allowed: false, reason: `blocked git subcommand: git ${subcommand}` };
+    }
+    if (subcommand === 'checkout' || subcommand === 'switch') {
+      if (tokens[j + 1] !== '--') {
+        return { allowed: false, reason: `blocked git subcommand: git ${subcommand} (checkout/switch of a ref is not allowed; use "-- <path>")` };
+      }
+    }
+    if (role === 'reviewer' && REVIEWER_GIT_WRITE_SUBCOMMANDS.has(subcommand)) {
+      return { allowed: false, reason: `reviewer role cannot run git ${subcommand}` };
+    }
+  }
+  if (role === 'reviewer' && REVIEWER_BASH_DENY.test(command)) {
+    return { allowed: false, reason: 'reviewer role cannot run bash commands that modify files or git state' };
+  }
+  return { allowed: true };
+}
 
 const PATH_TOOLS: readonly string[] = ['read', 'edit', 'write', 'grep', 'find', 'ls'];
 const WRITE_TOOLS: readonly string[] = ['edit', 'write'];
 
 type Verdict = Readonly<{ allow: true; summary: string }> | Readonly<{ allow: false; reason: string }>;
 
-/** Resolve `rawPath` against the worktree, realpath'd if it already exists. */
+/**
+ * Resolve `rawPath` against the worktree and realpath it. When the path does not exist yet
+ * (the write tool's normal case), realpath throws; falling back to the lexical path there
+ * would let a symlink such as `evil -> /tmp` plus a write to `evil/x.txt` escape the
+ * worktree undetected. Instead walk up to the deepest ancestor that does exist, realpath
+ * that (resolving any symlink in the existing prefix), and re-append the remaining,
+ * not-yet-existing components before the containment check.
+ */
 async function resolveGuardedPath(worktree: string, rawPath: string): Promise<string> {
   const resolved = resolve(worktree, rawPath);
   try {
     return await realpath(resolved);
   } catch {
-    return resolved;
+    let ancestor = dirname(resolved);
+    const remainder = [basename(resolved)];
+    for (;;) {
+      try {
+        const real = await realpath(ancestor);
+        return join(real, ...remainder);
+      } catch {
+        const parent = dirname(ancestor);
+        if (parent === ancestor) return resolved; // reached the filesystem root; give up on realpath
+        remainder.unshift(basename(ancestor));
+        ancestor = parent;
+      }
+    }
   }
 }
 
@@ -70,19 +155,19 @@ function isInside(candidate: string, root: string): boolean {
 
 function cdOutsideWorktree(command: string, worktree: string, worktreeReal: string): string | undefined {
   for (const match of command.matchAll(CD_ABSOLUTE)) {
-    const target = resolve(match[1] ?? '/');
-    if (!isInside(target, worktree) && !isInside(target, worktreeReal)) return match[1];
+    const raw = match[1] ?? match[2] ?? match[3] ?? '';
+    const target = resolve(raw || '/');
+    if (!isInside(target, worktree) && !isInside(target, worktreeReal)) return raw;
   }
   return undefined;
 }
 
+// F11: this deny-list approach confines the model's cooperative behavior only; it is not
+// OS-level sandboxing (no chroot/namespace/seccomp), and a determined bash one-liner can
+// still reach outside the worktree. That is accepted for now (see DESIGN.md).
 function bashRefusalReason(command: string, role: WorkerRole, worktree: string, worktreeReal: string): string | undefined {
-  for (const pattern of BASH_DENY) {
-    if (pattern.test(command)) return `blocked bash command (matches ${pattern.source})`;
-  }
-  if (role === 'reviewer' && REVIEWER_BASH_DENY.test(command)) {
-    return 'reviewer role cannot run bash commands that modify files or git state';
-  }
+  const verdict = classifyBash(command, role);
+  if (!verdict.allowed) return verdict.reason;
   const outside = cdOutsideWorktree(command, worktree, worktreeReal);
   if (outside) return `cd to an absolute path outside the worktree: ${outside}`;
   return undefined;
@@ -261,7 +346,7 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
 
         let rawText = await runTurn(message);
         let result = parseWorkerResult(rawText);
-        if (!result) {
+        if (!result && hooks.shouldContinue()) {
           rawText = await runTurn(CORRECTION_MESSAGE);
           result = parseWorkerResult(rawText);
         }

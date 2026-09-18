@@ -13,3 +13,6 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+
+# helm harness package
+helm/node_modules

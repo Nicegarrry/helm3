@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { EventRow, GateRow, PrRow, SpendRow, SpendSummary, Store, WorkerRow, WorkerState } from './types.js';
 
 const WORKER_COLUMNS = [
-  'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'baseRef', 'baseSha',
+  'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
   'branch', 'worktree', 'state', 'head', 'sessionFile', 'result', 'rawResultText', 'idempotencyKey',
   'createdAt', 'updatedAt',
 ] as const;
@@ -19,6 +19,8 @@ function toWorkerRow(row: Record<string, unknown>): WorkerRow {
     model: row.model as string,
     objective: row.objective as string,
     acceptance: (row.acceptance as string | null) ?? null,
+    contextPaths: row.contextPaths ? JSON.parse(row.contextPaths as string) : [],
+    allowWorkflows: Boolean(row.allowWorkflows),
     baseRef: row.baseRef as string,
     baseSha: row.baseSha as string,
     branch: row.branch as string,
@@ -94,6 +96,8 @@ export function openStore(path: string): Store {
       model TEXT NOT NULL,
       objective TEXT NOT NULL,
       acceptance TEXT,
+      contextPaths TEXT NOT NULL DEFAULT '[]',
+      allowWorkflows INTEGER NOT NULL DEFAULT 0,
       baseRef TEXT NOT NULL,
       baseSha TEXT NOT NULL,
       branch TEXT NOT NULL,
@@ -170,7 +174,7 @@ export function openStore(path: string): Store {
     insertWorker(row: WorkerRow): void {
       insertWorkerStmt.run(
         row.workerId, row.repo, row.repoSlug, row.role, row.model, row.objective, row.acceptance,
-        row.baseRef, row.baseSha, row.branch, row.worktree, row.state, row.head, row.sessionFile,
+        JSON.stringify(row.contextPaths), row.allowWorkflows ? 1 : 0, row.baseRef, row.baseSha, row.branch, row.worktree, row.state, row.head, row.sessionFile,
         row.result ? JSON.stringify(row.result) : null, row.rawResultText, row.idempotencyKey,
         row.createdAt, row.updatedAt,
       );
@@ -180,7 +184,12 @@ export function openStore(path: string): Store {
       const entries = Object.entries(patch);
       if (entries.length === 0) return;
       const sets = entries.map(([key]) => `${key} = ?`).join(', ');
-      const values = entries.map(([key, value]) => (key === 'result' ? (value ? JSON.stringify(value) : null) : value)) as (string | number | null)[];
+      const values = entries.map(([key, value]) => {
+        if (key === 'result') return value ? JSON.stringify(value) : null;
+        if (key === 'contextPaths') return JSON.stringify(value ?? []);
+        if (key === 'allowWorkflows') return value ? 1 : 0;
+        return value;
+      }) as (string | number | null)[];
       db.prepare(`UPDATE workers SET ${sets} WHERE workerId = ?`).run(...values, workerId);
     },
 

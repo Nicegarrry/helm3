@@ -21,6 +21,8 @@ function makeWorker(overrides: Partial<WorkerRow> = {}): WorkerRow {
     model: 'test/model',
     objective: 'do the thing',
     acceptance: null,
+    contextPaths: [],
+    allowWorkflows: false,
     baseRef: 'main',
     baseSha: 'a'.repeat(40),
     branch: 'helm/w-00000001',
@@ -36,6 +38,22 @@ function makeWorker(overrides: Partial<WorkerRow> = {}): WorkerRow {
     ...overrides,
   };
 }
+
+test('contextPaths and allowWorkflows round-trip through insert and update', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-store-'));
+  const store = openStore(join(dir, 'helm.sqlite'));
+  try {
+    store.insertWorker(makeWorker({ workerId: 'w-ctx', contextPaths: ['docs/a.md', 'src'], allowWorkflows: true }));
+    assert.deepEqual(store.getWorker('w-ctx')?.contextPaths, ['docs/a.md', 'src']);
+    assert.equal(store.getWorker('w-ctx')?.allowWorkflows, true);
+    store.updateWorker('w-ctx', { contextPaths: ['only.md'], allowWorkflows: false });
+    assert.deepEqual(store.getWorker('w-ctx')?.contextPaths, ['only.md']);
+    assert.equal(store.getWorker('w-ctx')?.allowWorkflows, false);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('insert, get, update a worker', () => {
   const { dir, path } = tempDbPath();

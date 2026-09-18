@@ -30,6 +30,8 @@ export type WorkerRow = Readonly<{
   model: string;           // "provider/model" as Pi names it
   objective: string;
   acceptance: string | null;
+  contextPaths: readonly string[];
+  allowWorkflows: boolean;
   baseRef: string;
   baseSha: string;
   branch: string;

@@ -176,6 +176,8 @@ export class Helm {
         model: input.model,
         objective: input.objective,
         acceptance: input.acceptance ?? null,
+        contextPaths: [...input.contextPaths],
+        allowWorkflows: input.allowWorkflows,
         baseRef,
         baseSha,
         branch,
@@ -193,7 +195,7 @@ export class Helm {
       this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model: input.model, baseRef, baseSha, branch, worktree });
       const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
       const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput) : this.prompts.builder(promptInput);
-      this.startRun(workerId, message, { contextPaths: input.contextPaths, allowWorkflows: input.allowWorkflows }, onDone);
+      this.startRun(workerId, message, onDone);
       return { ok: true, workerId, branch, worktree };
     } catch (err) {
       return refuse(errMessage(err));
@@ -252,7 +254,7 @@ export class Helm {
       if (!row) return refuse('worker not found');
       if (!STEERABLE_STATES.has(row.state)) return refuse(`worker is ${row.state}, not steerable`);
       const priorTurns = this.store.listEvents(input.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
-      this.startRun(input.workerId, input.message, { contextPaths: [], allowWorkflows: false });
+      this.startRun(input.workerId, input.message);
       return { ok: true, turn: priorTurns + 1 };
     } catch (err) {
       return refuse(errMessage(err));
@@ -451,13 +453,8 @@ export class Helm {
   }
 
   /** Start (or resume) one turn in the background. Tracked in `running` so stop/settle can wait on it. */
-  private startRun(
-    workerId: string,
-    message: string,
-    opts: { contextPaths: readonly string[]; allowWorkflows: boolean },
-    onDone?: OnDone,
-  ): void {
-    const promise = this.runTurn(workerId, message, { ...opts, onDone }).catch((err) => {
+  private startRun(workerId: string, message: string, onDone?: OnDone): void {
+    const promise = this.runTurn(workerId, message, onDone).catch((err) => {
       this.store.appendEvent(workerId, 'error', { message: `unhandled: ${errMessage(err)}` });
     });
     this.running.set(workerId, promise);
@@ -466,11 +463,7 @@ export class Helm {
     });
   }
 
-  private async runTurn(
-    workerId: string,
-    message: string,
-    opts: { contextPaths: readonly string[]; allowWorkflows: boolean; onDone?: OnDone },
-  ): Promise<void> {
+  private async runTurn(workerId: string, message: string, onDone?: OnDone): Promise<void> {
     const row = this.store.getWorker(workerId);
     if (!row) return;
     const prevState = row.state;
@@ -483,8 +476,8 @@ export class Helm {
       worktree: row.worktree,
       objective: row.objective,
       acceptance: row.acceptance,
-      contextPaths: opts.contextPaths,
-      allowWorkflows: opts.allowWorkflows,
+      contextPaths: row.contextPaths,
+      allowWorkflows: row.allowWorkflows,
       sessionFile: row.sessionFile,
       sessionDir: join(this.config.home, 'sessions', workerId),
     };
@@ -519,9 +512,9 @@ export class Helm {
       });
       this.store.appendEvent(workerId, 'result', result ? { ...result } : { rawText: outcome.rawText });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: nextState });
-      if (opts.onDone) {
+      if (onDone) {
         try {
-          await opts.onDone(workerId, result, outcome);
+          await onDone(workerId, result, outcome);
         } catch (err) {
           this.store.appendEvent(workerId, 'error', { message: `onDone failed: ${errMessage(err)}` });
         }

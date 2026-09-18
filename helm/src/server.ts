@@ -93,8 +93,23 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
 
     if (url.pathname === '/' && req.method === 'GET') {
       const outcome = await helm.list({});
+      const wantsHtml = (req.headers.accept ?? '').includes('text/html');
+      if (wantsHtml) {
+        const status = await helm.runStatus();
+        const body = outcome.ok
+          ? renderHomePage(outcome.workers, status.ok ? status : null)
+          : `<p>error: ${escapeHtml(outcome.reason)}</p>`;
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
+        return;
+      }
       const body = outcome.ok ? formatWorkerTable(outcome.workers) : `error: ${outcome.reason}`;
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(body);
+      return;
+    }
+
+    if (url.pathname === '/api/status' && req.method === 'GET') {
+      const status = await helm.runStatus();
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(status));
       return;
     }
 
@@ -152,6 +167,43 @@ async function readJsonBody(req: IncomingMessage, res: ServerResponse): Promise<
   } catch {
     throw new InvalidJsonBodyError('invalid JSON body');
   }
+}
+
+/** Escape text for safe interpolation into HTML. */
+export function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
+}
+
+type StatusView = { spendUsd: number; spendCapUsd: number; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
+
+/** Small server-rendered HTML page for GET / when the client asks for text/html. Auto-refreshes; no JS. */
+export function renderHomePage(
+  workers: ReadonlyArray<{ workerId: string; state: string; role: string; model: string; branch: string; head: string | null; createdAt: string }>,
+  status: StatusView | null,
+): string {
+  const statusLine = status
+    ? `$${status.spendUsd.toFixed(2)} / $${status.spendCapUsd.toFixed(2)} spend &middot; ${status.activeWorkers}/${status.maxWorkers} workers &middot; ${status.unknownCostEvents} unknown-cost events`
+    : 'status unavailable';
+  const rows = workers
+    .map((w) => `<tr><td>${escapeHtml(w.workerId)}</td><td>${escapeHtml(w.state)}</td><td>${escapeHtml(w.role)}</td><td>${escapeHtml(w.model)}</td><td>${escapeHtml(w.branch)}</td><td>${escapeHtml(w.head ? w.head.slice(0, 8) : '-')}</td><td>${escapeHtml(w.createdAt)}</td></tr>`)
+    .join('');
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="5">
+<title>Helm</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 14px/1.4 ui-monospace, monospace; margin: 1.5rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+th { opacity: 0.7; font-weight: 600; }
+p.status { opacity: 0.85; }
+</style></head>
+<body>
+<h1>Helm</h1>
+<p class="status">${statusLine}</p>
+<table><thead><tr><th>WORKER</th><th>STATE</th><th>ROLE</th><th>MODEL</th><th>BRANCH</th><th>HEAD</th><th>CREATED</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="7">no workers</td></tr>'}</tbody></table>
+</body></html>`;
 }
 
 /** Plain-text worker table. Shared by GET / and `helm ps`, so both render identically. */

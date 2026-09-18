@@ -49,7 +49,7 @@ Ten tools, one SQLite file, one daemon. About 2.2k lines of TypeScript.
 
 | Tool | What it does |
 | --- | --- |
-| `worker.spawn` | Create a worktree on a new branch and start a Pi worker on it. |
+| `worker.spawn` | Create a worktree on a new branch and start a Pi worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | One line per worker. |
 | `worker.steer` | Send a follow-up message to an idle or interrupted worker in the same Pi session. |
@@ -67,10 +67,14 @@ boundary.
 ## What a worker can and cannot do
 
 Workers get Pi's built-in tools: read, bash, edit, write, grep, find, ls. A `tool_call` hook
-refuses anything outside the worktree, writes under `.git/`, writes under
+refuses paths outside the worktree (symlinks are resolved), writes under `.git/`, writes under
 `.github/workflows/` unless the spawn allowed it, and shell commands that push, call `gh`,
-touch worktrees, check out other refs, or `rm -rf /`. Reviewers additionally cannot write.
-Refusals are logged as events and shown to the model as the tool result.
+touch worktrees, check out other refs, or `rm -rf /`. Git commands are tokenised, so
+inserting flags such as `git -C .. push` does not get past the check. Reviewers additionally
+cannot write. Refusals are logged as events and shown to the model as the tool result.
+
+This is a cooperative deny list, not an OS sandbox. A worker's shell can still read files
+outside the worktree. Run the daemon under whatever OS-level isolation you need.
 
 A worker's final message must be one JSON object: `status`, `summary`, `changedFiles`,
 `commandsRun`, optional `notes`. One correction turn is allowed; after that the worker is
@@ -78,6 +82,13 @@ marked failed and the raw text is saved.
 
 Gates come from `<repo>/helm.json` (`{ "gates": [{ "name", "command" }] }`) or default to
 the `test`, `typecheck` and `lint` scripts in `package.json`.
+
+## Watching it
+
+`helm ps`, `helm logs <id> -f`, `helm inspect <id>` and `helm status` read the store directly
+and work without the daemon. The daemon also serves `GET /` as a plain-text table (or a
+small auto-refreshing HTML page when the client asks for `text/html`) and `GET /api/status`
+as JSON.
 
 ## Durability and cost
 

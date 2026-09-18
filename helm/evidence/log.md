@@ -68,3 +68,11 @@ this session may only push to its designated branch).
   and no single-instance guard (F13); `updatedAt` never refreshed (F14).
 - Items 7, 8: `.mcp.example.json`, root README pointer; CI green on the branch.
 - After fixes: 74 tests, typecheck clean; src 2,482 lines, tests 1,945 lines.
+
+## 2026-09-18 10:45Z  Items 5 and 6
+
+- Simplify pass (behaviour preserving, no test changes): `helm.ts` 604 -> 511, `cli.ts` 367 -> 267.
+- `GET /` renders a small auto-refreshing HTML page when `Accept: text/html`; plain text
+  otherwise. `GET /api/status` added. README updated for clone-on-demand, watching, and the
+  sandbox caveat.
+- Final: 77 tests, typecheck clean; src 2,341 lines, tests 1,979 lines. Spend: US$0.

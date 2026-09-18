@@ -12,6 +12,8 @@ import type { ToolOutcome } from '../src/types.js';
 import type { Helm } from '../src/helm.js';
 
 /** A fake Helm: every tool method just returns a canned ok outcome. Enough to exercise the transport. */
+const FAKE_WORKER = { workerId: 'w-abc12345', state: 'idle', role: 'builder', model: 'anthropic/claude', branch: 'helm/w-abc12345', head: '1234567890abcdef', createdAt: '2026-01-01T00:00:00.000Z' };
+
 function createFakeHelm(home: string): Helm {
   const ok = (extra: Record<string, unknown> = {}): ToolOutcome<unknown> => ({ ok: true, ...extra });
   const method = (extra: Record<string, unknown> = {}) => async () => ok(extra);
@@ -19,7 +21,7 @@ function createFakeHelm(home: string): Helm {
     config: { home, spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 1000 },
     spawn: method({ workerId: 'w-1', branch: 'helm/w-1', worktree: '/tmp/w-1' }),
     inspect: method({ state: 'idle' }),
-    list: method({ workers: [] }),
+    list: method({ workers: [FAKE_WORKER] }),
     steer: method({ turn: 1 }),
     stop: method({ state: 'stopped' }),
     gate: method({ head: 'sha', passed: true, checks: [] }),
@@ -59,6 +61,38 @@ function postWithHost(port: number, path: string, host: string, body: string): P
     req.end(body);
   });
 }
+
+test('serve http: GET / with Accept: text/html returns an HTML page with the worker and refresh meta', async () => {
+  await withServer(async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { accept: 'text/html' } });
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get('content-type')?.includes('text/html'));
+    const body = await res.text();
+    assert.match(body, /<meta http-equiv="refresh" content="5">/);
+    assert.match(body, /w-abc12345/);
+  });
+});
+
+test('serve http: GET / without an html Accept header returns the plain-text table', async () => {
+  await withServer(async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { accept: '*/*' } });
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get('content-type')?.includes('text/plain'));
+    const body = await res.text();
+    assert.match(body, /w-abc12345/);
+    assert.doesNotMatch(body, /<html/);
+  });
+});
+
+test('serve http: GET /api/status returns ok JSON', async () => {
+  await withServer(async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/status`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.ok, true);
+    assert.equal(body.maxWorkers, 3);
+  });
+});
 
 test('serve http: POST /tools/run.status returns ok JSON', async () => {
   await withServer(async (port) => {

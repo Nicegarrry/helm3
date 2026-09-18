@@ -1,6 +1,6 @@
 # One-shot report
 
-Date: 2026-09-18. Branch: `claude/helm3-assessment-simplify-qsdefo`. Package: `helm/`.
+Date: 2026-09-18 (updated after the continuation). Branch: `claude/helm3-assessment-simplify-qsdefo`. Package: `helm/`.
 
 ## 1. Exit proofs
 
@@ -14,8 +14,13 @@ Evidence files: `helm/evidence/log.md`, `helm/test/e2e.test.ts`, test output bel
 
 ```
 npx tsc --noEmit          clean
-npm test                  52 tests, 52 pass, 0 fail
+npm test                  77 tests, 77 pass, 0 fail   (52 at the first commit)
 ```
+
+Continuation on 2026-09-18 (owner cleared up to 12 hours): an adversarial review found 14
+confirmed defects, all fixed with regression tests; `owner/name` cloning, persisted context
+paths, an HTML status page, and a simplification pass were added. Details in `log.md` and
+`worklist.md`.
 
 ## 2. Spend
 
@@ -25,8 +30,8 @@ Zero. No model provider was called. All model traffic used Pi's in-process faux 
 
 | | Lines |
 | --- | --- |
-| `helm/src/*.ts` (12 files) | 2,216 |
-| `helm/test/*.ts` (11 files) | ~1,570 |
+| `helm/src/*.ts` (12 files) | 2,341 |
+| `helm/test/*.ts` (11 files) | 1,979 |
 
 Old `src/` for comparison: 10,664 lines, 16 SQLite tables. New: 5 tables.
 
@@ -38,15 +43,14 @@ Old `src/` for comparison: 10,664 lines, 16 SQLite tables. New: 5 tables.
 - **`gh` transport untested against real `gh`.** `src/github.ts` is tested against a fake
   exec that records argv and parses sample JSON. The `gh pr create` URL parsing and
   `gh pr view --json` field names should be checked on first live use.
-- **Spawn takes a local path only.** `owner/name` is refused with a clear reason. Cloning on
-  demand was left out to stay inside scope.
-- **`contextPaths` and `allowWorkflows` are not persisted** on the worker row, so a steer
-  or resumed turn runs with empty context paths and workflows disallowed. Harmless for the
-  loop, worth a column later.
 - **Stop is cooperative.** `worker.stop` aborts at the next tool call boundary; a model
-  mid-generation finishes that generation first.
-- **Two files over their soft size targets.** `helm.ts` 535 lines and `cli.ts` 344 lines.
-  Whole package is still under the 3k target.
+  mid-generation finishes that generation first. If the turn never reaches a tool call the
+  stop stays pending and the worker reports `unknown` until it settles.
+- **Bash is not sandboxed.** The deny list blocks pushes, `gh`, worktree surgery and
+  checkouts, and paths are contained for the file tools, but a worker's shell can still read
+  outside the worktree. OS-level isolation is the operator's job.
+- **`helm.ts` is 511 lines** against a 450 target after the simplification pass; the rest is
+  contract boilerplate and the protected run loop.
 
 ## 5. Recommendations
 

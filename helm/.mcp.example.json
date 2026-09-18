@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "helm": {
+      "command": "node",
+      "args": ["/absolute/path/to/helm3/helm/bin/helm.js", "serve", "--stdio"],
+      "env": { "HELM_HOME": "/Users/you/.helm", "HELM_SPEND_CAP_USD": "5", "HELM_MAX_WORKERS": "3" }
+    }
+  }
+}

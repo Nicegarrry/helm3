@@ -236,7 +236,7 @@ async function cmdServe(args: string[]): Promise<void> {
   helm.markInterruptedOnStart();
   const mode = values.stdio && !values.http ? 'stdio' : 'http';
   const handle = await serve({ helm, mode, port: values.port ? Number(values.port) : 0 });
-  console.error(mode === 'http' ? `helm serve listening on http://127.0.0.1:${handle.port}` : 'helm serve listening on stdio');
+  console.error(mode === 'http' ? `helm serve listening on http://127.0.0.1:${handle.port}` : `helm serve listening on stdio; status page at http://127.0.0.1:${handle.port}/`);
   const shutdown = async () => {
     await handle.close();
     store.close();

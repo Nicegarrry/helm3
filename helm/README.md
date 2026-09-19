@@ -86,9 +86,14 @@ the `test`, `typecheck` and `lint` scripts in `package.json`.
 ## Watching it
 
 `helm ps`, `helm logs <id> -f`, `helm inspect <id>` and `helm status` read the store directly
-and work without the daemon. The daemon also serves `GET /` as a plain-text table (or a
-small auto-refreshing HTML page when the client asks for `text/html`) and `GET /api/status`
-as JSON.
+and work without the daemon.
+
+The daemon always serves a read-only dashboard on loopback, in both `--http` and `--stdio`
+mode (the URL is printed to stderr at start and the port is in `$HELM_HOME/serve.json`).
+Open `http://127.0.0.1:<port>/` in a browser: live workers with state, role, model, spend,
+tokens, elapsed time, head, objective and last event, plus a per-model rollup of spend and
+tokens. It refreshes every three seconds and has no JavaScript. The same data is at
+`GET /api/state` as JSON; `curl` on `/` returns the plain `helm ps` table.
 
 ## Durability and cost
 

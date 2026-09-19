@@ -1,6 +1,6 @@
 /** Drives `helm serve --stdio` as a child process through the real MCP client. */
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -29,6 +29,14 @@ test('mcp stdio: a real client lists all tools and calls them through helm serve
     const missing = JSON.parse(text(await client.callTool({ name: 'worker.inspect', arguments: { workerId: 'nope' } }))) as { ok: boolean; reason: string };
     assert.equal(missing.ok, false);
     assert.equal(missing.reason, 'worker not found');
+    // stdio mode also binds the read-only status page on loopback and records it in serve.json.
+    const serveJson = JSON.parse(readFileSync(join(home, 'serve.json'), 'utf8')) as { port: number };
+    const page = await fetch(`http://127.0.0.1:${serveJson.port}/`, { headers: { accept: 'text/html' } });
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /<title>Helm<\/title>/);
+    const state = (await (await fetch(`http://127.0.0.1:${serveJson.port}/api/state`)).json()) as { ok: boolean; workers: unknown[] };
+    assert.equal(state.ok, true);
+    assert.deepEqual(state.workers, []);
   } finally {
     await client.close();
     rmSync(home, { recursive: true, force: true });

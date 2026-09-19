@@ -125,6 +125,33 @@ function parseOwnerRepo(url: string): string | null {
   return `${match[1]}/${match[2]}`;
 }
 
+export type OverviewWorker = {
+  workerId: string; state: WorkerState; role: WorkerRow['role']; model: string; repoSlug: string; branch: string; head: string | null;
+  objective: string; createdAt: string; updatedAt: string; elapsedMs: number; spendUsd: number; tokens: number; unknownCostEvents: number;
+  lastEvent: { kind: string; at: string; summary: string } | null; resultStatus: WorkerResult['status'] | null;
+};
+export type OverviewModel = { model: string; workers: number; active: number; spendUsd: number; tokens: number };
+export type Overview = {
+  observedAt: string;
+  run: { spendUsd: number; spendCapUsd: number; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
+  workers: OverviewWorker[]; models: OverviewModel[];
+};
+
+/** One short line per event for the dashboard. */
+function summarizeEvent(kind: string, data: Record<string, unknown>): string {
+  const s = (k: string) => (typeof data[k] === 'string' ? (data[k] as string) : undefined);
+  switch (kind) {
+    case 'tool.call': return `${s('tool') ?? ''} ${s('summary') ?? ''}`.trim();
+    case 'tool.refused': return `${s('tool') ?? ''} refused: ${s('reason') ?? ''}`.trim();
+    case 'state': return `${s('from') ?? '?'} -> ${s('to') ?? '?'}`;
+    case 'result': return `${s('status') ?? ''} ${s('summary') ?? ''}`.trim();
+    case 'error': return s('message') ?? '';
+    case 'gate': return data.passed ? 'passed' : 'failed';
+    case 'pr': return s('url') ?? '';
+    default: { const first = Object.values(data).find((v) => typeof v === 'string'); return typeof first === 'string' ? first : ''; }
+  }
+}
+
 export class Helm {
   /** Public so server.ts can find $HELM_HOME (for serve.json) without a second config load. */
   readonly config: HelmConfig;
@@ -363,6 +390,37 @@ export class Helm {
       const outcome = await guard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
       if (!outcome.ok) return outcome;
       return { ok: true, reviewWorkerId: outcome.workerId };
+    });
+  }
+
+  /** Read-only dashboard data: run status, every worker with spend and last event, and a per-model rollup. */
+  async overview(): Promise<ToolOutcome<Overview>> {
+    return guard(async () => {
+      const status = await this.runStatus();
+      if (!status.ok) throw new Error(status.reason);
+      const now = this.nowIso();
+      const workers: OverviewWorker[] = this.store.listWorkers().map((r) => {
+        const spend = this.store.spendFor(r.workerId);
+        const last = this.store.listEvents(r.workerId, { limit: 1_000_000 }).at(-1);
+        const end = ACTIVE_STATES.has(r.state) ? now : r.updatedAt;
+        return {
+          workerId: r.workerId, state: r.state, role: r.role, model: r.model, repoSlug: r.repoSlug, branch: r.branch, head: r.head,
+          objective: r.objective.length > 160 ? `${r.objective.slice(0, 157)}...` : r.objective,
+          createdAt: r.createdAt, updatedAt: r.updatedAt, elapsedMs: Math.max(0, Date.parse(end) - Date.parse(r.createdAt)),
+          spendUsd: spend.spendUsd, tokens: spend.tokens.input + spend.tokens.output + spend.tokens.cacheRead + spend.tokens.cacheWrite,
+          unknownCostEvents: spend.unknownCostEvents,
+          lastEvent: last ? { kind: last.kind, at: last.at, summary: summarizeEvent(last.kind, last.data) } : null,
+          resultStatus: r.result?.status ?? null,
+        };
+      });
+      const byModel = new Map<string, OverviewModel>();
+      for (const w of workers) {
+        const m = byModel.get(w.model) ?? { model: w.model, workers: 0, active: 0, spendUsd: 0, tokens: 0 };
+        m.workers += 1; if (ACTIVE_STATES.has(w.state)) m.active += 1; m.spendUsd += w.spendUsd; m.tokens += w.tokens;
+        byModel.set(w.model, m);
+      }
+      const { ok: _ok, ...run } = status;
+      return { ok: true, observedAt: now, run, workers, models: [...byModel.values()].sort((a, b) => b.spendUsd - a.spendUsd) };
     });
   }
 

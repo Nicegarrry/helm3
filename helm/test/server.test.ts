@@ -29,6 +29,12 @@ function createFakeHelm(home: string): Helm {
     prStatus: method({ number: 1, state: 'open', head: 'sha', mergeable: true, checks: [], reviews: [], url: 'https://x' }),
     reviewRequest: method({ reviewWorkerId: 'w-2' }),
     runStatus: method({ spendUsd: 0, spendCapUsd: 0, activeWorkers: 0, maxWorkers: 3, unknownCostEvents: 0 }),
+    overview: method({
+      observedAt: '2026-01-01T00:00:05.000Z',
+      run: { spendUsd: 0.1234, spendCapUsd: 5, activeWorkers: 1, maxWorkers: 3, unknownCostEvents: 0 },
+      workers: [{ ...FAKE_WORKER, state: 'running', repoSlug: 'acme/widgets', objective: 'Add a <flag>', updatedAt: '2026-01-01T00:00:05.000Z', elapsedMs: 5000, spendUsd: 0.1234, tokens: 12345, unknownCostEvents: 0, lastEvent: { kind: 'tool.call', at: '2026-01-01T00:00:04.000Z', summary: 'bash npm test' }, resultStatus: null }],
+      models: [{ model: 'anthropic/claude', workers: 1, active: 1, spendUsd: 0.1234, tokens: 12345 }],
+    }),
     prMerge: method({ merged: true }),
   } as unknown as Helm;
 }
@@ -68,7 +74,12 @@ test('serve http: GET / with Accept: text/html returns an HTML page with the wor
     assert.equal(res.status, 200);
     assert.ok(res.headers.get('content-type')?.includes('text/html'));
     const body = await res.text();
-    assert.match(body, /<meta http-equiv="refresh" content="5">/);
+    assert.match(body, /<meta http-equiv="refresh" content="3">/);
+    assert.match(body, /anthropic\/claude/, 'model shown');
+    assert.match(body, /\$0\.1234/, 'spend shown');
+    assert.match(body, /12\.3k/, 'tokens shown');
+    assert.match(body, /Add a &lt;flag&gt;/, 'objective escaped');
+    assert.match(body, /bash npm test/, 'last event shown');
     assert.match(body, /w-abc12345/);
   });
 });
@@ -81,6 +92,16 @@ test('serve http: GET / without an html Accept header returns the plain-text tab
     const body = await res.text();
     assert.match(body, /w-abc12345/);
     assert.doesNotMatch(body, /<html/);
+  });
+});
+
+test('serve http: GET /api/state returns the overview JSON', async () => {
+  await withServer(async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/state`);
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok: boolean; models: Array<{ model: string }> };
+    assert.equal(body.ok, true);
+    assert.equal(body.models[0]?.model, 'anthropic/claude');
   });
 });
 

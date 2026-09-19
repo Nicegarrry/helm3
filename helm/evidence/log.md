@@ -81,3 +81,9 @@ this session may only push to its designated branch).
 
 - Draft PR #138 opened from the branch with the repo's PR template sections filled in.
 - Worklist complete. Self-wake routine deleted after confirming CI on the final head.
+
+## 2026-09-19 00:10Z  Stdio MCP proof
+
+- Drove `helm serve --stdio` as a child process with the real MCP SDK client: tools/list
+  returned all 11 tools; tools/call worked for run.status and worker.inspect; an invalid
+  input surfaced as an MCP validation error. Added `test/mcp-stdio.test.ts`. 78 tests green.

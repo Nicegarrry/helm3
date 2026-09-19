@@ -1,5 +1,12 @@
 # Helm 3
 
+> **New harness (2026-09-18):** the simplified Helm harness lives in [`helm/`](helm/README.md).
+> It is the current build target: `helm serve` exposes ten tools over MCP, runs Pi workers in
+> isolated worktrees, runs gates and opens PRs. The assessment that led to it is in
+> [`docs/one-shot-brief.md`](docs/one-shot-brief.md) and the build evidence in
+> [`helm/evidence/report.md`](helm/evidence/report.md). Everything below describes the
+> earlier control-plane build in `src/`, kept for reference.
+
 A durable control plane for autonomous software development.
 
 Status: Wave 10 is merged through PR #91 at main `4970c0c0951f34bc289b77e7443bc938a5fcfa9f`. The accepted provider-free fleet slice requires an intact status-matching terminal envelope, preserves quiet success, requests judgement for valid failed/partial results, and keeps missing, corrupt or ambiguous completion evidence unsignalled. The local connected Fable/Astra fixture exercises six bounded turns from red gate through same-session repair to green gate and Map update/close. Live provider access, physical process discovery, retries, frontier wake delivery and full Brief acceptance remain open; see [Wave 4 progress](docs/wave4-progress.md), [overnight authority](docs/overnight-authority.md), and [predecessor M1 receipt](docs/predecessor-m1.md).

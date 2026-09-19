@@ -22,3 +22,22 @@ jobs:
         run: npm run typecheck
       - name: Exercise contract and core boundaries
         run: npm test
+
+  helm-harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install frozen root dependencies (shared pinned versions)
+        run: npm ci --ignore-scripts
+      - name: Link shared dependencies into helm/
+        run: ln -s ../node_modules helm/node_modules
+      - name: Typecheck helm harness
+        run: npm run typecheck
+        working-directory: helm
+      - name: Test helm harness
+        run: npm test
+        working-directory: helm

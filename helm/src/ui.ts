@@ -41,7 +41,7 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: -0.01e
 .stat .l { font-size: 11px; font-weight: 500; color: var(--mute); text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
 .stat .v { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; } .stat .v span { color: var(--mute); font-weight: 500; font-size: 13px; }
 .bar { display:block; width: 100%; height: 4px; margin-top: 6px; background: var(--line); border-radius: 2px; overflow: hidden; }
-.bar i { display:block; height:100%; background: var(--blue); width:0; border-radius: 2px; transition: width .4s; } .bar.hot i { background: var(--red); }
+.bar i { display:block; height:100%; background: var(--blue); width:0; border-radius: 2px; transition: width .4s; } .bar.warn i { background: var(--amber); } .bar.hot i { background: var(--red); }
 .card { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px 20px; margin-bottom: 20px; min-width: 0; }
 .grid2 { display:grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items:start; }
 @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } body { padding: 16px; } .stats { margin-left: 0; } }
@@ -123,7 +123,7 @@ function renderHeader() {
   var run = state.run, cap = run.spendCapUsd > 0;
   $('spend').textContent = fmtUsd(run.spendUsd); $('cap').textContent = cap ? ' / ' + fmtUsd(run.spendCapUsd) + ' cap' : ' (no cap)';
   var pct = cap ? Math.min(100, 100 * run.spendUsd / run.spendCapUsd) : 0;
-  $('barfill').style.width = pct + '%'; $('bar').className = 'bar' + (pct >= 90 ? ' hot' : '');
+  $('barfill').style.width = pct + '%'; $('bar').className = 'bar' + (pct >= 90 ? ' hot' : (run.aboveSoftCap ? ' warn' : ''));
   $('active').textContent = run.activeWorkers; $('max').textContent = run.maxWorkers; $('unk').textContent = run.unknownCostEvents;
   $('observed').textContent = rel(state.observedAt);
 }

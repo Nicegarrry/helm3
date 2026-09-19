@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { Helm, type HelmPrompts, type SpawnInput } from '../src/helm.js';
+import { Helm, modelFamily, type HelmPrompts, type SpawnInput } from '../src/helm.js';
 import type {
   EventRow,
   GateRow,
@@ -434,6 +434,68 @@ test('spawn refuses once the spend cap is reached', async () => {
   if (!second.ok) assert.match(second.reason, /spend cap/);
 });
 
+test('soft spend cap: warning event, run.status flag, and spawn warning, without blocking', async () => {
+  const { helm, store } = makeHelm({ config: { spendCapUsd: 1, spendWarnUsd: 0.015 } }); // succeeded() records $0.01 per turn
+  const repo = mkTempDir('helm-repo-');
+  const first = await helm.spawn(spawnBody(repo));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  await helm.settle(first.workerId);
+  let status = await helm.runStatus();
+  assert.equal(status.ok && status.aboveSoftCap, false);
+  const second = await helm.spawn(spawnBody(repo));
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  await helm.settle(second.workerId);
+  status = await helm.runStatus();
+  assert.equal(status.ok && status.spendWarnUsd, 0.015);
+  assert.equal(status.ok && status.aboveSoftCap, true);
+  assert.ok(store.listEvents(second.workerId).some((e) => e.kind === 'spend.warning'), 'warning event on the worker that crossed it');
+  const third = await helm.spawn(spawnBody(repo));
+  assert.equal(third.ok, true, 'soft cap never blocks');
+  if (third.ok) assert.match(third.warning ?? '', /soft cap/);
+});
+
+test('soft spend cap defaults to 80% of the hard cap', async () => {
+  const { helm } = makeHelm({ config: { spendCapUsd: 5 } });
+  assert.equal(helm.spendWarnUsd(), 4);
+  const none = makeHelm();
+  assert.equal(none.helm.spendWarnUsd(), 0);
+});
+
+test('modelFamily strips provider and vendor prefixes', () => {
+  assert.equal(modelFamily('opencode-go/qwen3.8-flash'), 'qwen');
+  assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'glm');
+  assert.equal(modelFamily('google/gemini-3.8-flash'), 'gemini');
+  assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nemotron');
+  assert.equal(modelFamily('openai-codex/gpt-5.6-luna'), 'gpt');
+  assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'claude');
+});
+
+test('review.request refuses the builder model and its family unless allowSameFamily', async () => {
+  const { helm } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo, { model: 'opencode-go/qwen3.8-flash' }));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  await helm.gate({ workerId: spawned.workerId });
+  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(opened.ok, true);
+  const same = await helm.reviewRequest({ workerId: spawned.workerId, model: 'opencode-go/qwen3.8-flash', allowSameFamily: false });
+  assert.equal(same.ok, false);
+  if (!same.ok) assert.match(same.reason, /builder's model/);
+  const family = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: false });
+  assert.equal(family.ok, false);
+  if (!family.ok) assert.match(family.reason, /family 'qwen'/);
+  const forced = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: true });
+  assert.equal(forced.ok, true);
+  if (forced.ok) await helm.settle(forced.reviewWorkerId);
+  const other = await helm.reviewRequest({ workerId: spawned.workerId, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+  assert.equal(other.ok, true);
+  if (other.ok) await helm.settle(other.reviewWorkerId);
+});
+
 test('gate.run refuses on a dirty worktree', async () => {
   const { helm, markDirty } = makeHelm();
   const repo = mkTempDir('helm-repo-');
@@ -591,7 +653,7 @@ test('review.request spawns a reviewer that posts its result as a PR comment', a
   assert.equal(opened.ok, true);
   if (!opened.ok) return;
 
-  const review = await helm.reviewRequest({ workerId: spawned.workerId, model: 'acme/reviewer' });
+  const review = await helm.reviewRequest({ workerId: spawned.workerId, model: 'acme/reviewer', allowSameFamily: false });
   assert.equal(review.ok, true);
   if (!review.ok) return;
   await helm.settle(review.reviewWorkerId);

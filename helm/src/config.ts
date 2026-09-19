@@ -15,6 +15,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): HelmConfig {
   return Object.freeze({
     home,
     spendCapUsd: num(env.HELM_SPEND_CAP_USD, 0),
+    spendWarnUsd: num(env.HELM_SPEND_WARN_USD, 0),
     maxWorkers: num(env.HELM_MAX_WORKERS, 3),
     gateTimeoutMs: num(env.HELM_GATE_TIMEOUT_MS, 900000),
   });

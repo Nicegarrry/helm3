@@ -57,7 +57,7 @@ Ten tools, one SQLite file, one daemon. About 2.2k lines of TypeScript.
 | `gate.run` | Run the repo's checks in the worktree at its exact head and record the result. |
 | `pr.open` | Push the branch and open a PR. Refused unless a gate passed at the current head. |
 | `pr.status` | Mergeability, checks and reviews from GitHub. |
-| `review.request` | Spawn a read-only reviewer on the PR head with a different model; posts the verdict as a PR comment. |
+| `review.request` | Spawn a read-only reviewer on the PR head; posts the verdict as a PR comment. Refused if the reviewer is the builder's model or the same model family (`allowSameFamily` overrides). |
 | `run.status` | Spend, cap, active workers. |
 | `pr.merge` | Merge only when the PR is open, mergeable, checks are green and the head matches. |
 
@@ -114,7 +114,10 @@ files under `$HELM_HOME/sessions/`. If the daemon dies, running workers become
 replayed automatically.
 
 Spend is summed from Pi usage events times the model's catalogue price. `HELM_SPEND_CAP_USD`
-refuses new spawns and stops running workers at the next tool call once reached. Models
+refuses new spawns and stops running workers at the next tool call once reached. A soft cap,
+`HELM_SPEND_WARN_USD` (default 80% of the hard cap), never blocks: crossing it records a
+`spend.warning` event, sets `aboveSoftCap` in `run.status`, adds a `warning` field to spawn
+and steer results so the orchestrator sees it, and turns the dashboard bar amber. Models
 with no price are counted as tokens and reported as unknown-cost events, never blocked.
 
 ## Configuration
@@ -122,7 +125,8 @@ with no price are counted as tokens and reported as unknown-cost events, never b
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `HELM_HOME` | `~/.helm` | State directory |
-| `HELM_SPEND_CAP_USD` | `0` (no cap) | Run-wide spend cap |
+| `HELM_SPEND_CAP_USD` | `0` (no cap) | Run-wide hard spend cap |
+| `HELM_SPEND_WARN_USD` | 80% of the cap | Soft cap: warn, never block |
 | `HELM_MAX_WORKERS` | `3` | Concurrent workers |
 | `HELM_GATE_TIMEOUT_MS` | `900000` | Per-check timeout |
 

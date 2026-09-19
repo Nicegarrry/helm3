@@ -111,3 +111,15 @@ this session may only push to its designated branch).
   segmented filter control, Apple-style light and dark palettes with a `?theme=` override.
   Monospace kept for ids, hashes and event kinds only. Screenshots checked in light and dark,
   with the drawer open. 91 tests green.
+
+## 2026-09-19 08:05Z  Review independence and soft spend cap
+
+- `review.request` refuses the builder's exact model and any model of the same family
+  (leading letters of the model id after provider and vendor prefixes); `allowSameFamily`
+  overrides. `modelFamily()` exported and unit tested.
+- Soft cap `HELM_SPEND_WARN_USD`, default 80% of the hard cap. Crossing it appends a
+  `spend.warning` event, sets `aboveSoftCap` and `spendWarnUsd` in `run.status`, adds a
+  `warning` field to spawn and steer results, and turns the dashboard bar amber. Never blocks.
+- Confirmed Pi 0.85.1 ships an `openai-codex` provider (ChatGPT/Codex OAuth) alongside
+  `opencode-go`, `openrouter` and `github-copilot`, so Codex workers need no native harness.
+- 95 tests green.

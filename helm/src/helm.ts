@@ -135,7 +135,7 @@ export type OverviewModel = { model: string; workers: number; active: number; sp
 export type SpendPoint = { at: string; spendUsd: number };
 export type Overview = {
   observedAt: string;
-  run: { spendUsd: number; spendCapUsd: number; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
+  run: { spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
   workers: OverviewWorker[]; models: OverviewModel[];
   /** Cumulative spend over time (last SPEND_SERIES_POINTS spend rows, ascending by `at`; unknown cost counts as 0). */
   spendSeries: SpendPoint[];
@@ -155,6 +155,18 @@ const SPEND_SERIES_POINTS = 300;
 const DETAIL_EVENT_TAIL = 200;
 const EVENTS_DEFAULT_LIMIT = 100;
 const EVENTS_MAX_LIMIT = 1000;
+
+/**
+ * Model family for review independence: the leading letters of the last path segment of the model id,
+ * ignoring the provider prefix. 'opencode-go/qwen3.8-flash' -> 'qwen', 'openrouter/nvidia/nemotron-3-ultra:free' -> 'nemotron',
+ * 'openai-codex/gpt-5.6-luna' -> 'gpt', 'google/gemini-3.8-flash' -> 'gemini'.
+ */
+export function modelFamily(model: string): string {
+  const id = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
+  const last = id.split('/').pop() ?? id;
+  const m = /^[a-z]+/i.exec(last);
+  return (m ? m[0] : last).toLowerCase();
+}
 
 /** One short line per event for the dashboard. */
 function summarizeEvent(kind: string, data: Record<string, unknown>): string {
@@ -225,7 +237,7 @@ export class Helm {
     return this.store.markInterrupted();
   }
 
-  async spawn(input: SpawnInput): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string }>> {
+  async spawn(input: SpawnInput): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string }>> {
     return guard(() => this.withLock(() => this.spawnLocked(input)));
   }
 
@@ -269,7 +281,7 @@ export class Helm {
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput) : this.prompts.builder(promptInput);
     this.startRun(workerId, message, onDone);
-    return { ok: true, workerId, branch, worktree };
+    return { ok: true, workerId, branch, worktree, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
   }
 
   async inspect(input: InspectInput): Promise<ToolOutcome<{
@@ -301,18 +313,18 @@ export class Helm {
     });
   }
 
-  async steer(input: SteerInput): Promise<ToolOutcome<{ turn: number }>> {
+  async steer(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
     return guard(() => this.withLock(() => this.steerLocked(input)));
   }
 
-  private async steerLocked(input: SteerInput): Promise<ToolOutcome<{ turn: number }>> {
+  private async steerLocked(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
     const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
     must(STEERABLE_STATES.has(row.state), `worker is ${row.state}, not steerable`);
     must(!this.running.has(input.workerId), 'worker already has a turn in flight');
     must(!this.spendCapExceeded(), 'spend cap reached');
     const priorTurns = this.store.listEvents(input.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
     this.startRun(input.workerId, input.message);
-    return { ok: true, turn: priorTurns + 1 };
+    return { ok: true, turn: priorTurns + 1, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
   }
 
   async stop(input: StopInput): Promise<ToolOutcome<{ state: WorkerState }>> {
@@ -396,6 +408,9 @@ export class Helm {
       const byWorker = input.number === undefined && input.workerId ? this.store.getPrByWorker(input.workerId) : undefined;
       const pr = requireValue(byNumber ?? byWorker, 'pr not found');
       const sourceWorker = requireValue(this.store.getWorker(pr.workerId), 'source worker not found');
+      must(input.model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
+      must(input.allowSameFamily || modelFamily(input.model) !== modelFamily(sourceWorker.model),
+        `reviewer model family '${modelFamily(input.model)}' matches the builder's; pick another family or pass allowSameFamily`);
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {
         repo: sourceWorker.repo, objective, model: input.model, baseRef: sourceWorker.branch,
@@ -480,12 +495,21 @@ export class Helm {
     };
   }
 
-  async runStatus(): Promise<ToolOutcome<{ spendUsd: number; spendCapUsd: number; activeWorkers: number; maxWorkers: number; unknownCostEvents: number }>> {
+  /** Soft cap: explicit HELM_SPEND_WARN_USD, else 80% of the hard cap, else none. */
+  spendWarnUsd(): number {
+    const explicit = this.config.spendWarnUsd ?? 0;
+    if (explicit > 0) return explicit;
+    return this.config.spendCapUsd > 0 ? Math.round(this.config.spendCapUsd * 0.8 * 100) / 100 : 0;
+  }
+
+  private aboveSoftCap(): boolean { const w = this.spendWarnUsd(); return w > 0 && this.store.spendTotal().spendUsd >= w; }
+
+  async runStatus(): Promise<ToolOutcome<{ spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number }>> {
     return guard(async () => {
       const total = this.store.spendTotal();
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
       return {
-        ok: true, spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd,
+        ok: true, spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),
         activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents,
       };
     });
@@ -575,7 +599,11 @@ export class Helm {
         this.store.appendEvent(workerId, kind, data);
       },
       onUsage: (usage) => {
+        const before = this.store.spendTotal().spendUsd;
         this.store.addSpend({ ...usage, workerId, at: this.nowIso() });
+        const warn = this.spendWarnUsd();
+        const after = this.store.spendTotal().spendUsd;
+        if (warn > 0 && before < warn && after >= warn) this.store.appendEvent(workerId, 'spend.warning', { spendUsd: after, spendWarnUsd: warn, spendCapUsd: this.config.spendCapUsd });
       },
       shouldContinue: () => {
         if (this.stopRequested.has(workerId)) {

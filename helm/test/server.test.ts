@@ -33,10 +33,10 @@ function createFakeHelm(home: string): Helm {
     prOpen: method({ number: 1, url: 'https://x', head: 'sha' }),
     prStatus: method({ number: 1, state: 'open', head: 'sha', mergeable: true, checks: [], reviews: [], url: 'https://x' }),
     reviewRequest: method({ reviewWorkerId: 'w-2' }),
-    runStatus: method({ spendUsd: 0, spendCapUsd: 0, activeWorkers: 0, maxWorkers: 3, unknownCostEvents: 0 }),
+    runStatus: method({ spendUsd: 0, spendCapUsd: 0, spendWarnUsd: 0, aboveSoftCap: false, activeWorkers: 0, maxWorkers: 3, unknownCostEvents: 0 }),
     overview: method({
       observedAt: '2026-01-01T00:00:05.000Z',
-      run: { spendUsd: 0.1234, spendCapUsd: 5, activeWorkers: 1, maxWorkers: 3, unknownCostEvents: 0 },
+      run: { spendUsd: 0.1234, spendCapUsd: 5, spendWarnUsd: 4, aboveSoftCap: false, activeWorkers: 1, maxWorkers: 3, unknownCostEvents: 0 },
       workers: [FAKE_OVERVIEW_WORKER],
       models: [{ model: 'anthropic/claude', workers: 1, active: 1, spendUsd: 0.1234, tokens: 12345 }],
       spendSeries: [{ at: '2026-01-01T00:00:01.000Z', spendUsd: 0.05 }, { at: '2026-01-01T00:00:04.000Z', spendUsd: 0.1234 }],

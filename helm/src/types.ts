@@ -225,7 +225,7 @@ export const stopInput = z.object({ workerId: z.string().min(1) }).strict();
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
 export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
-export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1) }).strict();
+export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1), allowSameFamily: z.boolean().default(false) }).strict();
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
 export const emptyInput = z.object({}).strict();
 
@@ -237,6 +237,7 @@ export type ToolName = (typeof TOOL_NAMES)[number];
 export type HelmConfig = Readonly<{
   home: string;            // $HELM_HOME, default ~/.helm
   spendCapUsd: number;     // 0 = no cap
+  spendWarnUsd?: number;   // soft cap: warn, never block. Default 80% of the cap when a cap is set
   maxWorkers: number;
   gateTimeoutMs: number;
 }>;

@@ -104,3 +104,10 @@ this session may only push to its designated branch).
   `Store.listAllEvents`, `Store.spendSeries`, `spendSeries` in `overview()`.
 - Verified against a seeded daemon with headless Chromium screenshots (light, dark, drawer).
 - 91 tests green, typecheck clean.
+
+## 2026-09-19 07:45Z  Dashboard restyle
+
+- System sans-serif stack (SF Pro on Apple devices), cards, stat tiles, tinted state badges,
+  segmented filter control, Apple-style light and dark palettes with a `?theme=` override.
+  Monospace kept for ids, hashes and event kinds only. Screenshots checked in light and dark,
+  with the drawer open. 91 tests green.

@@ -16,7 +16,7 @@ test('dashboard shell is a self-contained document that polls the JSON endpoints
   assert.ok(html.includes('document.hidden'), 'pauses polling when hidden');
   assert.ok(html.includes('Intl.NumberFormat'));
   assert.ok(html.includes('<canvas'));
-  assert.ok(html.includes('Read only. JSON at <code>/api/state</code>; tools over MCP at <code>/mcp</code>.'));
+  assert.ok(/Read only[\s\S]*<code>\/api\/state<\/code>[\s\S]*<code>\/mcp<\/code>/.test(html), 'footer names the read-only API and MCP');
   assert.ok(html.split('\n').length < 450, 'shell stays compact');
 });
 

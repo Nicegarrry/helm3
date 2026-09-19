@@ -100,7 +100,8 @@ Open `http://127.0.0.1:<port>/` in a browser:
 - A live event stream across all workers, refusals and errors in red.
 
 It polls every two seconds, pauses when the tab is hidden, and is plain HTML with inline
-vanilla JavaScript: no framework, no build step, no external resources. The same data is
+vanilla JavaScript: no framework, no build step, no external resources. It follows the system
+light or dark appearance; append `?theme=dark` or `?theme=light` to force one. The same data is
 available as JSON at `GET /api/state`, `GET /api/worker/<id>` and `GET /api/events?after=<seq>`;
 `curl` on `/` returns the plain `helm ps` table.
 

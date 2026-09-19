@@ -90,10 +90,19 @@ and work without the daemon.
 
 The daemon always serves a read-only dashboard on loopback, in both `--http` and `--stdio`
 mode (the URL is printed to stderr at start and the port is in `$HELM_HOME/serve.json`).
-Open `http://127.0.0.1:<port>/` in a browser: live workers with state, role, model, spend,
-tokens, elapsed time, head, objective and last event, plus a per-model rollup of spend and
-tokens. It refreshes every three seconds and has no JavaScript. The same data is at
-`GET /api/state` as JSON; `curl` on `/` returns the plain `helm ps` table.
+Open `http://127.0.0.1:<port>/` in a browser:
+
+- Live workers: state, role, model, spend, tokens, elapsed (ticking), head, objective and
+  last event, with all / active / done / failed filters and a text filter.
+- Click a worker for its detail drawer: result and notes, gates with per-check exit codes,
+  PR link, diff stat, and its event history. `#w-<id>` in the URL deep-links to it.
+- Per-model rollup of workers, spend and tokens, and a cumulative spend timeline against the cap.
+- A live event stream across all workers, refusals and errors in red.
+
+It polls every two seconds, pauses when the tab is hidden, and is plain HTML with inline
+vanilla JavaScript: no framework, no build step, no external resources. The same data is
+available as JSON at `GET /api/state`, `GET /api/worker/<id>` and `GET /api/events?after=<seq>`;
+`curl` on `/` returns the plain `helm ps` table.
 
 ## Durability and cost
 

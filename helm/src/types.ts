@@ -98,6 +98,8 @@ export interface Store {
   listWorkers(filter?: { repo?: string; state?: WorkerState }): WorkerRow[];
   appendEvent(workerId: string, kind: string, data?: Record<string, unknown>): EventRow;
   listEvents(workerId: string, opts?: { afterSeq?: number; limit?: number }): EventRow[];
+  /** Events across every worker, ascending seq, `seq > afterSeq`. Default limit 100, capped at 1000. */
+  listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[];
   insertGate(row: GateRow): void;
   listGates(workerId: string): GateRow[];
   insertPr(row: PrRow): void;
@@ -106,6 +108,8 @@ export interface Store {
   addSpend(row: SpendRow): void;
   spendFor(workerId: string): SpendSummary;
   spendTotal(): SpendSummary;
+  /** The last `limit` spend rows (by insertion order), returned ascending by `at`. Feeds the cumulative spend chart. */
+  spendSeries(limit: number): Array<{ at: string; costUsd: number | null }>;
   /** Mark every `running` worker as `interrupted`. Called once on daemon start. Returns affected ids. */
   markInterrupted(): string[];
   close(): void;

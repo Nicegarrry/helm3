@@ -253,3 +253,54 @@ test('gates and prs round-trip', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('listAllEvents spans workers, ascends by seq, and honors afterSeq and limit', () => {
+  const { dir, path } = tempDbPath();
+  const store = openStore(path);
+  try {
+    store.insertWorker(makeWorker({ workerId: 'w-a' }));
+    store.insertWorker(makeWorker({ workerId: 'w-b', branch: 'helm/w-b', worktree: '/tmp/repo/worktrees/w-b' }));
+    store.appendEvent('w-a', 'spawned');
+    store.appendEvent('w-b', 'spawned');
+    store.appendEvent('w-a', 'turn.start', { message: 'go' });
+    store.appendEvent('w-b', 'tool.call', { tool: 'bash' });
+    store.appendEvent('w-a', 'result', { status: 'succeeded' });
+
+    const all = store.listAllEvents();
+    assert.deepEqual(all.map((e) => [e.seq, e.workerId]), [[1, 'w-a'], [2, 'w-b'], [3, 'w-a'], [4, 'w-b'], [5, 'w-a']]);
+    assert.deepEqual(all[3]?.data, { tool: 'bash' });
+
+    assert.deepEqual(store.listAllEvents({ afterSeq: 2 }).map((e) => e.seq), [3, 4, 5]);
+    assert.deepEqual(store.listAllEvents({ limit: 2 }).map((e) => e.seq), [1, 2]);
+    assert.deepEqual(store.listAllEvents({ afterSeq: 1, limit: 2 }).map((e) => e.seq), [2, 3]);
+    assert.deepEqual(store.listAllEvents({ afterSeq: 5 }), []);
+    assert.equal(store.listAllEvents({ limit: 5000 }).length, 5, 'an oversized limit is capped, not rejected');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('spendSeries returns the last N rows ascending by at, keeping null cost', () => {
+  const { dir, path } = tempDbPath();
+  const store = openStore(path);
+  try {
+    const base = { workerId: 'w-1', model: 'test/model', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    // Inserted out of time order on purpose: the series must sort by `at`, not by insertion.
+    store.addSpend({ ...base, costUsd: 0.3, at: '2026-01-01T00:00:03.000Z' });
+    store.addSpend({ ...base, costUsd: 0.1, at: '2026-01-01T00:00:01.000Z' });
+    store.addSpend({ ...base, costUsd: null, at: '2026-01-01T00:00:02.000Z' });
+    store.addSpend({ ...base, costUsd: 0.4, at: '2026-01-01T00:00:04.000Z' });
+
+    const all = store.spendSeries(10);
+    assert.deepEqual(all.map((p) => p.at.slice(17, 19)), ['01', '02', '03', '04']);
+    assert.deepEqual(all.map((p) => p.costUsd), [0.1, null, 0.3, 0.4]);
+
+    const lastTwo = store.spendSeries(2);
+    assert.deepEqual(lastTwo.map((p) => p.costUsd), [0.3, 0.4], 'limit keeps the newest rows');
+    assert.deepEqual(store.spendSeries(0), []);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

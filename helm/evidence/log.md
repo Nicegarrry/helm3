@@ -94,3 +94,13 @@ this session may only push to its designated branch).
   objective and last event, plus a per-model rollup. Served as HTML at `GET /` (Accept:
   text/html) and JSON at `GET /api/state`. `serve --stdio` now also binds the loopback page
   and prints its URL to stderr. Screenshot checked with headless Chromium. 79 tests green.
+
+## 2026-09-19 07:00Z  Live dashboard
+
+- `src/ui.ts`: single-page read-only dashboard, inline vanilla JS, polls `/api/state` and
+  `/api/events` every 2s (paused when hidden), worker detail drawer from `/api/worker/<id>`
+  with deep links (`#w-<id>`), filters, per-model rollup, spend timeline on canvas against
+  the cap, live event stream. Backend: `Helm.workerDetail`, `Helm.recentEvents`,
+  `Store.listAllEvents`, `Store.spendSeries`, `spendSeries` in `overview()`.
+- Verified against a seeded daemon with headless Chromium screenshots (light, dark, drawer).
+- 91 tests green, typecheck clean.

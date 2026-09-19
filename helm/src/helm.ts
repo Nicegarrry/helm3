@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { z } from 'zod';
 import type {
+  EventRow,
   GateRow,
   GateRunner,
   GitHub,
@@ -131,11 +132,29 @@ export type OverviewWorker = {
   lastEvent: { kind: string; at: string; summary: string } | null; resultStatus: WorkerResult['status'] | null;
 };
 export type OverviewModel = { model: string; workers: number; active: number; spendUsd: number; tokens: number };
+export type SpendPoint = { at: string; spendUsd: number };
 export type Overview = {
   observedAt: string;
   run: { spendUsd: number; spendCapUsd: number; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
   workers: OverviewWorker[]; models: OverviewModel[];
+  /** Cumulative spend over time (last SPEND_SERIES_POINTS spend rows, ascending by `at`; unknown cost counts as 0). */
+  spendSeries: SpendPoint[];
 };
+/** One worker's drill-down: the overview row plus everything the page shows on its detail panel. */
+export type WorkerDetail = {
+  worker: OverviewWorker;
+  result: WorkerResult | null;
+  rawResultText: string | null;
+  diffStat: string;
+  gates: GateRow[];
+  pr: PrRow | null;
+  events: EventRow[];
+};
+
+const SPEND_SERIES_POINTS = 300;
+const DETAIL_EVENT_TAIL = 200;
+const EVENTS_DEFAULT_LIMIT = 100;
+const EVENTS_MAX_LIMIT = 1000;
 
 /** One short line per event for the dashboard. */
 function summarizeEvent(kind: string, data: Record<string, unknown>): string {
@@ -399,29 +418,66 @@ export class Helm {
       const status = await this.runStatus();
       if (!status.ok) throw new Error(status.reason);
       const now = this.nowIso();
-      const workers: OverviewWorker[] = this.store.listWorkers().map((r) => {
-        const spend = this.store.spendFor(r.workerId);
-        const last = this.store.listEvents(r.workerId, { limit: 1_000_000 }).at(-1);
-        const end = ACTIVE_STATES.has(r.state) ? now : r.updatedAt;
-        return {
-          workerId: r.workerId, state: r.state, role: r.role, model: r.model, repoSlug: r.repoSlug, branch: r.branch, head: r.head,
-          objective: r.objective.length > 160 ? `${r.objective.slice(0, 157)}...` : r.objective,
-          createdAt: r.createdAt, updatedAt: r.updatedAt, elapsedMs: Math.max(0, Date.parse(end) - Date.parse(r.createdAt)),
-          spendUsd: spend.spendUsd, tokens: spend.tokens.input + spend.tokens.output + spend.tokens.cacheRead + spend.tokens.cacheWrite,
-          unknownCostEvents: spend.unknownCostEvents,
-          lastEvent: last ? { kind: last.kind, at: last.at, summary: summarizeEvent(last.kind, last.data) } : null,
-          resultStatus: r.result?.status ?? null,
-        };
-      });
+      const workers: OverviewWorker[] = this.store.listWorkers().map((r) => this.overviewWorker(r, now));
       const byModel = new Map<string, OverviewModel>();
       for (const w of workers) {
         const m = byModel.get(w.model) ?? { model: w.model, workers: 0, active: 0, spendUsd: 0, tokens: 0 };
         m.workers += 1; if (ACTIVE_STATES.has(w.state)) m.active += 1; m.spendUsd += w.spendUsd; m.tokens += w.tokens;
         byModel.set(w.model, m);
       }
+      let running = 0;
+      const spendSeries: SpendPoint[] = this.store.spendSeries(SPEND_SERIES_POINTS).map((p) => {
+        running += p.costUsd ?? 0;
+        return { at: p.at, spendUsd: running };
+      });
       const { ok: _ok, ...run } = status;
-      return { ok: true, observedAt: now, run, workers, models: [...byModel.values()].sort((a, b) => b.spendUsd - a.spendUsd) };
+      return { ok: true, observedAt: now, run, workers, models: [...byModel.values()].sort((a, b) => b.spendUsd - a.spendUsd), spendSeries };
     });
+  }
+
+  /** One worker's drill-down for the dashboard: overview row, result, diff stat, gates, PR and the last events. */
+  async workerDetail(workerId: string): Promise<ToolOutcome<WorkerDetail>> {
+    return guard(async () => {
+      const row = requireValue(this.store.getWorker(workerId), 'worker not found');
+      let diffStat = '';
+      try { diffStat = await this.workspace.diffStat(row.worktree, row.baseSha); } catch { diffStat = ''; }
+      const events = this.store.listEvents(workerId, { limit: 1_000_000 }).slice(-DETAIL_EVENT_TAIL);
+      return {
+        ok: true,
+        worker: this.overviewWorker(row, this.nowIso()),
+        result: row.result,
+        rawResultText: row.rawResultText,
+        diffStat,
+        gates: this.store.listGates(workerId),
+        pr: this.store.getPrByWorker(workerId) ?? null,
+        events,
+      };
+    });
+  }
+
+  /** Events across every worker with `seq > afterSeq`, ascending, for the dashboard's incremental poll. */
+  async recentEvents(afterSeq = 0, limit = EVENTS_DEFAULT_LIMIT): Promise<ToolOutcome<{ events: EventRow[] }>> {
+    return guard(async () => {
+      const safeAfter = Number.isFinite(afterSeq) ? Math.max(0, Math.floor(afterSeq)) : 0;
+      const safeLimit = Number.isFinite(limit) ? Math.min(EVENTS_MAX_LIMIT, Math.max(1, Math.floor(limit))) : EVENTS_DEFAULT_LIMIT;
+      return { ok: true, events: this.store.listAllEvents({ afterSeq: safeAfter, limit: safeLimit }) };
+    });
+  }
+
+  /** The per-worker row shared by overview() and workerDetail(), so both views agree on every field. */
+  private overviewWorker(r: WorkerRow, now: string): OverviewWorker {
+    const spend = this.store.spendFor(r.workerId);
+    const last = this.store.listEvents(r.workerId, { limit: 1_000_000 }).at(-1);
+    const end = ACTIVE_STATES.has(r.state) ? now : r.updatedAt;
+    return {
+      workerId: r.workerId, state: r.state, role: r.role, model: r.model, repoSlug: r.repoSlug, branch: r.branch, head: r.head,
+      objective: r.objective.length > 160 ? `${r.objective.slice(0, 157)}...` : r.objective,
+      createdAt: r.createdAt, updatedAt: r.updatedAt, elapsedMs: Math.max(0, Date.parse(end) - Date.parse(r.createdAt)),
+      spendUsd: spend.spendUsd, tokens: spend.tokens.input + spend.tokens.output + spend.tokens.cacheRead + spend.tokens.cacheWrite,
+      unknownCostEvents: spend.unknownCostEvents,
+      lastEvent: last ? { kind: last.kind, at: last.at, summary: summarizeEvent(last.kind, last.data) } : null,
+      resultStatus: r.result?.status ?? null,
+    };
   }
 
   async runStatus(): Promise<ToolOutcome<{ spendUsd: number; spendCapUsd: number; activeWorkers: number; maxWorkers: number; unknownCostEvents: number }>> {

@@ -13,6 +13,11 @@ import type { Helm } from '../src/helm.js';
 
 /** A fake Helm: every tool method just returns a canned ok outcome. Enough to exercise the transport. */
 const FAKE_WORKER = { workerId: 'w-abc12345', state: 'idle', role: 'builder', model: 'anthropic/claude', branch: 'helm/w-abc12345', head: '1234567890abcdef', createdAt: '2026-01-01T00:00:00.000Z' };
+const FAKE_OVERVIEW_WORKER = { ...FAKE_WORKER, state: 'running', repoSlug: 'acme/widgets', objective: 'Add a <flag>', updatedAt: '2026-01-01T00:00:05.000Z', elapsedMs: 5000, spendUsd: 0.1234, tokens: 12345, unknownCostEvents: 0, lastEvent: { kind: 'tool.call', at: '2026-01-01T00:00:04.000Z', summary: 'bash npm test' }, resultStatus: null };
+const FAKE_EVENTS = [
+  { seq: 1, workerId: 'w-abc12345', at: '2026-01-01T00:00:00.000Z', kind: 'spawned', data: {} },
+  { seq: 2, workerId: 'w-abc12345', at: '2026-01-01T00:00:04.000Z', kind: 'tool.call', data: { tool: 'bash', summary: 'npm test' } },
+];
 
 function createFakeHelm(home: string): Helm {
   const ok = (extra: Record<string, unknown> = {}): ToolOutcome<unknown> => ({ ok: true, ...extra });
@@ -32,9 +37,15 @@ function createFakeHelm(home: string): Helm {
     overview: method({
       observedAt: '2026-01-01T00:00:05.000Z',
       run: { spendUsd: 0.1234, spendCapUsd: 5, activeWorkers: 1, maxWorkers: 3, unknownCostEvents: 0 },
-      workers: [{ ...FAKE_WORKER, state: 'running', repoSlug: 'acme/widgets', objective: 'Add a <flag>', updatedAt: '2026-01-01T00:00:05.000Z', elapsedMs: 5000, spendUsd: 0.1234, tokens: 12345, unknownCostEvents: 0, lastEvent: { kind: 'tool.call', at: '2026-01-01T00:00:04.000Z', summary: 'bash npm test' }, resultStatus: null }],
+      workers: [FAKE_OVERVIEW_WORKER],
       models: [{ model: 'anthropic/claude', workers: 1, active: 1, spendUsd: 0.1234, tokens: 12345 }],
+      spendSeries: [{ at: '2026-01-01T00:00:01.000Z', spendUsd: 0.05 }, { at: '2026-01-01T00:00:04.000Z', spendUsd: 0.1234 }],
     }),
+    workerDetail: async (workerId: string) =>
+      workerId === FAKE_WORKER.workerId
+        ? ok({ worker: FAKE_OVERVIEW_WORKER, result: null, rawResultText: null, diffStat: ' a.ts | 1 +', gates: [], pr: null, events: FAKE_EVENTS })
+        : { ok: false, reason: 'worker not found' },
+    recentEvents: async (afterSeq = 0, limit = 100) => ok({ events: FAKE_EVENTS.filter((e) => e.seq > afterSeq).slice(0, limit) }),
     prMerge: method({ merged: true }),
   } as unknown as Helm;
 }
@@ -68,19 +79,14 @@ function postWithHost(port: number, path: string, host: string, body: string): P
   });
 }
 
-test('serve http: GET / with Accept: text/html returns an HTML page with the worker and refresh meta', async () => {
+test('serve http: GET / with Accept: text/html returns the dashboard shell from ui.ts', async () => {
   await withServer(async (port) => {
     const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { accept: 'text/html' } });
     assert.equal(res.status, 200);
     assert.ok(res.headers.get('content-type')?.includes('text/html'));
     const body = await res.text();
-    assert.match(body, /<meta http-equiv="refresh" content="3">/);
-    assert.match(body, /anthropic\/claude/, 'model shown');
-    assert.match(body, /\$0\.1234/, 'spend shown');
-    assert.match(body, /12\.3k/, 'tokens shown');
-    assert.match(body, /Add a &lt;flag&gt;/, 'objective escaped');
-    assert.match(body, /bash npm test/, 'last event shown');
-    assert.match(body, /w-abc12345/);
+    assert.match(body, /<title>Helm/);
+    assert.match(body, /<html/);
   });
 });
 
@@ -102,6 +108,58 @@ test('serve http: GET /api/state returns the overview JSON', async () => {
     const body = (await res.json()) as { ok: boolean; models: Array<{ model: string }> };
     assert.equal(body.ok, true);
     assert.equal(body.models[0]?.model, 'anthropic/claude');
+  });
+});
+
+test('serve http: GET /api/state includes spendSeries', async () => {
+  await withServer(async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/state`);
+    const body = (await res.json()) as { ok: boolean; spendSeries: Array<{ at: string; spendUsd: number }> };
+    assert.equal(body.ok, true);
+    assert.equal(body.spendSeries.length, 2);
+    assert.equal(body.spendSeries[1]?.spendUsd, 0.1234);
+  });
+});
+
+test('serve http: GET /api/worker/<id> returns the worker detail JSON', async () => {
+  await withServer(async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/worker/w-abc12345`);
+    assert.equal(res.status, 200);
+    assert.ok(res.headers.get('content-type')?.includes('application/json'));
+    const body = (await res.json()) as { ok: boolean; worker: { workerId: string }; diffStat: string; gates: unknown[]; pr: unknown; events: Array<{ seq: number }> };
+    assert.equal(body.ok, true);
+    assert.equal(body.worker.workerId, 'w-abc12345');
+    assert.equal(body.diffStat, ' a.ts | 1 +');
+    assert.deepEqual(body.gates, []);
+    assert.equal(body.pr, null);
+    assert.deepEqual(body.events.map((e) => e.seq), [1, 2]);
+  });
+});
+
+test('serve http: GET /api/worker/<unknown> returns ok:false, not a 404 or 500', async () => {
+  await withServer(async (port) => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/worker/nope`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: false, reason: 'worker not found' });
+  });
+});
+
+test('serve http: GET /api/events?after=<seq> returns events after the cursor', async () => {
+  await withServer(async (port) => {
+    const all = (await (await fetch(`http://127.0.0.1:${port}/api/events?after=0`)).json()) as { ok: boolean; events: Array<{ seq: number; kind: string }> };
+    assert.equal(all.ok, true);
+    assert.deepEqual(all.events.map((e) => e.seq), [1, 2]);
+    assert.equal(all.events[1]?.kind, 'tool.call');
+
+    const tail = (await (await fetch(`http://127.0.0.1:${port}/api/events?after=1`)).json()) as { ok: boolean; events: Array<{ seq: number }> };
+    assert.deepEqual(tail.events.map((e) => e.seq), [2]);
+
+    const limited = (await (await fetch(`http://127.0.0.1:${port}/api/events?after=0&limit=1`)).json()) as { ok: boolean; events: Array<{ seq: number }> };
+    assert.deepEqual(limited.events.map((e) => e.seq), [1]);
+
+    const noParams = (await (await fetch(`http://127.0.0.1:${port}/api/events`)).json()) as { ok: boolean; events: unknown[] };
+    assert.equal(noParams.ok, true);
+    assert.equal(noParams.events.length, 2);
   });
 });
 

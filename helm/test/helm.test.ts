@@ -78,6 +78,11 @@ function createFakeStore(): Store {
       const limit = opts?.limit ?? 1000;
       return events.filter((e) => e.workerId === workerId && e.seq > afterSeq).slice(0, limit);
     },
+    listAllEvents(opts) {
+      const afterSeq = opts?.afterSeq ?? 0;
+      const limit = Math.min(opts?.limit ?? 100, 1000);
+      return events.filter((e) => e.seq > afterSeq).slice(0, limit);
+    },
     insertGate(row) {
       gates.push(row);
     },
@@ -101,6 +106,9 @@ function createFakeStore(): Store {
     },
     spendTotal() {
       return summarize(spend);
+    },
+    spendSeries(limit) {
+      return [...spend].sort((a, b) => a.at.localeCompare(b.at)).slice(-limit).map((s) => ({ at: s.at, costUsd: s.costUsd }));
     },
     markInterrupted() {
       const ids: string[] = [];
@@ -632,4 +640,99 @@ test('markInterruptedOnStart flips running workers to interrupted', async () => 
   const ids = helm.markInterruptedOnStart();
   assert.deepEqual(ids, [spawned.workerId]);
   assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
+});
+
+test('workerDetail returns the overview row plus result, diff stat, gates, pr and events for a spawned worker', async () => {
+  const { helm } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+
+  const detail = await helm.workerDetail(spawned.workerId);
+  assert.equal(detail.ok, true);
+  if (!detail.ok) return;
+  assert.equal(detail.worker.workerId, spawned.workerId);
+  assert.equal(detail.worker.state, 'succeeded');
+  assert.equal(detail.worker.resultStatus, 'succeeded');
+  assert.equal(detail.result?.status, 'succeeded');
+  assert.equal(detail.rawResultText, null);
+  assert.equal(detail.diffStat, '1 file changed');
+  assert.equal(detail.gates.length, 1);
+  assert.equal(detail.gates[0]?.passed, true);
+  assert.equal(detail.pr?.number, opened.number);
+  const kinds = detail.events.map((e) => e.kind);
+  assert.equal(kinds[0], 'spawned');
+  assert.ok(kinds.includes('gate') && kinds.includes('pr'), `events should include gate and pr: ${kinds.join(',')}`);
+  for (let i = 1; i < detail.events.length; i += 1) assert.ok((detail.events[i]?.seq ?? 0) > (detail.events[i - 1]?.seq ?? 0), 'events ascend by seq');
+
+  // The overview row and the detail row are built by the same helper, so they agree field for field.
+  const overview = await helm.overview();
+  assert.equal(overview.ok, true);
+  if (!overview.ok) return;
+  const { elapsedMs: _a, ...fromOverview } = overview.workers.find((w) => w.workerId === spawned.workerId) ?? ({} as never);
+  const { elapsedMs: _b, ...fromDetail } = detail.worker;
+  assert.deepEqual(fromDetail, fromOverview);
+});
+
+test('workerDetail refuses an unknown worker', async () => {
+  const { helm } = makeHelm();
+  const detail = await helm.workerDetail('w-nope');
+  assert.deepEqual(detail, { ok: false, reason: 'worker not found' });
+});
+
+test('recentEvents pages across all workers by seq', async () => {
+  const { helm } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const first = await helm.spawn(spawnBody(repo));
+  const second = await helm.spawn(spawnBody(repo));
+  assert.equal(first.ok && second.ok, true);
+  if (!first.ok || !second.ok) return;
+  await helm.settle(first.workerId);
+  await helm.settle(second.workerId);
+
+  const page1 = await helm.recentEvents(0, 3);
+  assert.equal(page1.ok, true);
+  if (!page1.ok) return;
+  assert.equal(page1.events.length, 3);
+  assert.deepEqual(page1.events.map((e) => e.seq), [1, 2, 3]);
+
+  const last = page1.events.at(-1)?.seq ?? 0;
+  const page2 = await helm.recentEvents(last);
+  assert.equal(page2.ok, true);
+  if (!page2.ok) return;
+  assert.ok(page2.events.length > 0);
+  assert.ok(page2.events.every((e) => e.seq > last), 'only events after the cursor');
+  const workerIds = new Set(page2.events.map((e) => e.workerId));
+  assert.ok(workerIds.has(first.workerId) && workerIds.has(second.workerId), 'spans both workers');
+
+  const tail = page2.events.at(-1)?.seq ?? 0;
+  const empty = await helm.recentEvents(tail);
+  assert.equal(empty.ok, true);
+  if (empty.ok) assert.deepEqual(empty.events, []);
+});
+
+test('overview includes a cumulative spendSeries', async () => {
+  const { helm } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const first = await helm.spawn(spawnBody(repo));
+  const second = await helm.spawn(spawnBody(repo));
+  assert.equal(first.ok && second.ok, true);
+  if (!first.ok || !second.ok) return;
+  await helm.settle(first.workerId);
+  await helm.settle(second.workerId);
+
+  const overview = await helm.overview();
+  assert.equal(overview.ok, true);
+  if (!overview.ok) return;
+  assert.equal(overview.spendSeries.length, 2, 'one point per usage row');
+  assert.ok(Math.abs((overview.spendSeries[0]?.spendUsd ?? 0) - 0.01) < 1e-9);
+  assert.ok(Math.abs((overview.spendSeries[1]?.spendUsd ?? 0) - 0.02) < 1e-9, 'second point is cumulative');
+  assert.ok((overview.spendSeries[0]?.at ?? '') <= (overview.spendSeries[1]?.at ?? ''), 'ascending by at');
+  assert.ok(Math.abs((overview.spendSeries.at(-1)?.spendUsd ?? 0) - overview.run.spendUsd) < 1e-9, 'last point matches the run total');
 });

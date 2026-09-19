@@ -158,6 +158,7 @@ export function openStore(path: string): Store {
   const findByIdempotencyKeyStmt = db.prepare('SELECT * FROM workers WHERE idempotencyKey = ?');
   const appendEventStmt = db.prepare('INSERT INTO events (workerId, at, kind, data) VALUES (?, ?, ?, ?)');
   const getEventStmt = db.prepare('SELECT * FROM events WHERE seq = ?');
+  const listAllEventsStmt = db.prepare('SELECT * FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?');
   const insertGateStmt = db.prepare('INSERT INTO gates (gateId, workerId, head, passed, checks, at) VALUES (?, ?, ?, ?, ?, ?)');
   const listGatesStmt = db.prepare('SELECT * FROM gates WHERE workerId = ? ORDER BY at ASC');
   const insertPrStmt = db.prepare('INSERT INTO prs (number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?)');
@@ -168,6 +169,7 @@ export function openStore(path: string): Store {
   );
   const spendForStmt = db.prepare('SELECT inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd FROM spend WHERE workerId = ?');
   const spendTotalStmt = db.prepare('SELECT inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd FROM spend');
+  const spendSeriesStmt = db.prepare('SELECT at, costUsd FROM spend ORDER BY at DESC, id DESC LIMIT ?');
   const runningWorkersStmt = db.prepare("SELECT workerId FROM workers WHERE state = 'running'");
 
   return {
@@ -231,6 +233,13 @@ export function openStore(path: string): Store {
       return rows.map(toEventRow);
     },
 
+    listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[] {
+      const afterSeq = opts?.afterSeq ?? 0;
+      const limit = Math.min(Math.max(opts?.limit ?? 100, 0), 1000);
+      const rows = listAllEventsStmt.all(afterSeq, limit) as Record<string, unknown>[];
+      return rows.map(toEventRow);
+    },
+
     insertGate(row: GateRow): void {
       insertGateStmt.run(row.gateId, row.workerId, row.head, row.passed ? 1 : 0, JSON.stringify(row.checks), row.at);
     },
@@ -266,6 +275,12 @@ export function openStore(path: string): Store {
     spendTotal(): SpendSummary {
       const rows = spendTotalStmt.all() as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number | null }[];
       return summarize(rows);
+    },
+
+    spendSeries(limit: number): Array<{ at: string; costUsd: number | null }> {
+      // Take the newest `limit` rows by insertion id, then flip them so the caller sees ascending time.
+      const rows = spendSeriesStmt.all(Math.max(limit, 0)) as { at: string; costUsd: number | null }[];
+      return rows.reverse();
     },
 
     markInterrupted(): string[] {

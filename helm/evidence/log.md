@@ -123,3 +123,9 @@ this session may only push to its designated branch).
 - Confirmed Pi 0.85.1 ships an `openai-codex` provider (ChatGPT/Codex OAuth) alongside
   `opencode-go`, `openrouter` and `github-copilot`, so Codex workers need no native harness.
 - 95 tests green.
+
+## 2026-09-19 08:00Z  Liquid Glass restyle
+
+- Translucent frosted cards with backdrop blur and a specular inner edge, concentric large
+  radii, capsule segmented control and badges, soft gradient backdrop, large bold title, and
+  a floating glass drawer. CSS only; light and dark verified by screenshot.

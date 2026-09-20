@@ -68,7 +68,7 @@ test('e2e: spawn -> faux Pi writes a file -> commit -> gate -> pr.open -> daemon
   const store = openStore(join(home, 'helm.sqlite'));
   const ghCalls: string[] = [];
   const helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub(ghCalls), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt } });
-  const daemon = await serve({ helm, mode: 'http', port: 0 });
+  const daemon = await serve({ helm, port: 0 });
   try {
     const spawned = await helm.spawn({ repo, objective: 'Create hello.txt containing a greeting.', model: 'e2e-faux/offline', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);

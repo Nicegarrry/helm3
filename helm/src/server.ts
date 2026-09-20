@@ -2,7 +2,7 @@
  * `helm serve`: exposes the tool registry over MCP (stdio and Streamable HTTP) plus a
  * small loopback HTTP API the CLI uses. See DESIGN.md and one-shot-brief.md section 3.
  */
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse, request as httpRequest } from 'node:http';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -12,25 +12,51 @@ import { createToolRegistry } from './tools.js';
 import { renderDashboardShell } from './ui.js';
 import type { Helm } from './helm.js';
 
-export type ServeOptions = Readonly<{ helm: Helm; mode: 'stdio' | 'http'; port?: number }>;
-export type ServeHandle = Readonly<{ close(): Promise<void>; port?: number }>;
+export type ServeOptions = Readonly<{ helm: Helm; port?: number }>;
+/** `closed` resolves when the peer goes away (stdio only), so the process can exit with it. */
+export type ServeHandle = Readonly<{ close(): Promise<void>; port?: number; closed?: Promise<void> }>;
 
 type Registry = ReturnType<typeof createToolRegistry>;
 
+/** The daemon: owns the store and the workers, serves the dashboard, the CLI endpoint and MCP over HTTP. */
 export async function serve(opts: ServeOptions): Promise<ServeHandle> {
-  const registry = createToolRegistry(opts.helm);
-  if (opts.mode === 'stdio') {
-    // stdout is the MCP channel, so the read-only status page and CLI endpoint bind on loopback HTTP alongside it.
-    const http = await serveHttp(opts.helm, registry, opts.port ?? 0);
-    const mcp = buildMcpServer(registry);
-    await mcp.connect(new StdioServerTransport());
-    return { port: http.port, async close() { await mcp.close(); await http.close(); } };
-  }
-  return serveHttp(opts.helm, registry, opts.port ?? 0);
+  return serveHttp(opts.helm, createToolRegistry(opts.helm), opts.port ?? 0);
+}
+
+/**
+ * An MCP front-end over stdio that forwards every tool call to the daemon on `port`. It owns
+ * nothing: no store, no workers. Any number of these can attach to one daemon, one per
+ * orchestrator session, and each exits with its client. Calls go over `node:http` rather than
+ * `fetch` because undici gives up on a response after five silent minutes, and `worker.wait`
+ * may hold a response open for twenty-five.
+ */
+export async function serveStdioProxy(port: number): Promise<ServeHandle> {
+  const local = createToolRegistry(undefined as unknown as Helm); // schemas only; `call` never runs here
+  const registry: Registry = {
+    list: () => local.list(),
+    call: (name, input) => new Promise((resolve) => {
+      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json' } }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => { body += chunk; });
+        res.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve({ ok: false, reason: `daemon returned ${res.statusCode}: ${body.slice(0, 200)}` }); } });
+      });
+      req.on('error', (err) => resolve({ ok: false, reason: `daemon unreachable on port ${port}: ${err.message}` }));
+      req.end(JSON.stringify(input ?? {}));
+    }),
+  };
+  const mcp = buildMcpServer(registry);
+  const transport = new StdioServerTransport();
+  const closed = new Promise<void>((resolve) => {
+    transport.onclose = () => resolve();
+    process.stdin.once('end', () => resolve());
+  });
+  await mcp.connect(transport);
+  return { port, closed, async close() { await mcp.close(); } };
 }
 
 function buildMcpServer(registry: Registry): McpServer {
-  const server = new McpServer({ name: 'helm', version: '0.1.0' });
+  const server = new McpServer({ name: 'helm', version: '1.2.0' });
   for (const tool of registry.list()) {
     server.registerTool(
       tool.name,

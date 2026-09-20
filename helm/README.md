@@ -4,7 +4,8 @@ A small harness that lets an orchestrator agent (Claude Code, Codex, or a script
 coding work to Pi workers running cheap models, each in its own git worktree, and get back
 gates, PRs and status without spending its own context on the mechanics.
 
-Twelve tools, one SQLite file, one daemon. Under 3k lines of TypeScript.
+Twelve tools, one SQLite file, one daemon shared by every project on the machine. Under 3k
+lines of TypeScript.
 
 ## Five-minute start
 
@@ -16,22 +17,26 @@ Twelve tools, one SQLite file, one daemon. Under 3k lines of TypeScript.
    gh auth status         # gh is used for pr.open, pr.status, review comments and merge
    ```
 
-2. Start the daemon:
-
-   ```sh
-   HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http
-   ```
-
-   Workers run inside this process. State lives under `$HELM_HOME` (default `~/.helm`).
-
-3. Give the tools to an orchestrator. For Claude Code, add to `.mcp.json`:
+2. Give the tools to an orchestrator. For Claude Code, add to the project's `.mcp.json`:
 
    ```json
-   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio"] } } }
+   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio", "--port", "4747"],
+                             "env": { "HELM_SPEND_CAP_USD": "5" } } } }
    ```
 
+   That is all the setup there is. `serve --stdio` is a front-end for one session: it attaches
+   to the daemon if one is running, otherwise starts one in the background first, and exits
+   when its client does. The daemon (`helm serve --http`) owns the store and the workers,
+   keeps running between sessions, and is shared by every project that points at the same
+   `$HELM_HOME` (default `~/.helm`) — so two Claude Code sessions in two repos see one store,
+   one cap and one dashboard. Its environment is whichever session started it; to give a
+   project its own daemon, cap and dashboard, give it its own `HELM_HOME` in `env`.
+
    For Codex or anything that speaks Streamable HTTP, point it at `http://127.0.0.1:<port>/mcp`
-   (the port is in `$HELM_HOME/serve.json`).
+   (the port is in `$HELM_HOME/serve.json`; start the daemon by hand with
+   `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http --port 4747` if nothing has yet).
+
+3. Stop the daemon when you want workers and the dashboard gone: `helm shutdown`.
 
 4. Run one task by hand to see the loop:
 
@@ -101,8 +106,8 @@ polling calls to a handful of waits for the same job; `helm/evidence/live.md` ha
 `helm ps`, `helm logs <id> -f`, `helm inspect <id>` and `helm status` read the store directly
 and work without the daemon.
 
-The daemon always serves a read-only dashboard on loopback, in both `--http` and `--stdio`
-mode (the URL is printed to stderr at start and the port is in `$HELM_HOME/serve.json`).
+The daemon serves a read-only dashboard on loopback (the port is in `$HELM_HOME/serve.json`;
+each stdio front-end prints the URL to stderr when it attaches).
 Open `http://127.0.0.1:<port>/` in a browser:
 
 - Live workers: state, role, model, spend, tokens, elapsed (ticking), head, objective and

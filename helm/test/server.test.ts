@@ -53,7 +53,7 @@ function createFakeHelm(home: string): Helm {
 async function withServer(fn: (port: number) => Promise<void>): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'helm-serve-'));
   const helm = createFakeHelm(home);
-  const handle = await serve({ helm, mode: 'http', port: 0 });
+  const handle = await serve({ helm, port: 0 });
   try {
     assert.ok(handle.port, 'http mode should report the bound port');
     await fn(handle.port as number);

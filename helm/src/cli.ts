@@ -2,7 +2,8 @@
  * The `helm` command line. Reads (ps, logs, inspect, status) open the store directly;
  * writes POST to the running `helm serve --http` daemon. See DESIGN.md.
  */
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,7 @@ import { ghGitHub } from './github.js';
 import { piWorkerRunner } from './worker.js';
 import { builderPrompt, reviewerPrompt } from './prompt.js';
 import { Helm } from './helm.js';
-import { serve, formatWorkerTable } from './server.js';
+import { serve, serveStdioProxy, formatWorkerTable } from './server.js';
 
 function usage(): void {
   console.error(`usage: helm <command> [options]
@@ -33,7 +34,8 @@ function usage(): void {
   review <id|#n> --model m [--json]
   merge <#n> --head <sha> [--json]
   status [--json]
-  serve [--stdio|--http] [--port n]`);
+  serve [--stdio|--http] [--port n]
+  shutdown`);
 }
 
 function openReadStore() {
@@ -249,11 +251,27 @@ const cmdStatus = (args: string[]) =>
     console.log(`unknown-cost events: ${payload.unknownCostEvents}`);
   });
 
+/**
+ * `serve --http` is the daemon. `serve --stdio` is a front-end for one MCP client: it attaches
+ * to the running daemon, or starts one detached first, and exits when its client does. The
+ * daemon outlives sessions on purpose — workers keep running and the dashboard stays up — and
+ * every project on the machine shares it. `helm shutdown` stops it.
+ */
 async function cmdServe(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { stdio: { type: 'boolean' }, http: { type: 'boolean' }, port: { type: 'string' } } });
   const config = loadConfig();
   ensureHome(config);
-  const live = readLiveServeJson(join(config.home, 'serve.json'));
+  const serveJsonPath = join(config.home, 'serve.json');
+  const port = values.port ? Number(values.port) : 0;
+  if (values.stdio && !values.http) {
+    const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port));
+    const handle = await serveStdioProxy(live.port);
+    console.error(`helm stdio front-end attached to daemon pid ${live.pid}; status page at http://127.0.0.1:${live.port}/`);
+    await handle.closed;
+    await handle.close();
+    process.exit(0);
+  }
+  const live = readLiveServeJson(serveJsonPath);
   if (live) { console.error(`helm serve is already running (pid ${live.pid})`); process.exitCode = 2; return; }
   const store = openStore(join(config.home, 'helm.sqlite'));
   const helm = new Helm({
@@ -261,9 +279,8 @@ async function cmdServe(args: string[]): Promise<void> {
     runner: piWorkerRunner(), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
   });
   helm.markInterruptedOnStart();
-  const mode = values.stdio && !values.http ? 'stdio' : 'http';
-  const handle = await serve({ helm, mode, port: values.port ? Number(values.port) : 0 });
-  console.error(mode === 'http' ? `helm serve listening on http://127.0.0.1:${handle.port}` : `helm serve listening on stdio; status page at http://127.0.0.1:${handle.port}/`);
+  const handle = await serve({ helm, port });
+  console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     await handle.close();
     store.close();
@@ -273,10 +290,32 @@ async function cmdServe(args: string[]): Promise<void> {
   process.on('SIGTERM', () => void shutdown());
 }
 
+/** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */
+async function startDetachedDaemon(home: string, serveJsonPath: string, port: number): Promise<{ port: number; pid: number }> {
+  const log = openSync(join(home, 'daemon.log'), 'a');
+  const child = spawn(process.execPath, [...process.execArgv, process.argv[1] ?? '', 'serve', '--http', '--port', String(port)], {
+    detached: true, stdio: ['ignore', log, log], env: process.env,
+  });
+  child.unref();
+  for (let i = 0; i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    const live = readLiveServeJson(serveJsonPath);
+    if (live) return live;
+  }
+  throw new Error(`helm daemon did not start within 10s; see ${join(home, 'daemon.log')}`);
+}
+
+async function cmdShutdown(): Promise<void> {
+  const live = readLiveServeJson(join(loadConfig().home, 'serve.json'));
+  if (!live) { console.error('helm serve is not running'); return; }
+  process.kill(live.pid, 'SIGINT');
+  console.error(`sent SIGINT to helm serve (pid ${live.pid})`);
+}
+
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
-  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, serve: cmdServe,
+  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, serve: cmdServe, shutdown: cmdShutdown,
 };
 
 async function main(): Promise<void> {

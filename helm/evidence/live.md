@@ -536,3 +536,58 @@ context on the mechanics" — is now true in the measurement that mattered.
 
 `helm/src` 2,817 → 2,915 lines (ceiling 3,000). Tests 99 → 107; the three that pin the merge
 guard and the normalisation were each run against v1 and fail there.
+
+---
+
+# v1.2 — 2026-09-21
+
+## The orphan and the one-project limit were one flaw
+
+After the v1.1 proof, the `serve --stdio` process that Claude Code had started was still
+running after Claude Code exited, and `serve.json` still pointed at it. Separately, the owner
+asked whether only one project at a time could use Helm on a machine — and the answer was yes:
+`serve` refused to start beside a live `serve.json`, so a second project's session got no tools.
+
+Both came from the same shape: the MCP front-end and the daemon were one process. v1.2 splits
+them. `serve --http` is the daemon — store, workers, dashboard, CLI endpoint, HTTP MCP. `serve
+--stdio` is a front-end for one session: it attaches to the running daemon, or starts one
+detached (logging to `$HELM_HOME/daemon.log`) and then attaches, forwards every tool call, and
+exits on stdin EOF — which is what its client closing looks like. The daemon outlives sessions
+on purpose; `helm shutdown` stops it. Tool calls are forwarded over `node:http`, not `fetch`,
+because undici abandons a response after five silent minutes and `worker.wait` may hold one
+open for twenty-five.
+
+Line budget: 2,915 → 2,980 of 3,000.
+
+### Test, run against v1.1 first
+
+`mcp-stdio.test.ts` now has two tests. Both fail on v1.1's `cli.ts`/`server.ts` (swapped in
+from the tag) and pass on v1.2:
+
+- the original client test, plus an assertion that the daemon's pid is not the front-end's;
+- two front-ends on one `HELM_HOME`: the second attaches instead of starting a daemon, both
+  answer `run.status`; closing the first client makes its front-end exit within 5 s while the
+  daemon and the second client carry on.
+
+### Live: two projects at once
+
+Two headless Claude Code sessions, one in `~/code/web/brief` and one in `~/code/VG`, started two
+seconds apart, each restricted to `mcp__helm`, each asked for one `run_status`:
+
+```
+while both ran:   serve.json {"port":4747,"pid":27711}   front-ends: 2   daemons: 1
+brief  → spendUsd 0.752095391, spendCapUsd 5, activeWorkers 0   (3 turns)
+vg     → spendUsd 0.752095391, spendCapUsd 5, activeWorkers 0   (3 turns)
+after both exited:                                     front-ends: 0   daemon: still up
+helm shutdown → sent SIGINT to helm serve (pid 27711)
+```
+
+Same store, same cap, same numbers from both repos; nothing left behind when they closed.
+
+## `pr.merge`, twice more
+
+brief#249 and #250 (the v1 and v1.1 MCP proofs' PRs) were merged through Helm on the v1.1
+daemon: `gh pr ready`, then `helm merge <n> --head <sha>`. #249 merged first try
+(`273db94`); #250 was refused once with "github has not finished computing mergeability; try
+again shortly" — #249 had just landed on its base — and merged on the retry (`627bb1d`). That
+is the guard added in v1.1 doing precisely what it was added for.

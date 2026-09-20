@@ -68,6 +68,13 @@ Old `src/` for comparison: 10,664 lines, 16 SQLite tables. New: 5 tables.
 - **`helm.ts` is 511 lines** against a 450 target after the simplification pass; the rest is
   contract boilerplate and the protected run loop. `src/` totals 2,817 lines against the 3k
   ceiling, so the next addition has to be paid for by a cut.
+- ~~**One session at a time.**~~ In v1.1 the stdio MCP server and the daemon were one process, so a
+  second project's session could not start and the first's server outlived its client. v1.2
+  splits them: one daemon per `HELM_HOME`, any number of per-session front-ends. Proven live with
+  two repos at once; see `live.md` "v1.2".
+- **The daemon's environment is the first session's.** `HELM_SPEND_CAP_USD` and friends come
+  from whichever `.mcp.json` started the daemon; a later project's `env` is ignored while it runs.
+  Per-project isolation is a per-project `HELM_HOME`.
 - **The dashboard serves no favicon**, so every page load logs a 404. Cosmetic.
 
 ## 5. Recommendations

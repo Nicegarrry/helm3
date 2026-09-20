@@ -17,7 +17,7 @@ in `test/<module>.test.ts`, and must run with `npm test` from `helm/`.
 | `src/prompt.ts` | builder and reviewer prompt text and the result instruction | `buildPrompt(...)`, `RESULT_INSTRUCTION` |
 | `src/helm.ts` | the service: composes the above, implements the twelve tools | `class Helm` |
 | `src/tools.ts` | tool registry: names, zod inputs, dispatch to `Helm` | `createToolRegistry(helm)` |
-| `src/server.ts` | `helm serve`: MCP stdio + Streamable HTTP on 127.0.0.1 | `serve(opts)` |
+| `src/server.ts` | `helm serve --http`: the daemon (Streamable HTTP MCP, CLI endpoint, dashboard on 127.0.0.1); `serve --stdio`: a per-session front-end that proxies to it | `serve(opts)`, `serveStdioProxy(port)` |
 | `src/cli.ts` | `helm` command line | main |
 | `src/config.ts` | `$HELM_HOME`, spend cap, max workers | `loadConfig(env)` |
 

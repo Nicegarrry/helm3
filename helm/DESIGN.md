@@ -1,6 +1,6 @@
 # Helm harness: module map
 
-Read `../docs/one-shot-brief.md` first. `src/types.ts` is the contract; do not change it
+Read `docs/one-shot-brief.md` first. `src/types.ts` is the contract; do not change it
 without telling the coordinator. All modules are ESM TypeScript run by `tsx` on Node 22.
 Use `node:sqlite` (built in), `node:child_process` with `execFile` (never `shell: true`),
 `zod` v4 (`import { z } from 'zod'`). Tests use `node:test` and `node:assert/strict`, live

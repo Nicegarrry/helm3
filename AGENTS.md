@@ -1,50 +1,21 @@
-# Helm 3 agent contract
+# Helm agent contract
 
-## Current authority
+Helm is a harness: an orchestrator agent calls Helm tools; Helm runs Pi workers on cheap
+models in isolated worktrees, runs gates, opens PRs and reports status durably. The code
+lives in `helm/`. Read `helm/README.md` first.
 
-On 2026-09-17 at 06:05 UTC the user explicitly renewed autonomous building after model testing and requested the free Nemotron route be added to the roadmap and tiering list, while conserving ChatGPT usage. This supersedes the earlier paused/expired general run below. Current bounded continuation expires at **2026-09-17T10:05:35Z**. Preserve the cumulative US$20 ceiling and all unknown reservations. New maximum allocations are US$3.50 existing open/Gemini work, US$0.90 OpenRouter paid, and US$0 free inference, against inherited ledger liability US$15.476677786 plus US$0.04 external reserve. Prefer native Pi open/Gemini workers; any non-coordinator ChatGPT worker must be Luna. Free is a cost class, not a capability tier. NVIDIA's collecting free route is limited to curated public/synthetic context; no account-wide privacy changes or private-data export. See [current plan](docs/open-model-waves.md) and [model roster](docs/model-roster.md).
-
-
-On 2026-09-17 the user explicitly assumed unified ownership of Helm 3 and Helm CLI and requested every operational dogfooding issue be added to the Helm backlog. CLI issues are in scope; do not defer them solely because their original report lives in the CLI repository. Canonical operational work is tracked in [the unified backlog](docs/unified-helm-backlog.md), with original reports preserved and linked. Port useful behaviours and evidence without reintroducing the retired worker adapter architecture.
-
-The user granted continued coordination usage, superseding the previous 35% Codex reserve pause. Prefer actual native Pi Gemini/open-model workers liberally within the existing API spending ceiling. Apart from the coordinator, any ChatGPT worker must use Luna; do not dispatch Sol, Terra or frontier ChatGPT workers. Keep provider availability honest, preserve unresolved reservations, and use bounded, expiring execution grants. The earlier run deadlines below are historical and do not authorise new effects. The current renewed four-hour run ends at 2026-09-17T02:09:34.786143Z, with at most three concurrent workers and 64 attempts per node; the conservative US$20 combined ceiling includes all earlier commitments.
-
-On 2026-09-16 at 05:05 UTC the user renewed remaining-work Wave 2: “Ok continue wave 2 pls using more resource as needed”. Continue with native Pi Gemini/Qwen workers. The new operational bound ends at 08:05 UTC with 64 worker attempts and at most three concurrent workers. The cumulative daily API ceiling remains US$20; all prior settled usage and unknown reservations remain held. This supersedes earlier paused/expired run limits, not the fixed Brief or effect invariants. Current baseline is `7161f67` (PR101–108 merged, 306 tests passed). Process/session reconciliation, verified retries and operational bootstrap remain open.
-
-On 2026-09-16 the user explicitly authorised making Helm 3 public, merging the reviewed PRs and continuing the remaining-work **Wave 2** with Gemini/Qwen. PR101–105 are merged after green CI; main `7991467` matches the combined tree that passed 282 tests. The renewed bounded run expires at 2026-09-16T04:05:00Z. The combined daily API ceiling remains US$20, including prior settled usage and unknown reservations; no reset. See [current Wave 2 scope](docs/wave2-supervision.md). This supersedes the older run deadline and exhausted attempt grants below, not the fixed design or hard invariants.
-
-On 2026-09-16 the human approved starting the remaining build waves and reporting between waves, using almost only open-model Pi workers, with Qwen, Meta Muse Spark 1.3, GLM, Kimi and Gemini 3.8 Flash selected as suitable. This supersedes the expired overnight stop and the older Terra/Luna preference. Preserve the original cumulative US$10 ceiling and every outstanding reservation; no purchases, top-ups, account-plan changes or contributor-training opt-in are authorised. The renewed Wave 0 execution lease ends at 2026-09-16T02:15:00Z. See [open-model build waves](docs/open-model-waves.md).
-
-Wave 4 and onward are now explicitly approved for overnight execution on 2026-09-15. The user asked to continue fairly autonomously, dogfood Helm with native Pi workers including available open models, and supplied temporary OpenCode/Gemini credentials separately. The user explicitly chose a **US$10 combined incremental API spending ceiling for the entire overnight run**. See [overnight authority](docs/overnight-authority.md). This supersedes older wave-only and no-live-probe restrictions within these bounds. Stop new autonomous work at 08:00 Australia/Sydney on 2026-09-16; monitor and preserve evidence thereafter. No purchases, top-ups, unrelated deployment or interactive account changes are authorised.
-
-
-Wave 3 is explicitly approved: “Go for next wave - explain ‘imports remain open’”. Execute the supervised connected-control-plane wave in [wave-three scope and acceptance](docs/wave3-plan.md), including authorised predecessor reuse and provider-free dogfooding. This supersedes wave-two-only scope. Spending, login, source preservation and isolation boundaries below remain applicable.
-
-The human explicitly approved the first implementation wave after context clean on 2026-09-15: “pick up the handoff and review map and the first wave. Let’s get working using mostly Luna/terra workers and reviewers please”. The scoped decision is recorded in [APPROVAL #2](https://github.com/Nicegarrry/helm3/issues/2#issuecomment-5671903235) and [wave-one authority](docs/wave1-authority.md). Implement and review that foundation in isolated worktrees and integrate reviewed PRs. No purchases, top-ups, incremental paid API fallback or unattended Helm run lease are authorised. Predecessor reuse is now authorised as recorded below. Public SDK/package reads and local provider-free tests remain permitted.
-
-The human has now confirmed Opus completed the predecessor milestone and explicitly authorised free reuse and dogfooding for the next wave. This supersedes the predecessor access/import prohibition above and in older packets. The accepted source baseline is `Nicegarrry/helm-cli@ae5c3ff18ef8c0e12d57973ecb21c928b020b5c7`; see [milestone receipt and reuse plan](docs/predecessor-m1.md). Preserve unrelated uncommitted files in the predecessor checkout. Use isolated worktrees and SHA-pinned imports; port behaviours and tests, keeping Pi-native execution and Helm 3 domain authority.
-
-Interactive Pi OAuth is deferred until the human returns, expected 2026-09-16. Continue approved provider-free driver/tool/recovery implementation; live acceptance remains open. See the sequencing update in [wave-two authority](docs/wave2-authority.md). Elapsed time does not grant login consent.
-
-## Durable contract
-
-- The human owns the Brief. Proposals must not silently change fixed requirements. The full original design and its addendum are authoritative together.
-- The Map is fluid; GitHub is authoritative for issue/PR state. Documents are dated projections.
-- Agents are disposable; command/evidence/handoff records are durable.
-- Re-read authority and relevant external facts immediately before effects.
-- Unknown quota/cost remains unknown. No live provider probe without an authorised bounded cost.
-- One writer per isolated worktree; PR-only product work. Workers do not merge their own work.
-- Verify each worker brief against the accepted design and ticket before dispatch.
-- Root bootstrap commits are permitted for the authorised empty-repository preparation only.
-- Keep secrets, local account files, transcripts, and dependency trees out of Git.
-- Models choose workflows; machinery enforces authority, evidence and recovery.
-- One active, replaceable frontier orchestrator owns mutation at a time: Fable via Claude Agent SDK or Astra via Codex SDK. Helm's small driver normalises lifecycle/tool calls, never reasoning behaviour; Pi remains the one native worker runtime.
-- An orchestrator ownership lease and its monotonic epoch fence queued and at-effect mutating commands. It is distinct from the bounded Autonomy Lease that controls spend and effects.
+## Rules
+- GitHub owns issues and PRs. Helm owns worker state in `$HELM_HOME/helm.sqlite`.
+- One worker per worktree. Workers never push; `pr.open` pushes after a passing gate.
+- A PR merges only when checks are green at the exact head the gate passed on.
+- Spend is capped by `HELM_SPEND_CAP_USD`. Unknown prices are reported, never blocked.
+- Credentials stay in Pi's own store and `gh`. Never in the repo, config or logs.
+- No purchases, top-ups or account changes. Free routes see synthetic content only.
+- Workers report a JSON `WorkerResult`; a model's claim is not evidence until a gate ran.
 
 ## Working method
-
-Prefer native Pi Gemini/open-model workers for implementation, investigation and independent review. Any ChatGPT worker must be Luna; the coordinator may use frontier cognition for interface decisions, integration and acceptance. Prefer at most three workers plus coordinator, and increase only against demonstrated machine/provider capacity and delegated authority. Workers must report commands and observed results, distinguish mocks from live-provider evidence, and preserve WIP on interruption.
-
-Prefer codebase-memory-mcp for code discovery: search_graph, trace_path, get_code_snippet, query_graph, search_code. Run index_repository first when unindexed. Use file search for non-code/config/string literals or insufficient graph results. Predecessor indexing and inspection are now authorised against the recorded source baseline.
-
-Context clean and first-wave approval are now recorded. Subsequent autonomous waves require their actual delegated scope and bounds; elapsed time is not authority.
+- Product changes are PRs from worktrees. Keep `helm/` under 3k lines; cut before adding.
+- Prefer open models via OpenCode or OpenRouter for builders; a different family for review.
+- Run `npm test` in `helm/` before pushing.
+- The pre-`helm/` control plane is retired. It is reachable at the `legacy-control-plane`
+  tag and is not extended.

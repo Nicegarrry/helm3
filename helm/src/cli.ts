@@ -24,6 +24,7 @@ function usage(): void {
   ps [--repo path] [--state s] [--json]
   logs <id> [-f] [--json]
   inspect <id> [--tail n] [--json]
+  wait <id>... [--timeout ms] [--json]
   steer <id> "<message>" [--json]
   stop <id> [--json]
   gate <id> [--json]
@@ -191,6 +192,32 @@ const cmdInspect = (args: string[]) =>
     for (const e of payload.events) console.log(`  [${e.at}] ${e.kind} ${JSON.stringify(e.data)}`);
   }, { tail: { type: 'string' } });
 
+const cmdWait = (args: string[]) =>
+  readCmd(args, async (positionals, v, store) => {
+    if (positionals.length === 0) { usage(); process.exitCode = 2; return; }
+    const timeoutMs = v.timeout ? Number(v.timeout) : 600_000;
+    const started = Date.now();
+    for (;;) {
+      const rows: WorkerRow[] = [];
+      for (const id of positionals) {
+        const row = store.getWorker(id);
+        if (!row) { console.error(`worker not found: ${id}`); process.exitCode = 1; return; }
+        rows.push(row);
+      }
+      const settled = rows.filter((r) => r.state !== 'queued' && r.state !== 'running');
+      const waitedMs = Date.now() - started;
+      if (settled.length > 0 || waitedMs >= timeoutMs) {
+        const pending = rows.filter((r) => r.state === 'queued' || r.state === 'running').map((r) => r.workerId);
+        const payload = { settled: settled.map(toWorkerRowSummary), pending, timedOut: settled.length === 0, waitedMs };
+        if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
+        if (payload.timedOut) console.log(`timed out after ${Math.round(waitedMs / 1000)}s; still pending: ${pending.join(' ')}`);
+        else console.log(formatWorkerTable(payload.settled));
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }, { timeout: { type: 'string' } });
+
 const cmdSteer = (args: string[]) =>
   simpleCmd('worker.steer', args, (p) => (p[0] && p.length > 1 ? { workerId: p[0], message: p.slice(1).join(' ') } : undefined));
 
@@ -248,7 +275,7 @@ async function cmdServe(args: string[]): Promise<void> {
 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
-  spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
+  spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, serve: cmdServe,
 };
 

@@ -59,9 +59,9 @@ test('prStatus: maps gh pr view JSON to PrStatus, merged when mergedAt is set', 
   assert.equal(status.state, 'merged');
   assert.equal(status.mergeable, true);
   assert.equal(status.head, 'a'.repeat(40));
-  assert.deepEqual(status.checks, [{ name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }]);
+  assert.deepEqual(status.checks, [{ name: 'ci', status: 'completed', conclusion: 'success' }]);
   assert.deepEqual(status.reviews, [{ author: 'alice', state: 'APPROVED' }]);
-  assert.deepEqual(calls[0]?.args, ['pr', 'view', '5', '--repo', 'o/r', '--json', 'number,state,headRefOid,mergeable,statusCheckRollup,reviews,url,mergedAt']);
+  assert.deepEqual(calls[0]?.args, ['pr', 'view', '5', '--repo', 'o/r', '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt']);
 });
 
 test('prStatus: open state when not merged and not closed', async () => {
@@ -92,4 +92,32 @@ test('errors become thrown Error with the trimmed gh stderr', async () => {
   const { exec } = fakeExec(() => ({ stdout: '', stderr: '  permission denied  \n', code: 1 }));
   const github = ghGitHub(exec);
   await assert.rejects(() => github.merge('o/r', 4, 'd'.repeat(40)), /permission denied/);
+});
+
+test('prStatus: normalises gh casing, empty conclusions and commit-status contexts, and reads isDraft', async () => {
+  // Real `gh pr view --json statusCheckRollup` output: check runs carry upper-case status and
+  // conclusion, an in-progress run has an empty conclusion, and a commit-status context
+  // (Vercel) has only `state`. pr.merge compares against lower-case names and must never see
+  // a queued check as "completed" or a pending context as passing.
+  const sample = {
+    number: 7, state: 'OPEN', headRefOid: 'c'.repeat(40), mergeable: 'MERGEABLE', isDraft: true, url: 'u', reviews: [],
+    statusCheckRollup: [
+      { name: 'lint · typecheck · test · build', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      { name: 'slow', status: 'QUEUED', conclusion: '' },
+      { context: 'Vercel', state: 'SUCCESS' },
+      { context: 'Vercel Preview', state: 'PENDING' },
+      { name: 'flaky', status: 'COMPLETED', conclusion: 'FAILURE' },
+    ],
+  };
+  const { exec } = fakeExec(() => ({ stdout: JSON.stringify(sample), stderr: '', code: 0 }));
+  const status = await ghGitHub(exec).prStatus('o/r', 7);
+
+  assert.equal(status.draft, true);
+  assert.deepEqual(status.checks, [
+    { name: 'lint · typecheck · test · build', status: 'completed', conclusion: 'success' },
+    { name: 'slow', status: 'queued', conclusion: null },
+    { name: 'Vercel', status: 'completed', conclusion: 'success' },
+    { name: 'Vercel Preview', status: 'pending', conclusion: null },
+    { name: 'flaky', status: 'completed', conclusion: 'failure' },
+  ]);
 });

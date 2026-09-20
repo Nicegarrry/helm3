@@ -32,7 +32,7 @@ function createFakeHelm() {
   return { helm, calls };
 }
 
-test('list() returns all eleven tools with a description and a zod input schema', () => {
+test('list() returns all twelve tools with a description and a zod input schema', () => {
   const { helm } = createFakeHelm();
   const registry = createToolRegistry(helm);
   const tools = registry.list();

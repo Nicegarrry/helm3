@@ -210,7 +210,7 @@ function createFakeGitHub() {
     async openPr({ head: branch }) {
       const number = nextNumber++;
       const url = `https://github.com/acme/repo/pull/${number}`;
-      prs.set(number, { number, state: 'open', head: `pr-head-${branch}`, mergeable: true, checks: [], reviews: [], url });
+      prs.set(number, { number, state: 'open', head: `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
       return { number, url };
     },
     async prStatus(_repoSlug, number) {
@@ -290,7 +290,7 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number }> = {}) {
+function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number }> = {}) {
   const store = createFakeStore();
   const { workspace, pushed, cloned, fetched, created, removed, markDirty } = createFakeWorkspace();
   const githubFake = createFakeGitHub();
@@ -304,6 +304,7 @@ function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: Work
     runner: overrides.runner ?? succeeded(),
     prompts: FAKE_PROMPTS,
     stopTimeoutMs: overrides.stopTimeoutMs,
+    waitPollMs: overrides.waitPollMs,
   });
   return { helm, store, workspace, pushed, cloned, fetched, created, removed, markDirty, github: githubFake, config };
 }
@@ -838,4 +839,143 @@ test('the end-of-turn write does not reinstate a session file that predates onSe
   await helm.settle(spawned.workerId);
 
   assert.equal(store.getWorker(spawned.workerId)?.sessionFile, sessionFile);
+});
+
+// ---------- worker.wait ----------
+
+const settledOutcome: WorkerRunOutcome = {
+  result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null,
+};
+
+test('worker.wait blocks while the worker runs and returns it the moment it settles', async () => {
+  const { runner, resolveNext } = createControllableRunner();
+  const { helm } = makeHelm({ runner, waitPollMs: 5 });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+
+  let resolved = false;
+  const waiting = helm.wait({ workerIds: [spawned.workerId], timeoutMs: 5000 }).then((r) => { resolved = true; return r; });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(resolved, false, 'wait must not return while the worker is still running');
+
+  resolveNext(settledOutcome);
+  const outcome = await waiting;
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.timedOut, false);
+  assert.deepEqual(outcome.pending, []);
+  assert.equal(outcome.settled.length, 1);
+  assert.equal(outcome.settled[0]?.workerId, spawned.workerId);
+  assert.equal(outcome.settled[0]?.state, 'succeeded');
+  assert.equal(outcome.settled[0]?.result?.summary, 'done');
+});
+
+test('worker.wait times out with the worker still pending and reports how long it waited', async () => {
+  const { runner, resolveNext } = createControllableRunner();
+  const { helm } = makeHelm({ runner, waitPollMs: 5 });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+
+  const outcome = await helm.wait({ workerIds: [spawned.workerId], timeoutMs: 40 });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.timedOut, true);
+  assert.deepEqual(outcome.settled, []);
+  assert.deepEqual(outcome.pending, [spawned.workerId]);
+  assert.ok(outcome.waitedMs >= 40);
+
+  resolveNext(settledOutcome);
+  await helm.settle(spawned.workerId);
+});
+
+test('worker.wait returns as soon as any one of several workers settles, naming the rest as pending', async () => {
+  const { runner, resolveNext } = createControllableRunner();
+  const { helm } = makeHelm({ runner, waitPollMs: 5 });
+  const first = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  const second = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.equal(first.ok && second.ok, true);
+  if (!first.ok || !second.ok) return;
+
+  const waiting = helm.wait({ workerIds: [first.workerId, second.workerId], timeoutMs: 5000 });
+  resolveNext(settledOutcome); // the oldest pending turn is the first worker's
+  const outcome = await waiting;
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.deepEqual(outcome.settled.map((s) => s.workerId), [first.workerId]);
+  assert.deepEqual(outcome.pending, [second.workerId]);
+
+  resolveNext(settledOutcome);
+  await helm.settle(second.workerId);
+});
+
+test('worker.wait refuses an unknown worker id instead of waiting on it', async () => {
+  const { helm } = makeHelm({ waitPollMs: 5 });
+  const outcome = await helm.wait({ workerIds: ['w-nope'], timeoutMs: 1000 });
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.match(outcome.reason, /worker not found: w-nope/);
+});
+
+test('worker.wait sees an interrupted worker as settled: that is the state the orchestrator must act on', async () => {
+  const { runner } = createControllableRunner();
+  const { helm, store } = makeHelm({ runner, waitPollMs: 5 });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  store.updateWorker(spawned.workerId, { state: 'interrupted' });
+
+  const outcome = await helm.wait({ workerIds: [spawned.workerId], timeoutMs: 1000 });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.settled[0]?.state, 'interrupted');
+});
+
+// ---------- pr.merge guards ----------
+
+async function openedPr(helm: Helm, github: ReturnType<typeof createFakeGitHub>) {
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) throw new Error('spawn failed');
+  await helm.settle(spawned.workerId);
+  const gate = await helm.gate({ workerId: spawned.workerId });
+  assert.equal(gate.ok, true);
+  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) throw new Error('prOpen failed');
+  return { number: opened.number, head: opened.head, github };
+}
+
+test('pr.merge refuses a draft with a message that says what to do', async () => {
+  const { helm, github } = makeHelm();
+  const pr = await openedPr(helm, github);
+  github.setPrStatus(pr.number, { head: pr.head, draft: true, mergeable: true, checks: [{ name: 'ci', status: 'completed', conclusion: 'success' }] });
+  const outcome = await helm.prMerge({ number: pr.number, expectedHead: pr.head });
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.match(outcome.reason, /draft; mark it ready/);
+  assert.equal(github.merged.length, 0);
+});
+
+test('pr.merge tells "still running" apart from "failed", and treats neutral and skipped as passing', async () => {
+  const { helm, github } = makeHelm();
+  const pr = await openedPr(helm, github);
+
+  github.setPrStatus(pr.number, { head: pr.head, mergeable: true, checks: [{ name: 'ci', status: 'in_progress', conclusion: null }] });
+  const running = await helm.prMerge({ number: pr.number, expectedHead: pr.head });
+  assert.equal(running.ok, false);
+  if (!running.ok) assert.match(running.reason, /"ci" has not finished \(in_progress\)/);
+
+  github.setPrStatus(pr.number, { head: pr.head, mergeable: null, checks: [] });
+  const unknown = await helm.prMerge({ number: pr.number, expectedHead: pr.head });
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok) assert.match(unknown.reason, /not finished computing mergeability/);
+
+  github.setPrStatus(pr.number, { head: pr.head, mergeable: true, checks: [
+    { name: 'ci', status: 'completed', conclusion: 'success' },
+    { name: 'optional', status: 'completed', conclusion: 'neutral' },
+    { name: 'docs-only', status: 'completed', conclusion: 'skipped' },
+  ] });
+  const merged = await helm.prMerge({ number: pr.number, expectedHead: pr.head });
+  assert.equal(merged.ok, true, JSON.stringify(merged));
+  assert.equal(github.merged.length, 1);
 });

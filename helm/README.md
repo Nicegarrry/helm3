@@ -4,7 +4,7 @@ A small harness that lets an orchestrator agent (Claude Code, Codex, or a script
 coding work to Pi workers running cheap models, each in its own git worktree, and get back
 gates, PRs and status without spending its own context on the mechanics.
 
-Ten tools, one SQLite file, one daemon. About 2.2k lines of TypeScript.
+Twelve tools, one SQLite file, one daemon. Under 3k lines of TypeScript.
 
 ## Five-minute start
 
@@ -52,6 +52,7 @@ Ten tools, one SQLite file, one daemon. About 2.2k lines of TypeScript.
 | `worker.spawn` | Create a worktree on a new branch and start a Pi worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | One line per worker. |
+| `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
 | `worker.steer` | Send a follow-up message to an idle or interrupted worker in the same Pi session. |
 | `worker.stop` | Ask a running worker to stop. |
 | `gate.run` | Run the repo's checks in the worktree at its exact head and record the result. |
@@ -59,7 +60,7 @@ Ten tools, one SQLite file, one daemon. About 2.2k lines of TypeScript.
 | `pr.status` | Mergeability, checks and reviews from GitHub. |
 | `review.request` | Spawn a read-only reviewer on the PR head; posts the verdict as a PR comment. Refused if the reviewer is the builder's model or the same model family (`allowSameFamily` overrides). |
 | `run.status` | Spend, cap, active workers. |
-| `pr.merge` | Merge only when the PR is open, mergeable, checks are green and the head matches. |
+| `pr.merge` | Merge only when the PR is open, not a draft, mergeable, every check has finished and succeeded, and the head matches. |
 
 Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Nothing throws across the
 boundary.

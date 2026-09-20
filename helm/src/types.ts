@@ -156,6 +156,9 @@ export type PrStatus = Readonly<{
   state: 'open' | 'closed' | 'merged';
   head: string;
   mergeable: boolean | null;
+  draft: boolean;
+  /** `status` is lower-case and is `completed` only when the check has finished; `conclusion` is
+   * lower-case and null until then, for check runs and commit-status contexts alike. */
   checks: ReadonlyArray<{ name: string; status: string; conclusion: string | null }>;
   reviews: ReadonlyArray<{ author: string; state: string }>;
   url: string;
@@ -227,6 +230,12 @@ export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.numb
 export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();
 export const steerInput = z.object({ workerId: z.string().min(1), message: z.string().min(1).max(20000) }).strict();
 export const stopInput = z.object({ workerId: z.string().min(1) }).strict();
+export const waitInput = z.object({
+  workerIds: z.array(z.string().min(1)).min(1).max(20),
+  // Bounded under Claude Code's idle window for MCP tool calls (30 minutes on stdio, 5 on
+  // HTTP) so a wait is never aborted for silence. A caller that sees `timedOut` waits again.
+  timeoutMs: z.number().int().min(1000).max(1_500_000).default(600_000),
+}).strict();
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
 export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
@@ -234,7 +243,7 @@ export const reviewInput = z.object({ workerId: z.string().min(1).optional(), nu
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
 export const emptyInput = z.object({}).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge'] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 // ---------- Config ----------

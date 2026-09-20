@@ -187,7 +187,7 @@ test('serve http: POST /tools/run.status returns ok JSON', async () => {
   });
 });
 
-test('serve http: /mcp initialize + tools/list via the MCP SDK client returns 11 tools', async () => {
+test('serve http: /mcp initialize + tools/list via the MCP SDK client returns every tool', async () => {
   await withServer(async (port) => {
     const client = new Client({ name: 'test-client', version: '0.0.1' });
     const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));

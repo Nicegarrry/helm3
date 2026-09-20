@@ -598,6 +598,9 @@ export class Helm {
       emit: (kind, data) => {
         this.store.appendEvent(workerId, kind, data);
       },
+      onSession: (sessionFile) => {
+        this.store.updateWorker(workerId, { sessionFile });
+      },
       onUsage: (usage) => {
         const before = this.store.spendTotal().spendUsd;
         this.store.addSpend({ ...usage, workerId, at: this.nowIso() });
@@ -632,7 +635,10 @@ export class Helm {
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
-      this.store.updateWorker(workerId, { state: nextState, sessionFile: outcome.sessionFile ?? row.sessionFile, result, rawResultText: result === null ? outcome.rawText : null });
+      // `row` was read before the turn, so its sessionFile predates hooks.onSession; fall back to
+      // what the store holds now rather than reinstating the stale value.
+      const recordedSessionFile = this.store.getWorker(workerId)?.sessionFile ?? row.sessionFile;
+      this.store.updateWorker(workerId, { state: nextState, sessionFile: outcome.sessionFile ?? recordedSessionFile, result, rawResultText: result === null ? outcome.rawText : null });
       this.store.appendEvent(workerId, 'result', result ? { ...result } : { rawText: outcome.rawText });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: nextState });
       if (onDone) {

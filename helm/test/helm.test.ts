@@ -798,3 +798,44 @@ test('overview includes a cumulative spendSeries', async () => {
   assert.ok((overview.spendSeries[0]?.at ?? '') <= (overview.spendSeries[1]?.at ?? ''), 'ascending by at');
   assert.ok(Math.abs((overview.spendSeries.at(-1)?.spendUsd ?? 0) - overview.run.spendUsd) < 1e-9, 'last point matches the run total');
 });
+
+test('a turn killed before it returns still leaves a session file to resume from', async () => {
+  // The crash this guards is the one the daemon actually suffers: the process dies mid-turn, so
+  // the runner never returns and the end-of-turn write never happens. If the session file is
+  // only recorded from the outcome, `steer` resumes with `sessionFile: null` and Pi starts a
+  // brand-new session with none of the worker's context.
+  const sessionFile = '/tmp/helm-crash-test/session.jsonl';
+  const runner = createFakeRunner(async (_input, _message, hooks) => {
+    hooks.onSession(sessionFile);
+    throw new Error('daemon killed mid-turn');
+  });
+  const { helm, store } = makeHelm({ runner });
+  const repo = mkTempDir('helm-repo-');
+
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+
+  assert.equal(store.getWorker(spawned.workerId)?.sessionFile, sessionFile);
+});
+
+test('the end-of-turn write does not reinstate a session file that predates onSession', async () => {
+  // `row` is read before the turn starts, so it still carries the old value. A runner that
+  // reports a session but returns no sessionFile of its own must not be rolled back to it.
+  const sessionFile = '/tmp/helm-late-write/session.jsonl';
+  const runner = createFakeRunner(async (input, _message, hooks) => {
+    hooks.onSession(sessionFile);
+    hooks.onUsage({ model: input.model, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 });
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const { helm, store } = makeHelm({ runner });
+  const repo = mkTempDir('helm-repo-');
+
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+
+  assert.equal(store.getWorker(spawned.workerId)?.sessionFile, sessionFile);
+});

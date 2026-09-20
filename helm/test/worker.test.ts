@@ -48,6 +48,9 @@ function collectHooks(): { hooks: WorkerHooks; events: EventRow[] } {
     onUsage: (usage) => {
       events.push({ seq: events.length, workerId: 'w-test', at: new Date().toISOString(), kind: 'usage', data: { ...usage } });
     },
+    onSession: (sessionFile) => {
+      events.push({ seq: events.length, workerId: 'w-test', at: new Date().toISOString(), kind: 'session', data: { sessionFile } });
+    },
     shouldContinue: () => true,
   };
   return { hooks, events };
@@ -378,5 +381,31 @@ test('defaultModelRuntime loads the operator models.json so configured providers
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
     await rm(agentDir, { recursive: true, force: true });
+  }
+});
+
+test('the Pi session file is reported as soon as it is opened, before any model traffic', async () => {
+  const { root, worktree } = await makeWorktree();
+  try {
+    const { modelRuntime, ai, faux, model } = await makeFaux('helm-worker-session');
+    faux.setResponses([ai.fauxAssistantMessage(JSON.stringify(validResult))]);
+    const runner = piWorkerRunner({ modelRuntime });
+    const { hooks, events } = collectHooks();
+    const input = baseInput({ worktree, model, sessionDir: join(root, 'sessions') });
+    const outcome = await runner.run(input, 'do the thing', hooks);
+
+    const sessionEvents = events.filter((e) => e.kind === 'session');
+    assert.equal(sessionEvents.length, 1, 'onSession fires exactly once');
+    const reported = sessionEvents[0]!.data.sessionFile as string;
+    assert.ok(reported, 'a session file path is reported');
+    assert.equal(outcome.sessionFile, reported, 'it is the same file the outcome reports');
+
+    // Ordering is the point: a turn that is killed never reaches its usage or result events, so
+    // the session must already have been reported by then.
+    const firstUsage = events.findIndex((e) => e.kind === 'usage');
+    assert.ok(firstUsage >= 0, 'the turn produced usage');
+    assert.ok(sessionEvents[0]!.seq < firstUsage, 'the session is reported before any usage');
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

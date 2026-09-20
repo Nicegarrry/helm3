@@ -262,6 +262,11 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
       const sessionManager = input.sessionFile
         ? SessionManager.open(input.sessionFile, input.sessionDir, input.worktree)
         : SessionManager.create(input.worktree, input.sessionDir);
+      // Report the session file now, not at the end of the turn: if this process is killed
+      // mid-turn the outcome never arrives, and a resume with no session file starts a new
+      // session with none of the worker's context.
+      const openedSessionFile = sessionManager.getSessionFile();
+      if (openedSessionFile) hooks.onSession(openedSessionFile);
       const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
 
       let worktreeReal: string;

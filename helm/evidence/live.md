@@ -184,3 +184,157 @@ Spend after Wave A: **$0.009541** total, all of it the builder; 4 unknown-cost e
 `HELM_SPEND_CAP_USD=5`. The cap is read from the environment of whichever process answers, and
 the CLI reads the store directly rather than asking the daemon. Spend itself is correct. See
 Wave B3 for whether enforcement is affected.
+
+## Fix 2 — a killed turn left nothing to resume from
+
+**Symptom.** Wave B2, first attempt. The daemon was killed with SIGINT while `w-d4dfd1bf` was
+mid-turn, restarted, and correctly showed `interrupted`. But `helm steer` produced a **second**
+Pi session file, and the resumed worker had lost the objective: asked to create `a.txt`,
+`b.txt` and `c.txt`, it reported "Created hello.txt to satisfy the 'hello-exists' gate in
+helm.json" — a goal it invented from the repo, because it started with no context.
+
+```
+~/.helm/sessions/w-d4dfd1bf/
+  2026-09-20T08-16-32-941Z_…jsonl   14 entries   (before the kill)
+  2026-09-20T08-17-02-858Z_…jsonl   18 entries   (after the steer — a new session)
+```
+
+**Cause.** `helm/src/helm.ts` recorded the session file only from the turn's outcome:
+
+```ts
+this.store.updateWorker(workerId, { state: nextState, sessionFile: outcome.sessionFile ?? row.sessionFile, … });
+```
+
+A turn that is killed never returns an outcome, so `sessionFile` stayed `null`, and
+`runTurn` then passed `sessionFile: null` into the runner, which takes the
+`SessionManager.create()` branch instead of `SessionManager.open()`. The durability feature
+failed in exactly the case it exists for.
+
+**Why the faux-provider test missed it.** `test/e2e.test.ts` says it leaves the worker
+"in 'running' by writing the row directly, as a crash would" — but it first lets the turn
+*complete* (`await helm.settle(...)`, state `idle`), which persists `sessionFile`, and only
+then flips the row back to `running`. It reproduces a crash's **state** but not its **timing**,
+so line 155's `assert.ok(…sessionFile, 'session file recorded for resume')` was always
+satisfied by the completed run.
+
+**Fix.** A new `onSession(sessionFile)` hook on `WorkerHooks`. `piWorkerRunner` calls it
+immediately after `SessionManager.open`/`create`, from `sessionManager.getSessionFile()`, and
+`Helm.runTurn` writes it to the store there and then. The end-of-turn write now falls back to
+what the store holds rather than to the pre-turn `row`, which would otherwise reinstate the
+stale `null`.
+
+**Regression tests** (all three verified to fail without the fix):
+- `helm.test.ts` — "a turn killed before it returns still leaves a session file to resume from":
+  a runner that reports a session then throws; the row must still carry the path.
+- `helm.test.ts` — "the end-of-turn write does not reinstate a session file that predates
+  onSession".
+- `worker.test.ts` — "the Pi session file is reported as soon as it is opened, before any model
+  traffic": asserts `onSession` fires once, matches the outcome's path, and is ordered before
+  the first usage event.
+
+Suite: 96 → 99 tests. `src/*.ts` 2,798 → 2,817 lines.
+
+## Wave B — durable and cheap
+
+### B1. Cross-family review on the real PR
+
+```
+helm review w-5445a1ae --model google/gemini-3.8-flash
+→ { ok: true, reviewWorkerId: "w-c37ea58f" }
+```
+
+The reviewer ran read-only (`changedFiles: []`) and its own commands: `git diff origin/main..`,
+the targeted vitest file, `prettier --check`, `eslint`, `pnpm --filter @brief/shared typecheck`,
+`pnpm vitest run --project unit`, `pnpm lint`. Verdict `APPROVE`, posted as
+`review.posted {"number":248}` and confirmed on GitHub with
+`gh pr view 248 --json comments` — a comment by `Nicegarrry` carrying the verdict text.
+
+The family guard was exercised in both directions, and refused both times without spawning:
+
+```
+helm review w-5445a1ae --model opencode-go/qwen3.8-max
+→ { ok: false, reason: "reviewer model family 'qwen' matches the builder's; pick another family or pass allowSameFamily" }
+
+helm review w-5445a1ae --model opencode-go/qwen3.8-flash
+→ { ok: false, reason: "reviewer must not be the builder's model (opencode-go/qwen3.8-flash)" }
+```
+
+`allowSameFamily` was never passed.
+
+### B2. Kill and resume (re-run after Fix 2)
+
+Worker `w-4d39960b`, four files to write, free model.
+
+```
+# mid-turn, before the kill — the session file is already recorded:
+sessionFile: /Users/sa/.helm/sessions/w-4d39960b/2026-09-20T08-22-02-114Z_…jsonl
+
+kill -INT <daemon pid>        # Ctrl-C
+helm ps                       # still 'running' — a stale row, the daemon is gone
+<restart daemon>
+helm ps                       # w-4d39960b  interrupted
+helm steer w-4d39960b "Continue and finish."   → { ok: true, turn: 1 }
+```
+
+After the resume there is still exactly **one** session file, and the worker restated the
+original objective rather than inventing one:
+
+> "Created four files (one.txt, two.txt, three.txt, four.txt) in the repository root, each
+> containing a single sentence naming its number. Read each file back after writing to confirm
+> contents."
+
+`helm gate` passed at the resulting head `6bf34ed`.
+
+### B3. Soft cap, then hard cap
+
+The soft cap is crossed *during* a run and never blocks:
+
+```
+HELM_SPEND_WARN_USD=0.2135   (spend at the time: $0.21331)
+spend.warning {"spendUsd":0.21381,"spendWarnUsd":0.2135,"spendCapUsd":5}
+GET /api/state → run.aboveSoftCap: true      (the dashboard bar turns amber)
+```
+
+and the next spawn carries it back to the orchestrator:
+
+```
+helm spawn … → { ok: true, workerId: "w-72d8373a", …, "warning": "spend is above the soft cap of $0.21" }
+```
+
+The hard cap refuses:
+
+```
+HELM_SPEND_CAP_USD=0.10      (spend at the time: $0.21480)
+helm spawn … → { ok: false, reason: "spend cap reached" }
+```
+
+### Correction to the Wave A observation
+
+`helm status` from the CLI reports `spendCapUsd: 0` because the CLI reads the store with its
+own environment, and the cap lives in the environment of whichever process holds it. The
+daemon's own view is correct — `GET /api/state` returned `spendCapUsd: 5`, `spendWarnUsd: 0.22`
+while the CLI showed `0`. **Enforcement is not affected**: the refusal above came from a daemon
+started with the low cap. This is a reporting wrinkle in the CLI, not a cap defect.
+
+## Wave C — watchable
+
+`HELM_MAX_WORKERS=3`, three builders spawned back to back on `~/code/web/brief`, each writing a
+missing test file for a different untested module in `packages/shared/src`.
+
+| Worker | Target | Spend | Result |
+| --- | --- | --- | --- |
+| `w-4713f07b` | `scalars.test.ts` | $0.0035 | 64 lines, 7 tests |
+| `w-ebd7b6cb` | `palette.test.ts` | $0.0059 | 151 lines, 12 tests |
+| `w-c1253fff` | `boardComments.test.ts` | $0.0121 | 195 lines, 12 tests |
+
+Screenshot with all three running: `helm/evidence/live-dashboard.png`. It shows
+`WORKERS 3 / 3 active`, `SPEND $0.2186 / $5.00 cap`, the per-model rollup
+(`google/gemini-3.8-flash` 1 worker $0.2030, `opencode-go/qwen3.8-flash` 6 workers 3 active
+$0.0156, the free nemotron 5 workers $0.0000), the cumulative spend timeline against the cap,
+and the live event stream interleaving all three workers' tool calls.
+
+The only console output on the page is a `404` for `/favicon.ico`. Cosmetic.
+
+These three branches were left unpushed: they are real work, but opening three more PRs on
+brief was not part of this task. They live on `helm/w-4713f07b`, `helm/w-ebd7b6cb` and
+`helm/w-c1253fff` in `$HELM_HOME/worktrees/Nicegarrry__brief/`.

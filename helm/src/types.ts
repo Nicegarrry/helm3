@@ -197,6 +197,11 @@ export interface WorkerRunner {
 export type WorkerHooks = Readonly<{
   emit(kind: string, data?: Record<string, unknown>): void;
   onUsage(usage: Omit<SpendRow, 'workerId' | 'at'>): void;
+  /**
+   * The Pi session file, reported as soon as it is opened rather than when the turn returns.
+   * A turn that is killed never returns, and resume needs this path to reopen the same session.
+   */
+  onSession(sessionFile: string): void;
   /** Return false to stop the turn (spend cap hit or stop requested). Checked at tool-call boundaries. */
   shouldContinue(): boolean;
 }>;

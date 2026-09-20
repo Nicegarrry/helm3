@@ -338,3 +338,75 @@ The only console output on the page is a `404` for `/favicon.ico`. Cosmetic.
 These three branches were left unpushed: they are real work, but opening three more PRs on
 brief was not part of this task. They live on `helm/w-4713f07b`, `helm/w-ebd7b6cb` and
 `helm/w-c1253fff` in `$HELM_HOME/worktrees/Nicegarrry__brief/`.
+
+## Section 5 — an orchestrator drives Helm over MCP
+
+`~/code/web/brief/.mcp.json` (untracked, as `helm.json` is):
+
+```json
+{ "mcpServers": { "helm": {
+    "command": "node",
+    "args": ["/Users/sa/code/other/helm3-local-handoff/helm/bin/helm.js", "serve", "--stdio", "--port", "4747"],
+    "env": { "HELM_HOME": "/Users/sa/.helm", "HELM_SPEND_CAP_USD": "5", "HELM_MAX_WORKERS": "3" } } } }
+```
+
+A fresh headless Claude Code session (2.1.278) was started in `~/code/web/brief`, restricted to
+`--allowedTools mcp__helm` so it had **no** file, edit or shell tools at all, and given one task
+in plain English: cover the untested `packages/shared/src/introspection.ts`, then gate, open a
+draft PR and request a review.
+
+Tool-call sequence (identical calls collapsed):
+
+```
+ToolSearch  (tool discovery)                   x2
+mcp__helm__run_status
+mcp__helm__worker_list      { repo: … }
+mcp__helm__worker_spawn     { repo, model: opencode-go/qwen3.8-flash, role: builder, … }
+mcp__helm__worker_inspect   { workerId: w-a841aef8 }          x299
+mcp__helm__gate_run
+mcp__helm__pr_open
+mcp__helm__review_request   { model: google/gemini-3.8-flash }
+mcp__helm__pr_status
+```
+
+Result: **`https://github.com/Nicegarrry/brief/pull/249`**, draft, head `88e0368`, one file
+added — `packages/shared/src/introspection.test.ts` `+393/-0`, 15 tests. Gate passed at that
+head (`install` 0, `unit` 0 in 18.5s). Reviewer `w-d4eeefee` spawned on a different family.
+The session touched nothing itself; every action went through a Helm tool. The exit proof is met.
+
+### Finding — there is no way to wait, so an orchestrator busy-polls
+
+**299 of the session's 309 turns were `worker_inspect`.** The orchestrator's own cost for
+supervising the run was **$16.82**, against **$0.052** for the worker that did the work — 320x
+the cost of the thing it was managing.
+
+This is the one claim in `README.md` that the live run does not support:
+
+> "…and get back gates, PRs and status **without spending its own context on the mechanics**."
+
+Polling *is* the mechanic, and Helm currently makes the orchestrator pay for it in its own
+context. Every tool returns immediately; there is no blocking or long-poll variant, no
+`worker.wait`, no completion notification, and `worker.inspect` has no "block until the state
+changes" mode. A patient orchestrator therefore spins.
+
+Worth noting the CLI does not have this problem — `helm logs <id> -f` follows, and a human
+watches the dashboard. It is specifically the MCP surface, the one the product is *for*, that
+lacks a wait.
+
+Suggested shape (not implemented here): a `worker.wait` tool taking a worker id, a set of
+states to wait for and a timeout, returning either the reached state or a timeout marker so the
+orchestrator can decide whether to keep waiting. One call per state change instead of one call
+per two seconds.
+
+### Spend
+
+| | USD |
+| --- | --- |
+| Helm-tracked worker spend, whole run | 0.367 |
+| — `google/gemini-3.8-flash` (reviewers) | ~0.203 + the section-5 reviewer |
+| — `opencode-go/qwen3.8-flash` (builders, 8 workers) | ~0.079 |
+| — `openrouter/nvidia/nemotron-…:free` (5 workers) | 0.000 |
+| Orchestrator's own Claude Code cost, section 5 only | 16.82 |
+
+The $5 cap applies to the first row and was never approached. The last row is outside Helm's
+accounting entirely, which is itself part of the finding above.

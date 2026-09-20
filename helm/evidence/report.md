@@ -6,15 +6,16 @@ Date: 2026-09-18 (updated after the continuation). Branch: `claude/helm3-assessm
 
 | Wave | Exit proof | Result |
 | --- | --- | --- |
-| A | Orchestrator calls spawn, inspect, gate.run, pr.open against a real repo with a real model; a real PR exists with a green gate at its head | **Partially met.** The full chain runs end to end in `test/e2e.test.ts` on the real composition (SQLite store, git worktree, gate runner, Pi session, HTTP daemon) with Pi's faux provider and a fake `gh`. A faux worker wrote a file, its `git push` was refused by the hook, Helm committed, the gate passed at the new head, the branch was pushed to a bare origin and `pr.open` returned a PR. The MCP round trip (initialize, tools/list, 11 tools) passes in `test/server.test.ts`. **Not met here:** a live model and a real GitHub PR. This container has no Pi logins, no provider keys and no `gh`. |
-| B | Kill the daemon mid-run, restart, worker shows interrupted, steer resumes it, spend reported, reviewer comment on the PR | **Met with faux provider.** `test/e2e.test.ts` second case: running worker marked `interrupted` on restart, `worker.steer` resumed the same Pi session file to a succeeded result. Spend cap refusal, stop, review comment posting and `pr.merge` guards are covered in `test/helm.test.ts` with fakes. Live reviewer comment not run here. |
-| C | Three workers in parallel visible from one terminal | **Met for the mechanics.** `helm ps`, `helm logs -f`, `helm status` and `GET /` on the daemon work against the store. Not exercised with three live workers. |
+| A | Orchestrator calls spawn, inspect, gate.run, pr.open against a real repo with a real model; a real PR exists with a green gate at its head | **Met live, 2026-09-20.** `opencode-go/qwen3.8-flash` wrote the missing `targets.test.ts` in `Nicegarrry/brief`, the gate passed at head `96d59be` (2,709 tests), and `pr.open` produced the real draft PR [Nicegarrry/brief#248](https://github.com/Nicegarrry/brief/pull/248), confirmed independently with `gh`. `src/github.ts` needed no fix against real `gh`. A free-model smoke on a synthetic scratch repo ran first. See [live.md](live.md) "Wave A". |
+| B | Kill the daemon mid-run, restart, worker shows interrupted, steer resumes it, spend reported, reviewer comment on the PR | **Met live, after a fix.** `google/gemini-3.8-flash` posted an APPROVE comment on #248, and the cross-family and same-model guards both refused without `allowSameFamily`. SIGINT mid-run → `interrupted` on restart → `steer` resumed **the same** Pi session to a passing gate. The first attempt did not: a killed turn left `sessionFile: null` and the resume started a fresh session with no context. Fixed and re-proven. Soft cap warns and returns a `warning` on spawn; hard cap refuses. See [live.md](live.md) "Fix 2" and "Wave B". |
+| C | Three workers in parallel visible from one terminal | **Met live.** Three builders on brief at `HELM_MAX_WORKERS=3`, each adding a missing test file for a different untested module, for $0.021 all in. Dashboard screenshot with all three running: [live-dashboard.png](live-dashboard.png). See [live.md](live.md) "Wave C". |
+| — | An orchestrator drives Helm over MCP (README's central claim) | **Partly met.** A fresh Claude Code session restricted to `mcp__helm` tools — no file, edit or shell tools — spawned, gated, opened [brief#249](https://github.com/Nicegarrry/brief/pull/249) and requested a review, touching nothing itself. But 299 of its 309 turns were `worker_inspect` polls, costing $16.82 of its own context against $0.052 for the worker. There is no wait or long-poll tool. See [live.md](live.md) "Section 5". |
 
 Evidence files: `helm/evidence/log.md`, `helm/test/e2e.test.ts`, test output below.
 
 ```
 npx tsc --noEmit          clean
-npm test                  77 tests, 77 pass, 0 fail   (52 at the first commit)
+npm test                  99 tests, 99 pass, 0 fail   (52 at the first commit, 95 before the live run)
 ```
 
 Continuation on 2026-09-18 (owner cleared up to 12 hours): an adversarial review found 14
@@ -24,25 +25,42 @@ paths, an HTML status page, and a simplification pass were added. Details in `lo
 
 ## 2. Spend
 
-Zero. No model provider was called. All model traffic used Pi's in-process faux provider.
+Zero for the faux-provider build. The live run on 2026-09-20 cost **$0.367** in Helm-tracked
+worker spend against a $5 cap, across 14 workers and three models.
+
+Separately, the section-5 orchestrator burned the equivalent of **$16.82** of its own context,
+almost all of it polling. On a subscription that draws on plan usage rather than a bill, so it
+is not a spend problem — but it is a design one, and it is recorded as a finding in `live.md`.
 
 ## 3. Line counts
 
 | | Lines |
 | --- | --- |
-| `helm/src/*.ts` (12 files) | 2,341 |
-| `helm/test/*.ts` (11 files) | 1,979 |
+| `helm/src/*.ts` (13 files) | 2,817 |
+| `helm/test/*.ts` (11 files) | 2,445 |
 
 Old `src/` for comparison: 10,664 lines, 16 SQLite tables. New: 5 tables.
 
 ## 4. Gaps
 
-- **Live proof.** Wave A and B live exit proofs need the owner's machine: `pi login` to a
-  provider, `gh auth`, a target repo, and `HELM_SPEND_CAP_USD`. Run the four commands in the
-  README's step 4.
-- **`gh` transport untested against real `gh`.** `src/github.ts` is tested against a fake
-  exec that records argv and parses sample JSON. The `gh pr create` URL parsing and
-  `gh pr view --json` field names should be checked on first live use.
+- **No way to wait.** The MCP surface has no blocking or long-poll tool, so an orchestrator
+  supervises a worker by calling `worker.inspect` in a loop. Measured live: 299 polls across 309
+  turns for one worker. This is the gap that most directly contradicts the README's "without
+  spending its own context on the mechanics", and the first thing to fix. A `worker.wait`
+  (worker id, states to wait for, timeout) would turn one call per two seconds into one call per
+  state change. The CLI is unaffected — `helm logs -f` follows and the dashboard is live.
+- ~~**Live proof.**~~ Done 2026-09-20 on the owner's machine; see `live.md`.
+- ~~**`gh` transport untested against real `gh`.**~~ Exercised live: `pr.open`, `pr.status` and
+  the reviewer's PR comment all worked against real `gh` with no change to `src/github.ts`.
+  `pr.merge` is still only covered by fakes — no live merge has been run through Helm.
+- **`helm status` misreports the cap.** The CLI reads the store with its own environment, so
+  `run.status` from a shell shows `spendCapUsd: 0` while the daemon holds the real cap.
+  Enforcement is correct; only the CLI's reporting is wrong. Either read the cap from
+  `serve.json` or ask the daemon.
+- **Gate config is read from the source repo, not the worktree.** `defaultChecks(row.repo)`
+  means `helm.json` is taken from the repo the operator pointed at, at gate time — so a branch
+  cannot change its own gates, and an uncommitted `helm.json` silently governs. Convenient for
+  setup, surprising on reflection; worth a line in the README either way.
 - **Stop is cooperative.** `worker.stop` aborts at the next tool call boundary; a model
   mid-generation finishes that generation first. If the turn never reaches a tool call the
   stop stays pending and the worker reports `unknown` until it settles.
@@ -50,13 +68,19 @@ Old `src/` for comparison: 10,664 lines, 16 SQLite tables. New: 5 tables.
   checkouts, and paths are contained for the file tools, but a worker's shell can still read
   outside the worktree. OS-level isolation is the operator's job.
 - **`helm.ts` is 511 lines** against a 450 target after the simplification pass; the rest is
-  contract boilerplate and the protected run loop.
+  contract boilerplate and the protected run loop. `src/` totals 2,817 lines against the 3k
+  ceiling, so the next addition has to be paid for by a cut.
+- **The dashboard serves no favicon**, so every page load logs a 404. Cosmetic.
 
 ## 5. Recommendations
 
-1. Run the live Wave A proof on your machine with the free model first, then the builder model, before anything else.
-2. Once live, retire `src/`, `test/` and the wave docs into a `legacy/` tag and make `helm/` the repo root.
-3. Close issues #8, #10, #11, #27 as done and park the rest under one "deferred design" issue, as the assessment proposed.
+1. ~~Run the live Wave A proof.~~ Done; see `live.md`.
+2. **Add a `worker.wait` tool.** Nothing else in this list changes the product as much: without
+   it the harness saves the orchestrator's context on paper only.
+3. Retire `src/`, `test/` and the wave docs behind the `legacy-control-plane` tag and make
+   `helm/` the repo root.
+4. Close issues #8, #10, #11, #27 as done and park the rest under one "deferred design" issue,
+   as the assessment proposed.
 
 ## 6. Proposed replacement for the root AGENTS.md (not applied)
 

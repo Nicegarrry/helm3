@@ -376,9 +376,10 @@ The session touched nothing itself; every action went through a Helm tool. The e
 
 ### Finding — there is no way to wait, so an orchestrator busy-polls
 
-**299 of the session's 309 turns were `worker_inspect`.** The orchestrator's own cost for
-supervising the run was **$16.82**, against **$0.052** for the worker that did the work — 320x
-the cost of the thing it was managing.
+**299 of the session's 309 turns were `worker_inspect`.** The session reported $16.82 of its own
+cost for supervising a worker that cost **$0.052** — 320x the thing it was managing. On a
+subscription that is plan usage rather than a bill, so read the number as context and time
+burned, not money: 299 round trips of an orchestrator's attention to watch one file get written.
 
 This is the one claim in `README.md` that the live run does not support:
 
@@ -406,7 +407,7 @@ per two seconds.
 | — `google/gemini-3.8-flash` (reviewers) | ~0.203 + the section-5 reviewer |
 | — `opencode-go/qwen3.8-flash` (builders, 8 workers) | ~0.079 |
 | — `openrouter/nvidia/nemotron-…:free` (5 workers) | 0.000 |
-| Orchestrator's own Claude Code cost, section 5 only | 16.82 |
+| Orchestrator's own context, section 5 only (plan usage, not billed) | 16.82 |
 
 The $5 cap applies to the first row and was never approached. The last row is outside Helm's
 accounting entirely, which is itself part of the finding above.

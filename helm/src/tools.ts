@@ -1,5 +1,5 @@
 /**
- * The tool registry: maps the eleven tool names to their zod input schemas and dispatches
+ * The tool registry: maps the twelve tool names to their zod input schemas and dispatches
  * validated calls to a Helm instance. Never throws; unknown tools and invalid input both
  * come back as { ok: false, reason }. See DESIGN.md.
  */
@@ -16,6 +16,7 @@ import {
   spawnInput,
   steerInput,
   stopInput,
+  waitInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -39,6 +40,7 @@ const TOOLS: readonly ToolDef[] = [
   def('worker.spawn', 'Start a new Pi worker in an isolated git worktree to work on an objective; returns the worker id, branch and worktree path.', spawnInput, (h, i) => h.spawn(i)),
   def('worker.inspect', 'Get a worker\'s current state, spend, diff stat, result and recent events.', inspectInput, (h, i) => h.inspect(i)),
   def('worker.list', 'List workers, optionally filtered by repo and/or state, as one summary per worker.', listInput, (h, i) => h.list(i)),
+  def('worker.wait', 'Block until any of the given workers leaves queued/running (to succeeded, failed, idle, stopped or interrupted) or the timeout passes. Use this instead of polling worker.inspect; if it returns timedOut, call it again.', waitInput, (h, i) => h.wait(i)),
   def('worker.steer', 'Send a follow-up message to an idle, succeeded, failed or interrupted worker to start another turn.', steerInput, (h, i) => h.steer(i)),
   def('worker.stop', 'Request a running worker to stop at the next turn boundary and wait briefly for it to settle.', stopInput, (h, i) => h.stop(i)),
   def('gate.run', 'Run the repo\'s checks (tests, lint, etc.) against a worker\'s current commit and record pass/fail.', gateInput, (h, i) => h.gate(i)),

@@ -31,18 +31,36 @@ type PrViewJson = {
   state: string;
   headRefOid: string;
   mergeable: string | null;
+  isDraft?: boolean;
   mergedAt?: string | null;
   statusCheckRollup?: { name?: string; status?: string; conclusion?: string | null; state?: string; context?: string }[] | null;
   reviews?: { author?: { login?: string }; state?: string }[] | null;
 };
 
+const PENDING_CONTEXT_STATES: ReadonlySet<string> = new Set(['PENDING', 'EXPECTED']);
+
+/**
+ * `gh` reports a check run with upper-case `status`/`conclusion` (`COMPLETED`, `SUCCESS`) and a
+ * commit-status context (Vercel and friends) with only `state`. Both come out lower-case, with
+ * `status: 'completed'` only once the check has actually finished and `conclusion` null until
+ * then, so the merge guard can tell "still running" from "failed" and never compares cases.
+ */
+function mapCheck(check: NonNullable<PrViewJson['statusCheckRollup']>[number]): PrStatus['checks'][number] {
+  const name = check.name ?? check.context ?? 'unknown';
+  if (check.status) {
+    const status = check.status.toLowerCase();
+    const conclusion = status === 'completed' && check.conclusion ? check.conclusion.toLowerCase() : null;
+    return { name, status, conclusion };
+  }
+  if (!check.state) return { name, status: 'unknown', conclusion: null };
+  const contextState = check.state.toUpperCase();
+  if (PENDING_CONTEXT_STATES.has(contextState)) return { name, status: 'pending', conclusion: null };
+  return { name, status: 'completed', conclusion: contextState === 'SUCCESS' ? 'success' : 'failure' };
+}
+
 function mapPrStatus(json: PrViewJson): PrStatus {
   const state: PrStatus['state'] = json.mergedAt ? 'merged' : json.state.toLowerCase() === 'closed' ? 'closed' : 'open';
-  const checks = (json.statusCheckRollup ?? []).map((check) => ({
-    name: check.name ?? check.context ?? 'unknown',
-    status: check.status ?? check.state ?? 'unknown',
-    conclusion: check.conclusion ?? null,
-  }));
+  const checks = (json.statusCheckRollup ?? []).map(mapCheck);
   const reviews = (json.reviews ?? []).map((review) => ({
     author: review.author?.login ?? 'unknown',
     state: review.state ?? 'unknown',
@@ -52,6 +70,7 @@ function mapPrStatus(json: PrViewJson): PrStatus {
     state,
     head: json.headRefOid,
     mergeable: json.mergeable === 'MERGEABLE' ? true : json.mergeable === 'CONFLICTING' ? false : null,
+    draft: json.isDraft === true,
     checks,
     reviews,
     url: json.url,
@@ -74,7 +93,7 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       const stdout = await run(exec, [
         'pr', 'view', String(number),
         '--repo', repoSlug,
-        '--json', 'number,state,headRefOid,mergeable,statusCheckRollup,reviews,url,mergedAt',
+        '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt',
       ]);
       const parsed = JSON.parse(stdout) as PrViewJson;
       return mapPrStatus(parsed);

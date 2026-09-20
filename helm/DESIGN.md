@@ -15,7 +15,7 @@ in `test/<module>.test.ts`, and must run with `npm test` from `helm/`.
 | `src/github.ts` | `gh` CLI transport: pr create, status, comment, merge | `ghGitHub(exec?): GitHub` |
 | `src/worker.ts` | Pi session runtime, tool hook, result parsing, usage | `piWorkerRunner(opts): WorkerRunner` |
 | `src/prompt.ts` | builder and reviewer prompt text and the result instruction | `buildPrompt(...)`, `RESULT_INSTRUCTION` |
-| `src/helm.ts` | the service: composes the above, implements the ten tools | `class Helm` |
+| `src/helm.ts` | the service: composes the above, implements the twelve tools | `class Helm` |
 | `src/tools.ts` | tool registry: names, zod inputs, dispatch to `Helm` | `createToolRegistry(helm)` |
 | `src/server.ts` | `helm serve`: MCP stdio + Streamable HTTP on 127.0.0.1 | `serve(opts)` |
 | `src/cli.ts` | `helm` command line | main |

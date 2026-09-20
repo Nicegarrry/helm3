@@ -411,3 +411,128 @@ per two seconds.
 
 The $5 cap applies to the first row and was never approached. The last row is outside Helm's
 accounting entirely, which is itself part of the finding above.
+
+---
+
+# v1.1 — 2026-09-21
+
+Two things the v1 run left open: the orchestrator busy-polled because there was nothing to
+wait on, and `pr.merge` had never touched real `gh`. Both are closed here, and both turned out
+to hide a defect rather than a missing feature.
+
+## `pr.merge` against real `gh`: the first attempt refused a green PR
+
+brief#248 was green on every check, mergeable, and still a draft. Through the v1 daemon:
+
+```
+helm merge 248 --head 96d59be…   → { ok: false, reason: "pr is not mergeable" }        (1)
+helm merge 248 --head 96d59be…   → { ok: false, reason: "check \"lint · typecheck · test · build\" did not succeed" }   (2)
+```
+
+(1) was transient: I had pushed to brief's `main` a minute earlier and GitHub reports
+`mergeable: UNKNOWN` while it recomputes, which `mapPrStatus` turned into `null` and the guard
+into "not mergeable". Wrong message, right refusal.
+
+(2) was the real bug. The raw rollup for #248 at that moment:
+
+```
+{"name":"lint · typecheck · test · build","status":"COMPLETED","conclusion":"SUCCESS"}
+{"name":"Vercel","state":"SUCCESS"}
+{"name":"Vercel Preview Comments","status":"COMPLETED","conclusion":"SUCCESS"}
+```
+
+`gh` reports conclusions in upper case. The guard compared against lower-case `'success'`:
+
+```ts
+const failing = status.checks.find((c) => c.conclusion !== null && c.conclusion !== 'success');
+```
+
+so every real PR with completed checks was refused. Two other things were wrong in the same
+line: a queued check run arrives with `conclusion: ""`, which is neither `null` nor `'success'`
+and so was reported as "did not succeed" rather than "still running"; and a commit-status
+context such as Vercel has no `conclusion` at all, so it was ignored even when `PENDING`.
+
+**Why the tests passed.** `github.test.ts` fed the transport real casing and asserted it came
+back unchanged; `helm.test.ts` fed the service lower-case fakes. Each half was right about its
+own side of the seam, and nothing crossed it.
+
+**Fix.** Normalise once, at the boundary, in `github.ts`: lower-case `status` and `conclusion`
+for check runs, `conclusion: null` until `status` is `completed`, and commit-status contexts
+mapped from their `state` (`SUCCESS` → completed/success, `PENDING`/`EXPECTED` → pending,
+anything else → completed/failure). `pr.merge` then refuses in order: not open; a draft
+("mark it ready for review first"); mergeability not yet computed ("try again shortly"); a
+conflict; a head mismatch; a check that has not finished (naming its status); a check whose
+conclusion is not `success`, `neutral` or `skipped` (naming the conclusion). `isDraft` is now
+read from `gh` so the draft case is a clear refusal instead of a 405 from the merge API.
+
+**Proven live through the v1.1 daemon**, still on brief#248:
+
+```
+helm merge 248 --head 96d59be…   → { ok: false, reason: "pr is a draft; mark it ready for review first" }
+gh pr ready 248
+helm merge 248 --head 96d59be…   → { ok: true, merged: true }
+gh pr view 248 --json state,mergeCommit → MERGED, f35a139a94c3e3fbc209769e67b38382f9421b94
+```
+
+That is the first PR Helm has merged. Note `github.ts` merges with `merge_method=squash` via
+the REST API pinned to the expected SHA; brief's own history uses merge commits. Worth making
+configurable; not changed here.
+
+## `worker.wait`: one call per state change
+
+MCP cannot push. A server has no way to interrupt the model, and Claude Code does not surface
+server-initiated notifications as turns. So "ping the orchestrator back" has to mean: the one
+call the orchestrator made returns when there is something to act on. `worker.wait` does that —
+it blocks until any of the given workers leaves `queued`/`running`, or a timeout passes, and
+returns the settled workers with their state, head and result, plus the ids still pending.
+
+The timeout is capped at 25 minutes. Claude Code aborts an MCP tool call that has been silent
+for 30 minutes on stdio (5 on HTTP; `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`); the hard per-call
+limit is about 28 hours. Under that idle window a wait is never killed for silence, and a
+caller that sees `timedOut: true` simply waits again — that re-call is the failsafe poll, one
+every 10–25 minutes instead of one every two seconds. Also `helm wait <id>... [--timeout ms]`
+on the CLI, which reads the store directly and needs no daemon.
+
+Inside the daemon the wait re-reads SQLite every 500 ms. That costs the caller nothing: the
+orchestrator's context sees one request and one response.
+
+### Before and after, same task shape, same repo, same builder and reviewer
+
+A fresh headless Claude Code session in brief, restricted to `mcp__helm` (no file, edit or
+shell tools), asked to get a missing test file written, gated, PR'd and reviewed.
+
+| | v1 (`worker_inspect` only) | v1.1 (`worker_wait`) |
+| --- | --- | --- |
+| Tool calls to Helm | 307 | 9 |
+| …of which polling / waiting | 299 × `worker_inspect` | 3 × `worker_wait` |
+| Turns | 309 | 12 |
+| Orchestrator context (reported cost) | $16.82 | $0.82 |
+| Worker + reviewer spend | $0.052 + reviewer | $0.070 (two builders) + $0.209 reviewer = $0.278 |
+| Result | brief#249 | [brief#250](https://github.com/Nicegarrry/brief/pull/250) |
+
+The orchestrator chose `worker_wait` unprompted on its first attempt, with a 15-minute
+timeout, and used it again for the reviewer. It also handled a failure without polling: the
+first builder burned its turn budget on a bad premise in the ticket (`model.ts` is a pure barrel
+of 414 re-exports, not a module with behaviour of its own), `worker_wait` returned it as
+`failed`, and the orchestrator re-spawned with the scope cut to the barrel's actual contract.
+Nine Helm calls, three of them waits, twelve turns end to end. Tool-call sequence:
+
+```
+run_status
+worker_spawn                                   → w-bed43fe2
+worker_wait   { workerIds: [w-bed43fe2], timeoutMs: 900000 }   → settled: failed
+worker_spawn                                   → w-03755e9b (re-scoped from the first worker's findings)
+worker_wait   { workerIds: [w-03755e9b], timeoutMs: 1200000 }  → settled: succeeded, head a5ef292
+gate_run                                       → passed
+pr_open                                        → brief#250
+review_request                                 → w-5190af4f (google/gemini-3.8-flash)
+worker_wait   { workerIds: [w-5190af4f], timeoutMs: 1200000 }  → settled: succeeded, review.posted
+```
+
+`README.md`'s central claim — that the orchestrator gets its results "without spending its own
+context on the mechanics" — is now true in the measurement that mattered.
+
+## Counts
+
+`helm/src` 2,817 → 2,915 lines (ceiling 3,000). Tests 99 → 107; the three that pin the merge
+guard and the normalisation were each run against v1 and fail there.

@@ -38,6 +38,7 @@ import {
   reviewInput,
   spawnInput,
   steerInput,
+  waitInput,
   stopInput,
 } from './types.js';
 
@@ -53,6 +54,7 @@ export type PrOpenInput = z.infer<typeof prOpenInput>;
 export type PrStatusInput = z.infer<typeof prStatusInput>;
 export type ReviewInput = z.infer<typeof reviewInput>;
 export type PrMergeInput = z.infer<typeof prMergeInput>;
+export type WaitInput = z.infer<typeof waitInput>;
 
 /** What a builder/reviewer prompt is built from. Owned here since types.ts does not define it. */
 export type PromptInput = Readonly<{
@@ -77,10 +79,14 @@ export type HelmDeps = Readonly<{
   now?: () => Date;
   /** How long `stop()` waits for a running turn to settle before giving up. Default 10s; tests may lower it. */
   stopTimeoutMs?: number;
+  /** How often worker.wait re-reads the store while blocking. */
+  waitPollMs?: number;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'succeeded', 'failed', 'interrupted']);
 const ACTIVE_STATES: ReadonlySet<WorkerState> = new Set(['queued', 'running']);
+/** Check conclusions that do not block a merge. Lower-case: github.ts normalises them. */
+const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set(['success', 'neutral', 'skipped']);
 
 type OnDone = (workerId: string, result: WorkerResult | null, outcome: WorkerRunOutcome) => Promise<void>;
 
@@ -199,6 +205,7 @@ export class Helm {
   /** Workers whose current turn actually observed the stop request via hooks.shouldContinue(). */
   private readonly stopObserved = new Set<string>();
   private readonly stopTimeoutMs: number;
+  private readonly waitPollMs: number;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -212,6 +219,7 @@ export class Helm {
     this.prompts = deps.prompts;
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
+    this.waitPollMs = deps.waitPollMs ?? 500;
   }
 
   /** Runs `fn` exclusively with respect to every other call queued through this lock. */
@@ -515,16 +523,49 @@ export class Helm {
     });
   }
 
+  /**
+   * Blocks until any of the workers leaves an active state, or the timeout passes. This is how
+   * an orchestrator waits without polling: one call per state change rather than one every few
+   * seconds. The store is re-read every `waitPollMs` in-process, which costs the caller nothing.
+   */
+  async wait(input: WaitInput): Promise<ToolOutcome<{
+    settled: Array<{ workerId: string; state: WorkerState; head: string | null; result: WorkerRow['result'] }>;
+    pending: string[]; timedOut: boolean; waitedMs: number;
+  }>> {
+    return guard(async () => {
+      const started = Date.now();
+      for (;;) {
+        const rows = input.workerIds.map((id) => requireValue(this.store.getWorker(id), `worker not found: ${id}`));
+        const settled = rows.filter((r) => !ACTIVE_STATES.has(r.state));
+        const waitedMs = Date.now() - started;
+        if (settled.length > 0 || waitedMs >= input.timeoutMs) {
+          return {
+            ok: true,
+            settled: settled.map((r) => ({ workerId: r.workerId, state: r.state, head: r.head, result: r.result })),
+            pending: rows.filter((r) => ACTIVE_STATES.has(r.state)).map((r) => r.workerId),
+            timedOut: settled.length === 0,
+            waitedMs,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, this.waitPollMs));
+      }
+    });
+  }
+
   async prMerge(input: PrMergeInput): Promise<ToolOutcome<{ merged: true }>> {
     return guard(async () => {
       const pr = requireValue(this.store.getPrByNumber(input.number), 'pr not found');
       const worker = requireValue(this.store.getWorker(pr.workerId), 'pr worker not found');
       const status = await this.github.prStatus(worker.repoSlug, input.number);
       must(status.state === 'open', `pr is ${status.state}, not open`);
-      must(status.mergeable === true, 'pr is not mergeable');
+      must(!status.draft, 'pr is a draft; mark it ready for review first');
+      must(status.mergeable !== null, 'github has not finished computing mergeability; try again shortly');
+      must(status.mergeable === true, 'pr has conflicts with its base');
       must(status.head === input.expectedHead, `head mismatch: expected ${input.expectedHead}, got ${status.head}`);
-      const failing = status.checks.find((c) => c.conclusion !== null && c.conclusion !== 'success');
-      if (failing) return refuse(`check "${failing.name}" did not succeed`);
+      const unfinished = status.checks.find((c) => c.status !== 'completed');
+      if (unfinished) return refuse(`check "${unfinished.name}" has not finished (${unfinished.status})`);
+      const failing = status.checks.find((c) => !PASSING_CONCLUSIONS.has(c.conclusion ?? ''));
+      if (failing) return refuse(`check "${failing.name}" did not succeed (${failing.conclusion ?? 'no conclusion'})`);
       await this.github.merge(worker.repoSlug, input.number, input.expectedHead);
       return { ok: true, merged: true };
     });

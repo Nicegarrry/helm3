@@ -84,6 +84,18 @@ marked failed and the raw text is saved.
 Gates come from `<repo>/helm.json` (`{ "gates": [{ "name", "command" }] }`) or default to
 the `test`, `typecheck` and `lint` scripts in `package.json`.
 
+## Waiting, not polling
+
+An orchestrator should never loop on `worker.inspect`. After `worker.spawn` (or
+`review.request`) call `worker.wait` with the worker id and go quiet: it returns when the
+worker leaves `queued`/`running` — succeeded, failed, idle, stopped or interrupted — carrying
+the state, head and result, or after `timeoutMs` with `timedOut: true`, in which case call it
+again. Pass several ids to wake on the first that settles; the rest come back as `pending`.
+The timeout is capped at 25 minutes so a wait always returns inside Claude Code's 30-minute
+idle window for stdio MCP servers (5 minutes on HTTP — use a shorter timeout there, or raise
+`CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`). Measured live, this took one orchestrator from 299
+polling calls to a handful of waits for the same job; `helm/evidence/live.md` has the numbers.
+
 ## Watching it
 
 `helm ps`, `helm logs <id> -f`, `helm inspect <id>` and `helm status` read the store directly

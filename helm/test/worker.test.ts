@@ -2,11 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { piWorkerRunner, parseWorkerResult, classifyBash } from '../src/worker.js';
+import { piWorkerRunner, parseWorkerResult, classifyBash, defaultModelRuntime } from '../src/worker.js';
 import type { EventRow, WorkerHooks, WorkerRunInput, WorkerResult } from '../src/types.js';
 
 const exec = promisify(execFile);
@@ -350,4 +350,33 @@ test('F5: classifyBash denies reviewer git writes (commit/add/reset/rebase/merge
 test('F5: classifyBash still denies gh and rm -rf /', () => {
   assert.equal(classifyBash('gh pr create', 'builder').allowed, false);
   assert.equal(classifyBash('rm -rf /', 'builder').allowed, false);
+});
+
+test('defaultModelRuntime loads the operator models.json so configured providers resolve', async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), 'helm-agent-dir-'));
+  await writeFile(
+    join(agentDir, 'models.json'),
+    JSON.stringify({
+      providers: {
+        'helm-test-provider': {
+          baseUrl: 'https://example.invalid/v1',
+          api: 'openai-completions',
+          apiKey: 'test-key',
+          models: [{ id: 'configured-model', name: 'Configured Model', contextWindow: 1000, maxTokens: 100 }],
+        },
+      },
+    }),
+  );
+
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const runtime = await defaultModelRuntime();
+    const model = runtime.getModel('helm-test-provider', 'configured-model');
+    assert.ok(model, 'a provider configured only in models.json must resolve');
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(agentDir, { recursive: true, force: true });
+  }
 });

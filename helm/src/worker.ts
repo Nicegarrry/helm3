@@ -211,9 +211,12 @@ async function evaluateToolCall(
 
 // ---------- Model runtime / resolution ----------
 
-async function defaultModelRuntime(): Promise<ModelRuntime> {
+// modelsPath is left unset so Pi loads the operator's ~/.pi/agent/models.json. Custom
+// providers, their API keys and pinned routes live only in that file; passing null makes
+// every model configured there unresolvable and leaves built-in ones without credentials.
+export async function defaultModelRuntime(): Promise<ModelRuntime> {
   const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
-  return ModelRuntime.create({ modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
+  return ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false });
 }
 
 function defaultResolveModel(modelRuntime: ModelRuntime): (name: string) => Model<Api> | undefined {

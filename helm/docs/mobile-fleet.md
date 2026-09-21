@@ -1,4 +1,4 @@
-# Helm v1.6 mobile fleet
+# Helm v1.7 mobile fleet
 
 `helm fleet sync` is a separate, outbound-only companion for a private here.now site. It does not open `helm.sqlite`, start/restart the daemon, send Helm tool calls, or alter workers. It reads only `$HELM_HOME/serve.json`, then performs a bounded `GET http://127.0.0.1:<port>/api/state`.
 
@@ -32,6 +32,10 @@ The published `fleet` collection retains exactly one record. The publisher lists
 The record holds `snapshot` as a JSON string under 15,000 UTF-8 bytes and checks the final escaped Site Data body stays below 16 KB. It allowlists only snapshot version/time; safe run, daemon, count, worker and model scalar summaries. Long scalar values are capped; `counts.truncatedFields`, `truncatedWorkers`, and `truncatedModels` make all size reduction explicit. Workers are active-first across all sources, then newest. Each worker has only its source label—not its local path or port—so identical worker IDs remain distinct. Objectives, events, tool arguments, logs, paths, result bodies, lifecycle journal, deployment metadata, credentials and any unrecognised nested values are never copied.
 
 Every source reports an ID/label, source observation time, and live/stale/unavailable status. A malformed local response is rejected rather than manufactured into a healthy empty fleet. When one source fails, the publisher retains its last safe cloud workers and source observation time, labels that source unavailable, and marks the totals incomplete; if every source fails it makes no owner API call at all and leaves the cloud record untouched. The page polls every 30 seconds only while visible, bypasses the browser cache, prevents overlapping requests, marks snapshots stale after 90 seconds, and marks failed reads offline while retaining the last rendered snapshot. With no record yet it says that it is waiting, rather than implying an empty fleet.
+
+## v1.7 dashboard appearance
+
+The hosted page is a compact, read-only monitoring surface using the warm-paper brick palette. It bundles Bricolage Grotesque, Hanken Grotesk, and JetBrains Mono from local files only; their SIL OFL 1.1 notices are in `dashboard/fonts/licenses/`. The accessible Appearance selector offers System, Light, and Dark. System follows later OS colour-scheme changes; a valid explicit choice is persisted in `localStorage` under `helm-fleet-appearance`. Storage access is best-effort: blocked or malformed storage falls back to System, and an early guarded read applies a stored explicit choice before the stylesheet to prevent a light/dark flash. This remains presentation-only: no publisher, daemon, fleet data, or control capability changes.
 
 ## Phone use and acceptance
 

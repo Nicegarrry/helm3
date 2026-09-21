@@ -135,7 +135,8 @@ function parseOwnerRepo(url: string): string | null {
 export type OverviewWorker = {
   workerId: string; state: WorkerState; role: WorkerRow['role']; model: string; repoSlug: string; branch: string; head: string | null;
   objective: string; createdAt: string; updatedAt: string; elapsedMs: number; spendUsd: number; tokens: number; unknownCostEvents: number;
-  lastEvent: { kind: string; at: string; summary: string } | null; resultStatus: WorkerResult['status'] | null;
+  /** The dashboard summarises `data` client-side (ui.ts `summarize`), the one place that text is shaped. */
+  lastEvent: { kind: string; at: string; data: Record<string, unknown> } | null; resultStatus: WorkerResult['status'] | null;
 };
 export type OverviewModel = { model: string; workers: number; active: number; spendUsd: number; tokens: number };
 export type SpendPoint = { at: string; spendUsd: number };
@@ -172,21 +173,6 @@ export function modelFamily(model: string): string {
   const last = id.split('/').pop() ?? id;
   const m = /^[a-z]+/i.exec(last);
   return (m ? m[0] : last).toLowerCase();
-}
-
-/** One short line per event for the dashboard. */
-function summarizeEvent(kind: string, data: Record<string, unknown>): string {
-  const s = (k: string) => (typeof data[k] === 'string' ? (data[k] as string) : undefined);
-  switch (kind) {
-    case 'tool.call': return `${s('tool') ?? ''} ${s('summary') ?? ''}`.trim();
-    case 'tool.refused': return `${s('tool') ?? ''} refused: ${s('reason') ?? ''}`.trim();
-    case 'state': return `${s('from') ?? '?'} -> ${s('to') ?? '?'}`;
-    case 'result': return `${s('status') ?? ''} ${s('summary') ?? ''}`.trim();
-    case 'error': return s('message') ?? '';
-    case 'gate': return data.passed ? 'passed' : 'failed';
-    case 'pr': return s('url') ?? '';
-    default: { const first = Object.values(data).find((v) => typeof v === 'string'); return typeof first === 'string' ? first : ''; }
-  }
 }
 
 export class Helm {
@@ -498,7 +484,7 @@ export class Helm {
       createdAt: r.createdAt, updatedAt: r.updatedAt, elapsedMs: Math.max(0, Date.parse(end) - Date.parse(r.createdAt)),
       spendUsd: spend.spendUsd, tokens: spend.tokens.input + spend.tokens.output + spend.tokens.cacheRead + spend.tokens.cacheWrite,
       unknownCostEvents: spend.unknownCostEvents,
-      lastEvent: last ? { kind: last.kind, at: last.at, summary: summarizeEvent(last.kind, last.data) } : null,
+      lastEvent: last ? { kind: last.kind, at: last.at, data: last.data } : null,
       resultStatus: r.result?.status ?? null,
     };
   }

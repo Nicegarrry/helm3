@@ -14,6 +14,7 @@ in `test/<module>.test.ts`, and must run with `npm test` from `helm/`.
 | `src/gate.ts` | run checks as child processes, capture output | `gateRunner(): GateRunner` |
 | `src/github.ts` | `gh` CLI transport: pr create, status, comment, merge | `ghGitHub(exec?): GitHub` |
 | `src/worker.ts` | Pi session runtime, tool hook, result parsing, usage | `piWorkerRunner(opts): WorkerRunner` |
+| `src/codex.ts` | Codex CLI runtime (`codex exec` / `exec resume` per turn, Codex's sandbox as policy, JSONL events → Helm events, $0 usage) and the lane switch on the `codex/` model prefix | `codexWorkerRunner(opts): WorkerRunner`, `laneRunner({ pi, codex })`, `parseCodexModel(name)` |
 | `src/prompt.ts` | builder and reviewer prompt text and the result instruction | `buildPrompt(...)`, `RESULT_INSTRUCTION` |
 | `src/helm.ts` | the service: composes the above, implements the twelve tools | `class Helm` |
 | `src/tools.ts` | tool registry: names, zod inputs, dispatch to `Helm` | `createToolRegistry(helm)` |
@@ -26,11 +27,13 @@ Storage layout: `$HELM_HOME/helm.sqlite`, `$HELM_HOME/worktrees/<repoSlug>/<work
 
 Worker id: `w-` + 8 hex chars. Branch: `helm/<workerId>`.
 
-Events are the only log. Kinds used by `helm.ts` and `worker.ts`:
+Events are the only log. Kinds used by `helm.ts`, `worker.ts` and `codex.ts`:
 `spawned`, `state` ({from,to}), `turn.start` ({message}), `turn.end`, `tool.call`
 ({tool, summary}), `tool.refused` ({tool, reason}), `usage` (SpendRow fields), `result`
-(WorkerResult), `result.invalid` ({rawText}), `error` ({message}), `gate` ({gateId,passed}),
-`pr` ({number,url}), `stop.requested`.
+(WorkerResult), `result.invalid` ({rawText}), `error` ({message}), `notice` ({message}, a
+Codex-side warning that is not a failure), `gate` ({gateId,passed}), `pr` ({number,url}),
+`stop.requested`. `sessionFile` is a Pi session path on the Pi lane and `codex-thread:<uuid>`
+on the Codex lane; only the runner that wrote it reads it.
 
 Tool outcomes never throw across the MCP or HTTP boundary: `{ ok: true, ... }` or
 `{ ok: false, reason }`.

@@ -591,3 +591,45 @@ daemon: `gh pr ready`, then `helm merge <n> --head <sha>`. #249 merged first try
 (`273db94`); #250 was refused once with "github has not finished computing mergeability; try
 again shortly" — #249 had just landed on its base — and merged on the retry (`627bb1d`). That
 is the guard added in v1.1 doing precisely what it was added for.
+
+## v1.3 — the Codex lane (2026-09-21)
+
+Workers named `codex/<model>[:<effort>]` run the Codex CLI on the operator's ChatGPT
+subscription instead of a Pi session. Proven against `codex-cli 0.153.4` (`codex login
+status` → "Logged in using ChatGPT") on the same Mac as the earlier sections.
+
+### Probes that shaped the runner (each executed, not quoted)
+
+- `codex exec --json … -o last.md -` on a scratch repo: events are `thread.started`
+  ({thread_id}), `turn.started`, `item.started`/`item.completed` with item types
+  `command_execution` ({command, aggregated_output, exit_code, status}), `file_change`
+  ({changes:[{path,kind}]}), `agent_message` ({text}), `error` ({message}), and
+  `turn.completed` ({usage:{input_tokens, cached_input_tokens, cache_write_input_tokens,
+  output_tokens, reasoning_output_tokens}}). The `-o` file holds the final message.
+- `codex exec resume <thread_id>` keeps the earlier context ("PROBE OK" → "PROBE OK AGAIN")
+  but **resumed on the config default model** (`gpt-6-astra`) when `-m` was omitted — so the
+  runner always passes `-m`. `resume` accepts `-m`, `-c`, `--json`, `-o`,
+  `--skip-git-repo-check` and not `-C`/`-s`; the sandbox rides `-c sandbox_mode=…`.
+- `-s workspace-write -c approval_policy="never"`: the model wrote `hello.txt`, then
+  `git commit` failed with `.git/index.lock: Operation not permitted` — Codex's sandbox
+  refuses writes under `.git/`. Helm therefore commits for the worker, as it already did.
+  Network is off in that sandbox by default, so a push cannot reach GitHub either way.
+
+### Live run through the daemon on this branch (`HELM_HOME` scratch, port 4750, cap $1)
+
+Scratch repo with a `helm.json` gate of `test -f hello.txt`.
+
+| Step | Result |
+| --- | --- |
+| `helm spawn --model codex/gpt-5.6-luna:low` | `w-3d8331ff`, branch `helm/w-3d8331ff` |
+| `helm wait` | `succeeded` after 29,619 ms; Helm committed head `026bad6` (`hello.txt | 1 +`) |
+| events | `turn.start` → `notice` (Codex's own hooks warning) → `tool.call` bash ×2 + edit ×1 → `turn.end` {exitCode 0} → `result` |
+| `helm gate` | passed, `hello-exists` exit 0 at `026bad6` |
+| `helm steer "Also create bye.txt…"` | turn 3 ran as `codex exec resume <thread>`; `succeeded`, head `4eff057`, worktree holds both files with the exact lines |
+| `helm status` | `spendUsd: 0`, `unknownCostEvents: 0` — subscription usage is metered as tokens, never as spend |
+| tokens recorded for the worker | `{"input":22608,"output":1319,"cacheRead":208640,"cacheWrite":0}` |
+| `helm shutdown` | daemon exited cleanly |
+
+Suite: 117 tests, 117 pass (108 before; nine new in `test/codex.test.ts` against a fake
+`codex` binary that replays the probed event shapes). `tsc --noEmit` clean. `helm/src` is
+3,069 lines after cutting the duplicated event summariser and the daemon-less `wait`.

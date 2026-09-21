@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Helm, modelFamily, type HelmPrompts, type SpawnInput } from '../src/helm.js';
+import { createToolRegistry } from '../src/tools.js';
 import type {
   EventRow,
   GateRow,
@@ -978,4 +979,58 @@ test('pr.merge tells "still running" apart from "failed", and treats neutral and
   const merged = await helm.prMerge({ number: pr.number, expectedHead: pr.head });
   assert.equal(merged.ok, true, JSON.stringify(merged));
   assert.equal(github.merged.length, 1);
+});
+
+
+test('automatic routing reaches the runner, persists, and survives steer across all task tiers', async () => {
+  const seen: string[] = [];
+  const delegate = succeeded();
+  const { helm, store } = makeHelm({ runner: { run: async (input, message, hooks) => {
+    seen.push(input.model);
+    return delegate.run(input, message, hooks);
+  } } });
+  const registry = createToolRegistry(helm);
+  const repo = mkTempDir('helm-routing-');
+  for (const [difficulty, expected] of [
+    [undefined, 'codex/gpt-5.6-terra:medium'],
+    ['normal', 'codex/gpt-5.6-terra:medium'],
+    ['easy', 'codex/gpt-5.6-luna:medium'],
+    ['super-easy', 'opencode-go/qwen3.8-flash'],
+  ] as const) {
+    const outcome = await registry.call('worker.spawn', { repo, objective: 'task', ...(difficulty ? { difficulty } : {}) });
+    assert.equal(outcome.ok, true);
+    const row = store.listWorkers().at(-1)!;
+    await helm.settle(row.workerId);
+    assert.equal(row.model, expected);
+    assert.equal(seen.at(-1), expected);
+    assert.equal(store.listEvents(row.workerId).find((e) => e.kind === 'spawned')?.data.model, expected);
+    assert.equal((await helm.steer({ workerId: row.workerId, message: 'continue' })).ok, true);
+    await helm.settle(row.workerId);
+    assert.equal(seen.at(-1), expected);
+    await helm.gate({ workerId: row.workerId });
+    assert.equal((await helm.prOpen({ workerId: row.workerId, draft: true })).ok, true);
+    const review = await helm.reviewRequest({ workerId: row.workerId, allowSameFamily: false });
+    assert.ok(review.ok);
+    await helm.settle(review.reviewWorkerId);
+    assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'google/gemini-3.8-flash');
+  }
+});
+
+test('explicit models override difficulty; a Gemini builder gets an independent default reviewer', async () => {
+  const { helm, store } = makeHelm();
+  const repo = mkTempDir('helm-routing-');
+  const build = await helm.spawn(spawnBody(repo, { difficulty: 'super-easy', model: 'google/gemini-3.8-flash' }));
+  assert.ok(build.ok);
+  await helm.settle(build.workerId);
+  assert.equal(store.getWorker(build.workerId)?.model, 'google/gemini-3.8-flash');
+  await helm.gate({ workerId: build.workerId });
+  await helm.prOpen({ workerId: build.workerId, draft: true });
+  const review = await helm.reviewRequest({ workerId: build.workerId, allowSameFamily: false });
+  assert.ok(review.ok);
+  await helm.settle(review.reviewWorkerId);
+  assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'codex/gpt-5.6-terra:medium');
+  const direct = await helm.spawn(spawnBody(repo, { model: undefined, role: 'reviewer', difficulty: 'super-easy' }));
+  assert.ok(direct.ok);
+  await helm.settle(direct.workerId);
+  assert.equal(store.getWorker(direct.workerId)?.model, 'google/gemini-3.8-flash');
 });

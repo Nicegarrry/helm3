@@ -22,7 +22,7 @@ import { serve, serveStdioProxy, formatWorkerTable } from './server.js';
 
 function usage(): void {
   console.error(`usage: helm <command> [options]
-  spawn --repo <path> --objective <text> --model <m> [--base-ref r] [--role builder|reviewer]
+  spawn --repo <path> --objective <text> [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
         [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k]
   ps [--repo path] [--state s] [--json]
   logs <id> [-f] [--json]
@@ -33,7 +33,7 @@ function usage(): void {
   gate <id> [--json]
   pr <id> [--title t] [--body b] [--draft] [--json]
   pr-status <id|#n> [--json]
-  review <id|#n> --model m [--json]
+  review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
   status [--json]
   serve [--stdio|--http] [--port n]
@@ -147,12 +147,12 @@ async function readCmd(
 }
 
 const cmdSpawn = (args: string[]) =>
-  simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective && v.model
-    ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, acceptance: v.acceptance, model: v.model,
+  simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective
+    ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
         baseRef: v['base-ref'], role: v.role, contextPaths: v.context ?? [], allowWorkflows: v['allow-workflows'] ?? false,
         idempotencyKey: v['idempotency-key'] }
     : undefined), {
-    repo: { type: 'string' }, objective: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' },
+    repo: { type: 'string' }, objective: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
     'base-ref': { type: 'string' }, role: { type: 'string' }, context: { type: 'string', multiple: true },
     'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' },
   });
@@ -215,7 +215,7 @@ const cmdPr = (args: string[]) =>
 const cmdPrStatus = (args: string[]) => simpleCmd('pr.status', args, (p) => (p[0] ? prIdent(p[0]) : undefined));
 
 const cmdReview = (args: string[]) =>
-  simpleCmd('review.request', args, (p, v) => (p[0] && v.model ? { ...prIdent(p[0]), model: v.model } : undefined), { model: { type: 'string' } });
+  simpleCmd('review.request', args, (p, v) => (p[0] ? { ...prIdent(p[0]), model: v.model } : undefined), { model: { type: 'string' } });
 
 const cmdMerge = (args: string[]) =>
   simpleCmd('pr.merge', args, (p, v) => (p[0] && v.head ? { number: Number(p[0].replace('#', '')), expectedHead: v.head } : undefined),

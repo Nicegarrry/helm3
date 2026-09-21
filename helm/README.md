@@ -6,7 +6,7 @@ without spending its own context on the mechanics. Two lanes serve the workers: 
 on cheap API models, and the Codex CLI on the operator's ChatGPT subscription (any GPT model
 Codex offers, at $0 marginal cost).
 
-Twelve tools, one SQLite file, one daemon shared by every project on the machine. Under 3k
+Twelve tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
 lines of TypeScript.
 
 ## Five-minute start
@@ -44,12 +44,12 @@ lines of TypeScript.
 4. Run one task by hand to see the loop:
 
    ```sh
-   helm spawn --repo /path/to/target --objective "Add a --version flag" --model opencode-go/qwen3.8-flash
+   helm spawn --repo /path/to/target --objective "Add a --version flag"
    helm ps
    helm logs w-1a2b3c4d -f
    helm gate w-1a2b3c4d
    helm pr w-1a2b3c4d
-   helm review w-1a2b3c4d --model google/gemini-3.8-flash
+   helm review w-1a2b3c4d
    helm status
    ```
 
@@ -57,7 +57,7 @@ lines of TypeScript.
 
 | Tool | What it does |
 | --- | --- |
-| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` picks the lane: `provider/model` as Pi names it, or `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`). |
+| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, or `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`). |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | One line per worker. |
 | `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
@@ -72,6 +72,33 @@ lines of TypeScript.
 
 Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Nothing throws across the
 boundary.
+
+## Model selection
+
+Omit `model` to use the following policy on both CLI and MCP:
+
+| Task tier | Model | Runtime |
+| --- | --- | --- |
+| Normal (default) | `codex/gpt-5.6-terra:medium` | Codex CLI, ChatGPT subscription |
+| Easy | `codex/gpt-5.6-luna:medium` | Codex CLI, ChatGPT subscription |
+| Super easy | `opencode-go/qwen3.8-flash` | Pi |
+| Review of any of these | `google/gemini-3.8-flash` | Pi |
+
+Use `helm spawn --repo /path/to/repo --objective "…" --difficulty easy` or pass
+`difficulty: "easy"` to `worker.spawn`. The caller classifies the task; Helm does not
+infer difficulty from the objective. `super-easy` is for small, mechanical work.
+An explicit `--model` (MCP `model`) overrides the tier. Kimi K3 and Qwen 3.8 Max are
+never selected automatically, including on failures; explicit overrides remain available.
+
+`helm review <id>` / `review.request` also accepts an omitted model. Reviews default to
+Gemini Flash; if an explicitly selected builder is Gemini, the default reviewer is Codex
+Terra to retain family independence. A direct `worker.spawn` with `role: "reviewer"`
+defaults to Gemini Flash. Resume/steer keeps the worker's originally selected model.
+
+The Codex CLI must be signed in with ChatGPT (`codex login status`). Subscription usage
+is still finite; this policy does not measure remaining quota or automatically switch to
+paid APIs when Codex is unavailable. Pi routes need the corresponding provider login.
+See the Codex reviewer sandbox limitation below when reviewing a Gemini build.
 
 ## What a worker can and cannot do
 

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#17191d">
+  <title>Helm Fleet</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <header><div><p class="eyebrow">HELM · PRIVATE FLEET</p><h1>Fleet</h1></div><p id="freshness" class="status" role="status">Loading snapshot…</p></header>
+    <section class="metrics" aria-label="Fleet summary"><article><small>Spend</small><strong id="spend">—</strong></article><article><small>Workers</small><strong id="workers-count">—</strong></article><article><small>Unknown cost</small><strong id="unknown">—</strong></article></section>
+    <section class="filters" aria-label="Fleet filters"><label>Project <select id="project"><option value="">All projects</option></select></label><label>State <select id="state"><option value="">All states</option></select></label></section>
+    <p id="notice" class="notice" hidden></p>
+    <section aria-labelledby="workers-heading"><div class="section-title"><h2 id="workers-heading">Workers</h2><time id="updated"></time></div><div id="worker-list" class="worker-list" aria-live="polite"></div></section>
+    <section aria-labelledby="models-heading"><h2 id="models-heading">Models</h2><div id="models" class="models"></div></section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

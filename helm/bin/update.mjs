@@ -1,7 +1,7 @@
 // Standalone release installer: it must survive the daemon whose code it is replacing.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, realpathSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, realpathSync, readlinkSync, readdirSync, statSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,18 +17,25 @@ const write = (path, data) => {
 };
 export function digestRelease(root) {
   const hash = createHash('sha256');
-  const visit = (dir) => {
-    for (const entry of readdirSync(join(root, dir), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (entry.name === 'node_modules' || entry.name === '.git') continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) visit(path);
-      else if (entry.isFile()) { const data = readFileSync(join(root, path)); hash.update(`${path}\0${data.length}\0`); hash.update(data); }
-      else throw new Error(`release contains unsupported link: ${path}`);
+  const visit = (dir, relative = '', parents = new Set()) => {
+    const canonical = realpathSync(dir);
+    if (parents.has(canonical)) throw new Error(`release contains a symlink cycle: ${relative}`);
+    const ancestors = new Set([...parents, canonical]);
+    hash.update(`directory:${relative}\0`);
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === '.git') continue;
+      const path = join(dir, entry.name), name = join(relative, entry.name);
+      if (entry.isSymbolicLink()) hash.update(`link:${name}\0${readlinkSync(path)}\0`);
+      const info = statSync(path);
+      if (info.isDirectory()) visit(path, name, ancestors);
+      else if (info.isFile()) { const data = readFileSync(path); hash.update(`file:${name}\0${data.length}\0`); hash.update(data); }
+      else throw new Error(`release contains unsupported entry: ${name}`);
     }
   };
-  visit('');
+  visit(root);
   return hash.digest('hex');
 }
+
 export async function control(port, input) {
   const res = await fetch(`http://127.0.0.1:${port}/tools/daemon.control`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(5000),
@@ -43,9 +50,10 @@ export function stageRelease(home, repo, ref, validate = validateRelease) {
   const id = randomUUID();
   const lock = join(home, 'upgrade.lock');
   mkdirSync(lock);
-  write(join(lock, 'owner.json'), { id, pid: process.pid, operation: 'stage' });
-  try { return stageLocked(home, repo, ref, validate); }
-  finally { releaseLock(home, id); }
+  try {
+    write(join(lock, 'owner.json'), { id, pid: process.pid, operation: 'stage' });
+    return stageLocked(home, repo, ref, validate);
+  } finally { rmSync(lock, { recursive: true, force: true }); }
 }
 function releaseLock(home, id) {
   const lock = join(home, 'upgrade.lock');
@@ -84,19 +92,24 @@ export function launchUpgrade(home, port, source, timeoutMs) {
   const lock = join(home, 'upgrade.lock');
   const id = randomUUID();
   mkdirSync(lock);
-  write(join(lock, 'owner.json'), { id, pid: process.pid, operation: 'apply' });
-  const log = openSync(join(home, 'upgrade.log'), 'a');
+  let log, child;
   try {
-    const child = spawn(process.execPath, [script, 'apply', home, id], { detached: true, stdio: ['ignore', log, log], env: { ...process.env, HELM_HOME: home } });
+    write(join(lock, 'owner.json'), { id, pid: process.pid, operation: 'apply' });
+    log = openSync(join(home, 'upgrade.log'), 'a');
+    child = spawn(process.execPath, [script, 'apply', home, id], { detached: true, stdio: ['ignore', log, log], env: { ...process.env, HELM_HOME: home } });
     child.on('error', (err) => {
-      write(join(home, 'upgrade.json'), { id, phase: 'failed', error: err.message });
-      releaseLock(home, id);
+      try { write(join(home, 'upgrade.json'), { id, phase: 'failed', error: err.message }); }
+      catch (failure) { console.error(failure); }
+      try { releaseLock(home, id); } catch (failure) { console.error(failure); }
     });
     write(join(lock, 'owner.json'), { id, pid: child.pid, operation: 'apply' });
     write(join(home, 'upgrade.json'), { id, helperPid: child.pid, phase: 'draining', source: { bootId: source.bootId }, port, staged, timeoutMs });
     child.unref();
-  } catch (err) { releaseLock(home, id); throw err; }
-  finally { closeSync(log); }
+  } catch (err) {
+    if (child?.pid) child.kill('SIGTERM'); // Only the helper created here, before handover ownership was published.
+    rmSync(lock, { recursive: true, force: true });
+    throw err;
+  } finally { if (log !== undefined) closeSync(log); }
 }
 
 export async function applyUpgrade(home, id) {
@@ -108,7 +121,7 @@ export async function applyUpgrade(home, id) {
     await sleep(50);
   }
   if (job?.id !== id || job.helperPid !== process.pid) throw new Error('upgrade ownership was not established');
-  const save = (phase, extra = {}) => write(journal, { ...job, phase, ...extra });
+  const save = (phase, extra = {}) => { job = { ...job, phase, ...extra }; write(journal, job); };
   let stopped = false;
   try {
     if (digestRelease(job.staged.root) !== job.staged.digest) throw new Error('staged release changed after validation');
@@ -123,7 +136,7 @@ export async function applyUpgrade(home, id) {
       if (status.bootId !== job.source.bootId) throw new Error('daemon identity changed while draining');
     }
     if (digestRelease(job.staged.root) !== job.staged.digest) throw new Error('staged release changed while draining');
-    save('stopping');
+    save('stopping', { handoverStarted: true });
     stopped = true; // An interrupted response does not prove shutdown was absent.
     await control(job.port, { action: 'shutdown', expectedBootId: job.source.bootId });
     // The old process releases its ownership lock only after closing HTTP and SQLite.

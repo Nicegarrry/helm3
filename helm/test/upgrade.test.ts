@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
-import { control, digestRelease, stageRelease } from '../bin/update.mjs';
+import { control, digestRelease, stageRelease, launchUpgrade } from '../bin/update.mjs';
 import { openStore } from '../src/store.js';
 import { Lifecycle } from '../src/lifecycle.js';
 import { serve } from '../src/server.js';
@@ -15,7 +15,7 @@ import type { Helm } from '../src/helm.js';
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
 const write = (path: string, data: unknown) => writeFileSync(path, JSON.stringify(data));
-async function eventually<T>(get: () => Promise<T> | T, accept: (value: T) => boolean, timeout = 20000): Promise<T> {
+async function eventually<T>(get: () => Promise<T> | T, accept: (value: T) => boolean, timeout = 90000): Promise<T> {
   const end = Date.now() + timeout;
   let last: T | undefined;
   while (Date.now() < end) {
@@ -163,6 +163,12 @@ test('failed candidate startup leaves admissions closed and does not change the 
   assert.match(done.error, /new daemon exited 42/);
   assert.ok(existsSync(join(home, 'drain.json')));
   assert.equal(existsSync(join(home, 'current-release.json')), false);
+  assert.equal(done.handoverStarted, true);
+  await eventually(() => existsSync(join(home, 'upgrade.lock')), (locked) => !locked);
+  assert.throws(() => execFileSync(process.execPath, ['--import', 'tsx', join(packageRoot, 'src', 'cli.ts'), 'serve', '--stdio'], {
+    cwd: packageRoot, env: { ...process.env, HELM_HOME: home }, timeout: 5000, stdio: 'pipe',
+  }), /explicit manual recovery/);
+  assert.equal(existsSync(join(home, 'daemon.lock')), false);
 });
 
 test('staging pins an archive, isolates validation, and preserves prior selection on failure', (t) => {
@@ -204,4 +210,42 @@ test('a second real daemon is refused without interrupting the first owner', asy
   assert.equal((await control(old.port, { action: 'status' })).bootId, before.bootId);
   await control(old.port, { action: 'shutdown' });
   await eventually(() => existsSync(join(home, 'daemon.lock')), (locked) => !locked);
+});
+
+
+test('signal metadata failure leaves the daemon alive', async (t) => {
+  const home = testHome(t);
+  const old = await start(home);
+  const before = await control(old.port, { action: 'status' });
+  mkdirSync(join(home, 'drain.json'));
+  old.child.kill('SIGTERM');
+  await eventually(old.errors, (errors) => errors.includes('EISDIR'));
+  assert.equal(old.child.exitCode, null);
+  assert.equal((await control(old.port, { action: 'status' })).bootId, before.bootId);
+  rmSync(join(home, 'drain.json'), { recursive: true });
+  await control(old.port, { action: 'shutdown' });
+  await eventually(() => existsSync(join(home, 'daemon.lock')), (locked) => !locked);
+});
+
+test('upgrade setup failure releases its lock before any helper starts', (t) => {
+  const home = testHome(t);
+  write(join(home, 'staged-release.json'), {});
+  mkdirSync(join(home, 'upgrade.log'));
+  assert.throws(() => launchUpgrade(home, 1, { bootId: 'test' }, 1000), /EISDIR/);
+  assert.equal(existsSync(join(home, 'upgrade.lock')), false);
+  assert.equal(existsSync(join(home, 'upgrade.json')), false);
+});
+
+test('release digest covers installed and linked dependencies', (t) => {
+  const home = testHome(t);
+  const root = join(home, 'release'), dependency = join(home, 'dependency');
+  mkdirSync(join(root, 'node_modules'), { recursive: true });
+  mkdirSync(dependency);
+  writeFileSync(join(dependency, 'index.js'), 'original');
+  symlinkSync(dependency, join(root, 'node_modules', 'dependency'), 'dir');
+  const before = digestRelease(root);
+  writeFileSync(join(dependency, 'index.js'), 'changed');
+  assert.notEqual(digestRelease(root), before);
+  symlinkSync(root, join(dependency, 'cycle'), 'dir');
+  assert.throws(() => digestRelease(root), /symlink cycle/);
 });

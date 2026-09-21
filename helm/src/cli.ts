@@ -266,13 +266,14 @@ async function cmdServe(args: string[]): Promise<void> {
     if (!result.ok) console.error(result.reason);
     signaling = false;
   };
-  process.on('SIGINT', () => void drainOnSignal());
-  process.on('SIGTERM', () => void drainOnSignal());
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void drainOnSignal().catch((err) => { signaling = false; console.error(err); }); });
 }
 
 /** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */
 async function startDetachedDaemon(home: string, serveJsonPath: string, port: number): Promise<{ port: number; pid: number }> {
   if (existsSync(join(home, 'upgrade.lock'))) throw new Error('upgrade in progress; automatic startup is paused');
+  const update = readMetadata(join(home, 'upgrade.json'));
+  if (update?.phase === 'failed' && update.handoverStarted) throw new Error('upgrade failed after shutdown; explicit manual recovery is required');
   const selected = readMetadata(join(home, 'current-release.json'));
   const entry = selected ? join(String(selected.root), 'helm', 'src', 'cli.ts') : process.argv[1] ?? '';
   const log = openSync(join(home, 'daemon.log'), 'a');

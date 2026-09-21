@@ -6,6 +6,9 @@ import test from 'node:test';
 const dashboard = (name: string) => readFileSync(join(process.cwd(), 'dashboard', name), 'utf8');
 test('mobile dashboard has private relative polling, source filters, strict stale/offline state, and no unsafe HTML writes', () => {
   const html = dashboard('index.html'); const app = dashboard('app.js'); const css = dashboard('styles.css');
+  const releaseVersion = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')).version;
+  const assetVersions = [...html.matchAll(/(?:href|src)="(?:styles|app)\.\w+\?v=([^\"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(assetVersions, [releaseVersion, releaseVersion]);
   assert.match(html, /id="project"/); assert.match(html, /id="state"/); assert.match(html, /id="source"/); assert.match(html, /source-health/); assert.match(app, /\.herenow\/data\/fleet\?limit=1/);
   assert.match(app, /STALE_MS = 90_000/); assert.match(app, /document\.hidden/); assert.match(app, /offline = true/); assert.match(app, /validSnapshot/); assert.match(app, /Waiting for first snapshot/);
   assert.match(app, /textContent/); assert.doesNotMatch(app, /innerHTML|insertAdjacentHTML/);

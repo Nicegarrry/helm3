@@ -140,8 +140,8 @@ test('empty successful-looking state and malformed owner listing fail closed', a
   assert.throws(() => parseFleetArgs(['--site','test','--source','same=/tmp/a','--source','same=/tmp/b']), /uniquely/);
   const defaults = parseFleetArgs(['--site','test']);
   assert.equal(defaults.sources.length, 1);
-  assert.equal(defaults.sources[0].home, resolve(process.env.HELM_HOME || join(homedir(), '.helm')));
-  assert.equal(defaults.sources[0].label, 'Default Helm');
+  assert.equal(defaults.sources[0]!.home, resolve(process.env.HELM_HOME || join(homedir(), '.helm')));
+  assert.equal(defaults.sources[0]!.label, 'Default Helm');
 });
 
 

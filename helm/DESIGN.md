@@ -20,6 +20,8 @@ in `test/<module>.test.ts`, and must run with `npm test` from `helm/`.
 | `src/tools.ts` | tool registry: names, zod inputs, dispatch to `Helm` | `createToolRegistry(helm)` |
 | `src/server.ts` | `helm serve --http`: the daemon (Streamable HTTP MCP, CLI endpoint, dashboard on 127.0.0.1); `serve --stdio`: a per-session front-end that proxies to it | `serve(opts)`, `serveStdioProxy(port)` |
 | `src/cli.ts` | `helm` command line | main |
+| `src/lifecycle.ts` | Persistent drain admission, active operation accounting, release identity and exclusive daemon ownership | `Lifecycle`, `ownDaemon` |
+| `bin/update.mjs` | Standalone release staging and detached handover, surviving the old daemon | `stageRelease`, `launchUpgrade`, `applyUpgrade` |
 | `src/config.ts` | `$HELM_HOME`, spend cap, max workers | `loadConfig(env)` |
 
 Storage layout: `$HELM_HOME/helm.sqlite`, `$HELM_HOME/worktrees/<repoSlug>/<workerId>`,
@@ -37,3 +39,13 @@ on the Codex lane; only the runner that wrote it reads it.
 
 Tool outcomes never throw across the MCP or HTTP boundary: `{ ok: true, ... }` or
 `{ ok: false, reason }`.
+
+
+Lifecycle admission wraps the shared tool registry, before its first await. All daemon CLI
+and MCP calls use that boundary. The service exposes its full worker promises as blockers,
+so committing results and posting a review remain part of the work being drained. Direct
+in-process service calls are an embedding/test API and do not provide admission control.
+The lifecycle marker survives restarts. See `docs/safe-upgrade.md` for the restart contract.
+Release installation is a standalone Node program in `bin/`: it cannot live only inside a
+daemon process that it needs to replace. It uses the daemon's inherited environment, exact
+Git archives, a frozen npm install, content digests and an exclusive upgrade lock.

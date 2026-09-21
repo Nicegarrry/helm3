@@ -1034,3 +1034,93 @@ test('explicit models override difficulty; a Gemini builder gets an independent 
   await helm.settle(direct.workerId);
   assert.equal(store.getWorker(direct.workerId)?.model, 'google/gemini-3.8-flash');
 });
+
+function deferred() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+test('drain blocks new mutations across registries but lets an accepted worker finish its commit', async () => {
+  const entered = deferred(), commit = deferred();
+  const { helm, store, workspace } = makeHelm();
+  const original = workspace.commitAll;
+  Object.assign(workspace, { commitAll: async (...args: Parameters<Workspace['commitAll']>) => {
+    entered.release(); await commit.promise; return original(...args);
+  } });
+  const first = createToolRegistry(helm), second = createToolRegistry(helm);
+  const repo = mkTempDir('helm-drain-');
+  assert.ok((await first.call('worker.spawn', { repo, objective: 'finish this', model: 'acme/m' })).ok);
+  const worker = store.listWorkers()[0]!;
+  await entered.promise;
+  const drain = await second.call('daemon.control', { action: 'drain' });
+  assert.ok(drain.ok);
+  assert.equal(helm.lifecycle.status().phase, 'draining');
+  assert.deepEqual(helm.lifecycle.status().blockers, [`worker:${worker.workerId}`]);
+  for (const [name, input] of [
+    ['worker.spawn', { repo, objective: 'new' }],
+    ['worker.steer', { workerId: worker.workerId, message: 'new turn' }],
+    ['review.request', { workerId: worker.workerId }],
+    ['gate.run', { workerId: worker.workerId }],
+    ['pr.open', { workerId: worker.workerId }],
+    ['pr.merge', { number: 1, expectedHead: 'a'.repeat(40) }],
+  ] as const) {
+    const outcome = await first.call(name, input);
+    assert.equal(outcome.ok, false);
+    if (!outcome.ok) assert.match(outcome.reason, /draining/);
+  }
+  assert.ok((await second.call('run.status', {})).ok);
+  assert.ok((await second.call('worker.inspect', { workerId: worker.workerId })).ok);
+  assert.equal((await second.call('daemon.control', { action: 'shutdown' })).ok, false);
+  commit.release();
+  await helm.settle(worker.workerId);
+  assert.equal(store.getWorker(worker.workerId)?.state, 'succeeded');
+  assert.equal(helm.lifecycle.status().phase, 'ready');
+  assert.ok((await first.call('daemon.control', { action: 'resume' })).ok);
+  assert.ok((await second.call('worker.steer', { workerId: worker.workerId, message: 'continue' })).ok);
+  await helm.settle(worker.workerId);
+});
+
+test('drain tracks a gate after the builder settled and counts accepted requests before their first await', async () => {
+  const entered = deferred(), gate = deferred();
+  const real = createFakeGates();
+  const { helm, store } = makeHelm({ gates: { ...real, run: async (...args) => {
+    entered.release(); await gate.promise; return real.run(...args);
+  } } });
+  const build = await helm.spawn(spawnBody(mkTempDir('helm-drain-')));
+  assert.ok(build.ok);
+  await helm.settle(build.workerId);
+  const registry = createToolRegistry(helm);
+  const pending = registry.call('gate.run', { workerId: build.workerId });
+  await registry.call('daemon.control', { action: 'drain' });
+  assert.deepEqual(helm.lifecycle.status().blockers, ['gate.run']);
+  await entered.promise;
+  assert.equal((await registry.call('daemon.control', { action: 'shutdown' })).ok, false);
+  gate.release();
+  assert.ok((await pending).ok);
+  assert.ok(store.listGates(build.workerId).some((g) => g.passed));
+  assert.equal(helm.lifecycle.status().phase, 'ready');
+});
+
+test('drain waits for the review callback even after the reviewer state is succeeded', async () => {
+  const entered = deferred(), comment = deferred();
+  const gh = createFakeGitHub().github;
+  const { helm, store } = makeHelm({ github: { ...gh, comment: async (...args) => {
+    entered.release(); await comment.promise; return gh.comment(...args);
+  } } });
+  const build = await helm.spawn(spawnBody(mkTempDir('helm-drain-')));
+  assert.ok(build.ok);
+  await helm.settle(build.workerId);
+  await helm.gate({ workerId: build.workerId });
+  await helm.prOpen({ workerId: build.workerId, draft: true });
+  const review = await helm.reviewRequest({ workerId: build.workerId, allowSameFamily: false });
+  assert.ok(review.ok);
+  await entered.promise;
+  assert.equal(store.getWorker(review.reviewWorkerId)?.state, 'succeeded');
+  await helm.lifecycle.control({ action: 'drain' });
+  assert.deepEqual(helm.lifecycle.status().blockers, [`worker:${review.reviewWorkerId}`]);
+  comment.release();
+  await helm.settle(review.reviewWorkerId);
+  assert.equal(helm.lifecycle.status().phase, 'ready');
+  assert.ok(store.listEvents(review.reviewWorkerId).some((e) => e.kind === 'review.posted'));
+});

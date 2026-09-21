@@ -9,12 +9,7 @@ type CheckResult = { name: string; command: string; exitCode: number | null; out
 
 type ExecFileError = NodeJS.ErrnoException & { code?: number | string; signal?: string | null; killed?: boolean };
 
-/**
- * `check.name` is attacker/author-controlled free text used to build a log file path;
- * sanitize it before it ever reaches `outputPath` (F8). Anything outside
- * [A-Za-z0-9._-] becomes a single '-', runs of '-' collapse, and leading dots are
- * stripped (a name of just ".." would otherwise realize as the parent directory).
- */
+/** `check.name` is attacker/author-controlled free text used to build a log file path; sanitize it before it ever reaches `outputPath` (F8). */
 function slugifyCheckName(name: string): string {
   let slug = name.replace(/[^A-Za-z0-9._-]+/g, '-');
   slug = slug.replace(/-{2,}/g, '-');

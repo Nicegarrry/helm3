@@ -6,7 +6,7 @@ without spending its own context on the mechanics. Two lanes serve the workers: 
 on cheap API models, and the Codex CLI on the operator's ChatGPT subscription (any GPT model
 Codex offers, at $0 marginal cost).
 
-Twelve tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
+Thirteen tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
 lines of TypeScript.
 
 ## Five-minute start
@@ -39,7 +39,8 @@ lines of TypeScript.
    (the port is in `$HELM_HOME/serve.json`; start the daemon by hand with
    `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http --port 4747` if nothing has yet).
 
-3. Stop the daemon when you want workers and the dashboard gone: `helm shutdown`.
+3. Safely stop an idle daemon with `helm shutdown`. If busy, it closes admissions and
+   reports blockers; let them finish, then repeat the command. See safe updates below.
 
 4. Run one task by hand to see the loop:
 
@@ -67,7 +68,8 @@ lines of TypeScript.
 | `pr.open` | Push the branch and open a PR. Refused unless a gate passed at the current head. |
 | `pr.status` | Mergeability, checks and reviews from GitHub. |
 | `review.request` | Spawn a read-only reviewer on the PR head; posts the verdict as a PR comment. Refused if the reviewer is the builder's model or the same model family (`allowSameFamily` overrides). |
-| `run.status` | Spend, cap, active workers. |
+| `run.status` | Spend, cap, active workers and daemon lifecycle. |
+| `daemon.control` | Inspect lifecycle, drain new work, resume admissions, safely shut down, or apply a staged upgrade when idle. |
 | `pr.merge` | Merge only when the PR is open, not a draft, mergeable, every check has finished and succeeded, and the head matches. |
 
 Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Nothing throws across the
@@ -146,6 +148,56 @@ one long silent command is still killed inside `worker.stop`'s wait. One limit m
 a **Codex reviewer's** `read-only` sandbox refuses the IPC socket `tsx` binds to run tests, so a
 Codex reviewer can typecheck and read but not run a `tsx`-based suite — put run-the-code
 reviews on the Pi lane, or rely on the gate.
+
+## Safe updates (v1.5 and later)
+
+Keep the running daemon on its existing release while you prepare an update:
+
+```sh
+helm update --stage <commit-or-tag> --repo /path/to/helm3
+helm update --when-idle --timeout 600000
+helm daemon --action status --json
+```
+
+Staging archives the exact commit into a separate directory under `$HELM_HOME/releases`,
+installs frozen dependencies, and runs typecheck/tests with a separate test home. It selects
+that artifact only after validation succeeds. It never restarts or drains the daemon.
+`--when-idle` is the separate activation step: it launches a detached helper from the
+running daemon so the new release inherits its provider environment and spend settings.
+No credentials are written into release metadata or the upgrade journal.
+
+During drain, CLI and MCP refuse new builds, follow-up turns, reviews, gates and PR writes.
+Already admitted work finishes, including commits and review callbacks. Status, logs and
+explicit worker stops remain available. Orchestrators should pause dispatch when they see
+`draining` and retry refused work after admissions reopen; no mutation is replayed for them.
+
+When all work settles, the helper stops the old daemon and starts the validated release on
+the **same port and state directory**, with admissions still closed. It checks the new
+process, version and revision before reopening admissions. Existing stdio proxies retain
+that port; a request during the brief handover can fail and must be inspected before retry.
+Future automatic starts select the installed release recorded in `current-release.json`.
+
+A timeout leaves the old daemon running and draining, with blockers in `upgrade.json` and
+the dashboard. After the helper finishes, cancel the drain with `helm daemon --action resume`,
+or retry activation. A failed startup leaves admissions closed; inspect `upgrade.log` and
+`daemon.log` before starting a known-good release manually. There is no automatic database
+rollback. A release changed after validation is refused before shutdown.
+
+Manual controls are `helm daemon --action drain`, `status` and `resume`. `helm shutdown`
+refuses to exit with active work. SIGINT/SIGTERM drain for up to ten minutes and leave the
+daemon running on timeout; another signal does not force-kill workers.
+
+The dashboard and `run.status` show the running version, staged version, phase and blockers.
+`daemon.lock` is acquired before opening SQLite. A stale lock is deliberately **not** stolen:
+after a crash, verify the recorded owner and any surviving worker/gate processes have stopped
+before removing that lock directory. Likewise, only remove a stale `upgrade.lock` after its
+helper is confirmed stopped and the journal/daemon state has been inspected. Keep `drain.json`
+until recovery is complete, then use `resume`. Normal shutdown releases ownership itself.
+
+**First installation:** v1.4 and older do not implement drain. Let their current work finish,
+pause dispatch across clients, and install v1.5 during a quiet window. Update client launch
+paths too. The new updater refuses legacy daemons; it never sends them a shutdown signal.
+Merging a PR alone does not install or activate an update.
 
 ## Waiting, not polling
 

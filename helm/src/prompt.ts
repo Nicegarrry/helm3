@@ -1,7 +1,4 @@
-/**
- * Builder and reviewer prompt text, plus the WorkerResult instruction appended to every
- * turn. See DESIGN.md and docs/one-shot-brief.md section 5.
- */
+/** Builder and reviewer prompt text, plus the WorkerResult instruction appended to every turn. */
 
 /** What a builder/reviewer prompt is built from (mirrors helm.ts's local `PromptInput`). */
 export type PromptInput = Readonly<{

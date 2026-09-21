@@ -1,15 +1,4 @@
-/**
- * Codex CLI runtime: one `codex exec` (or `codex exec resume <thread>`) process per turn,
- * inside the worktree, on the operator's ChatGPT subscription. Models are named
- * `codex/<model>[:<effort>]`, e.g. `codex/gpt-6-astra:medium`.
- *
- * Codex's own sandbox is the whole policy on this lane: `workspace-write` for builders
- * (writes inside the worktree only; `.git/` is refused by Codex, so Helm commits for the
- * worker as it always has; no network unless HELM_CODEX_NETWORK=1), `read-only` for
- * reviewers. Events arrive as JSONL on stdout and are mapped onto Helm's event kinds; the
- * final message is read from `--output-last-message`. Spend is $0 by definition
- * (subscription); tokens are still recorded. See DESIGN.md.
- */
+/** Codex CLI per turn, native sandbox and subscription usage; see README.md and docs/runtime-notes.md. */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';

@@ -1,10 +1,6 @@
-/**
- * Shared contracts for the Helm harness. Every module codes against these.
- * Keep this file small; if a type is used by one module only, it lives there.
- */
+/** Shared contracts for the Helm harness. */
 import { z } from 'zod';
 
-// ---------- Worker result (what a Pi worker must end its turn with) ----------
 
 export const workerResultSchema = z.object({
   status: z.enum(['succeeded', 'failed', 'partial']),
@@ -20,7 +16,6 @@ export type WorkerState = (typeof WORKER_STATES)[number];
 export const WORKER_ROLES = ['builder', 'reviewer'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
 
-// ---------- Store rows (SQLite) ----------
 
 export type WorkerRow = Readonly<{
   workerId: string;
@@ -88,7 +83,6 @@ export type SpendSummary = Readonly<{
   unknownCostEvents: number;
 }>;
 
-// ---------- Store interface ----------
 
 export interface Store {
   insertWorker(row: WorkerRow): void;
@@ -115,7 +109,6 @@ export interface Store {
   close(): void;
 }
 
-// ---------- Workspace ----------
 
 export type WorktreeInfo = Readonly<{ path: string; branch: string; baseSha: string }>;
 
@@ -138,7 +131,6 @@ export interface Workspace {
   fetch(repo: string): Promise<void>;
 }
 
-// ---------- Gates ----------
 
 export type GateCheck = Readonly<{ name: string; command: string }>;
 
@@ -149,7 +141,6 @@ export interface GateRunner {
   defaultChecks(repo: string): Promise<GateCheck[]>;
 }
 
-// ---------- GitHub ----------
 
 export type PrStatus = Readonly<{
   number: number;
@@ -157,8 +148,7 @@ export type PrStatus = Readonly<{
   head: string;
   mergeable: boolean | null;
   draft: boolean;
-  /** `status` is lower-case and is `completed` only when the check has finished; `conclusion` is
-   * lower-case and null until then, for check runs and commit-status contexts alike. */
+  /** `status` is lower-case and is `completed` only when the check has finished; `conclusion` is lower-case and null until then, for check runs and commit-status contexts alike. */
   checks: ReadonlyArray<{ name: string; status: string; conclusion: string | null }>;
   reviews: ReadonlyArray<{ author: string; state: string }>;
   url: string;
@@ -171,7 +161,6 @@ export interface GitHub {
   merge(repoSlug: string, number: number, expectedHead: string): Promise<void>;
 }
 
-// ---------- Worker runtime ----------
 
 export type WorkerRunInput = Readonly<{
   workerId: string;
@@ -200,16 +189,12 @@ export interface WorkerRunner {
 export type WorkerHooks = Readonly<{
   emit(kind: string, data?: Record<string, unknown>): void;
   onUsage(usage: Omit<SpendRow, 'workerId' | 'at'>): void;
-  /**
-   * The Pi session file, reported as soon as it is opened rather than when the turn returns.
-   * A turn that is killed never returns, and resume needs this path to reopen the same session.
-   */
+  /** The Pi session file, reported as soon as it is opened rather than when the turn returns. */
   onSession(sessionFile: string): void;
   /** Return false to stop the turn (spend cap hit or stop requested). Checked at tool-call boundaries. */
   shouldContinue(): boolean;
 }>;
 
-// ---------- Tool boundary ----------
 
 export type ToolOk<T> = { ok: true } & T;
 export type ToolErr = { ok: false; reason: string };
@@ -242,12 +227,12 @@ export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.stri
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
 export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control'] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-// ---------- Config ----------
 
 export type HelmConfig = Readonly<{
   home: string;            // $HELM_HOME, default ~/.helm

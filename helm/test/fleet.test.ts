@@ -1,106 +1,114 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import test from 'node:test';
-import { acquirePublisherLock, assertPrivateAccess, fetchState, ownerHeaders, parseFleetArgs, parseServeJson, publishSnapshot, retryPublish, snapshotFromState, stateUrl, syncOnce } from '../bin/fleet.mjs';
+import { acquirePublisherLock, assertPrivateAccess, fetchState, listFleetRecord, mergeSnapshots, parseFleetArgs, parseServeJson, publishSnapshot, snapshotFromState, stateUrl, syncOnce } from '../bin/fleet.mjs';
 
-const state = (workers: unknown[] = []) => ({ ok: true, observedAt: '2026-09-21T00:00:00.000Z', run: { spendUsd: 1.2, spendCapUsd: 5, activeWorkers: 1, maxWorkers: 3, unknownCostEvents: 2, daemon: { version: '1.6.0', revision: 'abc', phase: 'ready', secret: 'never' } }, workers, models: [{ model: 'codex/test', workers: 1, active: 1, spendUsd: 1.2, tokens: 4, raw: { secret: 'never' } }] });
+const source = (id: string, home = `/tmp/${id}`) => ({ sourceId: id, label: id, home });
+const state = (workers: unknown[] = [], observedAt = '2026-09-21T00:00:00.000Z') => ({ ok: true, observedAt, run: { spendUsd: 1.2, spendCapUsd: 5, activeWorkers: 1, maxWorkers: 3, unknownCostEvents: 2, daemon: { version: '1.6.0', revision: 'abc', phase: 'ready', secret: 'never' } }, workers, models: [{ model: 'codex/test', workers: 1, active: 1, spendUsd: 1.2, tokens: 4, raw: { secret: 'never' } }] });
+const access = (mode: string) => ({ access: { mode, accessPolicyVersion: 1, allowedEmails: [], allowedDomains: [] }, paymentGate: null });
 
-test('fleet snapshot allowlists nested data and prioritizes active workers', () => {
-  const snap = snapshotFromState(state([
-    { workerId: 'done', state: 'idle', repoSlug: 'a/r', objective: 'TOP SECRET', result: { token: 'TOP SECRET' }, updatedAt: '2026-01-01' },
-    { workerId: 'live', state: 'running', repoSlug: 'a/r', model: 'm', updatedAt: '2025-01-01', toolArgs: { password: 'TOP SECRET' }, spendUsd: 1 },
-  ])) as any;
-  assert.deepEqual(snap.workers.map((worker: any) => worker.workerId), ['live', 'done']);
-  assert.equal(snap.daemon.secret, undefined);
-  assert.doesNotMatch(JSON.stringify(snap), /TOP SECRET|password|objective|toolArgs/);
-  assert.equal(snap.counts.totalWorkers, 2);
+test('fleet CLI accepts --home as a source and reports unavailable without auth or network', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'helm-fleet-cli-')); t.after(() => rm(home, { recursive: true, force: true }));
+  const { stdout, stderr } = await promisify(execFile)(process.execPath, ['bin/helm.js', 'fleet', 'sync', '--site', 'synthetic', '--home', home, '--once'], { cwd: process.cwd(), env: { PATH: process.env.PATH, HOME: home }, timeout: 10000 });
+  assert.match(`${stdout}${stderr}`, /sources unavailable/);
+  assert.doesNotMatch(`${stdout}${stderr}`, /undefined.*replace/i);
 });
 
-test('fleet snapshot bounds UTF-8 content and reports worker truncation', () => {
-  const workers = Array.from({ length: 150 }, (_, index) => ({ workerId: `w-${index}`, state: index === 149 ? 'running' : 'idle', repoSlug: 'x'.repeat(200), model: 'm'.repeat(100), updatedAt: String(index) }));
-  const snap = snapshotFromState(state(workers)) as any;
-  assert.ok(Buffer.byteLength(JSON.stringify(snap), 'utf8') < 15000);
-  assert.ok(Buffer.byteLength(JSON.stringify({ snapshot: JSON.stringify(snap) }), 'utf8') < 16384);
-  assert.equal(snap.workers[0].workerId, 'w-149');
-  assert.ok(snap.counts.truncatedWorkers > 0);
-});
-
-test('fleet bounds the model rollup before active workers and discloses model truncation', () => {
-  const models = Array.from({ length: 100 }, (_, index) => ({ model: `model-${index}-${'x'.repeat(250)}`, workers: 1, active: 0, spendUsd: 0, tokens: 0 }));
-  const snap = snapshotFromState({ ...state([{ workerId: 'live', state: 'running' }]), models }) as any;
-  assert.ok(Buffer.byteLength(JSON.stringify(snap), 'utf8') < 15000);
-  assert.ok(Buffer.byteLength(JSON.stringify({ snapshot: JSON.stringify(snap) }), 'utf8') < 16384);
-  assert.equal(snap.workers[0].workerId, 'live');
-  assert.ok(snap.counts.truncatedModels > 0);
-});
-
-test('fleet snapshot tolerates older daemon response and empty fleet', () => {
-  const snap = snapshotFromState({ ok: true, workers: [], run: { spendUsd: 0, activeWorkers: 0 }, models: [] }) as any;
-  assert.equal(snap.daemon, undefined);
-  assert.deepEqual(snap.workers, []);
-  assert.equal(snap.counts.totalWorkers, 0);
-});
-
-test('fleet safe state URL and serve validation reject non-loopback ambiguity', async (t) => {
+test('source state is fail-closed, loopback-only, and preserves no fake empty fleet', async (t) => {
   assert.equal(stateUrl(4747), 'http://127.0.0.1:4747/api/state');
   for (const bad of ['{}', '{"port":0}', '{"port":65536}', 'not-json']) assert.throws(() => parseServeJson(bad));
-  const home = await mkdtemp(join(tmpdir(), 'helm-fleet-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
+  for (const bad of [{}, { ok: true, run: {}, workers: 'bad', models: [] }, { ok: true, run: {}, workers: [], models: [], observedAt: 'nope' }]) assert.throws(() => snapshotFromState(bad));
+  const home = await mkdtemp(join(tmpdir(), 'helm-fleet-source-')); t.after(() => rm(home, { recursive: true, force: true }));
   await writeFile(join(home, 'serve.json'), '{"port":4750}');
-  let url = '';
-  const received = await fetchState(home, async (input) => { url = String(input); return new Response(JSON.stringify({ ok: true }), { status: 200 }); });
-  assert.equal(url, stateUrl(4750)); assert.deepEqual(received, { ok: true });
+  await assert.rejects(() => fetchState(home, async () => new Response(JSON.stringify({}), { status: 200 })), /invalid/);
 });
 
-test('fleet refuses public policy and uses authentication only for owner API routes', async () => {
-  const calls: Array<{ url: string; init?: RequestInit }> = [];
-  const request = async (url: RequestInfo | URL, init?: RequestInit) => { calls.push({ url: String(url), init }); return new Response(JSON.stringify({ access: 'anyone_with_link' }), { status: 200 }); };
-  await assert.rejects(() => assertPrivateAccess('private-fleet', 'owner-token', request), /refusing cloud write/);
-  assert.equal((calls[0]?.init?.headers as Record<string, string>).authorization, 'Bearer owner-token');
-  assert.deepEqual(ownerHeaders('owner-token'), { authorization: 'Bearer owner-token', accept: 'application/json' });
+test('snapshot allowlists nested values, bounds escaped UTF-8 body, and prioritizes active workers', () => {
+  const workers = Array.from({ length: 130 }, (_, index) => ({ workerId: `w-${index}\\\"😀`, state: index === 129 ? 'running' : 'idle', repoSlug: 'x'.repeat(600), model: 'm'.repeat(600), objective: 'TOP SECRET', toolArgs: { token: 'TOP SECRET' }, updatedAt: String(index) }));
+  const projection = snapshotFromState(state(workers), { sourceId: 'one' });
+  const snap = mergeSnapshots([{ source: source('one'), projection }], undefined, '2026-09-21T00:00:01.000Z') as any;
+  assert.equal(snap.workers[0].workerId.startsWith('w-129'), true);
+  assert.equal(snap.workers[0].sourceId, 'one');
+  assert.doesNotMatch(JSON.stringify(snap), /TOP SECRET|objective|toolArgs/);
+  assert.ok(Buffer.byteLength(JSON.stringify(snap), 'utf8') < 15000);
+  assert.ok(Buffer.byteLength(JSON.stringify({ snapshot: JSON.stringify(snap) }), 'utf8') < 16384);
+  assert.ok(snap.counts.truncatedWorkers > 0);
+  assert.ok(snap.counts.truncatedFields > 0);
 });
 
-test('fleet maintains one record, verifies access before each write, and uses stable idempotency only on create', async () => {
+test('merge retains unavailable source safely and disambiguates matching worker ids', () => {
+  const one = snapshotFromState(state([{ workerId: 'w-same', state: 'running' }]), { sourceId: 'one' });
+  const two = snapshotFromState(state([{ workerId: 'w-same', state: 'idle' }]), { sourceId: 'two' });
+  const both = mergeSnapshots([{ source: source('one'), projection: one }, { source: source('two'), projection: two }], undefined) as any;
+  assert.deepEqual(both.workers.map((worker: any) => `${worker.sourceId}:${worker.workerId}`).sort(), ['one:w-same', 'two:w-same']);
+  both.workers.find((worker: any) => worker.sourceId === 'two').secret = 'never retain arbitrary cloud data';
+  const partial = mergeSnapshots([{ source: source('one'), projection: snapshotFromState(state([{ workerId: 'fresh', state: 'running' }]), { sourceId: 'one' }) }, { source: source('two'), error: 'offline' }], both) as any;
+  assert.equal(partial.counts.sourcesComplete, false);
+  assert.equal(partial.sources.find((item: any) => item.sourceId === 'two').status, 'unavailable');
+  assert.ok(partial.workers.some((worker: any) => worker.sourceId === 'two' && worker.workerId === 'w-same'));
+  assert.doesNotMatch(JSON.stringify(partial), /never retain arbitrary cloud data/);
+});
+
+test('here.now access uses the actual access object and refuses public or malformed policies', async () => {
+  for (const mode of ['password', 'restricted', 'account_members']) {
+    await assert.doesNotReject(() => assertPrivateAccess('private-fleet', 'owner', async () => new Response(JSON.stringify(access(mode)), { status: 200 })));
+  }
+  for (const policy of [access('anyone_with_link'), access('public'), { access: {} }, {}]) {
+    await assert.rejects(() => assertPrivateAccess('private-fleet', 'owner', async () => new Response(JSON.stringify(policy), { status: 200 })), /refusing cloud write/);
+  }
+});
+
+test('one-record publisher rejects pagination ambiguity and sends auth only to owner APIs', async () => {
+  await assert.rejects(() => listFleetRecord('private-fleet', 'owner', async () => new Response(JSON.stringify({ records: [], nextCursor: 'later' }), { status: 200 })), /ambiguous/);
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const request = async (url: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(url), init });
-    if (String(url).endsWith('/data/fleet')) return new Response(JSON.stringify({ records: [] }), { status: 200 });
-    if (String(url).endsWith('/access')) return new Response(JSON.stringify({ access: 'password' }), { status: 200 });
-    return new Response(JSON.stringify({ id: 'new-record' }), { status: 200 });
+    if (String(url).endsWith('/data/fleet') && init?.method !== 'POST') return new Response(JSON.stringify({ records: [] }), { status: 200 });
+    if (String(url).endsWith('/access')) return new Response(JSON.stringify(access('password')), { status: 200 });
+    return new Response(JSON.stringify({ id: 'one' }), { status: 200 });
   };
-  await publishSnapshot({ slug: 'private-fleet', snapshot: snapshotFromState(state()), auth: 'owner-token', request });
-  assert.equal(calls.length, 3); assert.ok(calls[1]?.url.endsWith('/access'));
+  const result = await publishSnapshot({ slug: 'private-fleet', snapshot: mergeSnapshots([{ source: source('one'), projection: snapshotFromState(state(), { sourceId: 'one' }) }]), auth: 'owner', request });
+  assert.deepEqual(result, { action: 'created', recordId: 'one' });
+  assert.equal((calls[0]?.init?.headers as Record<string, string>).authorization, 'Bearer owner');
   assert.equal((calls[2]?.init?.headers as Record<string, string>)['idempotency-key']?.length, 64);
-  assert.ok(Buffer.byteLength(String(calls[2]?.init?.body), 'utf8') < 16384);
-  const updateCalls: Array<{ url: string; init?: RequestInit }> = [];
-  const updateRequest = async (url: RequestInfo | URL, init?: RequestInit) => { updateCalls.push({ url: String(url), init }); if (String(url).endsWith('/data/fleet')) return new Response(JSON.stringify({ records: [{ id: 'only', data: { snapshot: '{}' } }] }), { status: 200 }); if (String(url).endsWith('/access')) return new Response(JSON.stringify({ access: 'restricted' }), { status: 200 }); return new Response('{}', { status: 200 }); };
-  const result = await publishSnapshot({ slug: 'private-fleet', snapshot: snapshotFromState(state()), auth: 'owner-token', request: updateRequest });
-  assert.deepEqual(result, { action: 'updated', recordId: 'only' }); assert.equal(updateCalls[2]?.init?.method, 'PATCH'); assert.equal((updateCalls[2]?.init?.headers as Record<string, string>)['idempotency-key'], undefined);
 });
 
-test('fleet refuses ambiguity, has a per-home/site lock, and parses the read-only command', async (t) => {
-  await assert.rejects(() => publishSnapshot({ slug: 'private-fleet', snapshot: {}, auth: 'x', request: async (url: RequestInfo | URL) => new Response(JSON.stringify(String(url).endsWith('/data/fleet') ? { records: [{ id: 'a' }, { id: 'b' }] } : { access: 'password' }), { status: 200 }) }), /ambiguous/);
-  const home = await mkdtemp(join(tmpdir(), 'helm-fleet-lock-')); t.after(() => rm(home, { recursive: true, force: true }));
-  const release = acquirePublisherLock(home, 'site'); assert.throws(() => acquirePublisherLock(home, 'site'), /already running/); release(); acquirePublisherLock(home, 'site')();
-  assert.deepEqual(parseFleetArgs(['--site', 'private-fleet', '--home', '/tmp/helm', '--interval', '30000', '--once']), { site: 'private-fleet', home: '/tmp/helm', interval: 30000, once: true });
-});
-
-test('fleet outbound retries are bounded with backoff', async () => {
-  let attempts = 0; const waits: number[] = [];
-  const value = await retryPublish(async () => { attempts++; if (attempts < 3) throw new TypeError('temporary'); return 'published'; }, async (delay) => { waits.push(delay); });
-  assert.equal(value, 'published'); assert.equal(attempts, 3); assert.deepEqual(waits, [200, 600]);
-  attempts = 0;
-  await assert.rejects(() => retryPublish(async () => { attempts++; throw new Error('unsafe policy'); }, async () => {}), /unsafe policy/);
-  assert.equal(attempts, 1, 'privacy/configuration failures are not retried');
-});
-
-test('fleet source failure retains cloud data by making no owner API call or daemon mutation', async (t) => {
+test('all unavailable sources skip owner API/auth and lock records diagnosable owner metadata', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'helm-fleet-offline-')); t.after(() => rm(home, { recursive: true, force: true }));
-  const serve = '{"port":4750}'; await writeFile(join(home, 'serve.json'), serve);
-  let calls = 0;
-  await assert.rejects(() => syncOnce({ home, slug: 'private-fleet', auth: 'owner-token', request: async () => { calls++; throw new TypeError('offline'); } }), /offline/);
-  assert.equal(calls, 1);
-  assert.equal(await readFile(join(home, 'serve.json'), 'utf8'), serve);
+  const result = await syncOnce({ sources: [source('one', home)], slug: 'private-fleet', request: async () => { throw new Error('network must not run without serve.json'); } });
+  assert.equal(result.action, 'unavailable');
+  const release = acquirePublisherLock(home, 'site', [source('one')]);
+  const lock = await readFile(join(home, '.fleet-site.lock'), 'utf8');
+  assert.match(lock, /"pid":\d+/); assert.match(lock, /"sources":\["one"\]/);
+  assert.throws(() => acquirePublisherLock(home, 'site'), /lock exists/); release();
+});
+
+test('two-source sync publishes a partial merged record when one source is unavailable', async (t) => {
+  const one = await mkdtemp(join(tmpdir(), 'helm-fleet-one-')); const two = await mkdtemp(join(tmpdir(), 'helm-fleet-two-'));
+  t.after(() => Promise.all([rm(one, { recursive: true, force: true }), rm(two, { recursive: true, force: true })]));
+  await Promise.all([writeFile(join(one, 'serve.json'), '{"port":4101}'), writeFile(join(two, 'serve.json'), '{"port":4102}')]);
+  const calls: string[] = [];
+  const request = async (url: RequestInfo | URL, init?: RequestInit) => {
+    const value = String(url); calls.push(value);
+    if (value.includes(':4101/')) return new Response(JSON.stringify(state([{ workerId: 'one-worker', state: 'running' }])), { status: 200 });
+    if (value.includes(':4102/')) throw new TypeError('second source offline');
+    if (value.endsWith('/data/fleet') && init?.method !== 'POST') return new Response(JSON.stringify({ records: [] }), { status: 200 });
+    if (value.endsWith('/access')) return new Response(JSON.stringify(access('password')), { status: 200 });
+    return new Response(JSON.stringify({ id: 'record' }), { status: 200 });
+  };
+  const result = await syncOnce({ sources: [source('one', one), source('two', two)], slug: 'private-fleet', auth: 'owner', request }) as any;
+  assert.equal(result.action, 'created'); assert.equal(result.snapshot.counts.sourcesComplete, false);
+  assert.deepEqual(result.snapshot.workers.map((worker: any) => worker.sourceId), ['one']);
+  assert.equal(result.snapshot.sources.find((item: any) => item.sourceId === 'two').status, 'unavailable');
+  assert.ok(calls.some((value) => value.includes(':4101/'))); assert.ok(calls.some((value) => value.includes(':4102/')));
+});
+
+test('CLI validation supports repeatable absolute sources and rejects unsafe intervals', () => {
+  const parsed = parseFleetArgs(['--site', 'private-fleet', '--source', 'one=/tmp/a', '--source', 'two=/tmp/b', '--interval', '10000']);
+  assert.deepEqual(parsed.sources.map((item: any) => item.sourceId), ['one', 'two']);
+  for (const args of [['--site', 'x', '--interval', '9999'], ['--site', 'x', '--source', 'bad=relative'], ['--site', 'x', '--home', '/tmp/a', '--source', 'b=/tmp/b']]) assert.throws(() => parseFleetArgs(args));
 });

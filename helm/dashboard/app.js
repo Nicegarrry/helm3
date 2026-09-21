@@ -1,13 +1,140 @@
 const STALE_MS = 90_000;
+const POLL_MS = 30_000;
 const $ = (id) => document.getElementById(id);
-let snapshot; let offline = false; let lastReceived = 0;
-const money = (value) => typeof value === 'number' ? new Intl.NumberFormat(undefined, { style:'currency', currency:'USD', maximumFractionDigits:2 }).format(value) : '—';
-const text = (node, value) => { node.textContent = value == null || value === '' ? '—' : String(value); };
-function recordSnapshot(payload) { const record = payload?.records?.[0]; const raw = record?.data?.snapshot ?? payload?.snapshot ?? payload; return typeof raw === 'string' ? JSON.parse(raw) : raw; }
-function setOptions(id, values, label) { const select = $(id); const old = select.value; select.replaceChildren(new Option(label, '')); for (const value of values) select.add(new Option(value, value)); select.value = values.includes(old) ? old : ''; }
-function freshness() { const node = $('freshness'); if (!snapshot) { node.className = `status ${offline ? 'offline' : ''}`; text(node, offline ? 'Offline · no snapshot received' : 'Loading snapshot…'); return; } const observed = Date.parse(snapshot.observedAt || ''); const stale = !Number.isFinite(observed) || Date.now() - observed > STALE_MS; node.className = `status ${offline ? 'offline' : stale ? 'stale' : 'live'}`; text(node, offline ? 'Offline · last snapshot retained' : stale ? 'Stale · awaiting publisher' : 'Live snapshot'); text($('updated'), `Observed ${Number.isFinite(observed) ? new Date(observed).toLocaleString() : 'unknown'} · updated ${new Date(lastReceived).toLocaleTimeString()}`); }
-function render() { if (!snapshot) return; const workers = Array.isArray(snapshot.workers) ? snapshot.workers : []; const run = snapshot.run || {}; const counts = snapshot.counts || {}; text($('spend'), `${money(run.spendUsd)}${run.spendCapUsd > 0 ? ` / ${money(run.spendCapUsd)}` : ''}`); text($('workers-count'), `${counts.activeWorkers ?? 0} active · ${counts.totalWorkers ?? 0} total`); text($('unknown'), run.unknownCostEvents ?? 0); setOptions('project', [...new Set(workers.map((w) => w.repoSlug).filter(Boolean))].sort(), 'All projects'); setOptions('state', [...new Set(workers.map((w) => w.state).filter(Boolean))].sort(), 'All states'); $('notice').hidden = !counts.truncatedWorkers; text($('notice'), `${counts.truncatedWorkers} older worker${counts.truncatedWorkers === 1 ? '' : 's'} omitted to keep this private snapshot within its size limit.`);
-  const project = $('project').value; const state = $('state').value; const filtered = workers.filter((w) => (!project || w.repoSlug === project) && (!state || w.state === state)); const list = $('worker-list'); list.replaceChildren(); if (!filtered.length) { const empty = document.createElement('p'); text(empty, 'No workers match these filters.'); list.append(empty); } for (const worker of filtered) { const card = document.createElement('details'); card.className = 'worker'; const summary = document.createElement('summary'); const left = document.createElement('span'); const name = document.createElement('strong'); text(name, worker.workerId); const meta = document.createElement('span'); meta.className='meta'; text(meta, `${worker.repoSlug || 'unknown project'} · ${worker.model || 'model unknown'}`); left.append(name, document.createElement('br'), meta); const pill = document.createElement('span'); pill.className='pill'; text(pill, worker.state || 'unknown'); summary.append(left, pill); const details = document.createElement('div'); details.textContent = `Role: ${worker.role || '—'}\nElapsed: ${worker.elapsedMs == null ? '—' : `${Math.round(worker.elapsedMs / 1000)}s`}\nSpend: ${money(worker.spendUsd)}\nTokens: ${worker.tokens ?? '—'}\nUpdated: ${worker.updatedAt || '—'}\nHead: ${worker.head || '—'}`; card.append(summary, details); list.append(card); }
-  const models = $('models'); models.replaceChildren(); for (const model of snapshot.models || []) { const row = document.createElement('div'); row.className='model'; const a=document.createElement('span'); text(a, model.model); const b=document.createElement('span'); text(b, `${model.active ?? 0} active · ${money(model.spendUsd)}`); row.append(a,b); models.append(row); } freshness(); }
-async function load() { if (document.hidden) return; try { const response = await fetch('./.herenow/data/fleet?limit=1', { signal: AbortSignal.timeout(8000), headers:{accept:'application/json'} }); if (!response.ok) throw new Error(`HTTP ${response.status}`); const candidate = recordSnapshot(await response.json()); if (!candidate || typeof candidate !== 'object') throw new Error('invalid snapshot'); snapshot=candidate; offline=false; lastReceived=Date.now(); render(); } catch { offline=true; freshness(); } }
-for (const id of ['project','state']) $(id).addEventListener('change', render); document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); }); setInterval(() => { load(); freshness(); }, 30_000); load();
+let snapshot;
+let lastReceived = 0;
+let offline = false;
+
+function text(node, value) {
+  node.textContent = value == null || value === '' ? '—' : String(value);
+}
+
+function money(value) {
+  if (typeof value !== 'number') return '—';
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value);
+}
+
+function isTimestamp(value) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value));
+}
+function validSnapshot(value) {
+  return value && typeof value === 'object' && Number.isInteger(value.schemaVersion) && isTimestamp(value.observedAt)
+    && value.run && typeof value.run === 'object' && Array.isArray(value.workers) && Array.isArray(value.models) && Array.isArray(value.sources);
+}
+function recordSnapshot(payload) {
+  const raw = payload?.records?.[0]?.data?.snapshot ?? payload?.snapshot;
+  if (typeof raw !== 'string') throw new Error('no fleet snapshot is available yet');
+  return JSON.parse(raw);
+}
+function setOptions(id, values, label) {
+  const select = $(id);
+  const oldValue = select.value;
+  select.replaceChildren(new Option(label, ''));
+  for (const value of values) select.add(new Option(value, value));
+  select.value = values.includes(oldValue) ? oldValue : '';
+}
+
+function freshness() {
+  const node = $('freshness');
+  if (!snapshot) {
+    node.className = `status ${offline ? 'offline' : 'waiting'}`;
+    text(node, offline ? 'Offline · waiting for first snapshot' : 'Waiting for first snapshot');
+    return;
+  }
+  const stale = Date.now() - Date.parse(snapshot.observedAt) > STALE_MS;
+  const partial = snapshot.counts?.sourcesComplete === false;
+  node.className = `status ${offline ? 'offline' : partial ? 'partial' : stale ? 'stale' : 'live'}`;
+  text(node, offline ? 'Offline · last snapshot retained' : partial ? 'Partial · source unavailable' : stale ? 'Stale · awaiting publisher' : 'Live snapshot');
+  text($('updated'), `Updated ${new Date(lastReceived).toLocaleTimeString()} · snapshot ${new Date(snapshot.observedAt).toLocaleTimeString()}`);
+}
+
+function sourceHealth() {
+  const health = $('source-health');
+  health.replaceChildren();
+  for (const source of snapshot.sources) {
+    const item = document.createElement('li');
+    const stale = isTimestamp(source.observedAt) && Date.now() - Date.parse(source.observedAt) > STALE_MS;
+    const status = source.status === 'live' && stale ? 'stale' : source.status || 'unknown';
+    item.className = `source-${status}`;
+    const observed = isTimestamp(source.observedAt) ? ` · ${new Date(source.observedAt).toLocaleTimeString()}` : '';
+    text(item, `${source.label || source.sourceId}: ${status}${observed}`);
+    health.append(item);
+  }
+}
+
+function workerDetails(worker) {
+  const details = document.createElement('div');
+  details.className = 'worker-details';
+  const rows = [
+    ['Role', worker.role],
+    ['Elapsed', worker.elapsedMs == null ? undefined : `${Math.round(worker.elapsedMs / 1000)}s`],
+    ['Spend', money(worker.spendUsd)], ['Tokens', worker.tokens], ['Updated', worker.updatedAt], ['Head', worker.head],
+  ];
+  for (const [label, value] of rows) {
+    const row = document.createElement('div');
+    const key = document.createElement('span');
+    const content = document.createElement('span');
+    text(key, label); text(content, value);
+    row.append(key, content); details.append(row);
+  }
+  return details;
+}
+
+function renderWorkers() {
+  const list = $('worker-list');
+  const open = new Set([...list.querySelectorAll('details[open]')].map((item) => item.dataset.worker));
+  const project = $('project').value;
+  const state = $('state').value;
+  const sourceId = $('source').value;
+  const workers = snapshot.workers.filter((worker) => (!project || worker.repoSlug === project) && (!state || worker.state === state) && (!sourceId || worker.sourceId === sourceId));
+  list.replaceChildren();
+  if (!workers.length) {
+    const empty = document.createElement('p');
+    text(empty, 'No workers match these filters.'); list.append(empty);
+    return;
+  }
+  for (const worker of workers) {
+    const card = document.createElement('details'); const workerKey = `${worker.sourceId}:${worker.workerId}`;
+    card.className = 'worker'; card.dataset.worker = workerKey; card.open = open.has(workerKey);
+    const summary = document.createElement('summary'); const left = document.createElement('span'); const name = document.createElement('strong'); const meta = document.createElement('span'); const pill = document.createElement('span');
+    meta.className = 'meta'; pill.className = `pill state-${worker.state || 'unknown'}`;
+    text(name, worker.workerId); text(meta, `${worker.sourceId || 'source unknown'} · ${worker.repoSlug || 'project unknown'} · ${worker.model || 'model unknown'}`); text(pill, worker.state || 'unknown');
+    left.append(name, document.createElement('br'), meta); summary.append(left, pill); card.append(summary, workerDetails(worker)); list.append(card);
+  }
+}
+
+function renderModels() {
+  const models = $('models'); models.replaceChildren();
+  for (const model of snapshot.models) {
+    const row = document.createElement('div'); const name = document.createElement('span'); const total = document.createElement('span');
+    row.className = 'model'; text(name, `${model.sourceId || 'source'} · ${model.model || 'unknown model'}`); text(total, `${model.active ?? 0} active · ${money(model.spendUsd)}`); row.append(name, total); models.append(row);
+  }
+}
+
+function render() {
+  if (!snapshot) return;
+  const counts = snapshot.counts || {};
+  text($('spend'), `${money(snapshot.run?.spendUsd)}${snapshot.run?.spendCapUsd > 0 ? ` / ${money(snapshot.run.spendCapUsd)}` : ''}`);
+  text($('workers-count'), `${counts.activeWorkers ?? 0} active · ${counts.totalWorkers ?? 0} total`); text($('unknown'), snapshot.run?.unknownCostEvents ?? 0);
+  text($('notice'), `${counts.truncatedWorkers || 0} workers and ${counts.truncatedModels || 0} model rows omitted for the private size limit.`); $('notice').hidden = !(counts.truncatedWorkers || counts.truncatedModels || counts.truncatedFields);
+  setOptions('project', [...new Set(snapshot.workers.map((worker) => worker.repoSlug).filter(Boolean))].sort(), 'All projects');
+  setOptions('state', [...new Set(snapshot.workers.map((worker) => worker.state).filter(Boolean))].sort(), 'All states');
+  setOptions('source', [...new Set(snapshot.sources.map((item) => item.sourceId).filter(Boolean))].sort(), 'All sources');
+  sourceHealth(); renderWorkers(); renderModels(); freshness();
+}
+
+async function load() {
+  if (document.hidden) return;
+  try {
+    const response = await fetch('./.herenow/data/fleet?limit=1', { signal: AbortSignal.timeout(8000), headers: { accept: 'application/json' } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const candidate = recordSnapshot(await response.json());
+    if (!validSnapshot(candidate)) throw new Error('invalid fleet snapshot');
+    snapshot = candidate; offline = false; lastReceived = Date.now(); render();
+  } catch { offline = true; freshness(); }
+}
+
+for (const id of ['project', 'state', 'source']) $(id).addEventListener('change', renderWorkers);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); });
+setInterval(() => { void load(); freshness(); }, POLL_MS);
+void load();

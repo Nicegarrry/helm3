@@ -7,7 +7,7 @@
 1. Publish the contents of `helm/dashboard/` to a here.now site. Configure a site PIN (or restricted/account-members access) before starting the publisher. The `.herenow/data.json` manifest deliberately permits public **read** only; every mutation is owner-only.
 2. Confirm the deployed site is really gated: anonymous page and Site Data requests return HTTP 401; PIN submission to `/` returns 303 and a cookie; the cookie can read Site Data with HTTP 200. Do not put a slug or PIN in this repository.
 3. On the machine running Helm, authenticate locally with `HERENOW_API_KEY` or here.now's local `~/.herenow/credentials`. The credential is read only by the publisher and is never sent to the dashboard, local daemon, output, or files in this repository.
-4. Start the companion independently, after the Helm daemon is already running:
+4. Start the companion independently, after the Helm daemons are already running:
 
    ```sh
    helm fleet sync --site YOUR_PRIVATE_SLUG
@@ -15,15 +15,23 @@
    helm fleet sync --site YOUR_PRIVATE_SLUG --once
    ```
 
-   `--home <HELM_HOME>` selects a non-default daemon home and `--interval <ms>` defaults to 30000. Stop this publisher with Ctrl-C or SIGTERM; it only removes its own singleton lock. No Helm daemon restart is needed, including with a v1.5 daemon that lacks daemon metadata.
+   With no source flags, the installed monitor reads the default Helm home plus the configured Marlo fleet home. This is one publisher and one cloud record. To select homes explicitly (for example in a different installation), use repeatable source labels:
+
+   ```sh
+   helm fleet sync --site YOUR_PRIVATE_SLUG \
+     --source primary=/absolute/path/to/helm-home \
+     --source mobile=/absolute/path/to/mobile-helm-home
+   ```
+
+   `--home <HELM_HOME>` remains a compatible single-source shorthand and cannot be combined with `--source`. `--interval <ms>` defaults to 30000 and must be an integer of at least 10000. Stop this publisher with Ctrl-C or SIGTERM; it wakes its delay, removes only its own singleton lock, and never restarts a daemon. The lock contains its PID, start time, site and source labels for safe manual stale-lock diagnosis. No Helm daemon restart is needed, including with a v1.5 daemon that lacks daemon metadata.
 
 ## Contract and privacy
 
 The published `fleet` collection retains exactly one record. The publisher lists it, PATCHes that record, and POSTs only when the collection is empty using a stable idempotency key. More than one record is refused rather than guessing. Before every POST/PATCH it rechecks that the site policy is `password`, `restricted`, or `account_members`; `anyone_with_link` is refused.
 
-The record holds `snapshot` as a JSON string under 15,000 UTF-8 bytes (the Site Data body remains below 16 KB). It allowlists only snapshot version/time; safe run, daemon, count, worker and model scalar summaries. Workers are active-first, then newest. If capacity is reached, `counts.truncatedWorkers` says exactly how many were omitted. Objectives, events, tool arguments, logs, paths, result bodies, lifecycle journal, deployment metadata, credentials and any unrecognised nested values are never copied.
+The record holds `snapshot` as a JSON string under 15,000 UTF-8 bytes and checks the final escaped Site Data body stays below 16 KB. It allowlists only snapshot version/time; safe run, daemon, count, worker and model scalar summaries. Long scalar values are capped; `counts.truncatedFields`, `truncatedWorkers`, and `truncatedModels` make all size reduction explicit. Workers are active-first across all sources, then newest. Each worker has only its source label—not its local path or port—so identical worker IDs remain distinct. Objectives, events, tool arguments, logs, paths, result bodies, lifecycle journal, deployment metadata, credentials and any unrecognised nested values are never copied.
 
-If loopback state cannot be read, the publisher does not write a zero/healthy replacement: the prior cloud record remains and the dashboard becomes stale. The page polls every 30 seconds only while visible, marks snapshots stale after 90 seconds, and marks failed reads offline while retaining the last rendered snapshot.
+Every source reports an ID/label, source observation time, and live/stale/unavailable status. A malformed local response is rejected rather than manufactured into a healthy empty fleet. When one source fails, the publisher retains its last safe cloud workers and source observation time, labels that source unavailable, and marks the totals incomplete; if every source fails it makes no owner API call at all and leaves the cloud record untouched. The page polls every 30 seconds only while visible, marks snapshots stale after 90 seconds, and marks failed reads offline while retaining the last rendered snapshot. With no record yet it says that it is waiting, rather than implying an empty fleet.
 
 ## Phone use and acceptance
 
@@ -32,6 +40,6 @@ Open the PIN-protected site in Safari/Chrome and use the browser's **Add to Home
 Acceptance checks:
 
 - Access policy and the anonymous/PIN HTTP flow above are checked on the deployed site by the coordinator.
-- The publisher accepts old `/api/state` shapes with missing daemon metadata and an empty fleet, without daemon changes.
+- The publisher accepts old valid `/api/state` shapes with missing daemon metadata and an empty fleet, without daemon changes; it rejects missing `ok:true`, `run`, arrays, or timestamp.
 - Tests use injected HTTP functions only: no real here.now, provider, credential or daemon calls.
 - A sleeping laptop simply leaves the existing record stale; bring the publisher process back up later. No daemon restart or replay is required.

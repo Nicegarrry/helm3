@@ -14,7 +14,7 @@ import type { Model, Api } from '@earendil-works/pi-ai' with { 'resolution-mode'
 import { workerResultSchema, type WorkerResult, type WorkerRole, type WorkerRunInput, type WorkerRunOutcome, type WorkerRunner, type WorkerHooks } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
 
-const CORRECTION_MESSAGE =
+export const CORRECTION_MESSAGE =
   'Your final message must be exactly one JSON object matching the WorkerResult schema. Reply with only that JSON.';
 
 /**

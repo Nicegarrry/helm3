@@ -3,8 +3,9 @@
 The harness lives in **[`helm/`](helm/)**. Start with [`helm/README.md`](helm/README.md).
 
 Helm lets an orchestrator agent — Claude Code, Codex, or a script — dispatch coding work to
-Pi workers running cheap models, each in its own git worktree, and get back gates, PRs and
-status without doing the mechanics itself. Ten tools, one SQLite file, one daemon.
+workers, each in its own git worktree, and get back gates, PRs and status without doing the
+mechanics itself. Workers run as Pi sessions on cheap models or as the Codex CLI on the
+operator's ChatGPT subscription. Twelve tools, one SQLite file, one daemon.
 
 Proven live on 2026-09-20 against real models and a real GitHub repository:
 [`helm/evidence/live.md`](helm/evidence/live.md).

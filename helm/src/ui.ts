@@ -166,7 +166,7 @@ function renderWorkers() {
     var c5 = el('td', 'num', fmtUsd(w.spendUsd)); if (w.unknownCostEvents) add(c5, el('br'), el('small', null, w.unknownCostEvents + ' unknown'));
     var c7 = el('td', 'num', fmtElapsed(w.elapsedMs)); if (ACTIVE[w.state]) { c7.dataset.base = w.elapsedMs; c7.className += ' tick'; }
     var c9 = el('td', 'obj', w.objective); c9.title = w.objective;
-    var c10 = el('td', 'ev'); if (w.lastEvent) add(c10, el('code', null, w.lastEvent.kind), document.createTextNode(' ' + w.lastEvent.summary)); else c10.textContent = '-';
+    var c10 = el('td', 'ev'); if (w.lastEvent) add(c10, el('code', null, w.lastEvent.kind), document.createTextNode(' ' + summarize(w.lastEvent.kind, w.lastEvent.data))); else c10.textContent = '-';
     add(tb, add(tr, c1, c2, el('td', null, w.role), el('td', 'model', w.model), c5, el('td', 'num', fmtTokens(w.tokens)), c7,
       add(el('td', 'head'), el('code', null, w.head ? w.head.slice(0, 8) : '-')), c9, c10));
   });

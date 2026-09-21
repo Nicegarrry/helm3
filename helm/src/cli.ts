@@ -4,6 +4,7 @@
  */
 import { spawn } from 'node:child_process';
 import { existsSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +15,7 @@ import { gitWorkspace } from './workspace.js';
 import { gateRunner } from './gate.js';
 import { ghGitHub } from './github.js';
 import { piWorkerRunner } from './worker.js';
+import { codexWorkerRunner, laneRunner } from './codex.js';
 import { builderPrompt, reviewerPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable } from './server.js';
@@ -89,12 +91,18 @@ async function postTool(name: string, body: unknown): Promise<unknown> {
     process.exitCode = 2;
     return undefined;
   }
-  const res = await fetch(`http://127.0.0.1:${live.port}/tools/${name}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+  // node:http, not fetch: undici abandons a response after five silent minutes, and `helm wait`
+  // holds one open for up to twenty-five (the same reason the stdio proxy in server.ts does this).
+  return new Promise((resolve) => {
+    const req = httpRequest({ host: '127.0.0.1', port: live.port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json' } }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => { data += chunk; });
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve({ ok: false, reason: `daemon returned ${res.statusCode}: ${data.slice(0, 200)}` }); } });
+    });
+    req.on('error', (err) => resolve({ ok: false, reason: `daemon unreachable on port ${live.port}: ${err.message}` }));
+    req.end(JSON.stringify(body ?? {}));
   });
-  return res.json();
 }
 
 function toWorkerRowSummary(r: WorkerRow) {
@@ -182,43 +190,16 @@ const cmdInspect = (args: string[]) =>
     const events = tail > 0 ? store.listEvents(workerId, { limit: 1_000_000 }).slice(-tail) : [];
     const payload = { workerId, state: row.state, model: row.model, branch: row.branch, head: row.head, spendUsd: spend.spendUsd, tokens: spend.tokens, diffStat, result: row.result, events };
     if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
-    console.log(`worker:  ${payload.workerId}`);
-    console.log(`state:   ${payload.state}`);
-    console.log(`model:   ${payload.model}`);
-    console.log(`branch:  ${payload.branch}`);
-    console.log(`head:    ${payload.head ?? '-'}`);
-    console.log(`spend:   $${payload.spendUsd.toFixed(4)}`);
-    if (payload.result) console.log(`result:  ${payload.result.status} - ${payload.result.summary}`);
-    if (payload.diffStat) console.log(`diff:\n${payload.diffStat}`);
+    const lines: Array<[string, string | undefined]> = [['worker', workerId], ['state', row.state], ['model', row.model], ['branch', row.branch], ['head', row.head ?? '-'],
+      ['spend', `$${spend.spendUsd.toFixed(4)}`], ['result', row.result ? `${row.result.status} - ${row.result.summary}` : undefined], ['diff', diffStat ? `\n${diffStat}` : undefined]];
+    for (const [k, val] of lines) if (val !== undefined) console.log(`${k}:`.padEnd(9) + val);
     console.log('events:');
-    for (const e of payload.events) console.log(`  [${e.at}] ${e.kind} ${JSON.stringify(e.data)}`);
+    for (const e of events) console.log(`  [${e.at}] ${e.kind} ${JSON.stringify(e.data)}`);
   }, { tail: { type: 'string' } });
 
+/** `wait` goes through the daemon's worker.wait like the other write-side verbs: the daemon is what runs the workers anyway. */
 const cmdWait = (args: string[]) =>
-  readCmd(args, async (positionals, v, store) => {
-    if (positionals.length === 0) { usage(); process.exitCode = 2; return; }
-    const timeoutMs = v.timeout ? Number(v.timeout) : 600_000;
-    const started = Date.now();
-    for (;;) {
-      const rows: WorkerRow[] = [];
-      for (const id of positionals) {
-        const row = store.getWorker(id);
-        if (!row) { console.error(`worker not found: ${id}`); process.exitCode = 1; return; }
-        rows.push(row);
-      }
-      const settled = rows.filter((r) => r.state !== 'queued' && r.state !== 'running');
-      const waitedMs = Date.now() - started;
-      if (settled.length > 0 || waitedMs >= timeoutMs) {
-        const pending = rows.filter((r) => r.state === 'queued' || r.state === 'running').map((r) => r.workerId);
-        const payload = { settled: settled.map(toWorkerRowSummary), pending, timedOut: settled.length === 0, waitedMs };
-        if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
-        if (payload.timedOut) console.log(`timed out after ${Math.round(waitedMs / 1000)}s; still pending: ${pending.join(' ')}`);
-        else console.log(formatWorkerTable(payload.settled));
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }, { timeout: { type: 'string' } });
+  simpleCmd('worker.wait', args, (p, v) => (p.length > 0 ? { workerIds: p, ...(v.timeout ? { timeoutMs: Number(v.timeout) } : {}) } : undefined), { timeout: { type: 'string' } });
 
 const cmdSteer = (args: string[]) =>
   simpleCmd('worker.steer', args, (p) => (p[0] && p.length > 1 ? { workerId: p[0], message: p.slice(1).join(' ') } : undefined));
@@ -276,7 +257,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const store = openStore(join(config.home, 'helm.sqlite'));
   const helm = new Helm({
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
-    runner: piWorkerRunner(), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
+    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port });

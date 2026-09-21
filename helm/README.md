@@ -1,8 +1,10 @@
 # Helm
 
 A small harness that lets an orchestrator agent (Claude Code, Codex, or a script) dispatch
-coding work to Pi workers running cheap models, each in its own git worktree, and get back
-gates, PRs and status without spending its own context on the mechanics.
+coding work to workers, each in its own git worktree, and get back gates, PRs and status
+without spending its own context on the mechanics. Two lanes serve the workers: Pi sessions
+on cheap API models, and the Codex CLI on the operator's ChatGPT subscription (any GPT model
+Codex offers, at $0 marginal cost).
 
 Twelve tools, one SQLite file, one daemon shared by every project on the machine. Under 3k
 lines of TypeScript.
@@ -14,6 +16,7 @@ lines of TypeScript.
    ```sh
    npm install            # from helm/ (or symlink ../node_modules if you use the monorepo root)
    pi login               # writes ~/.pi/agent/auth.json; Helm reads it, never copies it
+   codex login status     # the Codex lane needs the Codex CLI signed in to ChatGPT
    gh auth status         # gh is used for pr.open, pr.status, review comments and merge
    ```
 
@@ -54,11 +57,11 @@ lines of TypeScript.
 
 | Tool | What it does |
 | --- | --- |
-| `worker.spawn` | Create a worktree on a new branch and start a Pi worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). |
+| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` picks the lane: `provider/model` as Pi names it, or `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`). |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | One line per worker. |
 | `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
-| `worker.steer` | Send a follow-up message to an idle or interrupted worker in the same Pi session. |
+| `worker.steer` | Send a follow-up message to an idle or interrupted worker in its own session (a Pi session, or a Codex thread resumed with the same model). |
 | `worker.stop` | Ask a running worker to stop. |
 | `gate.run` | Run the repo's checks in the worktree at its exact head and record the result. |
 | `pr.open` | Push the branch and open a PR. Refused unless a gate passed at the current head. |
@@ -88,6 +91,34 @@ marked failed and the raw text is saved.
 
 Gates come from `<repo>/helm.json` (`{ "gates": [{ "name", "command" }] }`) or default to
 the `test`, `typecheck` and `lint` scripts in `package.json`.
+
+### The Codex lane
+
+A `codex/…` model runs `codex exec` (non-interactive) in the worktree instead of a Pi
+session, on whatever account `codex login` holds. Codex's own sandbox is the policy on this
+lane, not the deny list above: builders run `workspace-write` (files inside the worktree
+only; Codex refuses writes under `.git/`, so a Codex worker cannot commit, and Helm commits
+its changes after the turn exactly as it does for Pi workers), reviewers run `read-only`.
+Network is off inside the sandbox unless the daemon has `HELM_CODEX_NETWORK=1`, so a worker
+cannot push or call GitHub either way; `pnpm install --prefer-offline` and friends work from
+the local store.
+
+The `:effort` suffix sets `model_reasoning_effort` (`low`, `medium`, `high`, `xhigh`);
+without it Codex uses its config default. A turn's session is the Codex thread id, recorded
+as `sessionFile` (`codex-thread:<uuid>`), so `worker.steer` and resume-after-restart go
+through `codex exec resume <id>` with the same model. Usage is recorded from Codex's
+`turn.completed` event with `costUsd: 0`: subscription tokens count as tokens, never as
+spend, and never as unknown-cost events. Codex's stdout events map onto the same
+`tool.call` / `turn.start` / `turn.end` / `result` kinds; its own warnings arrive as `notice`.
+The binary is `$HELM_CODEX_BIN`, else `~/.local/bin/codex`, else `codex` on PATH.
+
+A non-zero exit is never a healthy turn: the worker lands in `unknown` with the stderr tail as
+its error, its worktree keeps whatever was written, and a steer resumes it. A stop request is
+honoured on the next event or within half a second, whichever comes first, so a worker deep in
+one long silent command is still killed inside `worker.stop`'s wait. One limit measured live:
+a **Codex reviewer's** `read-only` sandbox refuses the IPC socket `tsx` binds to run tests, so a
+Codex reviewer can typecheck and read but not run a `tsx`-based suite — put run-the-code
+reviews on the Pi lane, or rely on the gate.
 
 ## Waiting, not polling
 
@@ -147,6 +178,8 @@ with no price are counted as tokens and reported as unknown-cost events, never b
 | `HELM_SPEND_WARN_USD` | 80% of the cap | Soft cap: warn, never block |
 | `HELM_MAX_WORKERS` | `3` | Concurrent workers |
 | `HELM_GATE_TIMEOUT_MS` | `900000` | Per-check timeout |
+| `HELM_CODEX_BIN` | `~/.local/bin/codex`, else `codex` | The Codex CLI the `codex/…` lane runs |
+| `HELM_CODEX_NETWORK` | unset | `1` lets Codex builders reach the network inside their sandbox |
 
 ## Development
 

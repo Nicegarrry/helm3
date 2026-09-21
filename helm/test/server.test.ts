@@ -13,7 +13,7 @@ import type { Helm } from '../src/helm.js';
 
 /** A fake Helm: every tool method just returns a canned ok outcome. Enough to exercise the transport. */
 const FAKE_WORKER = { workerId: 'w-abc12345', state: 'idle', role: 'builder', model: 'anthropic/claude', branch: 'helm/w-abc12345', head: '1234567890abcdef', createdAt: '2026-01-01T00:00:00.000Z' };
-const FAKE_OVERVIEW_WORKER = { ...FAKE_WORKER, state: 'running', repoSlug: 'acme/widgets', objective: 'Add a <flag>', updatedAt: '2026-01-01T00:00:05.000Z', elapsedMs: 5000, spendUsd: 0.1234, tokens: 12345, unknownCostEvents: 0, lastEvent: { kind: 'tool.call', at: '2026-01-01T00:00:04.000Z', summary: 'bash npm test' }, resultStatus: null };
+const FAKE_OVERVIEW_WORKER = { ...FAKE_WORKER, state: 'running', repoSlug: 'acme/widgets', objective: 'Add a <flag>', updatedAt: '2026-01-01T00:00:05.000Z', elapsedMs: 5000, spendUsd: 0.1234, tokens: 12345, unknownCostEvents: 0, lastEvent: { kind: 'tool.call', at: '2026-01-01T00:00:04.000Z', data: { tool: 'bash', summary: 'npm test' } }, resultStatus: null };
 const FAKE_EVENTS = [
   { seq: 1, workerId: 'w-abc12345', at: '2026-01-01T00:00:00.000Z', kind: 'spawned', data: {} },
   { seq: 2, workerId: 'w-abc12345', at: '2026-01-01T00:00:04.000Z', kind: 'tool.call', data: { tool: 'bash', summary: 'npm test' } },

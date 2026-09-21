@@ -6,12 +6,12 @@
 :root {
   color-scheme: light;
   --paper: #f5f2ec; --card: #fffaf3; --ink: #292a27; --muted: #716b63; --line: #d9d0c6;
-  --brick: #8d443b; --brick-soft: #f0e2d4; --good: #276c56; --warn: #955f17; --bad: #a33931; --unknown: #686259;
-  --focus: #b5745d;
+  --navy: #244a73; --navy-soft: #dce8f4; --good: #276c56; --warn: #955f17; --bad: #a33931; --unknown: #686259;
+  --focus: #244a73;
 }
 :root[data-theme="light"] { color-scheme: light; }
-:root[data-theme="dark"] { color-scheme: dark; --paper: #201f1c; --card: #2a2823; --ink: #f8f1e7; --muted: #c6bbae; --line: #514a40; --brick: #dc8b78; --brick-soft: #4d302a; --good: #8ec6a6; --warn: #f2c47f; --bad: #f2a49b; --unknown: #d1c5b6; --focus: #efaf99; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme]) { color-scheme: dark; --paper: #201f1c; --card: #2a2823; --ink: #f8f1e7; --muted: #c6bbae; --line: #514a40; --brick: #dc8b78; --brick-soft: #4d302a; --good: #8ec6a6; --warn: #f2c47f; --bad: #f2a49b; --unknown: #d1c5b6; --focus: #efaf99; } }
+:root[data-theme="dark"] { color-scheme: dark; --paper: #201f1c; --card: #2a2823; --ink: #f8f1e7; --muted: #c6bbae; --line: #514a40; --navy: #8db9e8; --navy-soft: #263d57; --good: #8ec6a6; --warn: #f2c47f; --bad: #f2a49b; --unknown: #d1c5b6; --focus: #8db9e8; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) { color-scheme: dark; --paper: #201f1c; --card: #2a2823; --ink: #f8f1e7; --muted: #c6bbae; --line: #514a40; --navy: #8db9e8; --navy-soft: #263d57; --good: #8ec6a6; --warn: #f2c47f; --bad: #f2a49b; --unknown: #d1c5b6; --focus: #8db9e8; } }
 
 * { box-sizing: border-box; min-width: 0; }
 body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.5 "Hanken Grotesk", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
@@ -35,14 +35,18 @@ h2 { font-size: 1.1rem; font-weight: 600; letter-spacing: -.025em; margin: 28px 
 .metrics article:last-child { grid-column: 1 / -1; }
 .metrics strong { display: block; font-size: 1.15rem; font-weight: 500; letter-spacing: -.025em; margin-top: 3px; }
 .filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.filters label { color: var(--muted); font-family: "JetBrains Mono", monospace; font-size: .66rem; letter-spacing: .065em; text-transform: uppercase; }
+.filters label, .filter-label { color: var(--muted); font-family: "JetBrains Mono", monospace; font-size: .66rem; letter-spacing: .065em; text-transform: uppercase; }
+.project-filter { min-width: 0; }.project-tabs { display: flex; gap: 6px; margin-top: 4px; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; padding: 1px 1px 4px; scrollbar-width: thin; }
+.project-tabs button { min-height: 44px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 5px; background: var(--card); color: var(--ink); padding: 0 11px; font: 1rem/1.2 "Hanken Grotesk", Arial, sans-serif; cursor: pointer; }
+.project-tabs button.selected { border-color: var(--navy); background: var(--navy-soft); color: var(--navy); font-weight: 650; }.project-tabs button:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.help { display: block; color: var(--muted); font: .62rem/1.2 "Hanken Grotesk", Arial, sans-serif; letter-spacing: normal; text-transform: none; }
 select { width: 100%; min-height: 44px; margin-top: 4px; border: 1px solid var(--line); border-radius: 5px; background: var(--card); color: var(--ink); padding: 0 9px; font: 1rem/1.4 "Hanken Grotesk", Arial, sans-serif; letter-spacing: normal; text-transform: none; }
 .notice { margin: 12px 0; border-radius: 6px; color: var(--warn); text-align: left; }
 #source-health { display: grid; gap: 3px; margin: 7px 0 0; padding: 0; list-style: none; color: var(--muted); font-family: "JetBrains Mono", monospace; font-size: .67rem; line-height: 1.45; }
 
 .worker-list, .models { display: grid; gap: 8px; }
 .worker { min-height: 72px; transition: border-color .15s ease, box-shadow .15s ease; }
-.worker[open] { border-color: var(--brick); box-shadow: 3px 3px 0 var(--brick-soft); }
+.worker[open] { border-color: var(--navy); box-shadow: 3px 3px 0 var(--navy-soft); }
 .worker summary { min-height: 44px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; list-style: none; cursor: pointer; }
 .worker summary::-webkit-details-marker { display: none; }
 .worker summary:focus-visible, select:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }

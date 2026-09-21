@@ -4,17 +4,26 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 const dashboard = (name: string) => readFileSync(join(process.cwd(), 'dashboard', name), 'utf8');
-test('mobile dashboard has private relative polling, source filters, strict stale/offline state, and no unsafe HTML writes', () => {
+test('mobile dashboard has private relative polling, project tabs, runner filters, strict stale/offline state, and no unsafe HTML writes', () => {
   const html = dashboard('index.html'); const app = dashboard('app.js'); const css = dashboard('styles.css');
   const releaseVersion = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')).version;
   const assetVersions = [...html.matchAll(/(?:href|src)="(?:styles|app)\.\w+\?v=([^\"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(assetVersions, [releaseVersion, releaseVersion]);
-  assert.match(html, /id="project"/); assert.match(html, /id="state"/); assert.match(html, /id="source"/); assert.match(html, /source-health/); assert.match(app, /\.herenow\/data\/fleet\?limit=1/);
+  assert.match(html, /id="project-filters"/); assert.match(html, /id="state"/); assert.match(html, /id="source"/); assert.match(html, />Runner</); assert.match(html, /A runner can work on several projects\./); assert.match(html, /source-health/); assert.match(app, /\.herenow\/data\/fleet\?limit=1/);
   assert.match(app, /STALE_MS = 90_000/); assert.match(app, /document\.hidden/); assert.match(app, /offline = true/); assert.match(app, /validSnapshot/); assert.match(app, /Waiting for first snapshot/);
   assert.match(app, /textContent/); assert.doesNotMatch(app, /innerHTML|insertAdjacentHTML/);
-  assert.match(app, /worker-details/); assert.match(app, /sourceId/); assert.match(css, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/); assert.match(css, /overflow-wrap: anywhere/); assert.match(css, /state-failed/);
-  assert.match(html, /id="appearance"/); assert.match(html, /helm-fleet-appearance/); assert.match(css, /#f5f2ec/); assert.match(css, /#fffaf3/); assert.match(css, /#8d443b/); assert.match(css, /Bricolage Grotesque/); assert.match(css, /Hanken Grotesk/); assert.match(css, /JetBrains Mono/);
+  assert.match(app, /worker-details/); assert.match(app, /Repository/); assert.match(app, /Runner:/); assert.match(app, /aria-pressed/); assert.match(app, /selectedProject/); assert.match(css, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/); assert.match(css, /overflow-wrap: anywhere/); assert.match(css, /state-failed/);
+  assert.match(html, /id="appearance"/); assert.match(html, /helm-fleet-appearance/); assert.match(css, /#f5f2ec/); assert.match(css, /#fffaf3/); assert.doesNotMatch(css, /--brick/); assert.match(css, /--navy/); assert.match(css, /Bricolage Grotesque/); assert.match(css, /Hanken Grotesk/); assert.match(css, /JetBrains Mono/);
   assert.match(css, /min-height: 44px/); assert.match(css, /prefers-color-scheme/); assert.match(css, /min-width: 700px/); assert.match(app, /media\.addEventListener\('change'/);
+});
+
+test('project tabs use repository slugs as stable keys and disambiguate short-name collisions', async () => {
+  const app = await import(new URL('../dashboard/app.js', import.meta.url).href);
+  assert.deepEqual(app.projectFilters([{ repoSlug: 'acme/widgets' }, { repoSlug: 'other/widgets' }, { repoSlug: 'solo/tools' }]), [
+    { key: 'acme/widgets', label: 'widgets (acme/widgets)', title: 'acme/widgets' },
+    { key: 'other/widgets', label: 'widgets (other/widgets)', title: 'other/widgets' },
+    { key: 'solo/tools', label: 'tools', title: 'solo/tools' },
+  ]);
 });
 
 

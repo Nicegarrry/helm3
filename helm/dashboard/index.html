@@ -3,13 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#17191d">
+  <meta name="theme-color" content="#f5f2ec">
   <title>Helm Fleet</title>
+  <script>(function(){try{var value=localStorage.getItem('helm-fleet-appearance');if(value==='light'||value==='dark')document.documentElement.setAttribute('data-theme',value);}catch(_){}}());</script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <main>
-    <header><div><p class="eyebrow">HELM · PRIVATE FLEET</p><h1>Fleet</h1></div><p id="freshness" class="status" role="status">Loading snapshot…</p></header>
+    <header>
+      <div><p class="eyebrow">HELM · PRIVATE FLEET</p><h1>Fleet</h1></div>
+      <div class="header-actions"><label class="appearance" for="appearance"><span>Appearance</span><select id="appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><p id="freshness" class="status" role="status">Loading snapshot…</p></div>
+    </header>
     <section class="metrics" aria-label="Fleet summary"><article><small>Spend</small><strong id="spend">—</strong></article><article><small>Workers</small><strong id="workers-count">—</strong></article><article><small>Unknown cost</small><strong id="unknown">—</strong></article></section>
     <section class="filters" aria-label="Fleet filters"><label>Project <select id="project"><option value="">All projects</option></select></label><label>State <select id="state"><option value="">All states</option></select></label><label>Source <select id="source"><option value="">All sources</option></select></label></section>
     <p id="notice" class="notice" hidden></p>

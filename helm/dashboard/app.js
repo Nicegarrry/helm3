@@ -1,10 +1,29 @@
 const STALE_MS = 90_000;
 const POLL_MS = 30_000;
+export const APPEARANCE_STORAGE_KEY = 'helm-fleet-appearance';
 const $ = (id) => document.getElementById(id);
 let snapshot;
 let lastReceived = 0;
 let offline = false;
 let loading = false;
+
+export function normalizeAppearance(value) {
+  return ['system', 'light', 'dark'].includes(value) ? value : 'system';
+}
+
+export function readAppearance(storage) {
+  try { return normalizeAppearance(storage?.getItem(APPEARANCE_STORAGE_KEY)); } catch { return 'system'; }
+}
+
+export function persistAppearance(value, storage) {
+  if (!storage) return false;
+  try { storage.setItem(APPEARANCE_STORAGE_KEY, normalizeAppearance(value)); return true; } catch { return false; }
+}
+
+export function resolvedTheme(appearance, systemDark) {
+  const selected = normalizeAppearance(appearance);
+  return selected === 'system' ? (systemDark ? 'dark' : 'light') : selected;
+}
 
 function text(node, value) {
   node.textContent = value == null || value === '' ? '—' : String(value);
@@ -154,6 +173,29 @@ async function load() {
 }
 
 if (typeof document !== 'undefined') {
+  const storage = () => {
+    try { return window.localStorage; } catch { return undefined; }
+  };
+  const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : undefined;
+  let appearance = readAppearance(storage());
+  const applyAppearance = (value) => {
+    appearance = normalizeAppearance(value);
+    const root = document.documentElement;
+    if (appearance === 'system') root.removeAttribute('data-theme');
+    else root.dataset.theme = appearance;
+    const themeColor = document.querySelector('meta[name="theme-color"]');
+    themeColor?.setAttribute('content', resolvedTheme(appearance, Boolean(media?.matches)) === 'dark' ? '#201f1c' : '#f5f2ec');
+    $('appearance').value = appearance;
+  };
+  const onSystemThemeChange = () => { if (appearance === 'system') applyAppearance('system'); };
+  applyAppearance(appearance);
+  $('appearance').addEventListener('change', (event) => {
+    const value = normalizeAppearance(event.currentTarget.value);
+    persistAppearance(value, storage());
+    applyAppearance(value);
+  });
+  if (media?.addEventListener) media.addEventListener('change', onSystemThemeChange);
+  else media?.addListener?.(onSystemThemeChange);
   for (const id of ['project', 'state', 'source']) $(id).addEventListener('change', renderWorkers);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); });
   setInterval(() => {

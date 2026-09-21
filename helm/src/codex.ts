@@ -78,9 +78,13 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
         let stderr = '';
         child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4000); });
         let lastText = '';
+        // Cancellation is checked on every event AND on a timer: a worker deep in one long silent
+        // command emits nothing, and a stop request must still land inside `stop()`'s wait.
+        const stopIfAsked = (): boolean => { if (hooks.shouldContinue()) return false; child.kill('SIGTERM'); return true; };
+        const poll = setInterval(stopIfAsked, 500);
         const lines = createInterface({ input: child.stdout });
         lines.on('line', (line) => {
-          if (!hooks.shouldContinue()) { child.kill('SIGTERM'); return; }
+          if (stopIfAsked()) return;
           let ev: CodexEvent;
           try { ev = JSON.parse(line) as CodexEvent; } catch { return; }
           const it = ev.item;
@@ -104,16 +108,16 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
         const [code] = await Promise.all([
           new Promise<number | null>((resolve) => child.on('close', resolve)),
           new Promise<void>((resolve) => lines.on('close', resolve)),
-        ]);
+        ]).finally(() => clearInterval(poll));
         hooks.emit('turn.end', { exitCode: code });
         if (spawnError) throw new Error(`codex could not start (${bin}): ${(spawnError as Error).message}`);
+        if (!hooks.shouldContinue()) return ''; // killed on request: a null result, never an error
         const text = await readFile(lastFile, 'utf8').catch(() => lastText);
         if (code !== 0) {
+          // A non-zero exit is not a healthy turn even when an answer was written; the worktree
+          // keeps whatever was done, the worker lands in `unknown`, and a steer can resume it.
           const tail = stderr.trim().split('\n').at(-1) ?? '';
-          if (!hooks.shouldContinue()) return ''; // killed on request: a null result, never an error
-          if (text.trim() === '') throw new Error(`codex exited ${code ?? 'by signal'}: ${tail}`.trim());
-          // It answered and then exited non-zero: keep the answer, record the exit so it is never silent.
-          hooks.emit('error', { message: `codex exited ${code ?? 'by signal'} after answering: ${tail}`.trim() });
+          throw new Error(`codex exited ${code ?? 'by signal'}${text.trim() ? ' after answering' : ''}: ${tail}`.trim());
         }
         return text;
       };

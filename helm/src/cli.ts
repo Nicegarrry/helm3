@@ -4,6 +4,7 @@
  */
 import { spawn } from 'node:child_process';
 import { existsSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -90,12 +91,18 @@ async function postTool(name: string, body: unknown): Promise<unknown> {
     process.exitCode = 2;
     return undefined;
   }
-  const res = await fetch(`http://127.0.0.1:${live.port}/tools/${name}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+  // node:http, not fetch: undici abandons a response after five silent minutes, and `helm wait`
+  // holds one open for up to twenty-five (the same reason the stdio proxy in server.ts does this).
+  return new Promise((resolve) => {
+    const req = httpRequest({ host: '127.0.0.1', port: live.port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json' } }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => { data += chunk; });
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve({ ok: false, reason: `daemon returned ${res.statusCode}: ${data.slice(0, 200)}` }); } });
+    });
+    req.on('error', (err) => resolve({ ok: false, reason: `daemon unreachable on port ${live.port}: ${err.message}` }));
+    req.end(JSON.stringify(body ?? {}));
   });
-  return res.json();
 }
 
 function toWorkerRowSummary(r: WorkerRow) {

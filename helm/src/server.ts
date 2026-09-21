@@ -56,7 +56,7 @@ export async function serveStdioProxy(port: number): Promise<ServeHandle> {
 }
 
 function buildMcpServer(registry: Registry): McpServer {
-  const server = new McpServer({ name: 'helm', version: '1.2.0' });
+  const server = new McpServer({ name: 'helm', version: '1.3.0' });
   for (const tool of registry.list()) {
     server.registerTool(
       tool.name,

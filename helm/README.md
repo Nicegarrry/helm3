@@ -61,7 +61,7 @@ lines of TypeScript.
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | One line per worker. |
 | `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
-| `worker.steer` | Send a follow-up message to an idle or interrupted worker in the same Pi session. |
+| `worker.steer` | Send a follow-up message to an idle or interrupted worker in its own session (a Pi session, or a Codex thread resumed with the same model). |
 | `worker.stop` | Ask a running worker to stop. |
 | `gate.run` | Run the repo's checks in the worktree at its exact head and record the result. |
 | `pr.open` | Push the branch and open a PR. Refused unless a gate passed at the current head. |
@@ -111,6 +111,14 @@ through `codex exec resume <id>` with the same model. Usage is recorded from Cod
 spend, and never as unknown-cost events. Codex's stdout events map onto the same
 `tool.call` / `turn.start` / `turn.end` / `result` kinds; its own warnings arrive as `notice`.
 The binary is `$HELM_CODEX_BIN`, else `~/.local/bin/codex`, else `codex` on PATH.
+
+A non-zero exit is never a healthy turn: the worker lands in `unknown` with the stderr tail as
+its error, its worktree keeps whatever was written, and a steer resumes it. A stop request is
+honoured on the next event or within half a second, whichever comes first, so a worker deep in
+one long silent command is still killed inside `worker.stop`'s wait. One limit measured live:
+a **Codex reviewer's** `read-only` sandbox refuses the IPC socket `tsx` binds to run tests, so a
+Codex reviewer can typecheck and read but not run a `tsx`-based suite — put run-the-code
+reviews on the Pi lane, or rely on the gate.
 
 ## Waiting, not polling
 

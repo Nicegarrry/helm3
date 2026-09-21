@@ -151,20 +151,20 @@ test('run: a binary that cannot start is an error naming it, never an unhandled 
   await assert.rejects(runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks), /codex could not start \(.*no-such-codex\): .*ENOENT/);
 });
 
-test('run: an answer followed by a non-zero exit is kept, with the exit recorded as an error event', async () => {
+test('run: an answer followed by a non-zero exit is still an error, naming the exit and the stderr tail', async () => {
   const f = await fixture('answer-then-fail');
-  const { hooks, events } = collectHooks();
-  const outcome = await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks);
-  assert.equal(outcome.result?.status, 'succeeded');
-  const err = events.find((e) => e.kind === 'error');
-  assert.match(String(err?.data.message), /codex exited 3 after answering: late failure/);
+  const { hooks } = collectHooks();
+  await assert.rejects(f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks), /codex exited 3 after answering: late failure/);
 });
 
-test('run: a stop request kills the process at the next event and yields a null result, not an error', async () => {
-  const f = await fixture('hang');
-  let seen = 0;
-  const { hooks, events } = collectHooks(() => ++seen < 3);
+test('run: a stop request kills a worker that is silent in a long command, and yields a null result, not an error', async () => {
+  const f = await fixture('hang'); // emits its events, then produces nothing for 60 s
+  let asked = false;
+  setTimeout(() => { asked = true; }, 800); // the request arrives after the last event has been read
+  const { hooks, events } = collectHooks(() => !asked);
+  const started = Date.now();
   const outcome = await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks);
+  assert.ok(Date.now() - started < 5000, 'the timer poll killed it without waiting for another event');
   assert.equal(outcome.result, null);
   assert.ok(events.some((e) => e.kind === 'result.invalid'));
   assert.equal(events.filter((e) => e.kind === 'turn.start').length, 1, 'no correction turn after a stop');

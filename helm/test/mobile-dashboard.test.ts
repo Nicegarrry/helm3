@@ -12,3 +12,18 @@ test('mobile dashboard has private relative polling, source filters, strict stal
   assert.match(app, /worker-details/); assert.match(app, /sourceId/); assert.match(css, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/); assert.match(css, /overflow-wrap: anywhere/); assert.match(css, /state-failed/);
   assert.match(css, /min-height: 44px/); assert.match(css, /prefers-color-scheme/); assert.match(css, /min-width: 700px/);
 });
+
+
+test('browser validation rejects malformed snapshots and source freshness ages independently', async () => {
+  const app = await import(new URL('../dashboard/app.js', import.meta.url).href);
+  const now = Date.now();
+  const snapshot = { schemaVersion: 2, observedAt: new Date(now).toISOString(), run: {},
+    counts: {totalWorkers:0,activeWorkers:0,publishedWorkers:0,truncatedWorkers:0,sourcesComplete:true},
+    sources: [{sourceId:'one',status:'live',observedAt:new Date(now).toISOString()}], workers:[], models:[] };
+  assert.equal(app.validSnapshot(snapshot), true);
+  for (const patch of [{schemaVersion:9},{observedAt:'invalid'},{workers:[null]},{sources:[null]},{models:[null]},{counts:{}}]) {
+    assert.equal(Boolean(app.validSnapshot({...snapshot,...patch})), false);
+  }
+  assert.equal(app.sourceStatus(snapshot.sources[0], now + 91000), 'stale');
+  assert.equal(app.sourceStatus({...snapshot.sources[0],status:'unavailable'}, now), 'unavailable');
+});

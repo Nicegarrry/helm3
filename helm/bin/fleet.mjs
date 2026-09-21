@@ -14,8 +14,7 @@ export const STALE_MS = 90000;
 const ACTIVE = new Set(['queued', 'running']);
 const VALUE_LIMIT = 256;
 const DEFAULT_SOURCES = () => [
-  { sourceId: 'default', label: 'Default Helm', home: join(homedir(), '.helm') },
-  { sourceId: 'marlo', label: 'Marlo Helm', home: '/Volumes/T7/factory-scratch/helm3-marlo' },
+  { sourceId: 'default', label: 'Default Helm', home: resolve(process.env.HELM_HOME || join(homedir(), '.helm')) },
 ];
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isFiniteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
@@ -43,7 +42,10 @@ function pick(value, keys, counters) {
 }
 
 function validateState(state) {
-  if (!isObject(state) || state.ok !== true || !isObject(state.run) || !Array.isArray(state.workers) || !Array.isArray(state.models) || !isTimestamp(state.observedAt)) {
+  if (!isObject(state) || state.ok !== true || !isObject(state.run) || !Array.isArray(state.workers) || !Array.isArray(state.models) || !isTimestamp(state.observedAt)
+    || !['spendUsd', 'spendCapUsd', 'activeWorkers', 'maxWorkers', 'unknownCostEvents'].every((key) => isFiniteNumber(state.run[key]) && state.run[key] >= 0)
+    || !state.workers.every((worker) => isObject(worker) && typeof worker.workerId === 'string' && typeof worker.state === 'string')
+    || !state.models.every((model) => isObject(model) && typeof model.model === 'string')) {
     throw new Error('daemon returned an invalid /api/state shape');
   }
 }
@@ -75,7 +77,7 @@ function sourceSummary(source, projection, status) {
     sourceId: source.sourceId,
     label: source.label,
     status,
-    ...(projection ? { observedAt: projection.observedAt, totalWorkers: projection.totalWorkers, activeWorkers: projection.activeWorkers, run: projection.run } : {}),
+    ...(projection ? { observedAt: projection.observedAt, totalWorkers: projection.totalWorkers, activeWorkers: projection.activeWorkers, run: projection.run, daemon: projection.daemon } : {}),
   };
 }
 
@@ -90,7 +92,7 @@ function priorProjection(snapshot, sourceId) {
   const models = Array.isArray(snapshot.models)
     ? snapshot.models.filter((model) => model?.sourceId === sourceId).map((model) => ({ sourceId, ...pick(model, ['model', 'workers', 'active', 'spendUsd', 'tokens', 'unknownCostEvents'], counters) }))
     : [];
-  return { observedAt: source.observedAt, run: pick(source.run, ['spendUsd', 'spendCapUsd', 'spendWarnUsd', 'aboveSoftCap', 'activeWorkers', 'maxWorkers', 'unknownCostEvents'], counters), workers, models, totalWorkers: Number(source.totalWorkers) || workers.length, activeWorkers: Number(source.activeWorkers) || 0, truncatedFields: counters.truncatedFields };
+  return { observedAt: source.observedAt, daemon: pick(source.daemon, ['version', 'revision', 'phase'], counters), run: pick(source.run, ['spendUsd', 'spendCapUsd', 'spendWarnUsd', 'aboveSoftCap', 'activeWorkers', 'maxWorkers', 'unknownCostEvents'], counters), workers, models, totalWorkers: Number(source.totalWorkers) || workers.length, activeWorkers: Number(source.activeWorkers) || 0, truncatedFields: counters.truncatedFields };
 }
 
 /** Merge live source projections with retained cloud data for unavailable sources. */
@@ -103,18 +105,20 @@ export function mergeSnapshots(results, previous, now = new Date().toISOString()
   let activeWorkers = 0;
   let spendUsd = 0;
   let spendCapUsd = 0;
+  let uncapped = false;
   let unknownCostEvents = 0;
   let truncatedFields = 0;
   for (const result of results) {
     const projection = result.projection ?? priorProjection(previous, result.source.sourceId);
     const status = result.projection ? (Date.now() - Date.parse(result.projection.observedAt) > STALE_MS ? 'stale' : 'live') : 'unavailable';
-    if (!result.projection) complete = false;
+    if (status !== 'live') complete = false;
     if (!projection) { sources.push(sourceSummary(result.source, undefined, 'unavailable')); continue; }
     sources.push(sourceSummary(result.source, projection, status));
     totalWorkers += projection.totalWorkers;
     activeWorkers += projection.activeWorkers;
     spendUsd += Number(projection.run?.spendUsd) || 0;
     spendCapUsd += Number(projection.run?.spendCapUsd) || 0;
+    if (!projection.run?.spendCapUsd) uncapped = true;
     unknownCostEvents += Number(projection.run?.unknownCostEvents) || 0;
     truncatedFields += projection.truncatedFields ?? 0;
     candidates.push(...projection.workers.map((worker) => ({ ...worker, sourceId: result.source.sourceId })));
@@ -124,7 +128,7 @@ export function mergeSnapshots(results, previous, now = new Date().toISOString()
   const snapshot = {
     schemaVersion: 2,
     observedAt: now,
-    run: { spendUsd, spendCapUsd, unknownCostEvents, activeWorkers },
+    run: { spendUsd, spendCapUsd: uncapped ? 0 : spendCapUsd, unknownCostEvents, activeWorkers },
     counts: { totalWorkers, activeWorkers, publishedWorkers: 0, truncatedWorkers: 0, totalModels: models.length, publishedModels: 0, truncatedModels: 0, truncatedFields, sourcesComplete: complete, availableSources: sources.filter((source) => source.status !== 'unavailable').length, unavailableSources: sources.filter((source) => source.status === 'unavailable').length },
     sources,
     workers: [],
@@ -135,7 +139,7 @@ export function mergeSnapshots(results, previous, now = new Date().toISOString()
     if (!fits(snapshot)) { snapshot.workers.pop(); break; }
   }
   snapshot.counts.publishedWorkers = snapshot.workers.length;
-  snapshot.counts.truncatedWorkers = candidates.length - snapshot.workers.length;
+  snapshot.counts.truncatedWorkers = Math.max(0, totalWorkers - snapshot.workers.length);
   for (const model of models) {
     snapshot.models.push(model);
     snapshot.counts.publishedModels = snapshot.models.length;
@@ -144,6 +148,14 @@ export function mergeSnapshots(results, previous, now = new Date().toISOString()
   }
   snapshot.counts.publishedModels = snapshot.models.length;
   snapshot.counts.truncatedModels = models.length - snapshot.models.length;
+  while (!fits(snapshot) && (snapshot.models.length || snapshot.workers.length)) {
+    if (snapshot.models.length) snapshot.models.pop();
+    else snapshot.workers.pop();
+    snapshot.counts.publishedModels = snapshot.models.length;
+    snapshot.counts.truncatedModels = models.length - snapshot.models.length;
+    snapshot.counts.publishedWorkers = snapshot.workers.length;
+    snapshot.counts.truncatedWorkers = Math.max(0, totalWorkers - snapshot.workers.length);
+  }
   if (!fits(snapshot)) throw new Error('safe fleet summary exceeds the Site Data size limit');
   return snapshot;
 }
@@ -163,7 +175,7 @@ export function stateUrl(port) {
 export async function fetchState(home, request = fetch) {
   const servePath = join(home, 'serve.json');
   if (!existsSync(servePath)) throw new Error('Helm daemon is not advertising serve.json');
-  const response = await request(stateUrl(parseServeJson(readFileSync(servePath, 'utf8'))), { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), headers: { accept: 'application/json' } });
+  const response = await request(stateUrl(parseServeJson(readFileSync(servePath, 'utf8'))), { redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), headers: { accept: 'application/json' } });
   if (!response.ok) throw new Error(`Helm /api/state returned HTTP ${response.status}`);
   const state = await response.json();
   validateState(state);
@@ -190,7 +202,7 @@ export function readLocalAuth(env = process.env) {
 }
 
 async function json(request, url, options) {
-  const response = await request(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  const response = await request(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   if (!response.ok) {
     const error = new Error(`Here.now returned HTTP ${response.status}`);
     error.status = response.status;
@@ -209,7 +221,8 @@ export async function assertPrivateAccess(slug, auth, request = fetch) {
 export async function listFleetRecord(slug, auth, request = fetch) {
   const base = `${API_ORIGIN}/api/v1/publishes/${encodeURIComponent(slug)}/data/fleet`;
   const listed = await json(request, base, { headers: ownerHeaders(auth) });
-  const records = Array.isArray(listed.records) ? listed.records : [];
+  if (!Array.isArray(listed.records)) throw new Error('fleet record list is malformed');
+  const records = listed.records;
   if (records.length > 1 || listed.nextCursor) throw new Error('refusing ambiguous Site Data record list');
   if (records.length === 1 && (typeof records[0]?.id !== 'string' || typeof records[0]?.data?.snapshot !== 'string')) throw new Error('fleet record is malformed');
   let previous;
@@ -244,7 +257,7 @@ export async function retryPublish(operation, sleep = (ms) => new Promise((resol
     try { return await operation(); } catch (error) {
       failure = error;
       const status = error && typeof error === 'object' ? error.status : undefined;
-      if (!(error instanceof TypeError || error?.name === 'AbortError' || status === 429 || (typeof status === 'number' && status >= 500))) break;
+      if (!(error instanceof TypeError || ['AbortError', 'TimeoutError'].includes(error?.name) || status === 429 || (typeof status === 'number' && status >= 500))) break;
     }
   }
   throw failure;
@@ -255,7 +268,8 @@ export function acquirePublisherLock(home, slug, sources = []) {
   const path = join(home, `.fleet-${slug.replace(/[^a-z0-9_-]/gi, '_')}.lock`);
   let fd;
   try { fd = openSync(path, 'wx'); } catch { throw new Error(`fleet publisher lock exists: ${path}`); }
-  writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), site: slug, sources: sources.map((source) => source.sourceId) }));
+  try { writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), site: slug, sources: sources.map((source) => source.sourceId) })); }
+  catch (error) { closeSync(fd); rmSync(path, { force: true }); throw error; }
   return () => { try { closeSync(fd); } finally { rmSync(path, { force: true }); } };
 }
 
@@ -292,8 +306,13 @@ export async function runPublisher({ sources, slug, interval = DEFAULT_INTERVAL_
   process.once('SIGINT', stopNow); process.once('SIGTERM', stopNow);
   try {
     do {
-      const result = await syncOnce({ sources, slug, auth, request });
-      report(result.action === 'unavailable' ? 'fleet sources unavailable; cloud snapshot retained unchanged' : `fleet ${result.action}: ${result.snapshot.counts.publishedWorkers}/${result.snapshot.counts.totalWorkers} workers`);
+      try {
+        const result = await syncOnce({ sources, slug, auth, request });
+        report(result.action === 'unavailable' ? 'fleet sources unavailable; cloud snapshot retained unchanged' : `fleet ${result.action}: ${result.snapshot.counts.publishedWorkers}/${result.snapshot.counts.totalWorkers} workers`);
+      } catch (error) {
+        report(`fleet publish unavailable: ${error instanceof Error ? error.message : 'request failed'}; previous snapshot retained`);
+        if (once) throw error;
+      }
       if (!once && !stop.signal.aborted) await waitFor(interval, stop.signal);
     } while (!once && !stop.signal.aborted);
   } finally {
@@ -321,6 +340,7 @@ export function parseFleetArgs(args) {
   if (home && sources.length) throw new Error('--home cannot be combined with --source');
   if (home) sources.push({ sourceId: 'default', label: 'Default Helm', home: resolve(home) });
   if (!sources.length) sources.push(...DEFAULT_SOURCES());
+  if (sources.length > 16 || new Set(sources.map((source) => source.sourceId)).size !== sources.length) throw new Error('use at most 16 uniquely labelled sources');
   if (!Number.isInteger(interval) || interval < 10000) throw new Error('--interval must be an integer of at least 10000ms');
   return { slug, sources, interval, once };
 }

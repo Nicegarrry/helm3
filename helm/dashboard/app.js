@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 let snapshot;
 let lastReceived = 0;
 let offline = false;
+let loading = false;
 
 function text(node, value) {
   node.textContent = value == null || value === '' ? '—' : String(value);
@@ -17,11 +18,28 @@ function money(value) {
 function isTimestamp(value) {
   return typeof value === 'string' && Number.isFinite(Date.parse(value));
 }
-function validSnapshot(value) {
-  return value && typeof value === 'object' && Number.isInteger(value.schemaVersion) && isTimestamp(value.observedAt)
-    && value.run && typeof value.run === 'object' && Array.isArray(value.workers) && Array.isArray(value.models) && Array.isArray(value.sources);
+export function validSnapshot(value) {
+  const object = (item) => item && typeof item === 'object' && !Array.isArray(item);
+  const count = (item) => Number.isInteger(item) && item >= 0;
+  return object(value) && value.schemaVersion === 2 && isTimestamp(value.observedAt)
+    && object(value.run) && object(value.counts)
+    && ['totalWorkers', 'activeWorkers', 'publishedWorkers', 'truncatedWorkers'].every((key) => count(value.counts[key]))
+    && typeof value.counts.sourcesComplete === 'boolean'
+    && Array.isArray(value.sources) && value.sources.length > 0
+    && value.sources.every((item) => object(item) && typeof item.sourceId === 'string'
+      && ['live', 'stale', 'unavailable'].includes(item.status)
+      && (isTimestamp(item.observedAt) || (item.status === 'unavailable' && item.observedAt == null)))
+    && Array.isArray(value.workers) && value.workers.every((item) => object(item) && typeof item.workerId === 'string' && typeof item.sourceId === 'string')
+    && Array.isArray(value.models) && value.models.every((item) => object(item) && typeof item.model === 'string');
 }
+
+export function sourceStatus(source, now = Date.now()) {
+  if (!source) return 'unknown';
+  return source.status === 'live' && now - Date.parse(source.observedAt) > STALE_MS ? 'stale' : source.status;
+}
+
 function recordSnapshot(payload) {
+  if (payload?.nextCursor || (payload?.records && payload.records.length !== 1)) throw new Error('no unique snapshot');
   const raw = payload?.records?.[0]?.data?.snapshot ?? payload?.snapshot;
   if (typeof raw !== 'string') throw new Error('no fleet snapshot is available yet');
   return JSON.parse(raw);
@@ -43,9 +61,9 @@ function freshness() {
   }
   const stale = Date.now() - Date.parse(snapshot.observedAt) > STALE_MS;
   const partial = snapshot.counts?.sourcesComplete === false;
-  node.className = `status ${offline ? 'offline' : partial ? 'partial' : stale ? 'stale' : 'live'}`;
-  text(node, offline ? 'Offline · last snapshot retained' : partial ? 'Partial · source unavailable' : stale ? 'Stale · awaiting publisher' : 'Live snapshot');
-  text($('updated'), `Updated ${new Date(lastReceived).toLocaleTimeString()} · snapshot ${new Date(snapshot.observedAt).toLocaleTimeString()}`);
+  node.className = `status ${offline ? 'offline' : stale ? 'stale' : partial ? 'partial' : 'live'}`;
+  text(node, offline ? 'Offline · last snapshot retained' : stale ? 'Stale · awaiting publisher' : partial ? 'Partial · last-known totals' : 'Live snapshot');
+  text($('updated'), `Snapshot ${new Date(snapshot.observedAt).toLocaleTimeString()} · checked ${new Date(lastReceived).toLocaleTimeString()}`);
 }
 
 function sourceHealth() {
@@ -53,11 +71,10 @@ function sourceHealth() {
   health.replaceChildren();
   for (const source of snapshot.sources) {
     const item = document.createElement('li');
-    const stale = isTimestamp(source.observedAt) && Date.now() - Date.parse(source.observedAt) > STALE_MS;
-    const status = source.status === 'live' && stale ? 'stale' : source.status || 'unknown';
+    const status = sourceStatus(source);
     item.className = `source-${status}`;
     const observed = isTimestamp(source.observedAt) ? ` · ${new Date(source.observedAt).toLocaleTimeString()}` : '';
-    text(item, `${source.label || source.sourceId}: ${status}${observed}`);
+    text(item, `${source.label || source.sourceId}: ${status}${observed}${source.daemon?.version ? ` · Helm ${source.daemon.version}` : ''}`);
     health.append(item);
   }
 }
@@ -98,7 +115,7 @@ function renderWorkers() {
     card.className = 'worker'; card.dataset.worker = workerKey; card.open = open.has(workerKey);
     const summary = document.createElement('summary'); const left = document.createElement('span'); const name = document.createElement('strong'); const meta = document.createElement('span'); const pill = document.createElement('span');
     meta.className = 'meta'; pill.className = `pill state-${worker.state || 'unknown'}`;
-    text(name, worker.workerId); text(meta, `${worker.sourceId || 'source unknown'} · ${worker.repoSlug || 'project unknown'} · ${worker.model || 'model unknown'}`); text(pill, worker.state || 'unknown');
+    text(name, worker.workerId); text(meta, `${worker.sourceId || 'source unknown'} (${sourceStatus(snapshot.sources.find((source) => source.sourceId === worker.sourceId))}) · ${worker.repoSlug || 'project unknown'} · ${worker.model || 'model unknown'}`); text(pill, worker.state || 'unknown');
     left.append(name, document.createElement('br'), meta); summary.append(left, pill); card.append(summary, workerDetails(worker)); list.append(card);
   }
 }
@@ -115,7 +132,7 @@ function render() {
   if (!snapshot) return;
   const counts = snapshot.counts || {};
   text($('spend'), `${money(snapshot.run?.spendUsd)}${snapshot.run?.spendCapUsd > 0 ? ` / ${money(snapshot.run.spendCapUsd)}` : ''}`);
-  text($('workers-count'), `${counts.activeWorkers ?? 0} active · ${counts.totalWorkers ?? 0} total`); text($('unknown'), snapshot.run?.unknownCostEvents ?? 0);
+  text($('workers-count'), `${counts.activeWorkers ?? 0} active · ${counts.totalWorkers ?? 0} ${counts.sourcesComplete ? 'total' : 'last known'}`); text($('unknown'), snapshot.run?.unknownCostEvents ?? '—');
   text($('notice'), `${counts.truncatedWorkers || 0} workers and ${counts.truncatedModels || 0} model rows omitted for the private size limit.`); $('notice').hidden = !(counts.truncatedWorkers || counts.truncatedModels || counts.truncatedFields);
   setOptions('project', [...new Set(snapshot.workers.map((worker) => worker.repoSlug).filter(Boolean))].sort(), 'All projects');
   setOptions('state', [...new Set(snapshot.workers.map((worker) => worker.state).filter(Boolean))].sort(), 'All states');
@@ -124,17 +141,25 @@ function render() {
 }
 
 async function load() {
-  if (document.hidden) return;
+  if (document.hidden || loading) return;
+  loading = true;
   try {
-    const response = await fetch('./.herenow/data/fleet?limit=1', { signal: AbortSignal.timeout(8000), headers: { accept: 'application/json' } });
+    const response = await fetch('./.herenow/data/fleet?limit=1', { cache: 'no-store', signal: AbortSignal.timeout(8000), headers: { accept: 'application/json' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const candidate = recordSnapshot(await response.json());
     if (!validSnapshot(candidate)) throw new Error('invalid fleet snapshot');
     snapshot = candidate; offline = false; lastReceived = Date.now(); render();
   } catch { offline = true; freshness(); }
+  finally { loading = false; }
 }
 
-for (const id of ['project', 'state', 'source']) $(id).addEventListener('change', renderWorkers);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); });
-setInterval(() => { void load(); freshness(); }, POLL_MS);
-void load();
+if (typeof document !== 'undefined') {
+  for (const id of ['project', 'state', 'source']) $(id).addEventListener('change', renderWorkers);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); });
+  setInterval(() => {
+    void load();
+    freshness();
+    if (snapshot) { sourceHealth(); renderWorkers(); }
+  }, POLL_MS);
+  void load();
+}

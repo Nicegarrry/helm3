@@ -15,7 +15,7 @@
    helm fleet sync --site YOUR_PRIVATE_SLUG --once
    ```
 
-   With no source flags, the installed monitor reads the default Helm home plus the configured Marlo fleet home. This is one publisher and one cloud record. To select homes explicitly (for example in a different installation), use repeatable source labels:
+   With no source flags, the monitor reads `HELM_HOME` (or `~/.helm`). To monitor multiple fleets in one cloud record, use explicit repeatable source labels:
 
    ```sh
    helm fleet sync --site YOUR_PRIVATE_SLUG \
@@ -23,7 +23,7 @@
      --source mobile=/absolute/path/to/mobile-helm-home
    ```
 
-   `--home <HELM_HOME>` remains a compatible single-source shorthand and cannot be combined with `--source`. `--interval <ms>` defaults to 30000 and must be an integer of at least 10000. Stop this publisher with Ctrl-C or SIGTERM; it wakes its delay, removes only its own singleton lock, and never restarts a daemon. The lock contains its PID, start time, site and source labels for safe manual stale-lock diagnosis. No Helm daemon restart is needed, including with a v1.5 daemon that lacks daemon metadata.
+   `--home <HELM_HOME>` remains a compatible single-source shorthand and cannot be combined with `--source`. `--interval <ms>` defaults to 30000 and must be an integer of at least 10000. Stop this publisher with Ctrl-C or SIGTERM; it wakes its delay, removes only its own singleton lock, and never restarts a daemon. The lock contains its PID, start time, site and source labels for safe manual stale-lock diagnosis. No Helm daemon restart is needed, including pre-v1.5 daemons that lack lifecycle metadata.
 
 ## Contract and privacy
 
@@ -31,7 +31,7 @@ The published `fleet` collection retains exactly one record. The publisher lists
 
 The record holds `snapshot` as a JSON string under 15,000 UTF-8 bytes and checks the final escaped Site Data body stays below 16 KB. It allowlists only snapshot version/time; safe run, daemon, count, worker and model scalar summaries. Long scalar values are capped; `counts.truncatedFields`, `truncatedWorkers`, and `truncatedModels` make all size reduction explicit. Workers are active-first across all sources, then newest. Each worker has only its source label—not its local path or port—so identical worker IDs remain distinct. Objectives, events, tool arguments, logs, paths, result bodies, lifecycle journal, deployment metadata, credentials and any unrecognised nested values are never copied.
 
-Every source reports an ID/label, source observation time, and live/stale/unavailable status. A malformed local response is rejected rather than manufactured into a healthy empty fleet. When one source fails, the publisher retains its last safe cloud workers and source observation time, labels that source unavailable, and marks the totals incomplete; if every source fails it makes no owner API call at all and leaves the cloud record untouched. The page polls every 30 seconds only while visible, marks snapshots stale after 90 seconds, and marks failed reads offline while retaining the last rendered snapshot. With no record yet it says that it is waiting, rather than implying an empty fleet.
+Every source reports an ID/label, source observation time, and live/stale/unavailable status. A malformed local response is rejected rather than manufactured into a healthy empty fleet. When one source fails, the publisher retains its last safe cloud workers and source observation time, labels that source unavailable, and marks the totals incomplete; if every source fails it makes no owner API call at all and leaves the cloud record untouched. The page polls every 30 seconds only while visible, bypasses the browser cache, prevents overlapping requests, marks snapshots stale after 90 seconds, and marks failed reads offline while retaining the last rendered snapshot. With no record yet it says that it is waiting, rather than implying an empty fleet.
 
 ## Phone use and acceptance
 

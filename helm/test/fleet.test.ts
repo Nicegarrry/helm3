@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { acquirePublisherLock, assertPrivateAccess, fetchState, listFleetRecord, mergeSnapshots, parseFleetArgs, parseServeJson, publishSnapshot, snapshotFromState, stateUrl, syncOnce } from '../bin/fleet.mjs';
+import { acquirePublisherLock, assertPrivateAccess, fetchState, listFleetRecord, mergeSnapshots, parseFleetArgs, parseServeJson, publishSnapshot, snapshotFromState, stateUrl, syncOnce, runPublisher } from '../bin/fleet.mjs';
 
 const source = (id: string, home = `/tmp/${id}`) => ({ sourceId: id, label: id, home });
 const state = (workers: unknown[] = [], observedAt = '2026-09-21T00:00:00.000Z') => ({ ok: true, observedAt, run: { spendUsd: 1.2, spendCapUsd: 5, activeWorkers: 1, maxWorkers: 3, unknownCostEvents: 2, daemon: { version: '1.6.0', revision: 'abc', phase: 'ready', secret: 'never' } }, workers, models: [{ model: 'codex/test', workers: 1, active: 1, spendUsd: 1.2, tokens: 4, raw: { secret: 'never' } }] });
@@ -111,4 +111,49 @@ test('CLI validation supports repeatable absolute sources and rejects unsafe int
   const parsed = parseFleetArgs(['--site', 'private-fleet', '--source', 'one=/tmp/a', '--source', 'two=/tmp/b', '--interval', '10000']);
   assert.deepEqual(parsed.sources.map((item: any) => item.sourceId), ['one', 'two']);
   for (const args of [['--site', 'x', '--interval', '9999'], ['--site', 'x', '--source', 'bad=relative'], ['--site', 'x', '--home', '/tmp/a', '--source', 'b=/tmp/b']]) assert.throws(() => parseFleetArgs(args));
+});
+
+
+test('aggregation retains spend, daemon identity, and cached omission counts', () => {
+  const now = new Date().toISOString();
+  const projection = snapshotFromState(state([{ workerId: 'w-old', state: 'running' }], now), { sourceId: 'one' });
+  const initial = mergeSnapshots([{ source: source('one'), projection }]) as any;
+  assert.equal(initial.run.spendUsd, 1.2);
+  assert.equal(initial.sources[0].daemon.version, '1.6.0');
+  assert.equal(initial.sources[0].daemon.secret, undefined);
+  initial.sources[0].totalWorkers = 10;
+  const partial = mergeSnapshots([{ source: source('one'), error: 'offline' }], initial) as any;
+  assert.equal(partial.run.spendUsd, 1.2);
+  assert.equal(partial.sources[0].observedAt, now);
+  assert.equal(partial.sources[0].daemon.version, '1.6.0');
+  assert.equal(partial.counts.truncatedWorkers, 9);
+  assert.equal(partial.counts.sourcesComplete, false);
+  const unlimited = state([], now); unlimited.run.spendCapUsd = 0;
+  const mixed = mergeSnapshots([{ source: source('one'), projection }, { source: source('two'), projection: snapshotFromState(unlimited) }]) as any;
+  assert.equal(mixed.run.spendCapUsd, 0, 'an unlimited source cannot imply a finite combined cap');
+});
+
+test('empty successful-looking state and malformed owner listing fail closed', async () => {
+  assert.throws(() => snapshotFromState({ ok: true, observedAt: new Date().toISOString(), run: {}, workers: [], models: [] }), /invalid/);
+  assert.throws(() => snapshotFromState(state([null])), /invalid/);
+  await assert.rejects(() => listFleetRecord('private-fleet', 'owner', async () => new Response('{}')), /malformed/);
+  assert.throws(() => parseFleetArgs(['--site','test','--source','same=/tmp/a','--source','same=/tmp/b']), /uniquely/);
+  const defaults = parseFleetArgs(['--site','test']);
+  assert.equal(defaults.sources.length, 1);
+  assert.doesNotMatch(JSON.stringify(defaults), /factory-scratch|Marlo/);
+});
+
+
+test('continuous publisher survives an owner API failure and releases its lock on stop', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'helm-fleet-retry-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await writeFile(join(home, 'serve.json'), '{"port":4101}');
+  const messages: string[] = [];
+  await runPublisher({ sources: [source('one', home)], slug: 'test', auth: 'synthetic',
+    request: async (url) => String(url).startsWith('http://127.0.0.1:')
+      ? new Response(JSON.stringify(state([], new Date().toISOString()))) : new Response('{}', {status:503}),
+    report: (message) => { messages.push(message); process.emit('SIGTERM'); },
+  });
+  assert.match(messages.join(' '), /publish unavailable.*previous snapshot retained/);
+  await assert.rejects(() => readFile(join(home, '.fleet-test.lock')), /ENOENT/);
 });

@@ -1,11 +1,8 @@
-/**
- * The tool registry: maps the twelve tool names to their zod input schemas and dispatches
- * validated calls to a Helm instance. Never throws; unknown tools and invalid input both
- * come back as { ok: false, reason }. See DESIGN.md.
- */
+/** The tool registry: maps the twelve tool names to their zod input schemas and dispatches validated calls to a Helm instance. */
 import type { z } from 'zod';
 import {
   emptyInput,
+  daemonInput,
   gateInput,
   inspectInput,
   listInput,
@@ -21,6 +18,7 @@ import {
   type ToolName,
   type ToolOutcome,
 } from './types.js';
+import { READ_TOOLS } from './lifecycle.js';
 import type { Helm } from './helm.js';
 
 type ToolDef = Readonly<{
@@ -37,6 +35,7 @@ function def<S extends z.ZodObject>(name: ToolName, description: string, inputSc
 }
 
 const TOOLS: readonly ToolDef[] = [
+  def('daemon.control', 'Inspect lifecycle, drain new work, resume admissions, safely stop an idle daemon, or apply a staged upgrade when idle. Draining refuses new mutations without replaying them.', daemonInput, (h, i) => h.lifecycle.control(i)),
   def('worker.spawn', 'Start an isolated worker. Omit model for Codex subscription (Terra); difficulty=easy uses Codex Luna; super-easy uses Qwen 3.8 Flash. Kimi K3 and Qwen 3.8 Max are excluded from automatic selection. Explicit model overrides are honoured.', spawnInput, (h, i) => h.spawn(i)),
   def('worker.inspect', 'Get a worker\'s current state, spend, diff stat, result and recent events.', inspectInput, (h, i) => h.inspect(i)),
   def('worker.list', 'List workers, optionally filtered by repo and/or state, as one summary per worker.', listInput, (h, i) => h.list(i)),
@@ -66,11 +65,13 @@ export function createToolRegistry(helm: Helm): {
       if (!tool) return { ok: false, reason: `unknown tool: ${name}` };
       const parsed = tool.inputSchema.safeParse(input ?? {});
       if (!parsed.success) return { ok: false, reason: `invalid input: ${parsed.error.message}` };
+      let release: (() => void) | undefined;
       try {
+        if (!READ_TOOLS.has(name)) release = helm.lifecycle?.admit(name);
         return await tool.call(helm, parsed.data as never);
       } catch (err) {
         return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-      }
+      } finally { release?.(); }
     },
   };
 }

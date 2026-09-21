@@ -1,8 +1,4 @@
-/**
- * Live read-only dashboard shell for GET /. A single self-contained HTML document (inline CSS + vanilla JS,
- * no external resources) that polls the loopback JSON endpoints: /api/state and /api/events every 2s,
- * /api/worker/<id> when a row is clicked. All dynamic text goes through textContent, never innerHTML.
- */
+/** Live read-only dashboard shell for GET /. */
 
 /** Escape text for safe interpolation into HTML. */
 export function escapeHtml(s: string): string {
@@ -140,6 +136,9 @@ function setDown(v) { down = v; $('dot').className = 'live' + (v ? ' down' : '')
 async function getJson(url) { var r = await fetch(url, { cache: 'no-store' }); if (!r.ok) throw new Error('http ' + r.status); var j = await r.json(); if (!j.ok) throw new Error(j.reason || 'not ok'); return j; }
 
 function renderHeader() {
+  var daemon = state.daemon;
+  $('release').textContent = daemon ? 'v' + daemon.version + ' · ' + daemon.phase + (daemon.staged && daemon.staged.revision !== daemon.revision ? ' · available v' + daemon.staged.version : '') : 'version unknown';
+  $('maintenance').textContent = daemon ? daemon.blockers.join(', ') + (daemon.update ? ' · update: ' + daemon.update.phase + (daemon.update.error ? ' · ' + daemon.update.error : '') : '') : '';
   var run = state.run, cap = run.spendCapUsd > 0;
   $('spend').textContent = fmtUsd(run.spendUsd); $('cap').textContent = cap ? ' / ' + fmtUsd(run.spendCapUsd) + ' cap' : ' (no cap)';
   var pct = cap ? Math.min(100, 100 * run.spendUsd / run.spendCapUsd) : 0;
@@ -281,6 +280,7 @@ export function renderDashboardShell(): string {
 <div class="stat"><span class="l">Unknown cost</span><span class="v"><b id="unk">-</b> <span>events</span></span></div>
 <div class="stat"><span class="l">Observed</span><span class="v"><span id="observed">-</span></span></div>
 </div></header>
+<section class="card" aria-live="polite"><b id="release">Loading version…</b><div id="maintenance"></div></section>
 <section class="card">
 <h2>Workers</h2>
 <div class="tools"><div class="seg"><button class="on" data-f="all">All</button><button data-f="active">Active</button><button data-f="done">Done</button><button data-f="failed">Failed</button></div>

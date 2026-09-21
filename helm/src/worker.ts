@@ -1,12 +1,4 @@
-/**
- * Pi session runtime: creates one in-process Pi coding-agent session per turn inside a
- * worktree, with Pi's built-in tools enabled, guarded by a `tool_call` extension hook that
- * is the entire protected-path policy. Parses the model's final message into a
- * `WorkerResult`, with one correction turn on malformed output. See DESIGN.md and
- * docs/one-shot-brief.md section 5.
- *
- * Pi packages are imported lazily, inside functions, never at module load time.
- */
+/** Pi session runtime: creates one in-process Pi coding-agent session per turn inside a worktree, with Pi's built-in tools enabled, guarded by a `tool_call` extension hook that is the entire protected-path policy. */
 import { mkdir, realpath } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
@@ -17,12 +9,7 @@ import { RESULT_INSTRUCTION } from './prompt.js';
 export const CORRECTION_MESSAGE =
   'Your final message must be exactly one JSON object matching the WorkerResult schema. Reply with only that JSON.';
 
-/**
- * Accept strict JSON or a ```json fenced block. Strict-JSON-whole-message is tried first;
- * if that fails, fenced blocks are tried from last to first, returning the first one that
- * validates against the schema (an unrelated JSON fence elsewhere in the message must not
- * shadow a valid result fence).
- */
+/** Parse whole-message JSON, then try fenced blocks from last to first until one validates. */
 export function parseWorkerResult(text: string): WorkerResult | null {
   const attempt = (candidate: string): WorkerResult | null => {
     let data: unknown;
@@ -45,7 +32,6 @@ export function parseWorkerResult(text: string): WorkerResult | null {
   return null;
 }
 
-// ---------- Protected-path policy (the whole tool_call hook) ----------
 
 // gh and a bare `rm -rf /` are denied outright, for every role; everything else about git
 // goes through the classifyBash tokenizer below, which is not foolable by inserted flags.
@@ -73,15 +59,7 @@ function tokenizeShell(command: string): string[] {
     .filter((tok) => tok.length > 0);
 }
 
-/**
- * Tokenizer-based classifier for bash commands, exported so it can be unit tested without a
- * Pi session. Finds every `git` invocation in the command (across `;`, `&&`, `||`, `|`, `(
- * )`, backticks and `$(`), skips its option tokens (and the value argument of options that
- * take one) to find the actual subcommand, and denies push/worktree/checkout(without `--`
- * for the reviewer or `switch`)/switch regardless of how many flags precede it. This closes
- * the `git -C .. push`, `git --no-pager push`, `git -C .. worktree remove` style bypasses
- * that a flat `/git\s+push/` regex misses.
- */
+/** Classify shell commands by tokens, including git options and compound commands. */
 export function classifyBash(command: string, role: WorkerRole): { allowed: boolean; reason?: string } {
   if (GH_DENY.test(command)) return { allowed: false, reason: 'gh CLI is not allowed' };
   if (RM_RF_ROOT_DENY.test(command)) return { allowed: false, reason: 'refusing rm -rf /' };
@@ -120,14 +98,7 @@ const WRITE_TOOLS: readonly string[] = ['edit', 'write'];
 
 type Verdict = Readonly<{ allow: true; summary: string }> | Readonly<{ allow: false; reason: string }>;
 
-/**
- * Resolve `rawPath` against the worktree and realpath it. When the path does not exist yet
- * (the write tool's normal case), realpath throws; falling back to the lexical path there
- * would let a symlink such as `evil -> /tmp` plus a write to `evil/x.txt` escape the
- * worktree undetected. Instead walk up to the deepest ancestor that does exist, realpath
- * that (resolving any symlink in the existing prefix), and re-append the remaining,
- * not-yet-existing components before the containment check.
- */
+/** Resolve symlinks through the deepest existing ancestor before checking path containment. */
 async function resolveGuardedPath(worktree: string, rawPath: string): Promise<string> {
   const resolved = resolve(worktree, rawPath);
   try {
@@ -209,7 +180,6 @@ async function evaluateToolCall(
   return { allow: true, summary: toolName };
 }
 
-// ---------- Model runtime / resolution ----------
 
 // modelsPath is left unset so Pi loads the operator's ~/.pi/agent/models.json. Custom
 // providers, their API keys and pinned routes live only in that file; passing null makes
@@ -235,7 +205,6 @@ function computeCostUsd(model: Model<Api>, usage: Readonly<{ input: number; outp
   return usd;
 }
 
-// ---------- Runner ----------
 
 export type PiWorkerRunnerOptions = Readonly<{
   modelRuntime?: ModelRuntime;

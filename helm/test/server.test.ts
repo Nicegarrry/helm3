@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Lifecycle } from '../src/lifecycle.js';
 import { serve } from '../src/server.js';
 import { TOOL_NAMES } from '../src/types.js';
 import type { ToolOutcome } from '../src/types.js';
@@ -23,6 +24,7 @@ function createFakeHelm(home: string): Helm {
   const ok = (extra: Record<string, unknown> = {}): ToolOutcome<unknown> => ({ ok: true, ...extra });
   const method = (extra: Record<string, unknown> = {}) => async () => ok(extra);
   return {
+    lifecycle: new Lifecycle(home, () => []),
     config: { home, spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 1000 },
     spawn: method({ workerId: 'w-1', branch: 'helm/w-1', worktree: '/tmp/w-1' }),
     inspect: method({ state: 'idle' }),
@@ -50,13 +52,13 @@ function createFakeHelm(home: string): Helm {
   } as unknown as Helm;
 }
 
-async function withServer(fn: (port: number) => Promise<void>): Promise<void> {
+async function withServer(fn: (port: number, helm: Helm) => Promise<void>): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'helm-serve-'));
   const helm = createFakeHelm(home);
   const handle = await serve({ helm, port: 0 });
   try {
     assert.ok(handle.port, 'http mode should report the bound port');
-    await fn(handle.port as number);
+    await fn(handle.port as number, helm);
   } finally {
     await handle.close();
     rmSync(home, { recursive: true, force: true });
@@ -221,5 +223,26 @@ test('F12: an invalid JSON body returns 400, not 500', async () => {
   await withServer(async (port) => {
     const res = await postWithHost(port, '/tools/run.status', `127.0.0.1:${port}`, '{not valid json');
     assert.equal(res.status, 400);
+  });
+});
+
+
+test('MCP drain closes admission for both MCP and CLI HTTP calls and keeps reads available', async () => {
+  await withServer(async (port) => {
+    const client = new Client({ name: 'drain-client', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+    try {
+      const call = async (name: string, args: Record<string, unknown>) => {
+        const result = await client.callTool({ name, arguments: args });
+        return JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+      };
+      assert.equal((await call('daemon.control', { action: 'drain' })).phase, 'ready');
+      const http = await postWithHost(port, '/tools/worker.spawn', `127.0.0.1:${port}`, JSON.stringify({ repo: '/repo', objective: 'new' }));
+      assert.match(JSON.parse(http.body).reason, /draining/);
+      assert.equal((await call('worker.spawn', { repo: '/repo', objective: 'new' })).ok, false);
+      assert.equal((await call('run.status', {})).ok, true);
+      assert.equal((await call('daemon.control', { action: 'resume' })).phase, 'accepting');
+      assert.equal((await call('worker.spawn', { repo: '/repo', objective: 'new' })).ok, true);
+    } finally { await client.close(); }
   });
 });

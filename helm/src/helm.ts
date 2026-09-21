@@ -38,6 +38,8 @@ import {
   stopInput,
 } from './types.js';
 
+import { Lifecycle } from './lifecycle.js';
+
 const exec = promisify(execFile);
 
 export type SpawnInput = z.infer<typeof spawnInput>;
@@ -94,8 +96,7 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Runs `fn` and turns any thrown error (including one from `must`/`requireValue` below) into
- * `{ ok: false, reason }`, so every tool method can express a refusal as a plain throw. */
+/** Runs `fn` and turns any thrown error (including one from `must`/`requireValue` below) into `{ ok: false, reason }`, so every tool method can express a refusal as a plain throw. */
 async function guard<T>(fn: () => Promise<ToolOutcome<T>>): Promise<ToolOutcome<T>> {
   try {
     return await fn();
@@ -109,8 +110,7 @@ function must(condition: unknown, reason: string): asserts condition {
   if (!condition) throw new Error(reason);
 }
 
-/** Returns `value`, or throws `reason` when it is null/undefined. The "find X or refuse" helper:
- * used for every worker/PR lookup so the refusal message is written once at the call site. */
+/** Returns `value`, or throws `reason` when it is null/undefined. */
 function requireValue<T>(value: T | null | undefined, reason: string): T {
   if (value === null || value === undefined) throw new Error(reason);
   return value;
@@ -137,6 +137,7 @@ export type OverviewWorker = {
 export type OverviewModel = { model: string; workers: number; active: number; spendUsd: number; tokens: number };
 export type SpendPoint = { at: string; spendUsd: number };
 export type Overview = {
+  daemon: ReturnType<Lifecycle['status']>;
   observedAt: string;
   run: { spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
   workers: OverviewWorker[]; models: OverviewModel[];
@@ -159,11 +160,7 @@ const DETAIL_EVENT_TAIL = 200;
 const EVENTS_DEFAULT_LIMIT = 100;
 const EVENTS_MAX_LIMIT = 1000;
 
-/**
- * Model family for review independence: the leading letters of the last path segment of the model id,
- * ignoring the provider prefix. 'opencode-go/qwen3.8-flash' -> 'qwen', 'openrouter/nvidia/nemotron-3-ultra:free' -> 'nemotron',
- * 'openai-codex/gpt-5.6-luna' -> 'gpt', 'google/gemini-3.8-flash' -> 'gemini'.
- */
+/** Review family: leading letters of the last model path segment, independent of provider. */
 export function modelFamily(model: string): string {
   const id = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
   const last = id.split('/').pop() ?? id;
@@ -177,6 +174,7 @@ const REVIEW_MODEL = 'google/gemini-3.8-flash';
 const TASK_MODELS = { normal: CODEX_MODEL, easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'opencode-go/qwen3.8-flash' } as const;
 
 export class Helm {
+  readonly lifecycle: Lifecycle;
   /** Public so server.ts can find $HELM_HOME (for serve.json) without a second config load. */
   readonly config: HelmConfig;
   private readonly store: Store;
@@ -198,6 +196,7 @@ export class Helm {
 
   constructor(deps: HelmDeps) {
     this.config = deps.config;
+    this.lifecycle = new Lifecycle(deps.config.home, () => [...this.running.keys()]);
     this.store = deps.store;
     this.workspace = deps.workspace;
     this.gates = deps.gates;
@@ -236,9 +235,7 @@ export class Helm {
     return guard(() => this.withLock(() => this.spawnLocked(input)));
   }
 
-  /** The admission-and-create section of spawn, always run under `this.lock` so maxWorkers,
-   * idempotencyKey and worktree creation cannot race with a concurrent spawn/steer. `onDone` is
-   * set only by reviewRequest, which calls this directly to post its result as a PR comment. */
+  /** Locked spawn admission; onDone keeps review posting inside the worker lifetime. */
   private async spawnLocked(
     input: SpawnInput,
     onDone?: OnDone,
@@ -443,7 +440,7 @@ export class Helm {
         return { at: p.at, spendUsd: running };
       });
       const { ok: _ok, ...run } = status;
-      return { ok: true, observedAt: now, run, workers, models: [...byModel.values()].sort((a, b) => b.spendUsd - a.spendUsd), spendSeries };
+      return { ok: true, daemon: this.lifecycle.status(), observedAt: now, run, workers, models: [...byModel.values()].sort((a, b) => b.spendUsd - a.spendUsd), spendSeries };
     });
   }
 
@@ -501,22 +498,18 @@ export class Helm {
 
   private aboveSoftCap(): boolean { const w = this.spendWarnUsd(); return w > 0 && this.store.spendTotal().spendUsd >= w; }
 
-  async runStatus(): Promise<ToolOutcome<{ spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number }>> {
+  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number }>> {
     return guard(async () => {
       const total = this.store.spendTotal();
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
       return {
-        ok: true, spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),
+        ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),
         activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents,
       };
     });
   }
 
-  /**
-   * Blocks until any of the workers leaves an active state, or the timeout passes. This is how
-   * an orchestrator waits without polling: one call per state change rather than one every few
-   * seconds. The store is re-read every `waitPollMs` in-process, which costs the caller nothing.
-   */
+  /** Wait for a settled worker or timeout; periodically re-read the store, without client polling. */
   async wait(input: WaitInput): Promise<ToolOutcome<{
     settled: Array<{ workerId: string; state: WorkerState; head: string | null; result: WorkerRow['result'] }>;
     pending: string[]; timedOut: boolean; waitedMs: number;

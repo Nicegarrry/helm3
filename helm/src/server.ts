@@ -1,7 +1,4 @@
-/**
- * `helm serve`: exposes the tool registry over MCP (stdio and Streamable HTTP) plus a
- * small loopback HTTP API the CLI uses. See DESIGN.md and one-shot-brief.md section 3.
- */
+/** `helm serve`: exposes the tool registry over MCP (stdio and Streamable HTTP) plus a small loopback HTTP API the CLI uses. */
 import { createServer, type IncomingMessage, type ServerResponse, request as httpRequest } from 'node:http';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,6 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createToolRegistry } from './tools.js';
 import { renderDashboardShell } from './ui.js';
+import { VERSION } from './lifecycle.js';
 import type { Helm } from './helm.js';
 
 export type ServeOptions = Readonly<{ helm: Helm; port?: number }>;
@@ -23,27 +21,12 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   return serveHttp(opts.helm, createToolRegistry(opts.helm), opts.port ?? 0);
 }
 
-/**
- * An MCP front-end over stdio that forwards every tool call to the daemon on `port`. It owns
- * nothing: no store, no workers. Any number of these can attach to one daemon, one per
- * orchestrator session, and each exits with its client. Calls go over `node:http` rather than
- * `fetch` because undici gives up on a response after five silent minutes, and `worker.wait`
- * may hold a response open for twenty-five.
- */
+/** Stdio proxy: owns no workers or store; forwards calls without replay. See docs/runtime-notes.md. */
 export async function serveStdioProxy(port: number): Promise<ServeHandle> {
   const local = createToolRegistry(undefined as unknown as Helm); // schemas only; `call` never runs here
   const registry: Registry = {
     list: () => local.list(),
-    call: (name, input) => new Promise((resolve) => {
-      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json' } }, (res) => {
-        let body = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk: string) => { body += chunk; });
-        res.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve({ ok: false, reason: `daemon returned ${res.statusCode}: ${body.slice(0, 200)}` }); } });
-      });
-      req.on('error', (err) => resolve({ ok: false, reason: `daemon unreachable on port ${port}: ${err.message}` }));
-      req.end(JSON.stringify(input ?? {}));
-    }),
+    call: (name, input) => callDaemon(port, name, input) as ReturnType<Registry['call']>,
   };
   const mcp = buildMcpServer(registry);
   const transport = new StdioServerTransport();
@@ -55,8 +38,22 @@ export async function serveStdioProxy(port: number): Promise<ServeHandle> {
   return { port, closed, async close() { await mcp.close(); } };
 }
 
+export function callDaemon(port: number, name: string, input: unknown): Promise<unknown> {
+  return new Promise((resolve) => {
+      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json' } }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('error', (err) => resolve({ ok: false, reason: `daemon response interrupted: ${err.message}; mutation outcome may be unknown, inspect before retrying` }));
+        res.on('data', (chunk: string) => { body += chunk; });
+        res.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve({ ok: false, reason: `daemon returned ${res.statusCode}: ${body.slice(0, 200)}` }); } });
+      });
+      req.on('error', (err) => resolve({ ok: false, reason: `daemon unreachable on port ${port}: ${err.message}` }));
+      req.end(JSON.stringify(input ?? {}));
+  });
+}
+
 function buildMcpServer(registry: Registry): McpServer {
-  const server = new McpServer({ name: 'helm', version: '1.3.0' });
+  const server = new McpServer({ name: 'helm', version: VERSION });
   for (const tool of registry.list()) {
     server.registerTool(
       tool.name,
@@ -89,7 +86,10 @@ async function serveHttp(helm: Helm, registry: Registry, requestedPort: number):
   return {
     port,
     async close() {
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      const timer = setTimeout(() => httpServer.closeAllConnections(), 100);
+      await closed;
+      clearTimeout(timer);
       try {
         rmSync(serveJsonPath, { force: true });
       } catch {
@@ -102,7 +102,7 @@ async function serveHttp(helm: Helm, registry: Registry, requestedPort: number):
 async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm: Helm, registry: Registry, getPort: () => number): Promise<void> {
   try {
     const host = req.headers.host ?? '';
-    if (host !== `127.0.0.1:${getPort()}`) {
+    if (host !== `127.0.0.1:${getPort()}` || (req.headers.origin && req.headers.origin !== `http://${host}`)) {
       res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden: bad host');
       return;
     }

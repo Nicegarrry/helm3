@@ -39,12 +39,7 @@ type PrViewJson = {
 
 const PENDING_CONTEXT_STATES: ReadonlySet<string> = new Set(['PENDING', 'EXPECTED']);
 
-/**
- * `gh` reports a check run with upper-case `status`/`conclusion` (`COMPLETED`, `SUCCESS`) and a
- * commit-status context (Vercel and friends) with only `state`. Both come out lower-case, with
- * `status: 'completed'` only once the check has actually finished and `conclusion` null until
- * then, so the merge guard can tell "still running" from "failed" and never compares cases.
- */
+/** `gh` reports a check run with upper-case `status`/`conclusion` (`COMPLETED`, `SUCCESS`) and a commit-status context (Vercel and friends) with only `state`. */
 function mapCheck(check: NonNullable<PrViewJson['statusCheckRollup']>[number]): PrStatus['checks'][number] {
   const name = check.name ?? check.context ?? 'unknown';
   if (check.status) {

@@ -35,6 +35,7 @@ else {
   emit({ type: 'item.completed', item: { id: 'i3', type: 'agent_message', text } });
   emit({ type: 'turn.completed', usage: { input_tokens: 1000, cached_input_tokens: 400, cache_write_input_tokens: 0, output_tokens: 50, reasoning_output_tokens: 10 } });
   writeFileSync(lastFile, text);
+  if (mode === 'answer-then-fail') { process.stderr.write('late failure\\n'); process.exit(3); }
 }
 `;
 
@@ -141,6 +142,22 @@ test('run: a non-zero exit with no message is an error carrying the stderr tail'
   const f = await fixture('fail');
   const { hooks } = collectHooks();
   await assert.rejects(f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks), /codex exited 2: codex: not logged in/);
+});
+
+test('run: a binary that cannot start is an error naming it, never an unhandled child error', async () => {
+  const f = await fixture('ok');
+  const runner = codexWorkerRunner({ bin: join(f.root, 'no-such-codex'), env: process.env });
+  const { hooks } = collectHooks();
+  await assert.rejects(runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks), /codex could not start \(.*no-such-codex\): .*ENOENT/);
+});
+
+test('run: an answer followed by a non-zero exit is kept, with the exit recorded as an error event', async () => {
+  const f = await fixture('answer-then-fail');
+  const { hooks, events } = collectHooks();
+  const outcome = await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks);
+  assert.equal(outcome.result?.status, 'succeeded');
+  const err = events.find((e) => e.kind === 'error');
+  assert.match(String(err?.data.message), /codex exited 3 after answering: late failure/);
 });
 
 test('run: a stop request kills the process at the next event and yields a null result, not an error', async () => {

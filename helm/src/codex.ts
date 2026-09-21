@@ -69,6 +69,10 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
         const lastFile = join(input.sessionDir, `last-${Date.now()}.md`);
         hooks.emit('turn.start', { message: prompt });
         const child = spawn(bin, codexArgs(input, spec, threadId, lastFile, network), { cwd: input.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] });
+        // A missing or non-executable binary surfaces as an 'error' event on the child, not as an
+        // exception from spawn(); left unhandled it would take the daemon down.
+        let spawnError: Error | null = null;
+        child.on('error', (err) => { spawnError = err; });
         child.stdin.on('error', () => undefined);
         child.stdin.end(`${prompt}\n\n${RESULT_INSTRUCTION}`);
         let stderr = '';
@@ -76,9 +80,9 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
         let lastText = '';
         const lines = createInterface({ input: child.stdout });
         lines.on('line', (line) => {
+          if (!hooks.shouldContinue()) { child.kill('SIGTERM'); return; }
           let ev: CodexEvent;
           try { ev = JSON.parse(line) as CodexEvent; } catch { return; }
-          if (!hooks.shouldContinue()) { child.kill('SIGTERM'); return; }
           const it = ev.item;
           if (ev.type === 'thread.started' && ev.thread_id) {
             threadId = ev.thread_id;
@@ -102,10 +106,14 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
           new Promise<void>((resolve) => lines.on('close', resolve)),
         ]);
         hooks.emit('turn.end', { exitCode: code });
+        if (spawnError) throw new Error(`codex could not start (${bin}): ${(spawnError as Error).message}`);
         const text = await readFile(lastFile, 'utf8').catch(() => lastText);
-        if (code !== 0 && text.trim() === '') {
+        if (code !== 0) {
+          const tail = stderr.trim().split('\n').at(-1) ?? '';
           if (!hooks.shouldContinue()) return ''; // killed on request: a null result, never an error
-          throw new Error(`codex exited ${code ?? 'by signal'}: ${stderr.trim().split('\n').at(-1) ?? ''}`.trim());
+          if (text.trim() === '') throw new Error(`codex exited ${code ?? 'by signal'}: ${tail}`.trim());
+          // It answered and then exited non-zero: keep the answer, record the exit so it is never silent.
+          hooks.emit('error', { message: `codex exited ${code ?? 'by signal'} after answering: ${tail}`.trim() });
         }
         return text;
       };

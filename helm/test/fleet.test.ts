@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { acquirePublisherLock, assertPrivateAccess, fetchState, listFleetRecord, mergeSnapshots, parseFleetArgs, parseServeJson, publishSnapshot, snapshotFromState, stateUrl, syncOnce, runPublisher } from '../bin/fleet.mjs';
@@ -140,7 +140,8 @@ test('empty successful-looking state and malformed owner listing fail closed', a
   assert.throws(() => parseFleetArgs(['--site','test','--source','same=/tmp/a','--source','same=/tmp/b']), /uniquely/);
   const defaults = parseFleetArgs(['--site','test']);
   assert.equal(defaults.sources.length, 1);
-  assert.doesNotMatch(JSON.stringify(defaults), /factory-scratch|Marlo/);
+  assert.equal(defaults.sources[0].home, resolve(process.env.HELM_HOME || join(homedir(), '.helm')));
+  assert.equal(defaults.sources[0].label, 'Default Helm');
 });
 
 

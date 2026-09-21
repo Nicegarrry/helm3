@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f5f2ec">
   <title>Helm Fleet</title>
   <script>(function(){try{var value=localStorage.getItem('helm-fleet-appearance');if(value==='light'||value==='dark')document.documentElement.setAttribute('data-theme',value);}catch(_){}}());</script>
-  <link rel="stylesheet" href="styles.css?v=1.7.0">
+  <link rel="stylesheet" href="styles.css?v=1.7.1">
 </head>
 <body>
   <main>
@@ -15,11 +15,11 @@
       <div class="header-actions"><label class="appearance" for="appearance"><span>Appearance</span><select id="appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><p id="freshness" class="status" role="status">Loading snapshot…</p></div>
     </header>
     <section class="metrics" aria-label="Fleet summary"><article><small>Spend</small><strong id="spend">—</strong></article><article><small>Workers</small><strong id="workers-count">—</strong></article><article><small>Unknown cost</small><strong id="unknown">—</strong></article></section>
-    <section class="filters" aria-label="Fleet filters"><label>Project <select id="project"><option value="">All projects</option></select></label><label>State <select id="state"><option value="">All states</option></select></label><label>Source <select id="source"><option value="">All sources</option></select></label></section>
+    <section class="filters" aria-label="Fleet filters"><div class="project-filter"><span class="filter-label">Project</span><div id="project-filters" class="project-tabs" role="group" aria-label="Project filters"></div></div><label>State <select id="state"><option value="">All states</option></select></label><label><span>Runner</span> <span class="help">A runner can work on several projects.</span><select id="source"><option value="">All runners</option></select></label></section>
     <p id="notice" class="notice" hidden></p>
     <section aria-labelledby="workers-heading"><div class="section-title"><div><h2 id="workers-heading">Workers</h2><ul id="source-health" aria-label="Source health"></ul></div><time id="updated"></time></div><div id="worker-list" class="worker-list" aria-live="polite"></div></section>
     <section aria-labelledby="models-heading"><h2 id="models-heading">Models</h2><div id="models" class="models"></div></section>
   </main>
-  <script type="module" src="app.js?v=1.7.0"></script>
+  <script type="module" src="app.js?v=1.7.1"></script>
 </body>
 </html>

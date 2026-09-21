@@ -6,6 +6,7 @@ let snapshot;
 let lastReceived = 0;
 let offline = false;
 let loading = false;
+let selectedProject = '';
 
 export function normalizeAppearance(value) {
   return ['system', 'light', 'dark'].includes(value) ? value : 'system';
@@ -71,6 +72,38 @@ function setOptions(id, values, label) {
   select.value = values.includes(oldValue) ? oldValue : '';
 }
 
+export function projectFilters(workers) {
+  const slugs = [...new Set(workers.map((worker) => worker.repoSlug).filter(Boolean))].sort();
+  const names = new Map();
+  for (const slug of slugs) {
+    const name = slug.split('/').pop() || slug;
+    const matches = slugs.filter((candidate) => (candidate.split('/').pop() || candidate) === name);
+    names.set(slug, matches.length > 1 ? `${name} (${slug})` : name);
+  }
+  return slugs.map((slug) => ({ key: slug, label: names.get(slug), title: slug }));
+}
+
+function renderProjectFilters() {
+  const group = $('project-filters');
+  const filters = [{ key: '', label: 'All', title: 'All projects' }, ...projectFilters(snapshot.workers)];
+  if (!filters.some((filter) => filter.key === selectedProject)) selectedProject = '';
+  const existing = new Map([...group.querySelectorAll('button')].map((button) => [button.dataset.project, button]));
+  const ordered = [];
+  for (const filter of filters) {
+    const button = existing.get(filter.key) || document.createElement('button');
+    button.type = 'button'; button.dataset.project = filter.key; button.title = filter.title;
+    button.textContent = filter.label; button.setAttribute('aria-pressed', String(selectedProject === filter.key));
+    button.className = selectedProject === filter.key ? 'selected' : '';
+    if (!existing.has(filter.key)) button.addEventListener('click', () => { selectedProject = filter.key; renderProjectFilters(); renderWorkers(); });
+    ordered.push(button);
+  }
+  if (group.children.length !== ordered.length || ordered.some((button, index) => group.children[index] !== button)) {
+    const focused = group.contains(document.activeElement) ? document.activeElement : null;
+    group.replaceChildren(...ordered);
+    if (focused) (ordered.includes(focused) ? focused : ordered[0]).focus({ preventScroll: true });
+  }
+}
+
 function freshness() {
   const node = $('freshness');
   if (!snapshot) {
@@ -102,6 +135,7 @@ function workerDetails(worker) {
   const details = document.createElement('div');
   details.className = 'worker-details';
   const rows = [
+    ['Repository', worker.repoSlug], ['Runner', worker.sourceId],
     ['Role', worker.role],
     ['Elapsed', worker.elapsedMs == null ? undefined : `${Math.round(worker.elapsedMs / 1000)}s`],
     ['Spend', money(worker.spendUsd)], ['Tokens', worker.tokens], ['Updated', worker.updatedAt], ['Head', worker.head],
@@ -119,10 +153,9 @@ function workerDetails(worker) {
 function renderWorkers() {
   const list = $('worker-list');
   const open = new Set([...list.querySelectorAll('details[open]')].map((item) => item.dataset.worker));
-  const project = $('project').value;
   const state = $('state').value;
   const sourceId = $('source').value;
-  const workers = snapshot.workers.filter((worker) => (!project || worker.repoSlug === project) && (!state || worker.state === state) && (!sourceId || worker.sourceId === sourceId));
+  const workers = snapshot.workers.filter((worker) => (!selectedProject || worker.repoSlug === selectedProject) && (!state || worker.state === state) && (!sourceId || worker.sourceId === sourceId));
   list.replaceChildren();
   if (!workers.length) {
     const empty = document.createElement('p');
@@ -134,7 +167,7 @@ function renderWorkers() {
     card.className = 'worker'; card.dataset.worker = workerKey; card.open = open.has(workerKey);
     const summary = document.createElement('summary'); const left = document.createElement('span'); const name = document.createElement('strong'); const meta = document.createElement('span'); const pill = document.createElement('span');
     meta.className = 'meta'; pill.className = `pill state-${worker.state || 'unknown'}`;
-    text(name, worker.workerId); text(meta, `${worker.sourceId || 'source unknown'} (${sourceStatus(snapshot.sources.find((source) => source.sourceId === worker.sourceId))}) · ${worker.repoSlug || 'project unknown'} · ${worker.model || 'model unknown'}`); text(pill, worker.state || 'unknown');
+    text(name, worker.workerId); text(meta, `Repository: ${worker.repoSlug || 'unknown'} · Runner: ${worker.sourceId || 'unknown'} (${sourceStatus(snapshot.sources.find((source) => source.sourceId === worker.sourceId))}) · ${worker.model || 'model unknown'}`); text(pill, worker.state || 'unknown');
     left.append(name, document.createElement('br'), meta); summary.append(left, pill); card.append(summary, workerDetails(worker)); list.append(card);
   }
 }
@@ -153,9 +186,9 @@ function render() {
   text($('spend'), `${money(snapshot.run?.spendUsd)}${snapshot.run?.spendCapUsd > 0 ? ` / ${money(snapshot.run.spendCapUsd)}` : ''}`);
   text($('workers-count'), `${counts.activeWorkers ?? 0} active · ${counts.totalWorkers ?? 0} ${counts.sourcesComplete ? 'total' : 'last known'}`); text($('unknown'), snapshot.run?.unknownCostEvents ?? '—');
   text($('notice'), `${counts.truncatedWorkers || 0} workers and ${counts.truncatedModels || 0} model rows omitted for the private size limit.`); $('notice').hidden = !(counts.truncatedWorkers || counts.truncatedModels || counts.truncatedFields);
-  setOptions('project', [...new Set(snapshot.workers.map((worker) => worker.repoSlug).filter(Boolean))].sort(), 'All projects');
+  renderProjectFilters();
   setOptions('state', [...new Set(snapshot.workers.map((worker) => worker.state).filter(Boolean))].sort(), 'All states');
-  setOptions('source', [...new Set(snapshot.sources.map((item) => item.sourceId).filter(Boolean))].sort(), 'All sources');
+  setOptions('source', [...new Set(snapshot.sources.map((item) => item.sourceId).filter(Boolean))].sort(), 'All runners');
   sourceHealth(); renderWorkers(); renderModels(); freshness();
 }
 
@@ -196,7 +229,7 @@ if (typeof document !== 'undefined') {
   });
   if (media?.addEventListener) media.addEventListener('change', onSystemThemeChange);
   else media?.addListener?.(onSystemThemeChange);
-  for (const id of ['project', 'state', 'source']) $(id).addEventListener('change', renderWorkers);
+  for (const id of ['state', 'source']) $(id).addEventListener('change', renderWorkers);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) void load(); });
   setInterval(() => {
     void load();

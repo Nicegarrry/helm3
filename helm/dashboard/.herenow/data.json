@@ -1,0 +1,10 @@
+{
+  "collections": {
+    "fleet": {
+      "fields": {
+        "snapshot": { "type": "string", "required": true, "maxLength": 15000 }
+      },
+      "access": { "read": "public", "insert": "owner", "update": "owner", "delete": "owner" }
+    }
+  }
+}

@@ -270,3 +270,13 @@ npm test
 Tests run against Pi's packaged faux provider and a fake `gh`; no network, no credentials.
 `test/e2e.test.ts` drives the real composition (SQLite, git worktree, gate runner, Pi
 session, HTTP daemon) end to end.
+
+## Private mobile monitoring (v1.6)
+
+Publish `helm/dashboard/` to a PIN-protected here.now site, then run
+`helm fleet sync --site YOUR_PRIVATE_SLUG` alongside your existing daemon.
+Use repeatable `--source label=/absolute/helm-home` flags for multiple fleets.
+The phone view refreshes every 30 seconds and shows stale or unavailable sources
+without exposing prompts, logs or build controls. This companion does not require
+a daemon restart. See [mobile fleet setup](docs/mobile-fleet.md) for access checks,
+credentials, source selection, and stopping the publisher.

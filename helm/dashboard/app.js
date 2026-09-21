@@ -97,7 +97,11 @@ function renderProjectFilters() {
     if (!existing.has(filter.key)) button.addEventListener('click', () => { selectedProject = filter.key; renderProjectFilters(); renderWorkers(); });
     ordered.push(button);
   }
-  if (ordered.some((button, index) => group.children[index] !== button)) group.replaceChildren(...ordered);
+  if (group.children.length !== ordered.length || ordered.some((button, index) => group.children[index] !== button)) {
+    const focused = group.contains(document.activeElement) ? document.activeElement : null;
+    group.replaceChildren(...ordered);
+    if (focused) (ordered.includes(focused) ? focused : ordered[0]).focus({ preventScroll: true });
+  }
 }
 
 function freshness() {

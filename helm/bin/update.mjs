@@ -38,7 +38,7 @@ export function digestRelease(root) {
 
 export async function control(port, input) {
   const res = await fetch(`http://127.0.0.1:${port}/tools/daemon.control`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(5000),
+    method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' }, body: JSON.stringify(input), signal: AbortSignal.timeout(5000),
   });
   const result = await res.json();
   if (!result.ok || result.protocol !== 1) throw new Error(result.reason ?? 'daemon has no safe upgrade protocol; arrange a quiet-window installation');

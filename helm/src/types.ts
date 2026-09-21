@@ -219,7 +219,8 @@ export const spawnInput = z.object({
   repo: z.string().min(1),
   objective: z.string().min(1).max(20000),
   acceptance: z.string().max(20000).optional(),
-  model: z.string().min(1),
+  model: z.string().min(1).optional(),
+  difficulty: z.enum(['super-easy', 'easy', 'normal']).optional(),
   baseRef: z.string().min(1).optional(),
   role: z.enum(WORKER_ROLES).default('builder'),
   contextPaths: z.array(z.string().min(1)).max(64).default([]),
@@ -239,7 +240,7 @@ export const waitInput = z.object({
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
 export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
-export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1), allowSameFamily: z.boolean().default(false) }).strict();
+export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
 export const emptyInput = z.object({}).strict();
 

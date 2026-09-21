@@ -57,7 +57,7 @@ test('call() rejects an unknown tool name', async () => {
 test('call() rejects input that fails schema validation', async () => {
   const { helm } = createFakeHelm();
   const registry = createToolRegistry(helm);
-  const outcome = await registry.call('worker.spawn', { repo: '/x' }); // missing objective and model
+  const outcome = await registry.call('worker.spawn', { repo: '/x' }); // missing objective
   assert.equal(outcome.ok, false);
   if (!outcome.ok) assert.match(outcome.reason, /invalid input/);
 });
@@ -79,4 +79,15 @@ test('call() validates and dispatches a valid call to the matching Helm method',
   const mergeOutcome = await registry.call('pr.merge', { number: 1, expectedHead: 'a'.repeat(40) });
   assert.equal(mergeOutcome.ok, true);
   assert.equal(calls.at(-1)?.method, 'prMerge');
+});
+
+
+test('routing inputs accept omitted models and reject invalid difficulty before dispatch', async () => {
+  const { helm, calls } = createFakeHelm();
+  const registry = createToolRegistry(helm);
+  assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'task', difficulty: 'super-easy' })).ok, true);
+  assert.equal((await registry.call('review.request', { workerId: 'w-1' })).ok, true);
+  assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'task', difficulty: 'unknown' })).ok, false);
+  assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'task', model: '' })).ok, false);
+  assert.equal(calls.length, 2);
 });

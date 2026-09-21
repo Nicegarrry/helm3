@@ -1,8 +1,4 @@
-/**
- * The Helm service: composes Store, Workspace, GateRunner, GitHub and WorkerRunner and
- * implements the ten (plus pr.merge) tools. Every public method returns a ToolOutcome and
- * never throws across the boundary. See DESIGN.md and docs/one-shot-brief.md sections 3-7.
- */
+/** Helm service: composes the runtime and implements the twelve tools. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -175,6 +171,11 @@ export function modelFamily(model: string): string {
   return (m ? m[0] : last).toLowerCase();
 }
 
+// Explicit model overrides remain available; automatic choices exclude Kimi K3 and Qwen Max.
+const CODEX_MODEL = 'codex/gpt-5.6-terra:medium';
+const REVIEW_MODEL = 'google/gemini-3.8-flash';
+const TASK_MODELS = { normal: CODEX_MODEL, easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'opencode-go/qwen3.8-flash' } as const;
+
 export class Helm {
   /** Public so server.ts can find $HELM_HOME (for serve.json) without a second config load. */
   readonly config: HelmConfig;
@@ -246,6 +247,7 @@ export class Helm {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
       if (existing) return { ok: true, workerId: existing.workerId, branch: existing.branch, worktree: existing.worktree };
     }
+    const model = input.model ?? (input.role === 'reviewer' ? REVIEW_MODEL : TASK_MODELS[input.difficulty ?? 'normal']);
     const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
     must(active < this.config.maxWorkers, `max workers reached (${this.config.maxWorkers})`);
     must(!this.spendCapExceeded(), 'spend cap reached');
@@ -260,7 +262,7 @@ export class Helm {
     await this.workspace.create(repo, worktree, branch, baseSha);
     const createdAt = this.nowIso();
     const row: WorkerRow = {
-      workerId, repo, repoSlug, role: input.role, model: input.model, objective: input.objective,
+      workerId, repo, repoSlug, role: input.role, model, objective: input.objective,
       acceptance: input.acceptance ?? null, contextPaths: [...input.contextPaths], allowWorkflows: input.allowWorkflows,
       baseRef, baseSha, branch, worktree, state: 'queued', head: null, sessionFile: null, result: null,
       rawResultText: null, idempotencyKey: input.idempotencyKey ?? null, createdAt, updatedAt: createdAt,
@@ -271,7 +273,7 @@ export class Helm {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
     }
-    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model: input.model, baseRef, baseSha, branch, worktree });
+    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput) : this.prompts.builder(promptInput);
     this.startRun(workerId, message, onDone);
@@ -402,12 +404,13 @@ export class Helm {
       const byWorker = input.number === undefined && input.workerId ? this.store.getPrByWorker(input.workerId) : undefined;
       const pr = requireValue(byNumber ?? byWorker, 'pr not found');
       const sourceWorker = requireValue(this.store.getWorker(pr.workerId), 'source worker not found');
-      must(input.model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
-      must(input.allowSameFamily || modelFamily(input.model) !== modelFamily(sourceWorker.model),
-        `reviewer model family '${modelFamily(input.model)}' matches the builder's; pick another family or pass allowSameFamily`);
+      const model = input.model ?? (modelFamily(sourceWorker.model) === 'gemini' ? CODEX_MODEL : REVIEW_MODEL);
+      must(model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
+      must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
+        `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {
-        repo: sourceWorker.repo, objective, model: input.model, baseRef: sourceWorker.branch,
+        repo: sourceWorker.repo, objective, model, baseRef: sourceWorker.branch,
         role: 'reviewer', contextPaths: [], allowWorkflows: false,
       };
       const onDone: OnDone = async (workerId, result) => {

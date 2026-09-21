@@ -37,7 +37,7 @@ function def<S extends z.ZodObject>(name: ToolName, description: string, inputSc
 }
 
 const TOOLS: readonly ToolDef[] = [
-  def('worker.spawn', 'Start a new Pi worker in an isolated git worktree to work on an objective; returns the worker id, branch and worktree path.', spawnInput, (h, i) => h.spawn(i)),
+  def('worker.spawn', 'Start an isolated worker. Omit model for Codex subscription (Terra); difficulty=easy uses Codex Luna; super-easy uses Qwen 3.8 Flash. Kimi K3 and Qwen 3.8 Max are excluded from automatic selection. Explicit model overrides are honoured.', spawnInput, (h, i) => h.spawn(i)),
   def('worker.inspect', 'Get a worker\'s current state, spend, diff stat, result and recent events.', inspectInput, (h, i) => h.inspect(i)),
   def('worker.list', 'List workers, optionally filtered by repo and/or state, as one summary per worker.', listInput, (h, i) => h.list(i)),
   def('worker.wait', 'Block until any of the given workers leaves queued/running (to succeeded, failed, idle, stopped or interrupted) or the timeout passes. Use this instead of polling worker.inspect; if it returns timedOut, call it again.', waitInput, (h, i) => h.wait(i)),
@@ -46,7 +46,7 @@ const TOOLS: readonly ToolDef[] = [
   def('gate.run', 'Run the repo\'s checks (tests, lint, etc.) against a worker\'s current commit and record pass/fail.', gateInput, (h, i) => h.gate(i)),
   def('pr.open', 'Push a worker\'s branch and open a pull request; requires a passing gate at the worker\'s current head.', prOpenInput, (h, i) => h.prOpen(i)),
   def('pr.status', 'Get a pull request\'s open/closed/merged state, mergeability, checks and reviews, by PR number or worker id.', prStatusInput, (h, i) => h.prStatus(i)),
-  def('review.request', 'Spawn a reviewer worker to review an open pull request; it posts its findings as a PR comment when done.', reviewInput, (h, i) => h.reviewRequest(i)),
+  def('review.request', 'Review an open PR. Omit model for Gemini Flash, or Codex Terra when the builder is Gemini, preserving family independence. Posts findings as a PR comment.', reviewInput, (h, i) => h.reviewRequest(i)),
   def('run.status', 'Get overall spend, the spend cap, and how many worker slots are active out of the configured maximum.', emptyInput, (h) => h.runStatus()),
   def('pr.merge', 'Merge a pull request, but only if it is open, mergeable, at the exact expected head commit, and all checks passed.', prMergeInput, (h, i) => h.prMerge(i)),
 ];

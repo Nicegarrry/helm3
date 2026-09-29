@@ -27,7 +27,8 @@ type Options = Readonly<{
   log?: (line: string) => void;
 }>;
 
-type Pending = { project: string; lines: string[]; firstAt: number };
+type Pending = { project: string; lines: string[]; firstAt: number; nextAttemptAt: number; lastSeq: number };
+type PostResult = 'sent' | 'drop' | 'retry';
 
 function text(value: unknown, fallback: string): string {
   if (typeof value === 'number' && Number.isFinite(value)) return String(value);
@@ -48,7 +49,6 @@ export function createDiscord(options: Options): DiscordService {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const now = options.now ?? (() => new Date());
   const env = { ...loadEnvFile(options.envFile ?? join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) };
-  const pending = new Map<string, Pending>();
   const sent = new Map<string, number[]>();
   const muted = new Map<string, number>();
   const nickAt = new Map<string, number>();
@@ -61,23 +61,39 @@ export function createDiscord(options: Options): DiscordService {
     return name ? env[name] : undefined;
   }
 
-  async function post(project: string, content: string): Promise<boolean> {
+  options.store.sql.exec(`
+    CREATE TABLE IF NOT EXISTS discord_pending (
+      project TEXT PRIMARY KEY,
+      lines TEXT NOT NULL,
+      firstAt INTEGER NOT NULL,
+      nextAttemptAt INTEGER NOT NULL,
+      lastSeq INTEGER NOT NULL
+    )
+  `);
+  const getPendingStmt = options.store.sql.prepare('SELECT * FROM discord_pending WHERE project = ?');
+  const upsertPendingStmt = options.store.sql.prepare(`
+    INSERT INTO discord_pending (project, lines, firstAt, nextAttemptAt, lastSeq) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(project) DO UPDATE SET lines = excluded.lines, lastSeq = excluded.lastSeq
+  `);
+  const listPendingStmt = options.store.sql.prepare('SELECT * FROM discord_pending ORDER BY firstAt ASC, project ASC');
+  const deletePendingStmt = options.store.sql.prepare('DELETE FROM discord_pending WHERE project = ?');
+  const retryPendingStmt = options.store.sql.prepare('UPDATE discord_pending SET nextAttemptAt = ? WHERE project = ?');
+
+  async function post(project: string, content: string): Promise<PostResult> {
     const url = webhook(project);
-    if (!url) return false;
+    if (!url) return 'drop';
     try {
       const response = await fetchImpl(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ content, username: 'Helm', allowed_mentions: { parse: [] } }),
+        body: JSON.stringify({ content: content.slice(0, 2000), username: 'Helm', allowed_mentions: { parse: [] } }),
       });
-      if (!response.ok) {
-        log(`daemon.log: Discord post failed for ${project} (HTTP ${response.status})`);
-        return false;
-      }
-      return true;
+      if (response.status >= 200 && response.status < 300) return 'sent';
+      log(`daemon.log: Discord post failed for ${project} (HTTP ${response.status})`);
+      return response.status === 429 || response.status >= 500 ? 'retry' : 'drop';
     } catch {
       log(`daemon.log: Discord post failed for ${project}`);
-      return false;
+      return 'retry';
     }
   }
 
@@ -87,33 +103,44 @@ export function createDiscord(options: Options): DiscordService {
       if (!line) continue;
       const worker = options.store.getWorker(event.workerId);
       const project = text(event.data.project ?? worker?.repoSlug, 'unknown');
-      const row = pending.get(project) ?? { project, lines: [], firstAt: now().getTime() };
-      row.lines.push(line);
-      pending.set(project, row);
+      const existing = getPendingStmt.get(project) as Record<string, unknown> | undefined;
+      const lastSeq = Number(existing?.lastSeq ?? 0);
+      if (event.seq <= lastSeq) continue;
+      const lines = existing ? JSON.parse(String(existing.lines)) as string[] : [];
+      lines.push(line);
+      upsertPendingStmt.run(project, JSON.stringify(lines), Number(existing?.firstAt ?? now().getTime()), Number(existing?.nextAttemptAt ?? 0), event.seq);
     }
   });
 
-  async function flush(project: string, row: Pending): Promise<void> {
+  async function flush(row: Pending): Promise<void> {
+    const project = row.project;
     const configured = options.settings.discord.projects[project];
-    if (!configured || !webhook(project)) { pending.delete(project); return; }
+    if (!configured || !webhook(project)) { deletePendingStmt.run(project); return; }
     const current = now().getTime();
+    if (current < row.nextAttemptAt || current - row.firstAt < options.settings.discord.digestSec * 1000) return;
     const hourAgo = current - 60 * 60_000;
     const times = (sent.get(project) ?? []).filter((at) => at > hourAgo);
     sent.set(project, times);
     const max = options.settings.discord.maxPerHour;
     if (times.length >= max) {
-      if (muted.has(project) && muted.get(project)! > hourAgo) { pending.delete(project); return; }
+      if (muted.has(project) && muted.get(project)! > hourAgo) { deletePendingStmt.run(project); return; }
       const oldest = times[0] ?? current;
       const minutes = Math.max(1, Math.ceil((oldest + 60 * 60_000 - current) / 60_000));
-      if (await post(project, `muted for ${minutes} min`)) {
+      const result = await post(project, `muted for ${minutes} min`);
+      if (result === 'sent' || result === 'drop') {
         muted.set(project, current);
-        pending.delete(project);
+        deletePendingStmt.run(project);
+      } else {
+        retryPendingStmt.run(current + options.settings.discord.digestSec * 1000, project);
       }
       return;
     }
-    if (await post(project, row.lines.join('\n'))) {
+    const result = await post(project, row.lines.join('\n'));
+    if (result === 'sent' || result === 'drop') {
       sent.set(project, [...times, current]);
-      pending.delete(project);
+      deletePendingStmt.run(project);
+    } else {
+      retryPendingStmt.run(current + options.settings.discord.digestSec * 1000, project);
     }
   }
 
@@ -123,7 +150,8 @@ export function createDiscord(options: Options): DiscordService {
     const current = now().getTime();
     const previous = nickAt.get(project);
     if (previous !== undefined && current - previous < 60_000) return { ok: false, reason: 'notify.nick is rate-limited to once per minute' };
-    if (!(await post(project, content))) return { ok: false, reason: 'Discord post failed' };
+    const result = await post(project, content.slice(0, 2000));
+    if (result !== 'sent') return { ok: false, reason: 'Discord post failed' };
     nickAt.set(project, current);
     sent.set(project, [...(sent.get(project) ?? []).filter((at) => at > current - 60 * 60_000), current]);
     return { ok: true, sent: true };
@@ -133,10 +161,11 @@ export function createDiscord(options: Options): DiscordService {
     consume,
     async tick() {
       await consume();
-      const current = now().getTime();
-      for (const [project, row] of pending) {
-        if (current - row.firstAt >= options.settings.discord.digestSec * 1000) await flush(project, row);
-      }
+      const rows = listPendingStmt.all() as Array<Record<string, unknown>>;
+      for (const row of rows) await flush({
+        project: String(row.project), lines: JSON.parse(String(row.lines)) as string[], firstAt: Number(row.firstAt),
+        nextAttemptAt: Number(row.nextAttemptAt), lastSeq: Number(row.lastSeq),
+      });
     },
     notifyNick,
   };

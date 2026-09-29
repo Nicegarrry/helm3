@@ -49,8 +49,18 @@ test('large score routes high and records one shared Jev question set', async ()
 });
 
 test('score probabilities use the indexed 0 through 3 shape', async () => {
-  const fixture = routeFixture({ complexity: { probabilities: { '0': 0, '1': 0, '2': 0.6, '3': 0.4 } }, too_big: { noul: false } });
-  try { assert.deepEqual(await choose(fixture.route, input('acme/repo', 'large task')), { model: HIGH, band: 'large', complexity: 2.4 }); } finally { fixture.store.close(); }
+  const fixture = routeFixture({ complexity: { probabilities: { '0': 0, '1': 0, '2': 0.6, '3': 0.4 } }, too_big: { probabilities: { true: 0.6, false: 0.4 } } });
+  try { assert.deepEqual(await choose(fixture.route, input('acme/repo', 'large task')), { model: HIGH, band: 'large', complexity: 2.4, warning: 'split recommended' }); } finally { fixture.store.close(); }
+});
+
+test('Jev failures fall back to high without throwing', async () => {
+  const store = openStore(':memory:'); const settings = loadSettings('/missing-route-settings');
+  try {
+    const failingJeves: Jev[] = [{ shadow: true, async ask() { throw new Error('timeout'); } }, { shadow: true, async ask() { return Promise.reject(new Error('timeout')); } }];
+    for (const jev of failingJeves) {
+      assert.deepEqual(await choose(createRouter({ settings, store, jev }), input('acme/repo', 'task')), { model: HIGH });
+    }
+  } finally { store.close(); }
 });
 
 test('a low medium-band clean rate steps up to high', async () => {
@@ -67,6 +77,12 @@ test('a configured model outside allowed is clamped to high', async () => {
   const defaults = loadSettings('/missing-route-settings');
   const fixture = routeFixture(answers(1.7), { ...defaults.routing, table: { ...defaults.routing.table, medium: 'other/model' } });
   try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, HIGH); } finally { fixture.store.close(); }
+});
+
+test('routing clamps to the strongest configured allowed model', async () => {
+  const defaults = loadSettings('/missing-route-settings');
+  const fixture = routeFixture(answers(1.7), { ...defaults.routing, allowed: [MEDIUM], table: { ...defaults.routing.table, medium: 'other/model' } });
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
 });
 
 test('no Jev key and too_big are safe fallback and warning cases', async () => {

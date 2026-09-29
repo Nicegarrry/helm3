@@ -14,9 +14,16 @@ function numberOf(answer: JevAnswer | undefined, name: string): number | boolean
   if (typeof answer.noul === 'number' || typeof answer.noul === 'boolean') return answer.noul;
   return answer.probabilities?.[name];
 }
-function flag(answer: JevAnswer | undefined, name: string, atLeast: boolean): boolean {
+export function flag(answer: JevAnswer | undefined, name: string, atLeast: boolean): boolean {
   const value = numberOf(answer, name);
   return typeof value === 'boolean' ? value : atLeast ? (value ?? 0) >= 0.5 : (value ?? 1) < 0.5;
+}
+export function score(answer: JevAnswer | undefined): number | undefined {
+  if (typeof answer?.score === 'number' && Number.isFinite(answer.score)) return answer.score;
+  const probabilities = answer?.probabilities;
+  if (!probabilities) return undefined;
+  const values = [0, 1, 2, 3].map((value) => probabilities[String(value)] ?? 0);
+  return values.every((value) => Number.isFinite(value)) ? Math.round(values.reduce((total, value, valueIndex) => total + value * valueIndex, 0) * 10_000) / 10_000 : undefined;
 }
 function text(value: unknown, limit = 3000): string { return (typeof value === 'string' ? value : JSON.stringify(value) ?? '').slice(0, limit); }
 function relation(answer: JevAnswer | undefined): { different: number; related: number; same: number } { return { different: answer?.probabilities?.['0'] ?? 0, related: answer?.probabilities?.['1'] ?? 0, same: answer?.probabilities?.['2'] ?? 0 }; }
@@ -30,8 +37,8 @@ export function createJevCheck({ jev, store }: { jev: Jev; store: Store }): JevC
     if (input.preset === 'issue') {
       const result = await ask('issue', input.project, input.input, issueQuestions());
       if (!result.ok) return result;
-      const score = result.answers.complexity?.score;
-      return { ok: true, flags: { testable: flag(result.answers.testable, 'true', false), too_big: flag(result.answers.too_big, 'true', true) }, complexity: { score, band: band(score) }, answers: result.answers };
+      const scoreValue = score(result.answers.complexity);
+      return { ok: true, flags: { testable: flag(result.answers.testable, 'true', false), too_big: flag(result.answers.too_big, 'true', true) }, complexity: { score: scoreValue, band: band(scoreValue) }, answers: result.answers };
     }
     if (input.preset === 'verdict') {
       const result = await ask('verdict', input.project, { body: text(input.input, 6000) }, { verdict: { type: 'noul', instructions: 'Does this code review approve the change for merge (as opposed to requesting changes)?' } });

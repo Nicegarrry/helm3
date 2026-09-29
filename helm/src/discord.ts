@@ -76,6 +76,10 @@ export function createDiscord(options: Options): DiscordService {
     if (!url) return undefined;
     try {
       const parsed = new URL(url);
+      const webhook = /^\/api\/(?:v\d+\/)?webhooks\/([^/]+)\/([^/]+)\/?$/i.exec(parsed.pathname);
+      if (webhook && ['discord.com', 'discordapp.com', 'ptb.discord.com', 'canary.discord.com'].includes(parsed.hostname.toLowerCase())) {
+        return `discord-webhook:${webhook[1]}/${webhook[2]}`;
+      }
       const path = parsed.pathname.replace(/\/+$/, '') || '/';
       return `${parsed.host.toLowerCase()}${path}`;
     } catch {

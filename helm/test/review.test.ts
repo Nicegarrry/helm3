@@ -71,6 +71,17 @@ test('an old-head review is rejected, then carried by the same patch id', async 
   } finally { d.store.close(); }
 });
 
+test('pr.merge refuses an old-head approval when the patch id changes', async () => {
+  const d = setup({ patchIds: { [head1]: 'patch-1', [head2]: 'patch-2' } });
+  try {
+    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-17', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    d.setHead(head2);
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head2 }), { ok: false, reason: `no approving review at ${head2}` });
+    assert.equal(d.merged(), 0);
+  } finally { d.store.close(); }
+});
+
 test('review.record refuses a stale head', async () => {
   const d = setup();
   try {

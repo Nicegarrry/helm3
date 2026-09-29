@@ -56,7 +56,7 @@ import { validatorPrompt } from './prompt.js';
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { confirmTap, consumeTap, ensureTapTable, envelopeBudgetGuard, envelopePath, readEnvelope, requestTap, type EnvelopeView } from './envelope.js';
+import { confirmTap, consumeTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTapsOnStartup, readEnvelope, requestTap, type EnvelopeView } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -117,6 +117,7 @@ export type HelmDeps = Readonly<{
   review?: ReviewService;
   jevChecker?: JevCheckService;
   randomInt?: (min: number, max: number) => number;
+  tapPepper?: Buffer;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -232,6 +233,8 @@ export class Helm {
   private readonly waitPollMs: number;
   private readonly settings: Settings;
   private readonly tapRandomInt?: (min: number, max: number) => number;
+  private readonly tapPepper: Buffer;
+  private readonly restartExpiredTaps: ReadonlySet<string>;
   private readonly guards = new Map<string, ToolGuard[]>();
   private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
@@ -255,6 +258,7 @@ export class Helm {
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     this.tapRandomInt = deps.randomInt;
+    this.tapPepper = deps.tapPepper ?? randomBytes(32);
     ensureBudgetTables(this.store);
     ensureBaselineTable(this.store);
     this.supervisor = deps.supervisor;
@@ -263,6 +267,7 @@ export class Helm {
     if (this.review) this.guard('pr.merge', (input) => this.review!.guard(input));
     this.jevChecker = deps.jevChecker;
     ensureTapTable(this.store);
+    this.restartExpiredTaps = expireTapsOnStartup(this.store);
     this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput, (project, kind, expectedActionHash, tapId) =>
       tapId ? consumeTap(this.store, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required'));
   }
@@ -688,6 +693,7 @@ export class Helm {
         ttlMin: this.settings.factory.tapTtlMin,
         now: () => this.nowDate(),
         randomInt: this.tapRandomInt,
+        pepper: this.tapPepper,
         post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: 'no tap channel configured' }),
       });
       return result;
@@ -695,7 +701,7 @@ export class Helm {
   }
 
   async tapConfirm(input: TapConfirmInput): Promise<ToolOutcome<{ granted: true }>> {
-    return runGuard(async () => confirmTap(this.store, input, this.nowDate()));
+    return runGuard(async () => confirmTap(this.store, input, this.tapPepper, this.nowDate(), this.restartExpiredTaps));
   }
 
   async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { z } from 'zod';
@@ -33,11 +33,18 @@ export function ensureTapTable(store: Store): void {
   )`);
 }
 
+export function expireTapsOnStartup(store: Store): Set<string> {
+  ensureTapTable(store);
+  const rows = store.sql.prepare("SELECT id FROM taps WHERE state IN ('pending', 'granted')").all() as Array<{ id: string }>;
+  store.sql.exec("UPDATE taps SET state = 'expired' WHERE state IN ('pending', 'granted')");
+  return new Set(rows.map((row) => row.id));
+}
+
 function tapRow(row: Record<string, unknown>): TapRow {
   return { id: String(row.id), project: String(row.project), kind: String(row.kind), action: String(row.action), actionHash: String(row.actionHash), codeHash: String(row.codeHash), state: row.state as TapRow['state'], attempts: Number(row.attempts), requestedAt: String(row.requestedAt), grantedAt: row.grantedAt ? String(row.grantedAt) : null, usedAt: row.usedAt ? String(row.usedAt) : null, expiresAt: String(row.expiresAt) };
 }
 
-export async function requestTap(store: Store, input: { project: string; kind: string; action: string }, options: { ttlMin: number; post: (content: string) => Promise<TapPostResult>; now?: () => Date; randomInt?: (min: number, max: number) => number }): Promise<{ ok: true; id: string; expiresAt: string } | { ok: false; reason: string }> {
+export async function requestTap(store: Store, input: { project: string; kind: string; action: string }, options: { ttlMin: number; post: (content: string) => Promise<TapPostResult>; pepper: Buffer; now?: () => Date; randomInt?: (min: number, max: number) => number }): Promise<{ ok: true; id: string; expiresAt: string } | { ok: false; reason: string }> {
   ensureTapTable(store);
   const now = options.now ?? (() => new Date());
   const requestedAt = now();
@@ -47,7 +54,7 @@ export async function requestTap(store: Store, input: { project: string; kind: s
   const message = `Tap needed for ${input.project}: ${input.action}. Tell your supervisor: tap ${id} ${code}`;
   if (message.length > 2_000) return { ok: false, reason: 'tap action too long' };
   store.sql.prepare('INSERT INTO taps (id, project, kind, action, actionHash, codeHash, state, attempts, requestedAt, expiresAt) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)')
-    .run(id, input.project, input.kind, input.action, actionHash(input.action), digest(`${id}:${code}`), 'pending', requestedAt.toISOString(), expiresAt);
+    .run(id, input.project, input.kind, input.action, actionHash(input.action), tapCodeHash(options.pepper, id, code), 'pending', requestedAt.toISOString(), expiresAt);
   try {
     const posted = await options.post(message);
     if (!posted.ok) throw new Error(posted.reason === 'no tap channel configured' ? posted.reason : 'tap channel post failed');
@@ -58,18 +65,19 @@ export async function requestTap(store: Store, input: { project: string; kind: s
   return { ok: true, id, expiresAt };
 }
 
-export function confirmTap(store: Store, input: { id: string; code: string }, now = new Date()): { ok: true; granted: true } | { ok: false; reason: string } {
+export function confirmTap(store: Store, input: { id: string; code: string }, pepper: Buffer, now = new Date(), restartExpired: ReadonlySet<string> = new Set<string>()): { ok: true; granted: true } | { ok: false; reason: string } {
   ensureTapTable(store);
   const row = store.sql.prepare('SELECT * FROM taps WHERE id = ?').get(input.id) as Record<string, unknown> | undefined;
   if (!row) return { ok: false, reason: 'tap not found' };
   const tap = tapRow(row);
+  if (tap.state === 'expired' && restartExpired.has(tap.id)) return { ok: false, reason: 'tap expired (daemon restarted); request a new tap' };
   if (tap.state !== 'pending') return { ok: false, reason: `tap is ${tap.state}` };
   if (Date.parse(tap.expiresAt) <= now.getTime()) {
     store.sql.prepare("UPDATE taps SET state = 'expired' WHERE id = ? AND state = 'pending'").run(tap.id);
     return { ok: false, reason: 'tap expired' };
   }
   const expected = Buffer.from(tap.codeHash, 'hex');
-  const actual = Buffer.from(digest(`${tap.id}:${input.code}`), 'hex');
+  const actual = Buffer.from(tapCodeHash(pepper, tap.id, input.code), 'hex');
   if (!timingSafeEqual(expected, actual)) {
     const changed = store.sql.prepare("UPDATE taps SET attempts = attempts + 1, state = CASE WHEN attempts + 1 >= 3 THEN 'denied' ELSE 'pending' END WHERE id = ? AND state = 'pending' AND expiresAt > ?").run(tap.id, now.toISOString());
     if (Number(changed.changes) !== 1) return { ok: false, reason: 'tap is no longer pending' };
@@ -109,6 +117,7 @@ function projectPath(home: string, project: string): string {
 }
 export function envelopePath(home: string, project: string): string { return projectPath(home, project); }
 function digest(bytes: string | Buffer): string { return createHash('sha256').update(bytes).digest('hex'); }
+function tapCodeHash(pepper: Buffer, id: string, code: string): string { return createHmac('sha256', pepper).update(`${id}:${code}`).digest('hex'); }
 function summary(value: Envelope): string { return `budget $${value.budget.maxSprintUsd}/${value.budget.maxSprintCodexTokens} tokens; deploy ${Object.entries(value.deploy).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'}; tap-only ${value.tapOnly.join(', ') || 'none'}`; }
 
 export function readEnvelope(home: string, project: string, log: (line: string) => void = console.error): EnvelopeView {

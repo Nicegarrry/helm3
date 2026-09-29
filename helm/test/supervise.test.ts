@@ -201,8 +201,10 @@ test('herdr host passes --ansi when reading the visible prompt and accepts done 
   const calls: string[][] = [];
   const fakeExec = async (_command: string, args: readonly string[]) => {
     calls.push([...args]);
-    if (args[0] === 'workspace') return { stdout: JSON.stringify({ workspaces: [{ id: 'ws-1', label: 'owner repo' }] }) };
-    if (args[0] === 'pane' && args[1] === 'list') return { stdout: JSON.stringify({ panes: [{ pane_id: 'p-1', agent_status: 'done' }] }) };
+    assert.ok(!args.includes('--json'), 'herdr 0.7.1 rejects --json');
+    if (args[0] === 'workspace' && args[1] === 'create') return { stdout: JSON.stringify({ id: 'cli:workspace:create', result: { type: 'workspace_created', workspace: { workspace_id: 'ws-2', label: 'new label' }, root_pane: { pane_id: 'ws-2:p1', agent_status: 'idle' } } }) };
+    if (args[0] === 'workspace') return { stdout: JSON.stringify({ id: 'cli:workspace:list', result: { type: 'workspace_list', workspaces: [{ workspace_id: 'ws-1', label: 'owner repo', agent_status: 'done', focused: false, pane_count: 1, tab_count: 1 }] } }) };
+    if (args[0] === 'pane' && args[1] === 'list') return { stdout: JSON.stringify({ id: 'cli:pane:list', result: { panes: [{ pane_id: 'p-1', agent_status: 'done', workspace_id: 'ws-1' }], type: 'pane_list' } }) };
     return { stdout: '\u001b[2mTry "…"\u001b[0m\n❯\u001b[2mTry "…"\u001b[0m' };
   };
   const host = herdrHost(fakeExec);
@@ -212,13 +214,15 @@ test('herdr host passes --ansi when reading the visible prompt and accepts done 
   assert.equal(await host.status(pane), 'idle');
   assert.equal(await host.promptEmpty(pane), true);
   assert.ok(calls.some((args) => args.includes('--ansi')));
+  assert.deepEqual(await host.create('new label', '/tmp', 'claude'), { id: 'ws-2:p1', workspaceId: 'ws-2', label: 'new label', host: 'herdr' });
 });
 
 test('herdr host refuses dash-prefixed positional values before executing', async () => {
   const calls: string[][] = [];
   const fakeExec = async (_command: string, args: readonly string[]) => {
     calls.push([...args]);
-    if (args[0] === 'workspace') return { stdout: JSON.stringify({ root_pane: { pane_id: 'p-1' }, workspace_id: 'ws-1' }) };
+    assert.ok(!args.includes('--json'), 'herdr 0.7.1 rejects --json');
+    if (args[0] === 'workspace') return { stdout: JSON.stringify({ id: 'cli:workspace:create', result: { type: 'workspace_created', workspace: { workspace_id: 'ws-1', label: 'label' }, root_pane: { pane_id: 'p-1', agent_status: 'idle' } } }) };
     return { stdout: '' };
   };
   const host = herdrHost(fakeExec);

@@ -27,6 +27,13 @@ function json(stdout: string): unknown {
   try { return JSON.parse(text); } catch { return text; }
 }
 
+function herdrResult(stdout: string): unknown {
+  const parsed = json(stdout);
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  const result = (parsed as Record<string, unknown>).result;
+  return result && typeof result === 'object' ? result : parsed;
+}
+
 function array(value: unknown, keys: string[]): unknown[] {
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== 'object') return [];
@@ -66,7 +73,7 @@ function statusOf(value: unknown): HostStatus {
 }
 
 function stripJsonText(stdout: string): string {
-  const parsed = json(stdout);
+  const parsed = herdrResult(stdout);
   if (typeof parsed === 'string') return parsed;
   if (parsed && typeof parsed === 'object') {
     const text = stringField(parsed as Record<string, unknown>, 'text', 'content', 'output');
@@ -114,7 +121,7 @@ export function promptEmptyTextForTest(text: string): boolean {
 export function herdrHost(exec: HostExec = defaultExec): Host {
   async function findWorkspace(label: string): Promise<{ id: string; raw: Record<string, unknown> } | null> {
     rejectLeadingDash(label, 'label');
-    const result = json((await exec('herdr', ['workspace', 'list', '--json'])).stdout);
+    const result = herdrResult((await exec('herdr', ['workspace', 'list'])).stdout);
     for (const entry of array(result, ['workspaces', 'items', 'results'])) {
       if (!entry || typeof entry !== 'object') continue;
       const raw = entry as Record<string, unknown>;
@@ -126,7 +133,7 @@ export function herdrHost(exec: HostExec = defaultExec): Host {
   }
 
   async function panes(workspace: string): Promise<unknown[]> {
-    return workspacePanes(json((await exec('herdr', ['pane', 'list', '--workspace', workspace, '--json'])).stdout));
+    return workspacePanes(herdrResult((await exec('herdr', ['pane', 'list', '--workspace', workspace])).stdout));
   }
 
   return {
@@ -159,11 +166,12 @@ export function herdrHost(exec: HostExec = defaultExec): Host {
       rejectLeadingDash(label, 'label');
       rejectLeadingDash(cwd, 'cwd');
       rejectLeadingDash(command, 'command');
-      const result = json((await exec('herdr', ['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus', '--json'])).stdout);
+      const result = herdrResult((await exec('herdr', ['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus'])).stdout);
       const raw = result && typeof result === 'object' ? result as Record<string, unknown> : {};
       const root = raw.root_pane ?? raw.rootPane ?? raw.pane;
+      const workspaceRaw = raw.workspace;
       const id = paneId(root) ?? paneId(result);
-      const workspace = workspaceId(raw) ?? stringField(raw, 'workspace_id', 'workspaceId');
+      const workspace = workspaceId(workspaceRaw) ?? workspaceId(raw);
       if (!id) return null;
       const pane: Pane = { id, workspaceId: workspace, label, host: 'herdr' };
       await this.send(pane, command);

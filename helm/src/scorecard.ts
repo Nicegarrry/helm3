@@ -4,7 +4,11 @@ import { consumer } from './daemon.js';
 import type { MemoryService } from './memory.js';
 import type { Store, ToolOutcome } from './types.js';
 
-export const scorecardExportInput = z.object({ project: z.string().min(1), budgetId: z.string().min(1).optional(), since: z.string().min(1).optional() }).strict();
+const isoDate = z.string().min(1).refine((value) => {
+  const shape = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+  return shape.test(value) && !Number.isNaN(Date.parse(value));
+}, 'since must be an ISO date');
+export const scorecardExportInput = z.object({ project: z.string().min(1), budgetId: z.string().min(1).optional(), since: isoDate.optional() }).strict();
 export type ScorecardExportInput = z.infer<typeof scorecardExportInput>;
 export type ScorecardJson = Readonly<{
   project: string;
@@ -28,6 +32,12 @@ const rate = (yes: number, total: number): number => total ? Math.round((yes / t
 const round = (value: number): number => Math.round(value * 100) / 100;
 const hasTable = (store: Store, name: string): boolean => Boolean(store.sql.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 const columns = (store: Store, name: string): Set<string> => new Set((store.sql.prepare(`PRAGMA table_info(${name})`).all() as Row[]).map((row) => String(row.name)));
+const redactError = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]+/g, '[redacted]')
+    .replace(/\b(?:api[-_ ]?key|token|secret|password)\s*[:=]\s*[^\s,;]+/gi, '[redacted]')
+    .slice(0, 1000);
+};
 
 function between(column: string, from?: string, to?: string): { sql: string; args: string[] } {
   const clauses: string[] = []; const args: string[] = [];
@@ -61,6 +71,7 @@ function markdown(json: ScorecardJson): string {
 export function createScorecard(options: { store: Store; memory: MemoryService; now?: () => Date }): ScorecardService {
   const { store, memory } = options; const now = options.now ?? (() => new Date());
   async function exportScorecard(input: ScorecardExportInput): Promise<ToolOutcome<{ markdown: string; json: ScorecardJson }>> {
+    if (input.since && !scorecardExportInput.safeParse(input).success) return { ok: false, reason: 'since must be an ISO date' };
     const budget = input.budgetId ? store.sql.prepare('SELECT * FROM budgets WHERE id = ?').get(input.budgetId) as Row | undefined : undefined;
     if (input.budgetId && !budget) return { ok: false, reason: `budget not found: ${input.budgetId}` };
     if (budget && String(budget.project) !== input.project) return { ok: false, reason: `budget ${input.budgetId} belongs to ${String(budget.project)}` };
@@ -95,8 +106,8 @@ export function createScorecard(options: { store: Store; memory: MemoryService; 
       json.outcomes = [...outcomeMap.values()].sort((a, b) => a.model.localeCompare(b.model) || a.band.localeCompare(b.band));
     }
     const projectWindow = between('at', from, to); if (hasTable(store, 'deploys')) { const rows = store.sql.prepare(`SELECT state FROM deploys WHERE project=?${projectWindow.sql}`).all(input.project, ...projectWindow.args) as Row[]; json.deploys = rows.length; json.rollbacks = rows.filter((row) => String(row.state).toLowerCase() === 'rolledback' || String(row.state).toLowerCase() === 'rollback').length; } if (hasTable(store, 'taps')) json.taps = (store.sql.prepare(`SELECT COUNT(*) AS count FROM taps WHERE project=?${between('requestedAt', from, to).sql}`).get(input.project, ...between('requestedAt', from, to).args) as Row).count as number;
-    const result = { markdown: markdown(json), json }; const title = `Scorecard ${json.window.label ?? input.since ?? 'all'}`; const saved = await memory.write({ scope: 'project', project: input.project, type: 'scorecard', title, summary: `${json.tickets} tickets; ${json.merged} merged`, truth: result.markdown }); if (!saved.ok) return saved; return { ok: true, ...result };
+    const result = { markdown: markdown(json), json }; const label = json.window.label ?? input.since ?? 'all'; const title = `Scorecard ${label}${input.budgetId ? ` ${input.budgetId}` : ''}`; const saved = await memory.write({ scope: 'project', project: input.project, type: 'scorecard', title, summary: `${json.tickets} tickets; ${json.merged} merged`, truth: result.markdown }); if (!saved.ok) return saved; return { ok: true, ...result };
   }
-  const consume = consumer(store, 'scorecard-export', async (events) => { for (const event of events.filter((candidate) => candidate.kind === 'budget.closed')) { const project = typeof event.data.project === 'string' ? event.data.project : event.workerId.replace(/^project:/, ''); const budgetId = typeof event.data.budgetId === 'string' ? event.data.budgetId : undefined; if (project) await exportScorecard({ project, ...(budgetId ? { budgetId } : {}) }); } });
+  const consume = consumer(store, 'scorecard-export', async (events) => { for (const event of events.filter((candidate) => candidate.kind === 'budget.closed')) { const project = typeof event.data.project === 'string' ? event.data.project : event.workerId.replace(/^project:/, ''); const budgetId = typeof event.data.budgetId === 'string' ? event.data.budgetId : undefined; if (!project) continue; try { const result = await exportScorecard({ project, ...(budgetId ? { budgetId } : {}) }); if (!result.ok) throw new Error(result.reason); } catch (error) { store.appendEvent(event.workerId, 'scorecard.failed', { project, ...(budgetId ? { budgetId } : {}), error: redactError(error) }); } } });
   return { export: exportScorecard, consume };
 }

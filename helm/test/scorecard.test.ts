@@ -61,6 +61,42 @@ test('a single steer turn is rework even without a failed gate or request change
   } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
 });
 
+test('budget.closed writes one page and handles a failing export once', async () => {
+  const seeded = seed();
+  try {
+    seeded.store.appendEvent('project:acme/widgets', 'budget.closed', { project: 'acme/widgets', budgetId: seeded.budget.id }, '2026-09-30T00:40:00.000Z');
+    await seeded.scorecard.consume(); await seeded.scorecard.consume();
+    const first = await (await import('../src/memory.js')).createMemory({ store: seeded.store, home: seeded.dir }).list({ project: 'acme/widgets', type: 'scorecard' });
+    assert.equal(first.ok ? first.memories.length : -1, 1);
+    assert.equal((seeded.store.sql.prepare('SELECT COUNT(*) AS count FROM memory_outbox').get() as { count: number }).count, 1);
+    seeded.store.appendEvent('project:acme/widgets', 'budget.closed', { project: 'acme/widgets', budgetId: 'missing-token=secret' }, '2026-09-30T00:41:00.000Z');
+    await seeded.scorecard.consume(); await seeded.scorecard.consume(); await seeded.scorecard.consume();
+    const failed = seeded.store.sql.prepare("SELECT data FROM events WHERE kind = 'scorecard.failed'").all() as Array<{ data: string }>;
+    assert.equal(failed.length, 1); const detail = JSON.parse(failed[0]!.data) as { error: string }; assert.doesNotMatch(detail.error, /secret/); assert.match(detail.error, /redacted/);
+  } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
+});
+
+test('budget ids keep same-label scorecards on separate memory pages', async () => {
+  const seeded = seed();
+  try {
+    assert.equal((await seeded.scorecard.export({ project: 'acme/widgets', budgetId: seeded.budget.id })).ok, true);
+    const second = openBudget(seeded.store, { project: 'acme/widgets', label: 'sprint-1', capUsd: 5, openedAt: '2026-10-01T00:00:00.000Z' });
+    seeded.store.sql.prepare('UPDATE budgets SET closedAt = ? WHERE id = ?').run('2026-10-01T00:30:00.000Z', second.id);
+    assert.equal((await seeded.scorecard.export({ project: 'acme/widgets', budgetId: second.id })).ok, true);
+    const pages = await (await import('../src/memory.js')).createMemory({ store: seeded.store, home: seeded.dir }).list({ project: 'acme/widgets', type: 'scorecard' });
+    assert.equal(pages.ok ? pages.memories.length : -1, 2);
+    if (pages.ok) { assert.notEqual(pages.memories[0]!.path, pages.memories[1]!.path); assert.ok(pages.memories.some((page) => page.path.includes(seeded.budget.id))); assert.ok(pages.memories.some((page) => page.path.includes(second.id))); }
+  } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
+});
+
+test('scorecard since accepts ISO dates and rejects invalid values', async () => {
+  const seeded = seed();
+  try {
+    assert.deepEqual(await seeded.scorecard.export({ project: 'acme/widgets', since: 'yesterday' }), { ok: false, reason: 'since must be an ISO date' });
+    assert.equal((await seeded.scorecard.export({ project: 'acme/widgets', since: '2026-09-30' })).ok, true);
+  } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
+});
+
 test('rerun overwrites one memory page and budget.closed consumer exports', async () => {
   const seeded = seed();
   try {

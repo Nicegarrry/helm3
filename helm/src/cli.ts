@@ -269,8 +269,10 @@ const cmdSupervisor = async (args: string[]): Promise<void> => {
     if (!project) { usage(); process.exitCode = 2; return; }
     const { config, store } = openReadStore();
     try {
-      const registered = createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } })
-        .list().supervisors.find((row) => row.project === project) ?? null;
+      const listed = createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } }).list();
+      const registered = listed.ok
+        ? listed.supervisors.find((row: SupervisorRow) => row.project === project) ?? null
+        : null;
       await startSupervisor({
         project,
         repo: values.repo as string | undefined,

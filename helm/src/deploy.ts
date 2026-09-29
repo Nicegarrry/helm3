@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -77,9 +77,12 @@ export function createDeploy(options: Options) {
   const exec = options.exec ?? defaultExec; const fetchImpl = options.fetch ?? globalThis.fetch; const now = options.now ?? (() => new Date()); const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   ensureDeployTable(options.store);
   const inProgress = new Set<string>();
+  const daemonEnv = () => ({ ...process.env, ...(options.env ?? {}) });
   const sourceEnv = () => ({ ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) });
   const secretEnv = (target: Target) => { const source = sourceEnv(); const values: Record<string, string> = {}; for (const [key, name] of Object.entries(envNames(target))) { const value = source[name]; if (!value) throw new Error(`missing credential ${name}`); values[key] = value; } return { values, redact: redactor(Object.values(values)) }; };
   const run = async (file: string, args: string[], target: Target, cwd?: string) => { const credentials = secretEnv(target); const source = sourceEnv(); const result = await withTempHome({ PATH: source.PATH ?? '', ...credentials.values }, (minimalEnv) => exec(file, args, { cwd, env: minimalEnv, timeout: 300_000 })); if ((result.code ?? 0) !== 0) throw new Error(credentials.redact(result.stderr || result.stdout || `${file} failed`)); return { text: credentials.redact(result.stdout), credentials }; };
+  const runDaemon = async (file: string, args: string[], cwd?: string) => { const result = await exec(file, args, { cwd, env: daemonEnv(), timeout: 300_000 }); if ((result.code ?? 0) !== 0) throw new Error(result.stderr || result.stdout || `${file} failed`); return { text: result.stdout }; };
+  const git = (args: string[], cwd: string) => exec('git', args, { cwd, env: daemonEnv() });
   const defaultMigrationGlobs = ['convex/schema.ts', 'convex/migrations/**'];
   const globMatch = (file: string, glob: string): boolean => { const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]'); return new RegExp(`^${escaped}$`).test(file); };
   const migrationGlobs = async (repo: string, previousSha: string | null, target: Target, includeTarget = false): Promise<string[]> => {
@@ -95,7 +98,7 @@ export function createDeploy(options: Options) {
   };
   const hasSchemaDiff = async (repo: string, globs: string[], previousSha: string | null, sha: string): Promise<boolean> => {
     if (!previousSha) return true;
-    const result = await exec('git', ['diff', '--name-only', `${previousSha}..${sha}`], { cwd: repo });
+    const result = await git(['diff', '--name-only', `${previousSha}..${sha}`], repo);
     if ((result.code ?? 0) !== 0) throw new Error('could not inspect Convex migration diff');
     return result.stdout.split(/\r?\n/).map((file) => file.trim()).filter(Boolean).some((file) => globs.some((glob) => globMatch(file, glob)));
   };
@@ -111,7 +114,7 @@ export function createDeploy(options: Options) {
       if (!worktree) throw new Error('TestFlight deploy requires a deploy worktree');
       const credentials = secretEnv(target);
       const source = sourceEnv();
-      const deployed = await runTestFlight(target, worktree, exec, { PATH: source.PATH ?? '', ...credentials.values }, credentials.redact);
+      const deployed = await runTestFlight(target, worktree, exec, { PATH: source.PATH ?? '', HOME: source.HOME ?? homedir(), TMPDIR: source.TMPDIR ?? tmpdir(), ...credentials.values }, credentials.redact);
       return { url: null, deploymentId: deployed.deploymentId };
     }
     if (target.kind === 'convex') { if (!worktree) throw new Error('Convex deploy requires a worktree'); await install(worktree); const result = await run('npx', ['--no-install', 'convex', 'deploy', '--yes'], target, worktree); return { url: null, deploymentId: sha }; }
@@ -119,12 +122,12 @@ export function createDeploy(options: Options) {
     if ((target.mode ?? 'cli') === 'git') {
       const deadline = Date.now() + 300_000;
       for (let attempt = 0; attempt < 300 && Date.now() < deadline; attempt++) {
-        const result = await run('gh', ['api', `repos/${slug}/deployments?sha=${sha}`], target, repo);
+        const result = await runDaemon('gh', ['api', `repos/${slug}/deployments?sha=${sha}`], repo);
         const deployments = JSON.parse(result.text || '[]') as Array<Record<string, unknown>>;
         for (const deployment of deployments) {
           const id = deployment.id === undefined ? undefined : String(deployment.id);
           if (!id) continue;
-          const statuses = await run('gh', ['api', `repos/${slug}/deployments/${id}/statuses`], target, repo);
+          const statuses = await runDaemon('gh', ['api', `repos/${slug}/deployments/${id}/statuses`], repo);
           const successful = (JSON.parse(statuses.text || '[]') as Array<Record<string, unknown>>).find((status) => String(status.state ?? status.status ?? '').toLowerCase() === 'success');
           if (successful) return { url: typeof successful.environment_url === 'string' && successful.environment_url ? successful.environment_url : typeof successful.target_url === 'string' && successful.target_url ? successful.target_url : null, deploymentId: id };
         }
@@ -135,7 +138,7 @@ export function createDeploy(options: Options) {
     const args = ['deploy']; if (!preview(target)) args.push('--prod'); args.push('--yes'); const result = await run('vercel', args, target, worktree); const url = result.text.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? null; return { url, deploymentId: url };
   };
   const rollbackAdapter = async (repo: string, slug: string, target: Target, previousSha: string, cwd?: string) => {
-    if (target.kind === 'convex') { const rollbackWorktree = `${cwd ?? options.home}-rollback`; const added = await exec('git', ['worktree', 'add', '--detach', rollbackWorktree, previousSha], { cwd: repo }); if ((added.code ?? 0) !== 0) throw new Error('could not create rollback worktree'); try { await adapter(repo, slug, target, previousSha, rollbackWorktree); } finally { try { await exec('git', ['worktree', 'remove', '--force', rollbackWorktree], { cwd: repo }); } catch { /* cleanup is best effort */ } } return; }
+    if (target.kind === 'convex') { const rollbackWorktree = `${cwd ?? options.home}-rollback`; const added = await git(['worktree', 'add', '--detach', rollbackWorktree, previousSha], repo); if ((added.code ?? 0) !== 0) throw new Error('could not create rollback worktree'); try { await adapter(repo, slug, target, previousSha, rollbackWorktree); } finally { try { await git(['worktree', 'remove', '--force', rollbackWorktree], repo); } catch { /* cleanup is best effort */ } } return; }
     if (target.kind !== 'vercel' || (target.mode ?? 'cli') !== 'cli' || preview(target)) throw new Error('Vercel rollback is only available for a production CLI deployment'); await run('vercel', ['rollback', previousSha], target, cwd);
   };
   const smoke = async (target: Target, url: string | null, cwd: string): Promise<Record<string, unknown>> => {
@@ -152,10 +155,10 @@ export function createDeploy(options: Options) {
   async function runDeployLocked(input: DeployInput, resolved: { repo: string; slug: string }): Promise<ToolOutcome<{ deploy: DeployRow; warning?: string }>> {
     let reservation: TapReservation | undefined; let deployId: string | undefined; let redact = (value: unknown) => String(value);
     try {
-      const branch = await options.workspace.defaultBranch(resolved.repo); const requestedSha = input.sha ?? branch; if (requestedSha.startsWith('-')) throw new Error('invalid commit reference'); const resolvedResult = await exec('git', ['rev-parse', '--verify', `${requestedSha}^{commit}`], { cwd: resolved.repo }); const sha = resolvedResult.stdout.trim().toLowerCase(); if ((resolvedResult.code ?? 0) !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new Error(`commit reference did not resolve to a full SHA: ${requestedSha}`); const config = await loadRepoConfig(resolved.repo, sha, false); const prior = previous(resolved.slug, input.target); let target: Target; let deployTarget: Target; let externalTap = false;
-      const fetched = await exec('git', ['fetch', 'origin', branch], { cwd: resolved.repo });
+      const branch = await options.workspace.defaultBranch(resolved.repo); const requestedSha = input.sha ?? branch; if (requestedSha.startsWith('-')) throw new Error('invalid commit reference'); const resolvedResult = await git(['rev-parse', '--verify', `${requestedSha}^{commit}`], resolved.repo); const sha = resolvedResult.stdout.trim().toLowerCase(); if ((resolvedResult.code ?? 0) !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new Error(`commit reference did not resolve to a full SHA: ${requestedSha}`); const config = await loadRepoConfig(resolved.repo, sha, false); const prior = previous(resolved.slug, input.target); let target: Target; let deployTarget: Target; let externalTap = false;
+      const fetched = await git(['fetch', 'origin', branch], resolved.repo);
       if ((fetched.code ?? 0) !== 0) throw new Error('base ref stale');
-      const ancestry = await exec('git', ['merge-base', '--is-ancestor', sha, `origin/${branch}`], { cwd: resolved.repo });
+      const ancestry = await git(['merge-base', '--is-ancestor', sha, `origin/${branch}`], resolved.repo);
       const onBase = (ancestry.code ?? 0) === 0;
       let baseConfig: RepoConfig | undefined;
       if (!onBase) {
@@ -166,6 +169,7 @@ export function createDeploy(options: Options) {
       } else {
         if (!baseConfig) throw new Error('base ref stale');
         try { target = targetFor(baseConfig, input.target); } catch { throw new Error('target not defined on base'); }
+        if (target.kind === 'testflight') throw new Error('testflight deploys require a base-branch sha');
         if (!preview(target)) throw new Error(`sha ${sha} is not on base branch ${branch}`);
       }
       deployTarget = target;
@@ -174,16 +178,16 @@ export function createDeploy(options: Options) {
         try { baseTarget = targetFor(baseConfig ?? await loadRepoConfig(resolved.repo, `origin/${branch}`, false), input.target); } catch { /* fail closed below */ }
         deployTarget = { ...target, platform: baseTarget?.platform, lane: baseTarget?.lane, external: baseTarget?.external };
         externalTap = baseTarget === undefined || baseTarget.external === true || !prior;
-        if (prior) { const changed = await exec('git', ['diff', '--name-only', prior.sha, sha], { cwd: resolved.repo }); externalTap ||= (changed.code ?? 0) !== 0 || requiresExternalTap(changed.stdout.split(/\r?\n/).filter(Boolean)); }
+        if (prior) { const changed = await git(['diff', '--name-only', prior.sha, sha], resolved.repo); externalTap ||= (changed.code ?? 0) !== 0 || requiresExternalTap(changed.stdout.split(/\r?\n/).filter(Boolean)); }
       }
       const smokeTarget = deployTarget;
       const globs = target.kind === 'convex' ? await migrationGlobs(resolved.repo, prior?.sha ?? null, target, !onBase) : []; const migration = target.kind === 'convex' ? await hasSchemaDiff(resolved.repo, globs, prior?.sha ?? null, sha) : false; const migrationAction = `convex.migration:${resolved.slug}:${target.name}:${prior?.sha ?? 'none'}:${sha}`; const action = migration ? migrationAction : `deploy.run:${resolved.slug}:${target.name}:${sha}`; const baseKinds = migration ? [`deploy.${target.name}`, 'convex.migration'] : [`deploy.${target.name}`]; const kinds = externalTap ? [...baseKinds, 'testflight.external'] : baseKinds; const decisions = await Promise.all(kinds.map((kind) => options.envelope({ project: resolved.slug, actions: [action], kind, baseRef: branch }))); for (const decision of decisions) if (!decision.ok) return decision; const verdicts = decisions.map((decision) => decision.ok ? decision.decisions[0]?.decision : undefined); if (verdicts.some((verdict) => !verdict)) return { ok: false, reason: `envelope returned no decision for ${target.kind}` }; if (verdicts.some((verdict) => verdict === 'never')) { const refusedKind = target.kind === 'testflight' && externalTap && verdicts.at(-1) === 'never' ? 'testflight.external' : kinds[0]; return { ok: false, reason: `deployment refused for ${refusedKind}` }; } const knownVerdicts = verdicts.filter((verdict): verdict is string => Boolean(verdict)); const verdict = knownVerdicts.reduce((left, right) => moreRestrictive(left, right), 'allow'); const hardMigrationTap = migration && !preview(target); if (hardMigrationTap || verdict === 'tap') { const migrationTap = migration && (hardMigrationTap || verdicts[kinds.indexOf('convex.migration')] === 'tap'); const externalTapKind = externalTap && verdicts[kinds.indexOf('testflight.external')] === 'tap'; const tapKind = migrationTap ? 'convex.migration' : externalTapKind ? 'testflight.external' : `deploy.${target.name}`; if (!input.tapId) return { ok: false, reason: `tap required for ${tapKind}: ${action}` }; const reserved = options.reserveTap(resolved.slug, tapKind, action, input.tapId); if (typeof reserved === 'string') return { ok: false, reason: `tap required for ${tapKind}: ${reserved}` }; reservation = reserved; }
       deployId = `d-${randomUUID()}`; const at = now().toISOString(); options.store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(deployId, resolved.slug, target.name, target.kind, typeof target.env === 'string' ? target.env : JSON.stringify(target.env), sha, 'deploying', null, null, prior?.deploymentId ?? null, '{}', reservation?.tapId ?? null, at);
       const worktree = join(options.home, 'deploys', resolved.slug.replace(/\//g, '__'), deployId); mkdirSync(join(options.home, 'deploys', resolved.slug.replace(/\//g, '__')), { recursive: true }); let created = false;
       let live = false;
-      try { const added = await exec('git', ['worktree', 'add', '--detach', worktree, sha], { cwd: resolved.repo }); if ((added.code ?? 0) !== 0) throw new Error(redact(added.stderr || added.stdout || 'could not create deploy worktree')); created = true; const deployed = await adapter(resolved.repo, resolved.slug, deployTarget, sha, worktree); live = Boolean(deployed.deploymentId || deployed.url); const smokeResult = await smoke(smokeTarget, deployed.url, worktree); save(deployId, { state: 'succeeded', url: deployed.url, deploymentId: deployed.deploymentId, smoke: JSON.stringify(smokeResult) }); const saved = row(options.store.sql.prepare('SELECT * FROM deploys WHERE id = ?').get(deployId) as Record<string, unknown>); options.store.appendEvent(`project:${resolved.slug}`, 'deploy', { project: resolved.slug, id: deployId, target: target.name, kind: target.kind, state: 'succeeded', ...(deployed.deploymentId ? { deploymentId: deployed.deploymentId } : {}), ...(deployed.url ? { url: redact(deployed.url) } : {}) }); let tapWarning: string | undefined; if (reservation) { try { options.commitTap(reservation); } catch (error) { const reason = redact(error instanceof Error ? error.message : error); tapWarning = `tap commit failed: ${reason}`; options.store.appendEvent(`project:${resolved.slug}`, 'error', { project: resolved.slug, id: deployId, target: target.name, kind: target.kind, operation: 'tap commit', reason }); } } const rollbackWarning = target.kind === 'testflight' && target.rollback !== 'none' ? 'TestFlight rollback is disabled; treating configured rollback as none' : undefined; const warning = [rollbackWarning, tapWarning].filter(Boolean).join('; ') || undefined; return { ok: true, deploy: saved, ...(warning ? { warning } : {}) }; }
+      try { const added = await git(['worktree', 'add', '--detach', worktree, sha], resolved.repo); if ((added.code ?? 0) !== 0) throw new Error(redact(added.stderr || added.stdout || 'could not create deploy worktree')); created = true; const deployed = await adapter(resolved.repo, resolved.slug, deployTarget, sha, worktree); live = Boolean(deployed.deploymentId || deployed.url); const smokeResult = await smoke(smokeTarget, deployed.url, worktree); save(deployId, { state: 'succeeded', url: deployed.url, deploymentId: deployed.deploymentId, smoke: JSON.stringify(smokeResult) }); const saved = row(options.store.sql.prepare('SELECT * FROM deploys WHERE id = ?').get(deployId) as Record<string, unknown>); options.store.appendEvent(`project:${resolved.slug}`, 'deploy', { project: resolved.slug, id: deployId, target: target.name, kind: target.kind, state: 'succeeded', ...(deployed.deploymentId ? { deploymentId: deployed.deploymentId } : {}), ...(deployed.url ? { url: redact(deployed.url) } : {}) }); let tapWarning: string | undefined; if (reservation) { try { options.commitTap(reservation); } catch (error) { const reason = redact(error instanceof Error ? error.message : error); tapWarning = `tap commit failed: ${reason}`; options.store.appendEvent(`project:${resolved.slug}`, 'error', { project: resolved.slug, id: deployId, target: target.name, kind: target.kind, operation: 'tap commit', reason }); } } const rollbackWarning = target.kind === 'testflight' && target.rollback !== 'none' ? 'TestFlight rollback is disabled; treating configured rollback as none' : undefined; const warning = [rollbackWarning, tapWarning].filter(Boolean).join('; ') || undefined; return { ok: true, deploy: saved, ...(warning ? { warning } : {}) }; }
       catch (error) { const schemaFailure = migration; const reason = redact(error instanceof Error ? error.message : error); const schemaRollback = schemaFailure ? 'manual (schema change)' : undefined; const rollback = target.kind === 'testflight' ? 'none' : target.rollback; save(deployId, { state: schemaFailure ? 'manual' : 'failed', smoke: JSON.stringify({ error: reason, ...(schemaRollback ? { rollback: schemaRollback } : {}) }) }); const priorDeployment = previous(resolved.slug, target.name); if (live && !migration && rollback === 'auto' && priorDeployment?.deploymentId) { try { await rollbackAdapter(resolved.repo, resolved.slug, target, target.kind === 'convex' ? priorDeployment.sha : priorDeployment.deploymentId, worktree); save(deployId, { state: 'rolledback' }); options.store.appendEvent(`project:${resolved.slug}`, 'deploy.rolledback', { project: resolved.slug, id: deployId, target: target.name, kind: target.kind, previousId: priorDeployment.deploymentId }); } catch (rollbackError) { const rollbackReason = redact(rollbackError instanceof Error ? rollbackError.message : rollbackError); options.store.appendEvent(`project:${resolved.slug}`, 'deploy.failed', { project: resolved.slug, id: deployId, target: target.name, kind: target.kind, reason, rollbackError: rollbackReason }); } } else options.store.appendEvent(`project:${resolved.slug}`, 'deploy.failed', { project: resolved.slug, id: deployId, target: target.name, kind: target.kind, reason, ...(schemaRollback ? { rollback: schemaRollback } : {}) }); throw new Error(reason); }
-      finally { if (created) { try { await exec('git', ['worktree', 'remove', '--force', worktree], { cwd: resolved.repo }); } catch { /* cleanup is best effort */ } } }
+      finally { if (created) { try { await git(['worktree', 'remove', '--force', worktree], resolved.repo); } catch { /* cleanup is best effort */ } } }
     } catch (error) { if (reservation) options.rollbackTap(reservation); return { ok: false, reason: redact(error instanceof Error ? error.message : error) }; }
   }
   async function runDeploy(input: DeployInput): Promise<ToolOutcome<{ deploy: DeployRow; warning?: string }>> {

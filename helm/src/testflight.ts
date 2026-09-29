@@ -1,6 +1,6 @@
 import type { DeployExec } from './deploy.js';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export type TestFlightTarget = Readonly<{ platform?: string; lane?: string; timeoutMin?: number }>;
@@ -15,7 +15,8 @@ export async function withTempHome<T>(env: NodeJS.ProcessEnv, action: (env: Node
 export async function runTestFlight(target: TestFlightTarget, worktree: string, exec: DeployExec, env: NodeJS.ProcessEnv, redact: (value: unknown) => string): Promise<{ deploymentId: string | null }> {
   if (!existsSync(join(worktree, 'Gemfile.lock'))) throw new Error('Gemfile.lock is required for TestFlight deploys');
   const timeout = (target.timeoutMin ?? 60) * 60_000;
-  const bundle = await withTempHome({ PATH: env.PATH ?? '' }, (minimalEnv) => exec('bundle', ['install', '--deployment'], { cwd: worktree, env: minimalEnv, timeout }));
+  const testFlightEnv = { ...env, PATH: env.PATH ?? process.env.PATH ?? '', HOME: env.HOME ?? homedir(), LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8', TMPDIR: env.TMPDIR ?? tmpdir() };
+  const bundle = await exec('bundle', ['install', '--deployment'], { cwd: worktree, env: testFlightEnv, timeout });
   if ((bundle.code ?? 0) !== 0) {
     const output = [bundle.stdout, bundle.stderr ?? ''].filter(Boolean).join('\n');
     throw new Error(`bundle install failed\n${redact(output.split(/\r?\n/).slice(-40).join('\n'))}`);
@@ -25,7 +26,7 @@ export async function runTestFlight(target: TestFlightTarget, worktree: string, 
   if (target.platform !== undefined && !valid.test(target.platform)) throw new Error('invalid TestFlight platform');
   if (!valid.test(lane)) throw new Error('invalid TestFlight lane');
   const laneArgs = target.platform === undefined ? [lane] : [target.platform, lane];
-  const result = await withTempHome(env, (minimalEnv) => exec('bundle', ['exec', 'fastlane', ...laneArgs], { cwd: worktree, env: minimalEnv, timeout }));
+  const result = await exec('bundle', ['exec', 'fastlane', ...laneArgs], { cwd: worktree, env: testFlightEnv, timeout });
   const output = [result.stdout, result.stderr ?? ''].filter(Boolean).join('\n');
   const lines = output.split(/\r?\n/); if (lines.at(-1) === '') lines.pop();
   const tail = redact(lines.slice(-40).join('\n'));

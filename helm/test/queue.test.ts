@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { createQueue, type QueueExec } from '../src/queue.js';
 import { createReview } from '../src/review.js';
@@ -11,14 +14,15 @@ const h1 = '1'.repeat(40);
 const h2 = '2'.repeat(40);
 const h3 = '3'.repeat(40);
 
-function worker(id: string, number: number, head: string): WorkerRow {
+function worker(id: string, number: number, head: string, worktree = `/worktree/${id}`, state: WorkerRow['state'] = 'succeeded'): WorkerRow {
   const at = new Date('2026-01-01T00:00:00.000Z').toISOString();
-  return { workerId: id, repo: '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/test', objective: `PR ${number}`, acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: `helm/${id}`, worktree: `/worktree/${id}`, state: 'succeeded', head, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: at, updatedAt: at };
+  return { workerId: id, repo: '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/test', objective: `PR ${number}`, acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: `helm/${id}`, worktree, state, head, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: at, updatedAt: at };
 }
 
-function setup(options: { gate?: boolean; mergeHead?: string; patchIds?: Record<string, string>; exec?: QueueExec; pending?: boolean; guardReviews?: boolean; fetchError?: boolean; statusError?: boolean; mergeable?: boolean | null; merged?: boolean } = {}) {
+function setup(options: { gate?: boolean; mergeHead?: string; patchIds?: Record<string, string>; exec?: QueueExec; pending?: boolean; guardReviews?: boolean; fetchError?: boolean; statusError?: boolean; mergeable?: boolean | null; merged?: boolean; retry?: (input: { workerId: string; kind: 'conflict' }) => Promise<{ ok: true; turn: number; message: string } | { ok: false; reason: string }>; workerState?: WorkerRow['state']; missingWorktree?: boolean } = {}) {
   const store = openStore(':memory:');
-  const workers = [worker('w-1', 1, h1), worker('w-2', 2, h2)];
+  const retryWorktree = options.retry && !options.missingWorktree ? mkdtempSync(join(tmpdir(), 'helm-queue-')) : undefined;
+  const workers = [worker('w-1', 1, h1, retryWorktree, options.workerState), worker('w-2', 2, h2)];
   for (const row of workers) { store.insertWorker(row); store.insertPr({ number: Number(row.workerId.slice(-1)), workerId: row.workerId, url: `https://example.invalid/${row.workerId}`, head: row.head!, createdAt: row.createdAt }); }
   let base = 'base';
   let clock = new Date('2026-01-01T00:00:00.000Z');
@@ -37,7 +41,7 @@ function setup(options: { gate?: boolean; mergeHead?: string; patchIds?: Record<
   const exec: QueueExec = options.exec ?? (async (file, args, opts) => { calls.push({ file, args, cwd: opts.cwd }); return { stdout: '', stderr: '', code: 0 }; });
   const settings = { ...loadSettings('/missing-queue-settings'), queue: { tickSec: 1, checksTimeoutMin: 1 } } as Settings;
   const review = createReview({ store, github, workspace, jev: { shadow: false, async ask() { return { ok: false as const, reason: 'no key' }; } }, settings });
-  const queue = createQueue({ store, workspace, github, settings, gate: async ({ workerId }) => ({ ok: true, head: store.getWorker(workerId)?.head ?? h1, passed: options.gate ?? true }), prMerge: async ({ number, expectedHead }) => { if (!options.guardReviews) return { ok: true, merged: true }; const reason = await review.guard({ number, expectedHead }); return reason ? { ok: false, reason } : { ok: true, merged: true }; }, exec, now: () => clock });
+  const queue = createQueue({ store, workspace, github, settings, retry: options.retry, gate: async ({ workerId }) => ({ ok: true, head: store.getWorker(workerId)?.head ?? h1, passed: options.gate ?? true }), prMerge: async ({ number, expectedHead }) => { if (!options.guardReviews) return { ok: true, merged: true }; const reason = await review.guard({ number, expectedHead }); return reason ? { ok: false, reason } : { ok: true, merged: true }; }, exec, now: () => clock });
   return { store, queue, review, calls, setBase: (value: string) => { base = value; }, setClock: (value: Date) => { clock = value; }, heads, supervisor: createSupervisor({ store, settings, hosts: { herdr: {} as never, tmux: {} as never } }) };
 }
 
@@ -81,8 +85,42 @@ test('a red gate fails the item and emits queue.failed', async () => {
 test('a merge conflict enters conflict and emits a wake, without force or rebase', async () => {
   const d = setup({ exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stdout: 'CONFLICT (content): conflict.txt', code: 1 }); if (file === 'git' && args[0] === 'diff') return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
   d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
-  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); assert.equal(d.calls.some((call) => call.args.includes('--force') || call.args.includes('rebase')), false); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
+  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); assert.ok(d.calls.some((call) => call.args.includes('--no-commit'))); assert.equal(d.calls.some((call) => call.args.includes('--force') || call.args.includes('rebase')), false); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
   finally { d.store.close(); }
+});
+
+test('a conflict retries the original worker and a clean unchanged fix merges without re-review', async () => {
+  const retryCalls: Array<{ workerId: string; kind: 'conflict' }> = [];
+  const d = setup({ guardReviews: true, retry: async (input) => { retryCalls.push(input); return { ok: true, turn: 2, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') return { stdout: '', stderr: 'CONFLICT', code: 1 }; if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
+  try {
+    await d.queue.enqueue({ number: 1 });
+    await d.review.record({ number: 1, head: h1, commentUrl: 'https://example.invalid/pr/1#issuecomment-1', reviewer: 'claude-sonnet', verdict: 'approve' });
+    d.setBase('base-2'); await d.queue.tick();
+    assert.deepEqual(retryCalls, [{ workerId: 'w-1', kind: 'conflict' }]); const conflict = d.store.listEvents('w-1').find((event) => event.kind === 'conflict'); assert.deepEqual(conflict?.data.files, ['conflict.txt']); assert.equal(rows(d)[0]?.state, 'updating'); assert.equal(rows(d)[0]?.reason, 'conflict retry sent');
+    d.store.updateWorker('w-1', { head: h3, state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick();
+    assert.equal(rows(d)[0]?.state, 'merged');
+  } finally { d.store.close(); }
+});
+
+test('leftover conflict markers trigger one second retry, then conflict and a wake', async () => {
+  let retries = 0;
+  const d = setup({ retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') return { stdout: '', stderr: 'CONFLICT', code: 1 }; if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'diff' && args[1] === '--check') return { stdout: 'conflict.txt:1: leftover conflict marker', stderr: '', code: 1 }; if (file === 'git' && args[0] === 'diff' && args[1] === '--name-only') return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
+  d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
+  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { head: h3, state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(retries, 2); assert.equal(rows(d)[0]?.state, 'updating'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
+  finally { d.store.close(); }
+});
+
+test('a changed conflict fix requires approval at the new head, and missing or stopped workers wake as conflict', async () => {
+  const d = setup({ guardReviews: true, patchIds: { [`base:h1`]: 'old', [`base-2:${h3}`]: 'new' }, retry: async () => ({ ok: true, turn: 1, message: 'retry sent' }), exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') return { stdout: '', stderr: 'CONFLICT', code: 1 }; if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
+  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { head: h3, state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'review'); await d.review.record({ number: 1, head: h3, commentUrl: 'https://example.invalid/pr/1#issuecomment-2', reviewer: 'claude-sonnet', verdict: 'approve' }); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'merged'); }
+  finally { d.store.close(); }
+
+  for (const options of [{ missingWorktree: true }, { workerState: 'stopped' as const }]) {
+    const d2 = setup({ ...options, retry: async () => ({ ok: true, turn: 1, message: 'retry sent' }), exec: async (file, args, opts) => { d2.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') return { stdout: '', stderr: 'CONFLICT', code: 1 }; if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
+    d2.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
+    try { await d2.queue.enqueue({ number: 1 }); d2.setBase('base-2'); await d2.queue.tick(); assert.equal(rows(d2)[0]?.state, 'conflict'); await d2.supervisor.consume(); const wakes = d2.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
+    finally { d2.store.close(); }
+  }
 });
 
 test('review waits for review.record approval, then merges on a later tick', async () => {

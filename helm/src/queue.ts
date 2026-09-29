@@ -1,6 +1,7 @@
 /** Per-repository, merge-first pull-request queue. */
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import type { GitHub, Store, ToolOutcome, Workspace, WorkerRow } from './types.js';
 import type { Settings } from './settings.js';
@@ -11,14 +12,15 @@ export type MergeQueueRow = Readonly<{ id: string; repoSlug: string; number: num
 export type QueueExec = (file: string, args: string[], options: { cwd?: string }) => Promise<{ stdout: string; stderr?: string; code: number }>;
 type GateCall = (input: { workerId: string }) => Promise<ToolOutcome<{ head: string; passed: boolean }>>;
 type MergeCall = (input: { number: number; expectedHead: string }) => Promise<ToolOutcome<{ merged: true }>>;
-type QueueError = Error & { conflict?: boolean; transient?: boolean; stdout?: string; stderr?: string };
+type QueueError = Error & { conflict?: boolean; transient?: boolean; stdout?: string; stderr?: string; files?: string[]; baseSha?: string };
+type ConflictRetry = (input: { workerId: string; kind: 'conflict' }) => Promise<ToolOutcome<{ turn: number; message: string }>>;
 export type QueueService = Readonly<{
   enqueue(input: { number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>>;
   queue(input: { project: string }): ToolOutcome<{ items: MergeQueueRow[] }>;
   dequeue(input: { number: number }): ToolOutcome<{ dequeued: true }>;
   tick(): Promise<void>;
 }>;
-export type QueueOptions = Readonly<{ store: Store; workspace: Workspace; github: GitHub; settings: Settings; gate: GateCall; prMerge: MergeCall; exec?: QueueExec; now?: () => Date }>;
+export type QueueOptions = Readonly<{ store: Store; workspace: Workspace; github: GitHub; settings: Settings; gate: GateCall; prMerge: MergeCall; retry?: ConflictRetry; exec?: QueueExec; now?: () => Date }>;
 
 const realExec = promisify(execFile);
 const defaultExec: QueueExec = async (file, args, options) => {
@@ -47,11 +49,12 @@ function transientError(error: unknown, message: string): QueueError {
 }
 
 export function createQueue(options: QueueOptions): QueueService {
-  const { store, workspace, github, settings, gate, prMerge } = options;
+  const { store, workspace, github, settings, gate, prMerge, retry } = options;
   const exec = options.exec ?? defaultExec;
   const now = options.now ?? (() => new Date());
-  store.sql.exec(`CREATE TABLE IF NOT EXISTS merge_queue (id TEXT PRIMARY KEY, repoSlug TEXT NOT NULL, number INTEGER NOT NULL UNIQUE, workerId TEXT NOT NULL, state TEXT NOT NULL, head TEXT NOT NULL, reason TEXT, enqueuedAt TEXT NOT NULL, updatedAt TEXT NOT NULL); CREATE INDEX IF NOT EXISTS merge_queue_project ON merge_queue(repoSlug, state, enqueuedAt); CREATE TABLE IF NOT EXISTS merge_queue_meta (id TEXT PRIMARY KEY, baseSha TEXT NOT NULL, priorPatchId TEXT, transientErrors INTEGER NOT NULL DEFAULT 0)`);
+  store.sql.exec(`CREATE TABLE IF NOT EXISTS merge_queue (id TEXT PRIMARY KEY, repoSlug TEXT NOT NULL, number INTEGER NOT NULL UNIQUE, workerId TEXT NOT NULL, state TEXT NOT NULL, head TEXT NOT NULL, reason TEXT, enqueuedAt TEXT NOT NULL, updatedAt TEXT NOT NULL); CREATE INDEX IF NOT EXISTS merge_queue_project ON merge_queue(repoSlug, state, enqueuedAt); CREATE TABLE IF NOT EXISTS merge_queue_meta (id TEXT PRIMARY KEY, baseSha TEXT NOT NULL, priorPatchId TEXT, transientErrors INTEGER NOT NULL DEFAULT 0, conflictRetries INTEGER NOT NULL DEFAULT 0)`);
   try { store.sql.exec('ALTER TABLE merge_queue_meta ADD COLUMN transientErrors INTEGER NOT NULL DEFAULT 0'); } catch { /* existing v4 databases already have it */ }
+  try { store.sql.exec('ALTER TABLE merge_queue_meta ADD COLUMN conflictRetries INTEGER NOT NULL DEFAULT 0'); } catch { /* existing v4 databases already have it */ }
   const read = store.sql.prepare('SELECT * FROM merge_queue WHERE id = ?');
   const byNumber = store.sql.prepare('SELECT * FROM merge_queue WHERE number = ?');
   const active = store.sql.prepare("SELECT * FROM merge_queue WHERE state NOT IN ('merged', 'failed', 'conflict') ORDER BY enqueuedAt ASC, id ASC");
@@ -60,8 +63,8 @@ export function createQueue(options: QueueOptions): QueueService {
   const update = store.sql.prepare('UPDATE merge_queue SET state = ?, head = ?, reason = ?, updatedAt = ? WHERE id = ?');
   const requeue = store.sql.prepare('UPDATE merge_queue SET state = ?, head = ?, reason = NULL, enqueuedAt = ?, updatedAt = ? WHERE id = ?');
   const remove = store.sql.prepare('DELETE FROM merge_queue WHERE id = ?');
-  const metaRead = store.sql.prepare('SELECT baseSha, priorPatchId, transientErrors FROM merge_queue_meta WHERE id = ?');
-  const metaWrite = store.sql.prepare('INSERT INTO merge_queue_meta (id, baseSha, priorPatchId, transientErrors) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET baseSha = excluded.baseSha, priorPatchId = excluded.priorPatchId, transientErrors = excluded.transientErrors');
+  const metaRead = store.sql.prepare('SELECT baseSha, priorPatchId, transientErrors, conflictRetries FROM merge_queue_meta WHERE id = ?');
+  const metaWrite = store.sql.prepare('INSERT INTO merge_queue_meta (id, baseSha, priorPatchId, transientErrors, conflictRetries) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET baseSha = excluded.baseSha, priorPatchId = excluded.priorPatchId, transientErrors = excluded.transientErrors, conflictRetries = excluded.conflictRetries');
   const metaCount = store.sql.prepare('UPDATE merge_queue_meta SET transientErrors = ? WHERE id = ?');
   const iso = () => now().toISOString();
   const item = (id: string) => { const row = read.get(id) as Record<string, unknown> | undefined; return row ? asRow(row) : undefined; };
@@ -91,7 +94,7 @@ export function createQueue(options: QueueOptions): QueueService {
         const worker = pr && store.getWorker(pr.workerId);
         if (!pr || !worker) return { ok: false, reason: 'pr worker not found' };
         requeue.run('queued', pr.head, iso(), iso(), row.id);
-        metaWrite.run(row.id, worker.baseSha, null, 0);
+        metaWrite.run(row.id, worker.baseSha, null, 0, 0);
         return { ok: true, item: item(row.id)! };
       }
       return { ok: true, item: row };
@@ -102,7 +105,7 @@ export function createQueue(options: QueueOptions): QueueService {
     if (!worker) return { ok: false, reason: 'pr worker not found' };
     const at = iso(); const id = `mq-${randomUUID()}`;
     insert.run(id, worker.repoSlug, input.number, worker.workerId, 'queued', pr.head, at, at);
-    metaWrite.run(id, worker.baseSha, null, 0);
+    metaWrite.run(id, worker.baseSha, null, 0, 0);
     return { ok: true, item: item(id)! };
   }
 
@@ -123,19 +126,19 @@ export function createQueue(options: QueueOptions): QueueService {
     let base: string;
     try { await workspace.fetch(worker.repo); base = await workspace.resolveSha(worker.repo, `origin/${worker.baseRef}`); }
     catch (error) { throw transientError(error, 'fetch failed'); }
-    const meta = metaRead.get(row.id) as { baseSha: string; priorPatchId: string | null; transientErrors: number };
+    const meta = metaRead.get(row.id) as { baseSha: string; priorPatchId: string | null; transientErrors: number; conflictRetries: number };
     return { base, meta };
   }
 
   async function runMerge(worker: WorkerRow): Promise<void> {
     let result: { stdout: string; stderr?: string; code: number } | undefined;
     let failure: QueueError | undefined;
-    try { result = await exec('git', ['merge', `origin/${worker.baseRef}`], { cwd: worker.worktree }); }
+    try { result = await exec('git', ['merge', '--no-commit', `origin/${worker.baseRef}`], { cwd: worker.worktree }); }
     catch (error) { failure = Object.assign(new Error(errorMessage(error)), error as object) as QueueError; }
     if (result?.code === 0) return;
     const unresolvedResult = await exec('git', ['diff', '--name-only', '--diff-filter=U'], { cwd: worker.worktree }).catch(() => undefined);
     const files = String(unresolvedResult?.stdout ?? '').split(/\r?\n/).map((file) => file.trim()).filter(Boolean);
-    if (files.length) throw Object.assign(new Error(`merge conflict: ${files.join(', ')}`), { conflict: true });
+    if (files.length) throw Object.assign(new Error(`merge conflict: ${files.join(', ')}`), { conflict: true, files });
     try { await exec('git', ['merge', '--abort'], { cwd: worker.worktree }); } catch { /* preserve the original failure */ }
     const message = result?.stderr?.trim() || failure?.stderr?.trim() || failure?.stdout?.trim() || failure?.message || 'git merge failed';
     throw new Error(message);
@@ -146,12 +149,40 @@ export function createQueue(options: QueueOptions): QueueService {
     if (meta.baseSha === base) return row;
     const updating = setState(row, 'updating');
     const priorPatchId = await workspace.patchId(worker.repo, meta.baseSha, updating.head);
-    await runMerge(worker);
+    try { await runMerge(worker); }
+    catch (error) { if ((error as QueueError).conflict) throw Object.assign(error as QueueError, { baseSha: base }); throw error; }
     const head = await workspace.commitAll(worker.worktree, `helm: merge origin/${worker.baseRef}`);
     store.updateWorker(worker.workerId, { head });
-    metaWrite.run(row.id, base, priorPatchId, 0);
+    metaWrite.run(row.id, base, priorPatchId, 0, 0);
     return setState(updating, 'gating', head);
   }
+
+  const conflictState = (row: MergeQueueRow, reason: string): MergeQueueRow => { const saved = setState(row, 'conflict', row.head, reason); event(saved, 'queue.failed', reason); return saved; };
+  const markerFiles = async (worker: WorkerRow, base: string, head: string, fallback: string[]): Promise<string[]> => {
+    const checks = await Promise.all([
+      exec('git', ['diff', '--check', `${base}..${head}`], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 })),
+      exec('git', ['diff', '--check'], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 })),
+    ]);
+    const output = checks.map((check) => `${check.stdout}\n${check.stderr}`).join('\n');
+    if (checks.every((check) => check.code === 0) && !/^<<<<<<<|^>>>>>>>/m.test(output)) return [];
+    const names = await Promise.all([
+      exec('git', ['diff', '--name-only', `${base}..${head}`], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 })),
+      exec('git', ['diff', '--name-only'], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 })),
+    ]);
+    const listed = names.flatMap((result) => String(result.stdout).split(/\r?\n/).map((file) => file.trim()).filter(Boolean));
+    const checked = output.split(/\r?\n/).map((line) => line.match(/^([^:]+):\d+:/)?.[1] ?? '').filter(Boolean);
+    return [...new Set(listed.length ? listed : checked.length ? checked : fallback.length ? fallback : ['unknown'])];
+  };
+  const sendConflictRetry = async (row: MergeQueueRow, worker: WorkerRow, base: string, files: string[], attempts: number): Promise<MergeQueueRow> => {
+    store.appendEvent(worker.workerId, 'conflict', { project: worker.repoSlug, head: worker.head ?? row.head, files });
+    if (!retry) return conflictState(row, `conflict retry unavailable: ${files.join(', ')}`);
+    if (!existsSync(worker.worktree)) return conflictState(row, `worktree missing: ${worker.worktree}`);
+    if (!['idle', 'waiting', 'succeeded', 'failed', 'interrupted'].includes(worker.state)) return conflictState(row, `worker is ${worker.state}, not steerable`);
+    const result = await retry({ workerId: worker.workerId, kind: 'conflict' });
+    if (!result.ok) return conflictState(row, `conflict retry refused: ${result.reason}`);
+    metaWrite.run(row.id, base, (metaRead.get(row.id) as { priorPatchId: string | null }).priorPatchId, 0, attempts + 1);
+    return setState(row, 'updating', worker.head ?? row.head, 'conflict retry sent');
+  };
 
   async function checkAndMerge(row: MergeQueueRow, worker: WorkerRow): Promise<boolean> {
     let status;
@@ -170,11 +201,11 @@ export function createQueue(options: QueueOptions): QueueService {
     }
     const failing = status.checks.find((check) => !passing.has(check.conclusion ?? ''));
     if (failing) { fail(row, `check "${failing.name}" did not succeed (${failing.conclusion ?? 'no conclusion'})`); return true; }
-    const meta = metaRead.get(row.id) as { baseSha: string; priorPatchId: string | null };
+    const meta = metaRead.get(row.id) as { baseSha: string; priorPatchId: string | null; conflictRetries: number };
     if (meta.priorPatchId) {
       const currentPatchId = await workspace.patchId(worker.repo, meta.baseSha, row.head);
       if (currentPatchId !== meta.priorPatchId) {
-        metaWrite.run(row.id, meta.baseSha, currentPatchId, 0);
+        metaWrite.run(row.id, meta.baseSha, currentPatchId, 0, meta.conflictRetries ?? 0);
         if (row.state !== 'review') review(row, 'the interdiff changed after the base moved');
         return row.state !== 'review';
       }
@@ -189,12 +220,32 @@ export function createQueue(options: QueueOptions): QueueService {
 
   async function process(row: MergeQueueRow): Promise<boolean> {
     const worker = store.getWorker(row.workerId);
-    if (!worker) { fail(row, 'worker not found'); return true; }
+    if (!worker) { conflictState(row, 'worker not found'); return true; }
     let current = row;
+    if (current.state === 'updating') {
+      if (worker.state === 'running' || worker.state === 'queued') return false;
+      if (worker.state === 'unknown' || worker.state === 'stopped') { conflictState(current, `worker is ${worker.state}, not steerable`); return true; }
+      if (!existsSync(worker.worktree)) { conflictState(current, `worktree missing: ${worker.worktree}`); return true; }
+      const meta = metaRead.get(current.id) as { baseSha: string; conflictRetries: number };
+      let head = worker.head ?? await workspace.head(worker.worktree).catch(() => current.head);
+      try { head = await workspace.commitAll(worker.worktree, 'helm: resolve merge conflict'); store.updateWorker(worker.workerId, { head }); }
+      catch (error) { conflictState(current, `conflict commit failed: ${errorMessage(error)}`); return true; }
+      const files = await markerFiles(worker, meta.baseSha, head, []);
+      if (files.length) {
+        if (meta.conflictRetries >= 2) { conflictState(current, `conflict markers remain: ${files.join(', ')}`); return true; }
+        await sendConflictRetry(current, worker, meta.baseSha, files, meta.conflictRetries);
+        return true;
+      }
+      current = setState(current, 'gating', head);
+    }
     try { current = await prepare(current, worker); }
     catch (error) {
       const problem = error as QueueError;
-      if (problem.conflict) { const saved = setState(current, 'conflict', current.head, problem.message); event(saved, 'queue.failed', problem.message); return true; }
+      if (problem.conflict) {
+        const meta = metaRead.get(current.id) as { baseSha: string; priorPatchId: string | null; conflictRetries: number };
+        await sendConflictRetry(current, worker, problem.baseSha ?? meta.baseSha, problem.files ?? [problem.message], meta.conflictRetries);
+        return true;
+      }
       if (problem.transient) return markTransient(current, problem.message) || current.state !== 'review';
       fail(current, errorMessage(error));
       return true;

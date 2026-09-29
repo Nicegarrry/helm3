@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { RepoConfig } from './repoconfig.js';
@@ -70,16 +70,34 @@ export function createDeploy(options: Options) {
   ensureDeployTable(options.store);
   const secretEnv = (target: Target) => { const source = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) }; const values: Record<string, string> = {}; for (const [key, name] of Object.entries(envNames(target))) { const value = source[name]; if (!value) throw new Error(`missing credential ${name}`); values[key] = value; } return { values, redact: redactor(Object.values(values)) }; };
   const run = async (file: string, args: string[], target: Target, cwd?: string) => { const credentials = secretEnv(target); const result = await exec(file, args, { cwd, env: { ...process.env, ...(options.env ?? {}), ...credentials.values }, timeout: 300_000 }); if ((result.code ?? 0) !== 0) throw new Error(credentials.redact(result.stderr || result.stdout || `${file} failed`)); return { text: credentials.redact(result.stdout), credentials }; };
-  const migrationFiles = (target: Target) => target.migrationGlobs ?? ['convex/schema.ts', 'convex/migrations/**'];
+  const defaultMigrationGlobs = ['convex/schema.ts', 'convex/migrations/**'];
   const globMatch = (file: string, glob: string): boolean => { const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]'); return new RegExp(`^${escaped}$`).test(file); };
-  const hasSchemaDiff = async (repo: string, target: Target, previousSha: string | null, sha: string): Promise<boolean> => {
+  const migrationGlobs = async (repo: string, previousSha: string | null, target: Target): Promise<string[]> => {
+    const configured: string[] = [];
+    if (previousSha) {
+      try {
+        const baseConfig = await loadRepoConfig(repo, previousSha, false);
+        const baseTarget = baseConfig.deploy?.targets.find((candidate) => candidate.name === target.name);
+        configured.push(...(baseTarget?.migrationGlobs ?? []));
+      } catch { /* defaults fail closed when the old config is unavailable */ }
+    }
+    return [...new Set([...defaultMigrationGlobs, ...configured])];
+  };
+  const hasSchemaDiff = async (repo: string, globs: string[], previousSha: string | null, sha: string): Promise<boolean> => {
     if (!previousSha) return true;
     const result = await exec('git', ['diff', '--name-only', `${previousSha}..${sha}`], { cwd: repo });
     if ((result.code ?? 0) !== 0) throw new Error('could not inspect Convex migration diff');
-    return result.stdout.split(/\r?\n/).map((file) => file.trim()).filter(Boolean).some((file) => migrationFiles(target).some((glob) => globMatch(file, glob)));
+    return result.stdout.split(/\r?\n/).map((file) => file.trim()).filter(Boolean).some((file) => globs.some((glob) => globMatch(file, glob)));
+  };
+  const install = async (worktree: string): Promise<void> => {
+    const command: readonly [string, string[]] | null = existsSync(join(worktree, 'package-lock.json')) ? ['npm', ['ci']] : existsSync(join(worktree, 'pnpm-lock.yaml')) ? ['pnpm', ['install', '--frozen-lockfile']] : existsSync(join(worktree, 'yarn.lock')) ? ['yarn', ['install', '--frozen-lockfile']] : null;
+    if (!command) throw new Error('Convex deploy requires a package lockfile');
+    const source = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) };
+    const result = await exec(command[0], command[1], { cwd: worktree, env: { PATH: source.PATH ?? '', HOME: source.HOME ?? homedir() }, timeout: 300_000 });
+    if ((result.code ?? 0) !== 0) throw new Error(result.stderr || result.stdout || `${command[0]} install failed`);
   };
   const adapter = async (repo: string, slug: string, target: Target, sha: string, worktree?: string): Promise<{ url: string | null; deploymentId: string | null }> => {
-    if (target.kind === 'convex') { const result = await run('npx', ['convex', 'deploy', '--yes'], target, worktree); return { url: null, deploymentId: sha }; }
+    if (target.kind === 'convex') { if (!worktree) throw new Error('Convex deploy requires a worktree'); await install(worktree); const result = await run('npx', ['--no-install', 'convex', 'deploy', '--yes'], target, worktree); return { url: null, deploymentId: sha }; }
     if (target.kind !== 'vercel') throw new Error(`${target.kind} deploy adapter is not available in C2a`);
     if ((target.mode ?? 'cli') === 'git') {
       const deadline = Date.now() + 300_000;
@@ -115,7 +133,7 @@ export function createDeploy(options: Options) {
   async function runDeploy(input: DeployInput): Promise<ToolOutcome<{ deploy: DeployRow }>> {
     let reservation: TapReservation | undefined; let deployId: string | undefined; let redact = (value: unknown) => String(value);
     try {
-      const resolved = await options.resolveRepo(input.project); const branch = await options.workspace.defaultBranch(resolved.repo); const requestedSha = input.sha ?? branch; if (requestedSha.startsWith('-')) throw new Error('invalid commit reference'); const resolvedResult = await exec('git', ['rev-parse', '--verify', `${requestedSha}^{commit}`], { cwd: resolved.repo }); const sha = resolvedResult.stdout.trim().toLowerCase(); if ((resolvedResult.code ?? 0) !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new Error(`commit reference did not resolve to a full SHA: ${requestedSha}`); const config = await loadRepoConfig(resolved.repo, sha, false); const target = targetFor(config, input.target); const prior = previous(resolved.slug, target.name); const migration = target.kind === 'convex' ? await hasSchemaDiff(resolved.repo, target, prior?.sha ?? null, sha) : false; const migrationAction = `convex.migration:${resolved.slug}:${target.name}:${prior?.sha ?? 'none'}:${sha}`; const action = migration ? migrationAction : `deploy.run:${resolved.slug}:${target.name}:${sha}`; const hardMigrationTap = migration && !preview(target); const decision = await options.envelope({ project: resolved.slug, actions: [action], kind: migration ? 'convex.migration' : `deploy.${target.name}`, baseRef: branch }); if (!decision.ok) return decision; const verdict = decision.decisions[0]?.decision; if (!verdict) return { ok: false, reason: `envelope returned no decision for ${target.kind}` }; if (verdict === 'never') return { ok: false, reason: `deployment refused for ${target.kind}` }; if (hardMigrationTap || verdict === 'tap') { if (!input.tapId) return { ok: false, reason: `tap required for ${migration ? 'convex.migration' : target.kind}: ${action}` }; const reserved = options.reserveTap(resolved.slug, migration ? 'convex.migration' : target.kind, action, input.tapId); if (typeof reserved === 'string') return { ok: false, reason: `tap required for ${migration ? 'convex.migration' : target.kind}: ${reserved}` }; reservation = reserved; }
+      const resolved = await options.resolveRepo(input.project); const branch = await options.workspace.defaultBranch(resolved.repo); const requestedSha = input.sha ?? branch; if (requestedSha.startsWith('-')) throw new Error('invalid commit reference'); const resolvedResult = await exec('git', ['rev-parse', '--verify', `${requestedSha}^{commit}`], { cwd: resolved.repo }); const sha = resolvedResult.stdout.trim().toLowerCase(); if ((resolvedResult.code ?? 0) !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new Error(`commit reference did not resolve to a full SHA: ${requestedSha}`); const config = await loadRepoConfig(resolved.repo, sha, false); const target = targetFor(config, input.target); const prior = previous(resolved.slug, target.name); const globs = target.kind === 'convex' ? await migrationGlobs(resolved.repo, prior?.sha ?? null, target) : []; const migration = target.kind === 'convex' ? await hasSchemaDiff(resolved.repo, globs, prior?.sha ?? null, sha) : false; const migrationAction = `convex.migration:${resolved.slug}:${target.name}:${prior?.sha ?? 'none'}:${sha}`; const action = migration ? migrationAction : `deploy.run:${resolved.slug}:${target.name}:${sha}`; const kinds = migration ? [`deploy.${target.name}`, 'convex.migration'] : [`deploy.${target.name}`]; const decisions = await Promise.all(kinds.map((kind) => options.envelope({ project: resolved.slug, actions: [action], kind, baseRef: branch }))); for (const decision of decisions) if (!decision.ok) return decision; const verdicts = decisions.map((decision) => decision.ok ? decision.decisions[0]?.decision : undefined); if (verdicts.some((verdict) => verdict === 'never')) return { ok: false, reason: `deployment refused for ${verdicts[0] === 'never' ? kinds[0] : 'convex.migration'}` }; if (verdicts.some((verdict) => !verdict)) return { ok: false, reason: `envelope returned no decision for ${target.kind}` }; const verdict = verdicts.includes('tap') ? 'tap' : 'allow'; const hardMigrationTap = migration && !preview(target); if (hardMigrationTap || verdict === 'tap') { if (!input.tapId) return { ok: false, reason: `tap required for ${migration ? 'convex.migration' : target.kind}: ${action}` }; const reserved = options.reserveTap(resolved.slug, migration ? 'convex.migration' : target.kind, action, input.tapId); if (typeof reserved === 'string') return { ok: false, reason: `tap required for ${migration ? 'convex.migration' : target.kind}: ${reserved}` }; reservation = reserved; }
       redact = secretEnv(target).redact; if (!preview(target)) { const check = await exec('git', ['merge-base', '--is-ancestor', sha, `origin/${branch}`], { cwd: resolved.repo }); if ((check.code ?? 0) !== 0) throw new Error(`sha ${sha} is not on base branch ${branch}`); }
       deployId = `d-${randomUUID()}`; const at = now().toISOString(); options.store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(deployId, resolved.slug, target.name, target.kind, typeof target.env === 'string' ? target.env : JSON.stringify(target.env), sha, 'deploying', null, null, prior?.deploymentId ?? null, '{}', reservation?.tapId ?? null, at);
       const worktree = join(options.home, 'deploys', resolved.slug.replace(/\//g, '__'), deployId); mkdirSync(join(options.home, 'deploys', resolved.slug.replace(/\//g, '__')), { recursive: true }); let created = false;

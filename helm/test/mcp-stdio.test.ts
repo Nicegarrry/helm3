@@ -55,15 +55,9 @@ test('mcp stdio: a real client lists all tools and calls them through helm serve
     const missing = JSON.parse(text(await client.callTool({ name: 'worker.inspect', arguments: { workerId: 'nope' } }))) as { ok: boolean; reason: string };
     assert.equal(missing.ok, false);
     assert.equal(missing.reason, 'worker not found');
-    // The front-end started a daemon, which serves the status page and records itself in serve.json.
+    // The front-end started a daemon, which records itself in serve.json.
     const daemon = daemonOf(home);
     assert.notEqual(daemon.pid, transport.pid, 'the daemon is a separate process from the stdio front-end');
-    const page = await fetch(`http://127.0.0.1:${daemon.port}/`, { headers: { accept: 'text/html' } });
-    assert.equal(page.status, 200);
-    assert.match(await page.text(), /<title>Helm<\/title>/);
-    const state = (await (await fetch(`http://127.0.0.1:${daemon.port}/api/state`)).json()) as { ok: boolean; workers: unknown[] };
-    assert.equal(state.ok, true);
-    assert.deepEqual(state.workers, []);
   } finally {
     await client.close();
     await stopDaemon(home);

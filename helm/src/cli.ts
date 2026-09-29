@@ -486,7 +486,7 @@ async function cmdServe(args: string[]): Promise<void> {
   if (values.stdio && !values.http) {
     const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port));
     const handle = await serveStdioProxy(live.port);
-    console.error(`helm stdio front-end attached to daemon pid ${live.pid}; status page at http://127.0.0.1:${live.port}/`);
+    console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);
     await handle.closed;
     await handle.close();
     process.exit(0);

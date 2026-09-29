@@ -32,8 +32,8 @@ lines of TypeScript.
    when its client does. The daemon (`helm serve --http`) owns the store and the workers,
    keeps running between sessions, and is shared by every project that points at the same
    `$HELM_HOME` (default `~/.helm`) — so two Claude Code sessions in two repos see one store,
-   one cap and one dashboard. Its environment is whichever session started it; to give a
-   project its own daemon, cap and dashboard, give it its own `HELM_HOME` in `env`.
+   one cap. Its environment is whichever session started it; to give a project its own daemon
+   and cap, give it its own `HELM_HOME` in `env`.
 
    For Codex or anything that speaks Streamable HTTP, point it at `http://127.0.0.1:<port>/mcp`
    (the port is in `$HELM_HOME/serve.json`; start the daemon by hand with
@@ -179,8 +179,8 @@ process, version and revision before reopening admissions. Existing stdio proxie
 that port; a request during the brief handover can fail and must be inspected before retry.
 Future automatic starts select the installed release recorded in `current-release.json`.
 
-A timeout leaves the old daemon running and draining, with blockers in `upgrade.json` and
-the dashboard. After the helper finishes, cancel the drain with `helm daemon --action resume`,
+A timeout leaves the old daemon running and draining, with blockers in `upgrade.json`. After
+the helper finishes, cancel the drain with `helm daemon --action resume`,
 or retry activation. A failed startup leaves admissions closed; inspect `upgrade.log` and
 `daemon.log` before starting a known-good release manually. There is no automatic database
 rollback. A release changed after validation is refused before shutdown.
@@ -189,7 +189,7 @@ Manual controls are `helm daemon --action drain`, `status` and `resume`. `helm s
 refuses to exit with active work. SIGINT/SIGTERM drain for up to ten minutes and leave the
 daemon running on timeout; another signal does not force-kill workers.
 
-The dashboard and `run.status` show the running version, staged version, phase and blockers.
+`run.status` shows the running version, staged version, phase and blockers.
 `daemon.lock` is acquired before opening SQLite. A stale lock is deliberately **not** stolen:
 after a crash, verify the recorded owner and any surviving worker/gate processes have stopped
 before removing that lock directory. Likewise, only remove a stale `upgrade.lock` after its
@@ -218,22 +218,8 @@ polling calls to a handful of waits for the same job; `helm/evidence/live.md` ha
 `helm ps`, `helm logs <id> -f`, `helm inspect <id>` and `helm status` read the store directly
 and work without the daemon.
 
-The daemon serves a read-only dashboard on loopback (the port is in `$HELM_HOME/serve.json`;
-each stdio front-end prints the URL to stderr when it attaches).
-Open `http://127.0.0.1:<port>/` in a browser:
-
-- Live workers: state, role, model, spend, tokens, elapsed (ticking), head, objective and
-  last event, with all / active / done / failed filters and a text filter.
-- Click a worker for its detail drawer: result and notes, gates with per-check exit codes,
-  PR link, diff stat, and its event history. `#w-<id>` in the URL deep-links to it.
-- Per-model rollup of workers, spend and tokens, and a cumulative spend timeline against the cap.
-- A live event stream across all workers, refusals and errors in red.
-
-It polls every two seconds, pauses when the tab is hidden, and is plain HTML with inline
-vanilla JavaScript: no framework, no build step, no external resources. It follows the system
-light or dark appearance; append `?theme=dark` or `?theme=light` to force one. The same data is
-available as JSON at `GET /api/state`, `GET /api/worker/<id>` and `GET /api/events?after=<seq>`;
-`curl` on `/` returns the plain `helm ps` table.
+The daemon's loopback HTTP interface is reserved for the CLI, health checks, tool calls, and
+MCP; use Discord or chat for live coordination.
 
 ## Durability and cost
 
@@ -251,7 +237,7 @@ global backstop: it refuses new spawns and stops running workers at the next too
 A value of `0` or an unset variable means no global cap. A soft cap,
 `HELM_SPEND_WARN_USD` (default 80% of the hard cap), never blocks: crossing it records a
 `spend.warning` event, sets `aboveSoftCap` in `run.status`, adds a `warning` field to spawn
-and steer results so the orchestrator sees it, and turns the dashboard bar amber. Models
+and steer results so the orchestrator sees it. Models
 with no price are counted as tokens and reported as unknown-cost events, never blocked.
 
 ## Configuration
@@ -285,6 +271,6 @@ Use repeatable `--source label=/absolute/helm-home` flags for multiple fleets.
 The phone view refreshes every 30 seconds and shows stale or unavailable sources
 without exposing prompts, logs or build controls. This companion does not require
 a daemon restart. See [mobile fleet setup](docs/mobile-fleet.md) for access checks,
-credentials, source selection, and stopping the publisher. The hosted dashboard uses local
+credentials, source selection, and stopping the publisher. The hosted mobile monitor uses local
 font files only and has an accessible, persisted System / Light / Dark appearance selector;
 System follows the device setting and storage failures safely fall back to it.

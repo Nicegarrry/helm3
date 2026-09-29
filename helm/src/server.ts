@@ -6,7 +6,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createToolRegistry } from './tools.js';
-import { renderDashboardShell } from './ui.js';
 import { VERSION } from './lifecycle.js';
 import type { Helm } from './helm.js';
 
@@ -16,7 +15,7 @@ export type ServeHandle = Readonly<{ close(): Promise<void>; port?: number; clos
 
 type Registry = ReturnType<typeof createToolRegistry>;
 
-/** The daemon: owns the store and the workers, serves the dashboard, the CLI endpoint and MCP over HTTP. */
+/** The daemon: owns the store and the workers, serves the CLI endpoint and MCP over HTTP. */
 export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   return serveHttp(opts.helm, createToolRegistry(opts.helm), opts.port ?? 0);
 }
@@ -121,11 +120,6 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
     }
 
     if (url.pathname === '/' && req.method === 'GET') {
-      if ((req.headers.accept ?? '').includes('text/html')) {
-        // The page is a static shell (src/ui.ts) that polls the /api/* endpoints below for its data.
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(renderDashboardShell());
-        return;
-      }
       const outcome = await helm.list({});
       const body = outcome.ok ? formatWorkerTable(outcome.workers) : `error: ${outcome.reason}`;
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }).end(body);
@@ -134,22 +128,6 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
 
     if (url.pathname === '/api/state' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(await helm.overview()));
-      return;
-    }
-
-    const workerMatch = req.method === 'GET' ? url.pathname.match(/^\/api\/worker\/([^/]+)$/) : null;
-    if (workerMatch) {
-      const workerId = decodeURIComponent(workerMatch[1] ?? '');
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(await helm.workerDetail(workerId)));
-      return;
-    }
-
-    if (url.pathname === '/api/events' && req.method === 'GET') {
-      // Both params are optional; recentEvents() clamps them (limit default 100, max 1000; NaN falls back to the default).
-      const after = Number(url.searchParams.get('after') ?? '0');
-      const limitParam = url.searchParams.get('limit');
-      const outcome = limitParam === null ? await helm.recentEvents(after) : await helm.recentEvents(after, Number(limitParam));
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(outcome));
       return;
     }
 

@@ -1,4 +1,3 @@
-/** Git worktree add/remove, commit, push, diff stat. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -9,6 +8,20 @@ const exec = promisify(execFile);
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await exec('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 });
   return stdout;
+}
+
+async function patchId(repo: string, baseSha: string, head: string): Promise<string> {
+  const diff = await git(repo, ['diff', `${baseSha}...${head}`]);
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = execFile('git', ['patch-id', '--stable'], { cwd: repo, maxBuffer: 16 * 1024 * 1024 }, (error, output, stderr) => {
+      if (error) reject(new Error(stderr.trim() || error.message));
+      else resolve(output);
+    });
+    child.stdin?.end(diff);
+  });
+  const id = stdout.trim().split(/\s+/)[0];
+  if (!id) throw new Error(`empty patch id for ${baseSha}...${head}`);
+  return id;
 }
 
 async function refExists(repo: string, ref: string): Promise<boolean> {
@@ -33,7 +46,6 @@ export function gitWorkspace(): Workspace {
         const branch = out.trim().replace(/^refs\/remotes\/origin\//, '');
         if (branch) return branch;
       } catch {
-        // fall through
       }
       if (await refExists(repo, 'refs/heads/main')) return 'main';
       if (await refExists(repo, 'refs/heads/master')) return 'master';
@@ -66,6 +78,8 @@ export function gitWorkspace(): Workspace {
       return git(path, ['diff', '--stat', baseSha]);
     },
 
+    patchId,
+
     async commitAll(path: string, message: string): Promise<string> {
       await git(path, ['add', '-A']);
       const staged = await git(path, ['diff', '--cached', '--name-only']);
@@ -87,7 +101,6 @@ export function gitWorkspace(): Workspace {
         await exec('gh', ['repo', 'clone', slug, dest], { maxBuffer: 16 * 1024 * 1024 });
       } catch (err) {
         const code = (err as { code?: unknown }).code;
-        // gh missing or not authenticated: fall back to anonymous https.
         if (code !== 'ENOENT' && typeof code === 'number' && existsSync(dest)) throw err;
         await exec('git', ['clone', `https://github.com/${slug}.git`, dest], { maxBuffer: 16 * 1024 * 1024 });
       }

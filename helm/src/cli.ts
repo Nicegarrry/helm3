@@ -1,4 +1,3 @@
-/** The `helm` command line. */
 import { spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -26,6 +25,7 @@ import type { SupervisorHost, SupervisorRow } from './types.js';
 import { createWatcher } from './watch.js';
 import { createSupervisor } from './supervise.js';
 import { createDiscord } from './discord.js';
+import { createReview } from './review.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -86,7 +86,6 @@ function printOutcome(outcome: unknown, json: boolean): void {
   }
 }
 
-/** Reads serve.json and confirms its pid is actually alive, deleting a stale file if not. */
 function readLiveServeJson(serveJsonPath: string): { port: number; pid: number } | undefined {
   if (!existsSync(serveJsonPath)) return undefined;
   const parsed = JSON.parse(readFileSync(serveJsonPath, 'utf8')) as { port: number; pid: number };
@@ -98,7 +97,6 @@ function readLiveServeJson(serveJsonPath: string): { port: number; pid: number }
       try { rmSync(serveJsonPath, { force: true }); } catch { /* best effort */ }
       return undefined;
     }
-    // Some other error (e.g. EPERM: pid exists but owned by another user) - treat as alive.
     return parsed;
   }
 }
@@ -126,7 +124,6 @@ function printEvent(e: EventRow, json: boolean): void {
 type ParsedValues = Record<string, string | boolean | string[] | undefined>;
 type CliOptions = Record<string, { type: 'string' | 'boolean'; multiple?: boolean; short?: string }>;
 
-/** Shared shape for the thin write commands: parse args, build a tool body, POST, print. */
 async function simpleCmd(
   toolName: string,
   args: string[],
@@ -139,7 +136,6 @@ async function simpleCmd(
   printOutcome(await postTool(toolName, body), values.json === true);
 }
 
-/** Shared shape for the thin read commands: parse args, open the store, run, close the store. */
 async function readCmd(
   args: string[],
   run: (positionals: string[], values: ParsedValues, store: Store, config: HelmConfig) => Promise<void> | void,
@@ -205,7 +201,6 @@ const cmdInspect = (args: string[]) =>
     for (const e of events) console.log(`  [${e.at}] ${e.kind} ${JSON.stringify(e.data)}`);
   }, { tail: { type: 'string' } });
 
-/** `wait` goes through the daemon's worker.wait like the other write-side verbs: the daemon is what runs the workers anyway. */
 const cmdWait = (args: string[]) =>
   simpleCmd('worker.wait', args, (p, v) => (p.length > 0 ? { workerIds: p, ...(v.timeout ? { timeoutMs: Number(v.timeout) } : {}) } : undefined), { timeout: { type: 'string' } });
 
@@ -371,7 +366,6 @@ function preflight(repo: string, warn: (line: string) => void, home: string): vo
   if (!existsSync(skill)) warn(`warning: helm-supervisor skill is missing at ${skill}`);
 }
 
-/** Starts or reattaches the owner session. Dependencies are injectable for fake-exec tests. */
 export async function startSupervisor(input: StartSupervisorInput, deps: StartSupervisorDeps = {}): Promise<void> {
   const env = deps.env ?? process.env;
   const warn = deps.warn ?? ((line: string) => console.error(line));
@@ -447,7 +441,6 @@ const cmdWake = (args: string[]) =>
     printOutcome(service.manualWake(project, text), values.json === true);
   });
 
-/** HTTP owns the daemon; stdio attaches or starts it. See README.md. */
 async function cmdServe(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { stdio: { type: 'boolean' }, http: { type: 'boolean' }, port: { type: 'string' } } });
   const config = loadConfig();
@@ -471,11 +464,14 @@ async function cmdServe(args: string[]): Promise<void> {
   const settings = loadSettings(config.home);
   const discord = createDiscord({ store, settings, home: config.home });
   const jev = createJev({ settings, store, env: process.env });
+  const workspace = gitWorkspace();
+  const github = ghGitHub();
   const helm = new Helm({
-    config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
+    config, store, workspace, gates: gateRunner(), github,
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
+    review: createReview({ store, github, workspace, jev, settings }),
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
@@ -506,7 +502,6 @@ async function cmdServe(args: string[]): Promise<void> {
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void drainOnSignal().catch((err) => { signaling = false; console.error(err); }); });
 }
 
-/** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */
 async function startDetachedDaemon(home: string, serveJsonPath: string, port: number): Promise<{ port: number; pid: number }> {
   if (existsSync(join(home, 'upgrade.lock'))) throw new Error('upgrade in progress; automatic startup is paused');
   const update = readMetadata(join(home, 'upgrade.json'));
@@ -533,7 +528,6 @@ async function cmdShutdown(): Promise<void> {
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
 
-/** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,

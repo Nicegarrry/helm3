@@ -1,4 +1,3 @@
-/** Shared contracts for the Helm harness. */
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -128,7 +127,6 @@ export interface Store {
   listWorkers(filter?: { repo?: string; state?: WorkerState }): WorkerRow[];
   appendEvent(workerId: string, kind: string, data?: Record<string, unknown>, at?: string): EventRow;
   listEvents(workerId: string, opts?: { afterSeq?: number; limit?: number }): EventRow[];
-  /** Events across every worker, ascending seq, `seq > afterSeq`. Default limit 100, capped at 1000. */
   listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[];
   getCursor(name: string): number;
   setCursor(name: string, seq: number): void;
@@ -140,9 +138,7 @@ export interface Store {
   addSpend(row: SpendRow): void;
   spendFor(workerId: string): SpendSummary;
   spendTotal(): SpendSummary;
-  /** The last `limit` spend rows (by insertion order), returned ascending by `at`. Feeds the cumulative spend chart. */
   spendSeries(limit: number): Array<{ at: string; costUsd: number | null }>;
-  /** Mark every `running` worker as `interrupted`. Called once on daemon start. Returns affected ids. */
   markInterrupted(): string[];
   close(): void;
 }
@@ -151,21 +147,17 @@ export interface Store {
 export type WorktreeInfo = Readonly<{ path: string; branch: string; baseSha: string }>;
 
 export interface Workspace {
-  /** Resolve `ref` in `repo` to a full SHA. */
   resolveSha(repo: string, ref: string): Promise<string>;
   defaultBranch(repo: string): Promise<string>;
-  /** `git worktree add -b <branch> <path> <baseSha>` under root. */
   create(repo: string, root: string, branch: string, baseSha: string): Promise<WorktreeInfo>;
   remove(repo: string, path: string): Promise<void>;
   head(path: string): Promise<string>;
   isClean(path: string): Promise<boolean>;
   diffStat(path: string, baseSha: string): Promise<string>;
-  /** Stage everything and commit; returns new head. No-op (returns head) if nothing to commit. */
+  patchId(repo: string, baseSha: string, head: string): Promise<string>;
   commitAll(path: string, message: string): Promise<string>;
   push(path: string, branch: string): Promise<void>;
-  /** Clone `owner/name` into `dest`, preferring `gh repo clone` (uses gh auth) and falling back to https. */
   clone(slug: string, dest: string): Promise<void>;
-  /** `git fetch --prune origin`; best effort for an already-cloned repo. */
   fetch(repo: string): Promise<void>;
 }
 
@@ -173,9 +165,7 @@ export interface Workspace {
 export type GateCheck = Readonly<{ name: string; command: string }>;
 
 export interface GateRunner {
-  /** Run each check in `cwd` sequentially; capture output to files under `logDir`. */
   run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
-  /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
   defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }
 
@@ -186,7 +176,6 @@ export type PrStatus = Readonly<{
   head: string;
   mergeable: boolean | null;
   draft: boolean;
-  /** `status` is lower-case and is `completed` only when the check has finished; `conclusion` is lower-case and null until then, for check runs and commit-status contexts alike. */
   checks: ReadonlyArray<{ name: string; status: string; conclusion: string | null }>;
   reviews: ReadonlyArray<{ author: string; state: string }>;
   url: string;
@@ -195,9 +184,12 @@ export type PrStatus = Readonly<{
 export interface GitHub {
   openPr(input: { cwd: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
-  comment(repoSlug: string, number: number, body: string): Promise<void>;
+  comment(repoSlug: string, id: number): Promise<GitHubComment>;
+  postComment(repoSlug: string, number: number, body: string): Promise<void>;
   merge(repoSlug: string, number: number, expectedHead: string): Promise<void>;
 }
+
+export type GitHubComment = Readonly<{ body: string; issueNumber?: number; issueUrl?: string; pullRequestUrl?: string }>;
 
 
 export type WorkerRunInput = Readonly<{
@@ -220,16 +212,13 @@ export type WorkerRunOutcome = Readonly<{
 }>;
 
 export interface WorkerRunner {
-  /** Run one turn (objective or steer message). Emits events through `emit`; resolves when the turn ends. */
   run(input: WorkerRunInput, message: string, hooks: WorkerHooks): Promise<WorkerRunOutcome>;
 }
 
 export type WorkerHooks = Readonly<{
   emit(kind: string, data?: Record<string, unknown>): void;
   onUsage(usage: Omit<SpendRow, 'workerId' | 'at'>): void;
-  /** The Pi session file, reported as soon as it is opened rather than when the turn returns. */
   onSession(sessionFile: string): void;
-  /** Return false to stop the turn (spend cap hit or stop requested). Checked at tool-call boundaries. */
   shouldContinue(): boolean;
 }>;
 
@@ -285,8 +274,6 @@ export const inboxListInput = z.object({ project: z.string().min(1).optional(), 
 export const inboxReplyInput = z.object({ id: z.string().regex(/^q-[0-9a-f]+$/), answer: z.string().min(1).max(20000), by: z.string().min(1).max(200).default('supervisor') }).strict();
 export const waitInput = z.object({
   workerIds: z.array(z.string().min(1)).min(1).max(20),
-  // Bounded under Claude Code's idle window for MCP tool calls (30 minutes on stdio, 5 on
-  // HTTP) so a wait is never aborted for silence. A caller that sees `timedOut` waits again.
   timeoutMs: z.number().int().min(1000).max(1_500_000).default(600_000),
 }).strict();
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
@@ -294,6 +281,9 @@ export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.stri
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
 export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+export const reviewRecordInput = z.object({
+  number: z.number().int().positive(), head: z.string().regex(/^[0-9a-f]{40}$/), commentUrl: z.string().url(), reviewer: z.string().min(1), verdict: z.enum(['approve', 'request_changes']),
+}).strict();
 export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
 export const supervisorRegisterInput = z.object({ project: z.string().min(1), repo: z.string().min(1), host: z.enum(['herdr', 'tmux']), label: z.string().min(1) }).strict();
@@ -302,7 +292,7 @@ export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boole
 export const supervisorRotateInput = z.object({ project: z.string().min(1), focus: z.string().min(1).max(4000) }).strict();
 export const notifyNickInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick'] as const;
 export type ToolName = string;
 
 

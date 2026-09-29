@@ -1,6 +1,5 @@
-/** `gh` CLI transport: pr create, status, comment, merge. See DESIGN.md. */
 import { execFile } from 'node:child_process';
-import type { GitHub, PrStatus } from './types.js';
+import type { GitHub, GitHubComment, PrStatus } from './types.js';
 
 export type ExecFn = (
   file: string,
@@ -12,7 +11,6 @@ const defaultExecFn: ExecFn = (file, args, opts) => new Promise((resolve, reject
   const child = execFile(file, args, { cwd: opts.cwd, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
     if (error === null) { resolve({ stdout, stderr, code: 0 }); return; }
     const code = (error as NodeJS.ErrnoException & { code?: number | string }).code;
-    // A spawn failure (e.g. `gh` not found) carries a string code; a process exit carries a number.
     if (typeof code !== 'number') { reject(error); return; }
     resolve({ stdout, stderr, code });
   });
@@ -39,7 +37,6 @@ type PrViewJson = {
 
 const PENDING_CONTEXT_STATES: ReadonlySet<string> = new Set(['PENDING', 'EXPECTED']);
 
-/** `gh` reports a check run with upper-case `status`/`conclusion` (`COMPLETED`, `SUCCESS`) and a commit-status context (Vercel and friends) with only `state`. */
 function mapCheck(check: NonNullable<PrViewJson['statusCheckRollup']>[number]): PrStatus['checks'][number] {
   const name = check.name ?? check.context ?? 'unknown';
   if (check.status) {
@@ -94,7 +91,17 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       return mapPrStatus(parsed);
     },
 
-    async comment(repoSlug: string, number: number, body: string): Promise<void> {
+    async comment(repoSlug: string, id: number): Promise<GitHubComment> {
+      const stdout = await run(exec, ['api', `repos/${repoSlug}/issues/comments/${id}`]);
+      const parsed = JSON.parse(stdout) as { body?: unknown; issue_url?: unknown; pull_request_url?: unknown };
+      if (typeof parsed.body !== 'string') throw new Error('GitHub comment has no body');
+      const issueUrl = typeof parsed.issue_url === 'string' ? parsed.issue_url : undefined;
+      const pullRequestUrl = typeof parsed.pull_request_url === 'string' ? parsed.pull_request_url : undefined;
+      const issueNumber = issueUrl ? Number(issueUrl.match(/\/issues\/(\d+)(?:$|\/)/)?.[1]) : NaN;
+      return { body: parsed.body, issueUrl, pullRequestUrl, ...(Number.isInteger(issueNumber) ? { issueNumber } : {}) };
+    },
+
+    async postComment(repoSlug: string, number: number, body: string): Promise<void> {
       await run(exec, ['pr', 'comment', String(number), '--repo', repoSlug, '--body-file', '-'], { input: body });
     },
 

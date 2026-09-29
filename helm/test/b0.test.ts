@@ -18,14 +18,14 @@ function deps() {
   const workspace: Workspace = {
     async resolveSha(_repo, ref) { return ref; }, async defaultBranch() { return 'main'; },
     async create(_repo, path, branch, baseSha) { return { path, branch, baseSha }; }, async remove() {},
-    async head() { return 'a'.repeat(40); }, async isClean() { return true; }, async diffStat() { return ''; },
+    async head() { return 'a'.repeat(40); }, async isClean() { return true; }, async diffStat() { return ''; }, async patchId() { return 'patch'; },
     async commitAll(_path, message) { return message; }, async push() {}, async clone() {}, async fetch() {},
   };
   const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
   const github: GitHub = {
     async openPr() { return { number: 1, url: 'https://example.invalid/1' }; },
     async prStatus(_repo, number): Promise<PrStatus> { return { number, state: 'open', head: 'a'.repeat(40), mergeable: true, draft: false, checks: [], reviews: [], url: 'https://example.invalid/1' }; },
-    async comment() {}, async merge() {},
+    async comment() { return { body: '', issueNumber: 1 }; }, async postComment() {}, async merge() {},
   };
   const runner: WorkerRunner = { async run(_input, _message, _hooks) { return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } };
   const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'build', reviewer: () => 'review' }, settings: loadSettings(home) });

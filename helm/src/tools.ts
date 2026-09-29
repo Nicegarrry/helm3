@@ -1,4 +1,3 @@
-/** The tool registry: maps tool names to their zod input schemas and dispatches validated calls to a Helm instance. */
 import type { z } from 'zod';
 import {
   emptyInput,
@@ -15,6 +14,7 @@ import {
   prOpenInput,
   prStatusInput,
   reviewInput,
+  reviewRecordInput,
   spawnInput,
   steerInput,
   stopInput,
@@ -38,8 +38,6 @@ type ToolDef = Readonly<{
   call: (helm: Helm, input: never) => Promise<ToolOutcome<unknown>>;
 }>;
 
-// Cast each schema/handler pair once here so the table below stays readable; `call`'s
-// input is validated against `inputSchema` before it is ever invoked.
 function def<S extends z.ZodObject>(name: ToolName, description: string, inputSchema: S, call: (helm: Helm, input: z.infer<S>) => Promise<ToolOutcome<unknown>>): ToolDef {
   return { name, description, inputSchema, call: call as ToolDef['call'] };
 }
@@ -59,6 +57,7 @@ const TOOLS: readonly ToolDef[] = [
   def('pr.open', 'Push a worker\'s branch and open a pull request; requires a passing gate at the worker\'s current head.', prOpenInput, (h, i) => h.prOpen(i)),
   def('pr.status', 'Get a pull request\'s open/closed/merged state, mergeability, checks and reviews, by PR number or worker id.', prStatusInput, (h, i) => h.prStatus(i)),
   def('review.request', 'Review an open PR with an explicit model. Claude reviews are recorded with review.record.', reviewInput, (h, i) => h.reviewRequest(i)),
+  def('review.record', 'Record an external review comment and its merge verdict for the exact pull-request head.', reviewRecordInput, (h, i) => h.reviewRecord(i)),
   def('run.status', 'Get overall spend, the spend cap, and how many worker slots are active out of the configured maximum.', emptyInput, (h) => h.runStatus()),
   def('pr.merge', 'Merge a pull request, but only if it is open, mergeable, at the exact expected head commit, and all checks passed.', prMergeInput, (h, i) => h.prMerge(i)),
   def('inbox.list', 'List open worker questions, optionally filtered by project or state.', inboxListInput, (h, i) => h.inboxList(i)),

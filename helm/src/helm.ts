@@ -1,4 +1,3 @@
-/** Helm service: composes the runtime and implements the worker, budget, and lifecycle tools. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -51,6 +50,7 @@ import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
+import type { ReviewRecordInput, ReviewService } from './review.js';
 
 const exec = promisify(execFile);
 
@@ -71,7 +71,6 @@ export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
 export type InboxListInput = z.infer<typeof inboxListInput>;
 export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
 
-/** What a builder/reviewer prompt is built from. Owned here since types.ts does not define it. */
 export type PromptInput = Readonly<{
   objective: string;
   acceptance: string | null;
@@ -92,18 +91,16 @@ export type HelmDeps = Readonly<{
   runner: WorkerRunner;
   prompts: HelmPrompts;
   now?: () => Date;
-  /** How long `stop()` waits for a running turn to settle before giving up. Default 10s; tests may lower it. */
   stopTimeoutMs?: number;
-  /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
   settings?: Settings;
   supervisor?: SupervisorService;
   discord?: DiscordService;
+  review?: ReviewService;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
 const ACTIVE_STATES: ReadonlySet<WorkerState> = new Set(['queued', 'running']);
-/** Check conclusions that do not block a merge. Lower-case: github.ts normalises them. */
 const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set(['success', 'neutral', 'skipped']);
 
 type OnDone = (workerId: string, result: WorkerResult | null, outcome: WorkerRunOutcome) => Promise<void>;
@@ -116,7 +113,6 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Turns thrown errors into the harness's stable refusal shape. */
 async function runGuard<T>(fn: () => Promise<ToolOutcome<T>>): Promise<ToolOutcome<T>> {
   try {
     return await fn();
@@ -125,12 +121,10 @@ async function runGuard<T>(fn: () => Promise<ToolOutcome<T>>): Promise<ToolOutco
   }
 }
 
-/** Throws `reason` when `condition` is falsy. Meant for use inside a `guard`-wrapped method. */
 function must(condition: unknown, reason: string): asserts condition {
   if (!condition) throw new Error(reason);
 }
 
-/** Returns `value`, or throws `reason` when it is null/undefined. */
 function requireValue<T>(value: T | null | undefined, reason: string): T {
   if (value === null || value === undefined) throw new Error(reason);
   return value;
@@ -140,7 +134,6 @@ function genId(prefix: string): string {
   return `${prefix}-${randomBytes(4).toString('hex')}`;
 }
 
-/** Extract "owner/name" from a git remote URL (ssh or https), or null if it doesn't parse. */
 function parseOwnerRepo(url: string): string | null {
   const trimmed = url.trim();
   const match = trimmed.match(/[/:]([^/:]+)\/([^/]+?)(\.git)?\/?$/);
@@ -151,7 +144,6 @@ function parseOwnerRepo(url: string): string | null {
 export type OverviewWorker = {
   workerId: string; state: WorkerState; role: WorkerRow['role']; model: string; repoSlug: string; branch: string; head: string | null;
   objective: string; createdAt: string; updatedAt: string; elapsedMs: number; spendUsd: number; tokens: number; unknownCostEvents: number;
-  /** The dashboard summarises `data` client-side (ui.ts `summarize`), the one place that text is shaped. */
   lastEvent: { kind: string; at: string; data: Record<string, unknown> } | null; resultStatus: WorkerResult['status'] | null;
 };
 export type OverviewModel = { model: string; workers: number; active: number; spendUsd: number; tokens: number };
@@ -161,10 +153,8 @@ export type Overview = {
   observedAt: string;
   run: { spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
   workers: OverviewWorker[]; models: OverviewModel[];
-  /** Cumulative spend over time (last SPEND_SERIES_POINTS spend rows, ascending by `at`; unknown cost counts as 0). */
   spendSeries: SpendPoint[];
 };
-/** One worker's drill-down: the overview row plus everything the page shows on its detail panel. */
 export type WorkerDetail = {
   worker: OverviewWorker;
   result: WorkerResult | null;
@@ -180,7 +170,6 @@ const DETAIL_EVENT_TAIL = 200;
 const EVENTS_DEFAULT_LIMIT = 100;
 const EVENTS_MAX_LIMIT = 1000;
 
-/** Review family: leading letters of the last model path segment, independent of provider. */
 export function modelFamily(model: string): string {
   const id = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
   const last = id.split('/').pop() ?? id;
@@ -188,7 +177,6 @@ export function modelFamily(model: string): string {
   return (m ? m[0] : last).toLowerCase();
 }
 
-// Explicit model overrides remain available; automatic choices exclude Kimi K3 and Qwen Max.
 const TASK_MODELS = { normal: 'codex/gpt-5.6-luna:high', easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'codex/gpt-5.6-luna:medium' } as const;
 
 export type ToolGuard = (input: unknown) => string | null | Promise<string | null>;
@@ -196,7 +184,6 @@ export type ModelChooser = (input: SpawnInput) => string | null | undefined | Pr
 
 export class Helm {
   readonly lifecycle: Lifecycle;
-  /** Public so server.ts can find $HELM_HOME (for serve.json) without a second config load. */
   readonly config: HelmConfig;
   private readonly store: Store;
   private readonly workspace: Workspace;
@@ -206,9 +193,7 @@ export class Helm {
   private readonly prompts: HelmPrompts;
   private readonly now?: () => Date;
   private readonly running = new Map<string, Promise<void>>();
-  /** Workers with a stop requested for their current turn; cleared only once that turn settles (see runTurn). */
   private readonly stopRequested = new Set<string>();
-  /** Workers whose current turn actually observed the stop request via hooks.shouldContinue(). */
   private readonly stopObserved = new Set<string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
@@ -217,7 +202,7 @@ export class Helm {
   private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
   readonly discord?: DiscordService;
-  /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
+  private readonly review?: ReviewService;
   private lock: Promise<void> = Promise.resolve();
 
   constructor(deps: HelmDeps) {
@@ -236,16 +221,16 @@ export class Helm {
     ensureBudgetTables(this.store);
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
+    this.review = deps.review;
+    if (this.review) this.guard('pr.merge', (input) => this.review!.guard(input));
   }
 
-  /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {
     const hooks = this.guards.get(tool) ?? [];
     hooks.push(fn);
     this.guards.set(tool, hooks);
   }
 
-  /** Register model selection before spawn admission takes the mutex. */
   chooseModel(fn: ModelChooser): void {
     this.modelChoosers.push(fn);
   }
@@ -268,7 +253,6 @@ export class Helm {
     return chosen;
   }
 
-  /** Runs `fn` exclusively with respect to every other call queued through this lock. */
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {
     const previous = this.lock;
     let release: () => void = () => {};
@@ -281,12 +265,10 @@ export class Helm {
     }
   }
 
-  /** Await a worker's in-flight turn, if any. Exposed for tests. */
   async settle(workerId: string): Promise<void> {
     await this.running.get(workerId);
   }
 
-  /** Called once on daemon start: every `running` worker becomes `interrupted`. */
   markInterruptedOnStart(): string[] {
     return this.store.markInterrupted();
   }
@@ -300,7 +282,6 @@ export class Helm {
     });
   }
 
-  /** Locked spawn admission; onDone keeps review posting inside the worker lifetime. */
   private async spawnLocked(
     input: SpawnInput,
     onDone?: OnDone,
@@ -435,12 +416,8 @@ export class Helm {
       this.store.appendEvent(input.workerId, 'stop.requested');
       const settled = await this.waitForSettle(input.workerId, this.stopTimeoutMs);
       if (!settled) {
-        // The turn never settled: leave `stopRequested` set so the flag is not lost, and
-        // hooks.shouldContinue() keeps returning false for it if/when it does check again.
         return { ok: true, state: 'unknown' };
       }
-      // runTurn's completion path already cleared stopRequested/stopObserved and wrote the
-      // final state (forced to 'stopped' only if the turn actually observed the request).
       const finalRow = this.store.getWorker(input.workerId);
       return { ok: true, state: finalRow?.state ?? 'unknown' };
     });
@@ -522,7 +499,7 @@ export class Helm {
       };
       const onDone: OnDone = async (workerId, result) => {
         const body = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
-        await this.github.comment(sourceWorker.repoSlug, pr.number, body);
+        await this.github.postComment(sourceWorker.repoSlug, pr.number, body);
         this.store.appendEvent(workerId, 'review.posted', { number: pr.number });
       };
       const outcome = await runGuard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
@@ -531,7 +508,11 @@ export class Helm {
     });
   }
 
-  /** Read-only dashboard data: run status, every worker with spend and last event, and a per-model rollup. */
+  async reviewRecord(input: ReviewRecordInput): Promise<ToolOutcome<unknown>> {
+    if (!this.review) return refuse('review service is not configured');
+    return this.review.record(input);
+  }
+
   async overview(): Promise<ToolOutcome<Overview>> {
     return runGuard(async () => {
       const status = await this.runStatus();
@@ -554,7 +535,6 @@ export class Helm {
     });
   }
 
-  /** One worker's drill-down for the dashboard: overview row, result, diff stat, gates, PR and the last events. */
   async workerDetail(workerId: string): Promise<ToolOutcome<WorkerDetail>> {
     return runGuard(async () => {
       const row = requireValue(this.store.getWorker(workerId), 'worker not found');
@@ -574,7 +554,6 @@ export class Helm {
     });
   }
 
-  /** Events across every worker with `seq > afterSeq`, ascending, for the dashboard's incremental poll. */
   async recentEvents(afterSeq = 0, limit = EVENTS_DEFAULT_LIMIT): Promise<ToolOutcome<{ events: EventRow[] }>> {
     return runGuard(async () => {
       const safeAfter = Number.isFinite(afterSeq) ? Math.max(0, Math.floor(afterSeq)) : 0;
@@ -583,7 +562,6 @@ export class Helm {
     });
   }
 
-  /** The per-worker row shared by overview() and workerDetail(), so both views agree on every field. */
   private overviewWorker(r: WorkerRow, now: string): OverviewWorker {
     const spend = this.store.spendFor(r.workerId);
     const last = this.store.listEvents(r.workerId, { limit: 1_000_000 }).at(-1);
@@ -599,7 +577,6 @@ export class Helm {
     };
   }
 
-  /** Soft cap: explicit HELM_SPEND_WARN_USD, else 80% of the hard cap, else none. */
   spendWarnUsd(): number {
     const explicit = this.config.spendWarnUsd ?? 0;
     if (explicit > 0) return explicit;
@@ -640,7 +617,6 @@ export class Helm {
     return runGuard(async () => ({ ok: true, budgets: listBudgetStatuses(this.store, input.project) }));
   }
 
-  /** Wait for a settled worker or timeout; periodically re-read the store, without client polling. */
   async wait(input: WaitInput): Promise<ToolOutcome<{
     settled: Array<{ workerId: string; state: WorkerState; head: string | null; result: WorkerRow['result'] }>;
     pending: string[]; timedOut: boolean; waitedMs: number;
@@ -723,7 +699,6 @@ export class Helm {
     return current;
   }
 
-  /** Absolute local paths are used as-is; `owner/name` is cloned once under $HELM_HOME/repos and fetched on later use. */
   private async resolveRepo(repo: string): Promise<string | undefined> {
     if (/^[\w.-]+\/[\w.-]+$/.test(repo)) {
       const dest = join(this.config.home, 'repos', repo.replace('/', '__'));
@@ -745,7 +720,6 @@ export class Helm {
       const slug = parseOwnerRepo(stdout);
       if (slug) return slug;
     } catch {
-      // no origin remote, or git failed; fall back below.
     }
     return basename(repo);
   }
@@ -759,7 +733,6 @@ export class Helm {
     return !timedOut;
   }
 
-  /** Start (or resume) one turn in the background. Tracked in `running` so stop/settle can wait on it. */
   private startRun(workerId: string, message: string, onDone?: OnDone): void {
     const promise = this.runTurn(workerId, message, onDone).catch((err) => {
       this.store.appendEvent(workerId, 'error', { message: `unhandled: ${errMessage(err)}` });
@@ -832,13 +805,9 @@ export class Helm {
       }
       let nextState: WorkerState =
         result === null ? 'failed' : result.status === 'succeeded' ? 'succeeded' : result.status === 'failed' ? 'failed' : result.status === 'question' ? 'waiting' : 'idle';
-      // Only report 'stopped' when this turn actually observed the stop request (via
-      // hooks.shouldContinue()); a turn that completed on its own keeps its real outcome.
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
-      // `row` was read before the turn, so its sessionFile predates hooks.onSession; fall back to
-      // what the store holds now rather than reinstating the stale value.
       const recordedSessionFile = this.store.getWorker(workerId)?.sessionFile ?? row.sessionFile;
       this.store.updateWorker(workerId, { state: nextState, sessionFile: outcome.sessionFile ?? recordedSessionFile, result, rawResultText: result === null ? outcome.rawText : null });
       this.store.appendEvent(workerId, 'result', result ? { ...result } : { rawText: outcome.rawText });

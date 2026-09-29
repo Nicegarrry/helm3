@@ -68,6 +68,7 @@ lines of TypeScript.
 | `pr.open` | Push the branch and open a PR. Refused unless a gate passed at the current head. |
 | `pr.status` | Mergeability, checks and reviews from GitHub. |
 | `review.request` | Spawn a read-only reviewer on the PR head; posts the verdict as a PR comment. Refused if the reviewer is the builder's model or the same model family (`allowSameFamily` overrides). |
+| `review.record` | Record an external review comment and its exact-head merge verdict. |
 | `run.status` | Spend, cap, per-project budgets, active workers and daemon lifecycle. |
 | `budget.open` / `budget.close` / `budget.status` | Open, close and inspect per-project sprint budgets. A new budget closes the previous one; worker spend remains attributed to the budget active at spawn. |
 | `daemon.control` | Inspect lifecycle, drain new work, resume admissions, safely shut down, or apply a staged upgrade when idle. |

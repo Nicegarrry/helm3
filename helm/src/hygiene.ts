@@ -24,6 +24,8 @@ type Options = Readonly<{
   exec?: HygieneExec;
   fs?: HygieneFs;
   statfs?: (path: string) => Promise<StatfsResult>;
+  withWorkerLock?: <T>(workerId: string, fn: () => Promise<T>) => Promise<T>;
+  deployInProgress?: (project: string, target: string) => boolean;
 }>;
 
 const realExec = promisify(execFile);
@@ -65,6 +67,22 @@ export function createHygiene(options: Options): HygieneService {
   const fs = options.fs ?? defaultFs;
   const worktreeRoot = join(options.home, 'worktrees');
   const deployRoot = join(options.home, 'deploys');
+  const workerLocks = new Map<string, Promise<void>>();
+
+  async function withWorkerLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {
+    if (options.withWorkerLock) return options.withWorkerLock(workerId, fn);
+    const previous = workerLocks.get(workerId) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    workerLocks.set(workerId, current);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (workerLocks.get(workerId) === current) workerLocks.delete(workerId);
+    }
+  }
 
   async function git(repo: string, args: string[]): Promise<string> {
     const result = await exec('git', args, { cwd: repo });
@@ -75,7 +93,7 @@ export function createHygiene(options: Options): HygieneService {
   async function trackedClean(worker: WorkerRow): Promise<boolean> {
     try {
       if (options.workspace.isTrackedClean) return await options.workspace.isTrackedClean(worker.worktree);
-      return (await git(worker.worktree, ['status', '--porcelain', '--untracked-files=no'])).trim() === '';
+      return (await git(worker.worktree, ['status', '--porcelain'])).trim() === '';
     } catch {
       return false;
     }
@@ -85,8 +103,20 @@ export function createHygiene(options: Options): HygieneService {
     const head = worker.head ?? await options.workspace.head(worker.worktree).catch(() => '');
     if (!head) return false;
     try {
-      if (options.workspace.contains) return await options.workspace.contains(worker.repo, head);
-      return (await git(worker.repo, ['for-each-ref', '--format=%(refname)', '--contains', head, 'refs/remotes/origin/'])).trim().length > 0;
+      if (options.workspace.contains) return await options.workspace.contains(worker.repo, head, worker.branch);
+      const own = `origin/${worker.branch}`;
+      return (await git(worker.repo, ['branch', '-r', '--contains', head])).split(/\r?\n/).map((line) => line.replace(/^\s*\*?\s*/, '').trim()).filter(Boolean).some((ref) => ref !== own && ref !== `refs/remotes/${own}`);
+    } catch {
+      return false;
+    }
+  }
+
+  async function reachableFromOrigin(worker: WorkerRow): Promise<boolean> {
+    const head = worker.head ?? await options.workspace.head(worker.worktree).catch(() => '');
+    if (!head) return false;
+    try {
+      if (options.workspace.reachableFromOrigin) return await options.workspace.reachableFromOrigin(worker.repo, head);
+      return (await git(worker.repo, ['branch', '-r', '--contains', head])).trim().length > 0;
     } catch {
       return false;
     }
@@ -97,9 +127,9 @@ export function createHygiene(options: Options): HygieneService {
     if (pr) {
       try {
         const status = await options.github.prStatus(worker.repoSlug, pr.number);
-        if (status.state === 'merged' || status.state === 'closed') return true;
+        return status.state === 'merged' || status.state === 'closed';
       } catch {
-        // A GitHub outage must not make an otherwise safe TTL decision unsafe.
+        return false;
       }
     }
     if (await contained(worker)) return true;
@@ -120,17 +150,35 @@ export function createHygiene(options: Options): HygieneService {
     options.store.appendEvent(worker.workerId, 'worktree.removed', { worktree: worker.worktree, branch: worker.branch });
   }
 
+  function sameWorker(before: WorkerRow, after: WorkerRow): boolean {
+    return before.state === after.state && before.updatedAt === after.updatedAt && before.worktree === after.worktree && before.branch === after.branch && before.head === after.head;
+  }
+
+  async function gcWorker(candidate: WorkerRow): Promise<void> {
+    if (!inside(worktreeRoot, candidate.worktree)) return;
+    await withWorkerLock(candidate.workerId, async () => {
+      const worker = options.store.getWorker(candidate.workerId);
+      if (!worker || removed(worker.workerId) || !settled(worker) || options.isRunning?.(worker.workerId)) return;
+      if (!inside(worktreeRoot, worker.worktree) || !await trackedClean(worker) || !await dispositionAllows(worker)) return;
+      const pushed = await reachableFromOrigin(worker);
+      const latest = options.store.getWorker(worker.workerId);
+      if (!latest || !sameWorker(worker, latest) || !settled(latest) || options.isRunning?.(latest.workerId)) return;
+      if (!pushed) {
+        options.store.appendEvent(worker.workerId, 'worktree.kept', { reason: 'unpushed commits', worktree: worker.worktree, branch: worker.branch });
+        return;
+      }
+      try { await removeWorkerWorktree(latest); } catch { /* leave the row for a later conservative retry */ }
+    });
+  }
+
   async function gc(): Promise<void> {
-    for (const worker of options.store.listWorkers()) {
-      if (removed(worker.workerId) || !settled(worker) || options.isRunning?.(worker.workerId) || !inside(worktreeRoot, worker.worktree)) continue;
-      if (!await trackedClean(worker) || !await dispositionAllows(worker)) continue;
-      try { await removeWorkerWorktree(worker); } catch { /* leave the row for a later conservative retry */ }
-    }
+    for (const worker of options.store.listWorkers()) await gcWorker(worker);
     await gcDeploys();
   }
 
   async function gcDeploys(): Promise<void> {
     const cutoff = now().getTime() - 60 * 60_000;
+    const orphanCutoff = now().getTime() - 24 * 60 * 60_000;
     let projects: string[];
     try { projects = await fs.readdir(deployRoot); } catch { return; }
     for (const project of projects) {
@@ -144,12 +192,26 @@ export function createHygiene(options: Options): HygieneService {
         const deployPath = join(projectPath, deploy);
         try {
           const deployStat = await fs.stat(deployPath);
-          if (deployStat.isDirectory() && deployStat.mtimeMs < cutoff) await fs.rm(deployPath, { recursive: true, force: true });
+          if (!deployStat.isDirectory()) continue;
+          let row: { project: string; target: string; state: string; at: string } | undefined;
+          try {
+            row = options.store.sql.prepare('SELECT project, target, state, at FROM deploys WHERE id = ?').get(deploy) as typeof row;
+          } catch {
+            // A store without the optional deploy table has no durable deploy rows.
+          }
+          if (row) {
+            const state = row.state.toLowerCase().replaceAll(' ', '_');
+            if (state === 'deploying' || state === 'running' || state === 'in_progress' || options.deployInProgress?.(row.project, row.target)) continue;
+            const at = Date.parse(row.at);
+            if ((Number.isFinite(at) ? at : deployStat.mtimeMs) < cutoff) await fs.rm(deployPath, { recursive: true, force: true });
+          } else if (deployStat.mtimeMs < orphanCutoff) {
+            await fs.rm(deployPath, { recursive: true, force: true });
+          }
         } catch { /* best effort cleanup; the next tick can retry */ }
       }
       try {
         const remaining = await fs.readdir(projectPath);
-        if (!remaining.length && projectStat.mtimeMs < cutoff) await fs.rm(projectPath, { recursive: true, force: true });
+        if (!remaining.length && projectStat.mtimeMs < orphanCutoff) await fs.rm(projectPath, { recursive: true, force: true });
       } catch { /* best effort cleanup */ }
     }
   }

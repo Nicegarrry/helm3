@@ -30,6 +30,7 @@ export type DeployService = Readonly<{
   run(input: DeployInput): Promise<ToolOutcome<{ deploy: DeployRow; warning?: string }>>;
   status(input: DeployStatusInput): Promise<ToolOutcome<{ deploys: DeployRow[] }>>;
   rollback(input: DeployRollbackInput): Promise<ToolOutcome<{ deploy: DeployRow }>>;
+  isInProgress(project: string, target: string): boolean;
 }>;
 
 const realExec = promisify(execFile);
@@ -215,7 +216,7 @@ export function createDeploy(options: Options) {
       } catch (error) { if (reservation) options.rollbackTap(reservation); return { ok: false, reason: String(error instanceof Error ? error.message : error) }; }
     } finally { inProgress.delete(key); }
   }
-  return { run: runDeploy, status, rollback };
+  return { run: runDeploy, status, rollback, isInProgress: (project: string, target: string) => inProgress.has(lockKey(project, target)) };
 }
 
 registerWakeKind('deploy.failed', (event, project, now) => ({ id: `wake-deploy-${randomUUID()}`, project, kind: 'deploy.failed', workerId: event.workerId, summary: `deployment failed: ${String(event.data.reason ?? event.data.target ?? 'unknown')}`, command: false, createdAt: now }));

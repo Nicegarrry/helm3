@@ -75,14 +75,23 @@ export function gitWorkspace(): Workspace {
     },
 
     async isTrackedClean(path: string): Promise<boolean> {
-      const out = await git(path, ['status', '--porcelain', '--untracked-files=no']);
+      const out = await git(path, ['status', '--porcelain']);
       return out.trim() === '';
     },
 
-    async contains(repo: string, head: string): Promise<boolean> {
+    async contains(repo: string, head: string, excludeBranch?: string): Promise<boolean> {
       try {
-        const out = await git(repo, ['for-each-ref', '--format=%(refname)', '--contains', head, 'refs/remotes/origin/']);
-        return out.trim().length > 0;
+        const out = await git(repo, ['branch', '-r', '--contains', head]);
+        const excluded = excludeBranch ? `origin/${excludeBranch}` : undefined;
+        return out.split(/\r?\n/).map((line) => line.replace(/^\s*\*?\s*/, '').trim()).filter(Boolean).some((ref) => ref !== excluded && ref !== `refs/remotes/${excluded}`);
+      } catch {
+        return false;
+      }
+    },
+
+    async reachableFromOrigin(repo: string, head: string): Promise<boolean> {
+      try {
+        return (await git(repo, ['branch', '-r', '--contains', head])).trim().length > 0;
       } catch {
         return false;
       }

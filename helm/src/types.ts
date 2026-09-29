@@ -171,7 +171,10 @@ export interface Workspace {
   prune?(repo: string): Promise<void>;
   deleteBranch?(repo: string, branch: string): Promise<void>;
   isTrackedClean?(path: string): Promise<boolean>;
-  contains?(repo: string, head: string): Promise<boolean>;
+  /** Whether an origin ref other than `excludeBranch` contains `head`. */
+  contains?(repo: string, head: string, excludeBranch?: string): Promise<boolean>;
+  /** Whether any origin remote ref contains `head`, including the worker branch. */
+  reachableFromOrigin?(repo: string, head: string): Promise<boolean>;
   head(path: string): Promise<string>;
   isClean(path: string): Promise<boolean>;
   diffStat(path: string, baseSha: string): Promise<string>;

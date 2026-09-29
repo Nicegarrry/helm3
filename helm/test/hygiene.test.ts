@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createHygiene } from '../src/hygiene.js';
+import { ensureDeployTable } from '../src/deploy.js';
 import { loadSettings, type Settings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
 import type { GitHub, PrStatus, Store, WorkerRow, Workspace } from '../src/types.js';
@@ -21,13 +22,14 @@ function settings(home: string): Settings {
   return loadSettings(home);
 }
 
-function fakeWorkspace(removed: string[], contained: Set<string>, dirty: Set<string>): Workspace {
+function fakeWorkspace(removed: string[], contained: Set<string>, dirty: Set<string>, reachable: boolean | Set<string> = true, untracked = new Set<string>(), excludedContainedBranch?: string): Workspace {
   return {
     async create() { throw new Error('unused'); }, async remove(_repo, path) { removed.push(path); },
     async head() { return 'b'.repeat(40); }, async isClean() { return true; }, async diffStat() { return ''; },
     async patchId() { return ''; }, async commitAll() { return ''; }, async push() {}, async clone() {}, async fetch() {},
-    async isTrackedClean(path) { return !dirty.has(path); },
-    async contains(_repo, head) { return contained.has(head); },
+    async isTrackedClean(path) { return !dirty.has(path) && !untracked.has(path); },
+    async contains(_repo, head, excludeBranch) { return contained.has(head) && excludeBranch !== excludedContainedBranch; },
+    async reachableFromOrigin(_repo, head) { return reachable === true || (reachable instanceof Set && reachable.has(head)); },
     async prune() {}, async deleteBranch() {},
     async resolveSha() { return ''; }, async defaultBranch() { return 'main'; },
   };
@@ -63,6 +65,77 @@ test('GC removes only settled clean workers eligible by merged PR, origin contai
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
+test('GC keeps an open-PR worker even when it is old and contained', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-hygiene-open-pr-'));
+  const store = openStore(':memory:');
+  const row = worker('open-pr', home, 'failed', '2025-12-01T00:00:00.000Z');
+  try {
+    store.insertWorker(row);
+    store.insertPr({ repoSlug: row.repoSlug, number: 42, workerId: row.workerId, url: 'https://github.com/owner/repo/pull/42', head: row.head!, createdAt: row.createdAt });
+    const removed: string[] = [];
+    const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace(removed, new Set([row.head!]), new Set()), github: fakeGitHub(new Map([[42, { number: 42, state: 'open', head: row.head!, mergeable: null, draft: false, checks: [], reviews: [], url: '' }]])), now: () => new Date('2026-01-02T00:00:00.000Z') });
+    await service.gc();
+    assert.deepEqual(removed, []);
+    assert.equal(store.listEvents(row.workerId).some((event) => event.kind === 'worktree.removed'), false);
+  } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('GC does not treat the worker branch as an integration origin ref', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-hygiene-own-branch-'));
+  const store = openStore(':memory:');
+  const row = worker('own-branch', home, 'succeeded', '2026-01-01T23:59:00.000Z');
+  try {
+    store.insertWorker(row);
+    const removed: string[] = [];
+    const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace(removed, new Set([row.head!]), new Set(), true, new Set(), row.branch), github: fakeGitHub(new Map()), now: () => new Date('2026-01-02T00:00:00.000Z') });
+    await service.gc();
+    assert.deepEqual(removed, []);
+  } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('GC keeps a TTL-eligible worker with unpushed commits and records the reason', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-hygiene-unpushed-'));
+  const store = openStore(':memory:');
+  const row = worker('unpushed', home, 'failed', '2025-12-01T00:00:00.000Z');
+  try {
+    store.insertWorker(row);
+    const removed: string[] = [];
+    const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace(removed, new Set(), new Set(), false), github: fakeGitHub(new Map()), now: () => new Date('2026-01-02T00:00:00.000Z') });
+    await service.gc();
+    assert.deepEqual(removed, []);
+    assert.equal(store.listEvents(row.workerId).some((event) => event.kind === 'worktree.kept' && event.data.reason === 'unpushed commits'), true);
+  } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('GC aborts when worker state changes during the GitHub check', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-hygiene-race-'));
+  const store = openStore(':memory:');
+  const row = worker('changing', home, 'failed', '2025-12-01T00:00:00.000Z');
+  try {
+    store.insertWorker(row);
+    const removed: string[] = [];
+    const github = fakeGitHub(new Map([[43, { number: 43, state: 'merged', head: row.head!, mergeable: true, draft: false, checks: [], reviews: [], url: '' }]]));
+    store.insertPr({ repoSlug: row.repoSlug, number: 43, workerId: row.workerId, url: 'https://github.com/owner/repo/pull/43', head: row.head!, createdAt: row.createdAt });
+    const racingGithub: GitHub = { ...github, async prStatus() { store.updateWorker(row.workerId, { state: 'idle', updatedAt: '2026-01-01T00:00:00.000Z' }); return { number: 43, state: 'merged', head: row.head!, mergeable: true, draft: false, checks: [], reviews: [], url: '' }; } };
+    const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace(removed, new Set(), new Set()), github: racingGithub, now: () => new Date('2026-01-02T00:00:00.000Z') });
+    await service.gc();
+    assert.deepEqual(removed, []);
+  } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('GC keeps a clean worker with an untracked non-ignored file', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-hygiene-untracked-'));
+  const store = openStore(':memory:');
+  const row = worker('untracked', home, 'failed', '2025-12-01T00:00:00.000Z');
+  try {
+    store.insertWorker(row);
+    const removed: string[] = [];
+    const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace(removed, new Set(), new Set(), true, new Set([row.worktree])), github: fakeGitHub(new Map()), now: () => new Date('2026-01-02T00:00:00.000Z') });
+    await service.gc();
+    assert.deepEqual(removed, []);
+  } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
 function rowHead(id: string): string { return id === 'merged' ? 'b'.repeat(40) : 'c'.repeat(40); }
 
 test('disk.low is emitted once per hour and low disk runs GC immediately', async () => {
@@ -82,19 +155,26 @@ test('disk.low is emitted once per hour and low disk runs GC immediately', async
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
-test('GC removes deploy leftovers older than one hour and keeps recent deploy worktrees', async () => {
+test('GC removes old terminal deploys, keeps recent or long-running deploy worktrees', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-hygiene-deploys-'));
   const store = openStore(':memory:');
   const oldPath = join(home, 'deploys', 'owner__repo', 'd-old');
   const recentPath = join(home, 'deploys', 'owner__repo', 'd-recent');
+  const runningPath = join(home, 'deploys', 'owner__repo', 'd-running');
   try {
     mkdirSync(oldPath, { recursive: true });
     mkdirSync(recentPath, { recursive: true });
+    mkdirSync(runningPath, { recursive: true });
     const old = new Date('2025-12-31T22:00:00.000Z');
     utimesSync(oldPath, old, old);
-    const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace([], new Set(), new Set()), github: fakeGitHub(new Map()), now: () => new Date('2026-01-01T00:00:00.000Z') });
+    utimesSync(runningPath, old, old);
+    ensureDeployTable(store);
+    store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('d-old', 'owner/repo', 'preview', 'vercel', '{}', 'a'.repeat(40), 'succeeded', null, null, null, '{}', null, old.toISOString());
+    store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('d-running', 'owner/repo', 'preview', 'vercel', '{}', 'a'.repeat(40), 'deploying', null, null, null, '{}', null, old.toISOString());
+    const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace([], new Set(), new Set()), github: fakeGitHub(new Map()), now: () => new Date('2026-01-01T00:00:00.000Z'), deployInProgress: () => false });
     await service.gc();
     assert.equal(existsSync(oldPath), false);
     assert.equal(existsSync(recentPath), true);
+    assert.equal(existsSync(runningPath), true);
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
 });

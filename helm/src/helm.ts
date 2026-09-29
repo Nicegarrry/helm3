@@ -231,6 +231,8 @@ export class Helm {
   readonly deploy: DeployService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
+  /** Per-worker admission locks shared with hygiene so GC cannot race steer/retry. */
+  private readonly workerLocks = new Map<string, Promise<void>>();
 
   constructor(deps: HelmDeps) {
     this.config = deps.config;
@@ -335,7 +337,13 @@ export class Helm {
 
   async retryWorker(input: z.infer<typeof retryInput>): Promise<ToolOutcome<{ turn: number; kind: import('./retry.js').RetryKind; message: string }>> {
     if (!this.retry) return refuse('retry service is not configured');
-    return runGuard(() => this.withLock(() => this.retry!.retry(input, (workerId, message) => this.steerLocked({ workerId, message }))));
+    return runGuard(async () => {
+      return this.withWorkerLock(input.workerId, async () => {
+        return this.withLock(async () => {
+          return this.retry!.retry(input, (workerId, message) => this.steerLocked({ workerId, message }));
+        });
+      });
+    });
   }
 
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
@@ -399,6 +407,20 @@ export class Helm {
       return await fn();
     } finally {
       release();
+    }
+  }
+
+  async withWorkerLock<T>(workerId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.workerLocks.get(workerId) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.workerLocks.set(workerId, current);
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.workerLocks.get(workerId) === current) this.workerLocks.delete(workerId);
     }
   }
 
@@ -524,7 +546,7 @@ export class Helm {
   }
 
   async steer(input: z.infer<typeof steerInput>): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
-    return runGuard(() => this.withLock(() => this.steerLocked(input)));
+    return runGuard(() => this.withWorkerLock(input.workerId, () => this.withLock(() => this.steerLocked(input))));
   }
 
   private async steerLocked(input: z.infer<typeof steerInput>): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
@@ -545,20 +567,23 @@ export class Helm {
   }
 
   async inboxReply(input: z.infer<typeof inboxReplyInput>): Promise<ToolOutcome<{ id: string; workerId: string; turn: number; state: 'answered'; warning?: string }>> {
-    return runGuard(() => this.withLock(async () => {
+    return runGuard(async () => {
       const item = requireValue(getInbox(this.store.sql, input.id), 'inbox item not found');
-      must(item.state === 'open', `inbox item is ${item.state}, not open`);
-      const worker = requireValue(this.store.getWorker(item.workerId), 'worker not found');
-      must(worker.state === 'waiting', `worker is ${worker.state}, not waiting`);
-      must(!this.running.has(worker.workerId), 'worker already has a turn in flight');
-      must(!this.spendCapExceeded(), 'spend cap reached');
-      this.assertBudget(worker.repoSlug, worker.workerId);
-      const answeredAt = this.nowIso();
-      must(answerInbox(this.store.sql, item.id, input.answer, input.by, answeredAt), 'inbox item is no longer open');
-      const priorTurns = this.store.listEvents(worker.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
-      this.startRun(worker.workerId, `Answer to your question: ${input.answer}\nContinue the objective.`);
-      return { ok: true, id: item.id, workerId: worker.workerId, turn: priorTurns + 1, state: 'answered', ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
-    }));
+      return this.withWorkerLock(item.workerId, () => this.withLock(async () => {
+        const currentItem = requireValue(getInbox(this.store.sql, input.id), 'inbox item not found');
+        must(currentItem.state === 'open', `inbox item is ${currentItem.state}, not open`);
+        const worker = requireValue(this.store.getWorker(currentItem.workerId), 'worker not found');
+        must(worker.state === 'waiting', `worker is ${worker.state}, not waiting`);
+        must(!this.running.has(worker.workerId), 'worker already has a turn in flight');
+        must(!this.spendCapExceeded(), 'spend cap reached');
+        this.assertBudget(worker.repoSlug, worker.workerId);
+        const answeredAt = this.nowIso();
+        must(answerInbox(this.store.sql, currentItem.id, input.answer, input.by, answeredAt), 'inbox item is no longer open');
+        const priorTurns = this.store.listEvents(worker.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
+        this.startRun(worker.workerId, `Answer to your question: ${input.answer}\nContinue the objective.`);
+        return { ok: true, id: currentItem.id, workerId: worker.workerId, turn: priorTurns + 1, state: 'answered', ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
+      }));
+    });
   }
 
   async stop(input: z.infer<typeof stopInput>): Promise<ToolOutcome<{ state: WorkerState }>> {

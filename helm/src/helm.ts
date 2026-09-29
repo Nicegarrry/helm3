@@ -90,6 +90,7 @@ export type PromptInput = Readonly<{
   objective: string;
   acceptance: string | null;
   contextPaths: readonly string[];
+  guidance?: string;
 }>;
 
 export type HelmPrompts = Readonly<{

@@ -2,8 +2,18 @@
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 
+function omitEmptyStrings(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitEmptyStrings);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).flatMap(([key, entry]) => {
+      if (typeof entry === 'string' && entry.trim() === '') return [];
+      return [[key, omitEmptyStrings(entry)]];
+    }));
+  }
+  return value;
+}
 
-export const workerResultSchema = z.object({
+export const workerResultSchema = z.preprocess(omitEmptyStrings, z.object({
   status: z.enum(['succeeded', 'failed', 'partial', 'question']),
   summary: z.string().min(1).max(4000),
   changedFiles: z.array(z.string().min(1)).max(500).default([]),
@@ -11,12 +21,12 @@ export const workerResultSchema = z.object({
   question: z.string().min(1).max(4000).optional(),
   notes: z.string().max(8000).optional(),
   claims: z.array(z.string().max(300)).max(12).optional(),
-  acceptance: z.object({ command: z.string().min(1), files: z.array(z.string().min(1)) }).optional(),
+  acceptance: z.object({ command: z.string().min(1).optional(), files: z.array(z.string().min(1)) }).optional(),
 }).strict().superRefine((result, ctx) => {
   if (result.status === 'question' && !result.question) {
     ctx.addIssue({ code: 'custom', path: ['question'], message: 'question is required when status is question' });
   }
-});
+}));
 export type WorkerResult = z.infer<typeof workerResultSchema>;
 
 export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded', 'failed', 'stopped', 'interrupted', 'unknown'] as const;

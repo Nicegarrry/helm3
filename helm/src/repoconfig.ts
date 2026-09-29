@@ -18,7 +18,11 @@ export type RepoConfig = z.infer<typeof repoConfigSchema>;
 export async function loadRepoConfig(repo: string, sha?: string): Promise<RepoConfig> {
   let raw: string;
   if (sha) {
-    ({ stdout: raw } = await exec('git', ['show', `${sha}:helm.json`], { cwd: repo }));
+    try {
+      ({ stdout: raw } = await exec('git', ['show', `${sha}:helm.json`], { cwd: repo }));
+    } catch {
+      raw = await readFile(join(repo, 'helm.json'), 'utf8');
+    }
   } else {
     raw = await readFile(join(repo, 'helm.json'), 'utf8');
   }

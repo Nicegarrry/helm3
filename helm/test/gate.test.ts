@@ -93,6 +93,40 @@ test('defaultChecks: a worker helm.json change cannot remove base gates', async 
   }
 });
 
+test('defaultChecks: an untracked operator helm.json is used when absent at the base sha', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
+  const runner = gateRunner();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'base', '--allow-empty'], { cwd: dir });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'local', command: 'echo local' }] }));
+    assert.deepEqual(await runner.defaultChecks(dir, baseSha), [{ name: 'local', command: 'echo local' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultChecks: a helm.json in a separate worker worktree is not used', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
+  const worker = mkdtempSync(join(tmpdir(), 'helm-gate-worker-'));
+  const runner = gateRunner();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'base', '--allow-empty'], { cwd: dir });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(worker, 'helm.json'), JSON.stringify({ gates: [{ name: 'worker', command: 'echo worker' }] }));
+    assert.deepEqual(await runner.defaultChecks(dir, baseSha), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worker, { recursive: true, force: true });
+  }
+});
+
 test('defaultChecks: falls back to package.json scripts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
   const runner = gateRunner();

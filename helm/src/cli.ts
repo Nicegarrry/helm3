@@ -23,6 +23,7 @@ import { loadSettings } from './settings.js';
 import { defaultExec, herdrHost, tmuxHost, type Host, type HostExec, type HostStatus } from './host.js';
 import type { SupervisorHost, SupervisorRow } from './types.js';
 import { createWatcher } from './watch.js';
+import { createJev } from './jev.js';
 import { createSupervisor } from './supervise.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
@@ -440,6 +441,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const releaseOwner = ownDaemon(config.home);
   const store = openStore(join(config.home, 'helm.sqlite'));
   const settings = loadSettings(config.home);
+  const jev = createJev({ settings, store, env: process.env });
   const helm = new Helm({
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
@@ -447,9 +449,8 @@ async function cmdServe(args: string[]): Promise<void> {
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const jev = createJev({ settings, store, env: process.env });
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev })]);
-  const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings })]);
+  const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopTicker = () => { stopWake(); stopWatch(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {

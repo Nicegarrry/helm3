@@ -17,6 +17,7 @@ import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
 import { startTicker } from './daemon.js';
 import { loadSettings } from './settings.js';
+import { createWatcher } from './watch.js';
 import { herdrHost, tmuxHost } from './host.js';
 import { createSupervisor } from './supervise.js';
 
@@ -282,7 +283,10 @@ async function cmdServe(args: string[]): Promise<void> {
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopTicker = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined)]);
+  const settings = loadSettings(config.home);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined)]);
+  const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings })]);
+  const stopTicker = () => { stopWake(); stopWatch(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();

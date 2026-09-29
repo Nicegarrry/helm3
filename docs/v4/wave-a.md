@@ -53,6 +53,7 @@ Round 1: A0, A4 (+A8 in parallel) · Round 2: A1, A2, A5a · Round 3: A3, A5b, A
 
 ## A2 — Supervisor registry + wake delivery
 **Why:** the supervisor is an interactive session; Helm must nudge it without typing over Nick.
+**A8 findings (binding, see helm/evidence/v4-a8.md):** herdr reports `done` after a turn and `idle` later, so treat `idle` OR `done` as idle (`working`/`blocked` = busy). `promptEmpty` must read with `--ansi`: the prompt is empty if nothing follows `❯` or only faint-styled (`ESC[2m`) placeholder text does.
 **Scope:**
 - New `src/host.ts` (injectable `exec`): `herdrHost` and `tmuxHost` implementing `resolve(label) → pane|null`, `status(pane) → idle|busy|unknown`, `promptEmpty(pane)`, `send(pane, line)`, `create(label, cwd, command)` (used by A3).
   - herdr: `workspace list` (JSON; match `label`) → `pane list --workspace <id>` → `pane read <pane> --source visible --lines 8` (prompt line has no text after the `>` glyph) → `pane run`.
@@ -77,7 +78,7 @@ Round 1: A0, A4 (+A8 in parallel) · Round 2: A1, A2, A5a · Round 3: A3, A5b, A
 ## A3 — `helm supervisor start <project>`
 **Why:** one idempotent command that brings up, or reattaches, a project's owner session.
 **Scope:** `src/cli.ts` + the `create` in `host.ts`. `helm supervisor start <owner/name> --repo <abs path> [--host herdr|tmux] [--label text]`. `--repo` and `--label` are needed only the first time; later runs read the registry. Host defaults to herdr when `herdr status server` succeeds, else tmux.
-- Command: `supervisor.command` from settings, else `<claude> "Use the helm-supervisor skill. You are the supervisor for <slug>. Run its startup read order."`. `<claude>` = `$HELM_CLAUDE_BIN` → `~/.local/bin/claude` → `claude`.
+- Command: `supervisor.command` from settings, else `<claude> --remote-control '<label>' "Use the helm-supervisor skill. You are the supervisor for <slug>. Run its startup read order."`. `<claude>` = `$HELM_CLAUDE_BIN` → `~/.local/bin/claude` → `claude`.
 - Idempotent:
   - Workspace exists and its root pane has a detected agent → print `attached <label> <pane>`, no change.
   - Workspace exists but no agent → `pane run` the command.
@@ -85,7 +86,8 @@ Round 1: A0, A4 (+A8 in parallel) · Round 2: A1, A2, A5a · Round 3: A3, A5b, A
 - Then start the daemon if down (reuse `startDetachedDaemon`) and POST `supervisor.register`.
 - Preflight warnings (not failures): repo `.mcp.json` has no `helm` server; skill not installed at `~/.claude/skills/helm-supervisor`.
 **Acceptance (fake exec):** start twice → creates once, attaches once; a dead agent in an existing workspace → the command re-runs; register is called with the label.
-**Out:** enabling remote control (A8 finds the flag or step; A3 adds it to `command` as a follow-up). **Size** S (~90). **Lane** google/gemini-3.8-flash. **Deps** A2.
+After launch, warn if `agent_status` is `blocked` (e.g. Claude's folder-trust prompt).
+**Out:** restarts of a live session (rotation is compact-only). **Size** S (~90). **Lane** google/gemini-3.8-flash. **Deps** A2.
 
 ## A4 — Supervisor skill (`~/code/skills/helm-supervisor/SKILL.md`, separate repo)
 **Why:** the owner contract has to live somewhere that survives `/compact`.

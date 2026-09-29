@@ -1,3 +1,4 @@
+/** Git worktree add/remove, commit, push, diff stat. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -46,6 +47,7 @@ export function gitWorkspace(): Workspace {
         const branch = out.trim().replace(/^refs\/remotes\/origin\//, '');
         if (branch) return branch;
       } catch {
+        // fall through
       }
       if (await refExists(repo, 'refs/heads/main')) return 'main';
       if (await refExists(repo, 'refs/heads/master')) return 'master';
@@ -101,6 +103,7 @@ export function gitWorkspace(): Workspace {
         await exec('gh', ['repo', 'clone', slug, dest], { maxBuffer: 16 * 1024 * 1024 });
       } catch (err) {
         const code = (err as { code?: unknown }).code;
+        // gh missing or not authenticated: fall back to anonymous https.
         if (code !== 'ENOENT' && typeof code === 'number' && existsSync(dest)) throw err;
         await exec('git', ['clone', `https://github.com/${slug}.git`, dest], { maxBuffer: 16 * 1024 * 1024 });
       }

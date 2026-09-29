@@ -73,7 +73,7 @@ export function createReview({ store, github, workspace, jev, settings, now = ()
     if (!fetched || typeof fetched !== 'object' || typeof fetched.body !== 'string') return refusal('GitHub comment was not found');
     if (issueNumber(fetched) !== input.number) return refusal('comment does not belong to this PR');
     const scoreResult = await jev.ask('review.verdict', {
-      project: worker.repoSlug, state: { body: fetched.body.replace(/^(?:APPROVE|REQUEST_CHANGES): ?/gm, ''), stated: input.verdict },
+      project: worker.repoSlug, state: { body: fetched.body.replace(/^(?:APPROVE|REQUEST_CHANGES): ?/gm, '') },
       questions: { verdict: { type: 'noul', instructions: 'Does this code review approve the change for merge (as opposed to requesting changes)?' } },
     });
     const answer = scoreResult.ok ? scoreResult.answers.verdict ?? scoreResult.answers.approve : undefined;

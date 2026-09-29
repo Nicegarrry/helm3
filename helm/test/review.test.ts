@@ -60,11 +60,32 @@ test('a Jev disagreement records disputed and emits a supervisor wake', async ()
 test('an old-head review is rejected, then carried by the same patch id', async () => {
   const d = setup({ patchIds: { [head1]: 'patch-1', [head2]: 'patch-1' } });
   try {
+    assert.deepEqual(await d.review.record({ number: 1, head: head2, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-10', reviewer: 'claude-sonnet', verdict: 'approve' }), {
+      ok: false, reason: `head mismatch: expected ${head2}, got ${head1}`,
+    });
     const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-10', reviewer: 'claude-sonnet', verdict: 'approve' });
     assert.equal(recorded.ok, true);
     d.setHead(head2);
     assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head2 }), { ok: true, merged: true });
     assert.equal(d.merged(), 1);
+  } finally { d.store.close(); }
+});
+
+test('review.record refuses a stale head', async () => {
+  const d = setup();
+  try {
+    assert.deepEqual(await d.review.record({ number: 1, head: head2, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-13', reviewer: 'claude-sonnet', verdict: 'approve' }), {
+      ok: false, reason: `head mismatch: expected ${head2}, got ${head1}`,
+    });
+  } finally { d.store.close(); }
+});
+
+test('pr.merge refuses a review from the builder model family', async () => {
+  const d = setup();
+  try {
+    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-14', reviewer: 'codex/gpt-5.6-luna:high', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: "reviewer model family 'gpt' matches the builder's" });
   } finally { d.store.close(); }
 });
 

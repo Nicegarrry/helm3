@@ -1,3 +1,4 @@
+/** `gh` CLI transport: pr create, status, comment, merge. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import type { GitHub, GitHubComment, PrStatus } from './types.js';
 
@@ -11,6 +12,7 @@ const defaultExecFn: ExecFn = (file, args, opts) => new Promise((resolve, reject
   const child = execFile(file, args, { cwd: opts.cwd, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
     if (error === null) { resolve({ stdout, stderr, code: 0 }); return; }
     const code = (error as NodeJS.ErrnoException & { code?: number | string }).code;
+    // A spawn failure (e.g. `gh` not found) carries a string code; a process exit carries a number.
     if (typeof code !== 'number') { reject(error); return; }
     resolve({ stdout, stderr, code });
   });
@@ -37,6 +39,7 @@ type PrViewJson = {
 
 const PENDING_CONTEXT_STATES: ReadonlySet<string> = new Set(['PENDING', 'EXPECTED']);
 
+/** `gh` reports a check run with upper-case `status`/`conclusion` (`COMPLETED`, `SUCCESS`) and a commit-status context (Vercel and friends) with only `state`. */
 function mapCheck(check: NonNullable<PrViewJson['statusCheckRollup']>[number]): PrStatus['checks'][number] {
   const name = check.name ?? check.context ?? 'unknown';
   if (check.status) {

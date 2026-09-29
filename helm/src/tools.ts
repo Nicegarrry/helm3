@@ -1,3 +1,4 @@
+/** The tool registry: maps tool names to their zod input schemas and dispatches validated calls to a Helm instance. */
 import type { z } from 'zod';
 import {
   emptyInput,
@@ -40,6 +41,8 @@ type ToolDef = Readonly<{
   call: (helm: Helm, input: never) => Promise<ToolOutcome<unknown>>;
 }>;
 
+// Cast each schema/handler pair once here so the table below stays readable; `call`'s
+// input is validated against `inputSchema` before it is ever invoked.
 function def<S extends z.ZodObject>(name: ToolName, description: string, inputSchema: S, call: (helm: Helm, input: z.infer<S>) => Promise<ToolOutcome<unknown>>): ToolDef {
   return { name, description, inputSchema, call: call as ToolDef['call'] };
 }

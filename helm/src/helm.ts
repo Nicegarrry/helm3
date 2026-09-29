@@ -792,7 +792,8 @@ export class Helm {
 
   async envelopeCheck(input: EnvelopeCheckInput): Promise<ToolOutcome<{ decisions: EnvelopeDecision[] }>> {
     const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
-    let repo = worker?.repo;
+    const sameProjectWorker = worker?.repoSlug === input.project ? worker : undefined;
+    let repo = sameProjectWorker?.repo;
     if (!repo) {
       try { repo = await this.resolveRepo(input.project); } catch { /* branch lookup failure stays fail closed */ }
     }
@@ -804,8 +805,7 @@ export class Helm {
       jev: this.jev,
       envelopeTapAt: this.settings.factory.envelopeTapAt,
       defaultBranch,
-      workerBaseRef: worker?.baseRef,
-      workerBranch: worker?.branch,
+      workerBaseRef: sameProjectWorker?.baseRef,
     }) };
   }
 

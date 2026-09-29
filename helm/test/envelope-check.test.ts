@@ -18,7 +18,7 @@ function putEnvelope(root: string, value: Record<string, unknown>): void {
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, JSON.stringify(value));
 }
-async function one(action: string, jev: Jev | undefined, root: string, kind?: string, baseRef?: string, branches: { defaultBranch?: string; workerBaseRef?: string; workerBranch?: string } = {}) {
+async function one(action: string, jev: Jev | undefined, root: string, kind?: string, baseRef?: string, branches: { defaultBranch?: string; workerBaseRef?: string } = {}) {
   return (await checkEnvelope(root, { project, actions: [action], kind, baseRef }, { jev, envelopeTapAt: 0.5, ...branches }))[0]!;
 }
 
@@ -90,9 +90,9 @@ test('push hard rule parses shell refspecs and protects the configured base bran
     }
     const custom = await one('git push origin release', fakeJev(0), root, undefined, 'release');
     assert.deepEqual(custom, { action: 'git push origin release', decision: 'tap', source: 'hard', pTap: null });
-    const discoveredDefault = await one('git push origin trunk', fakeJev(0), root, undefined, undefined, { defaultBranch: 'trunk', workerBranch: 'feature/c3' });
+    const discoveredDefault = await one('git push origin trunk', fakeJev(0), root, undefined, undefined, { defaultBranch: 'trunk' });
     assert.deepEqual(discoveredDefault, { action: 'git push origin trunk', decision: 'tap', source: 'hard', pTap: null });
-    const discoveredWorkerBase = await one('git push origin release', fakeJev(0), root, undefined, undefined, { workerBaseRef: 'release', workerBranch: 'feature/c3' });
+    const discoveredWorkerBase = await one('git push origin release', fakeJev(0), root, undefined, undefined, { workerBaseRef: 'release' });
     assert.deepEqual(discoveredWorkerBase, { action: 'git push origin release', decision: 'tap', source: 'hard', pTap: null });
     const feature = await one('git push origin feature/c3', fakeJev(0), root, undefined, 'release');
     assert.deepEqual(feature, { action: 'git push origin feature/c3', decision: 'allow', source: 'jev', pTap: 0 });
@@ -109,11 +109,13 @@ test('push hard rule parses shell refspecs and protects the configured base bran
     ]) {
       assert.deepEqual(await one(action, fakeJev(0), root, undefined, 'release'), { action, decision: 'tap', source: 'hard', pTap: null });
     }
-    for (const action of ['git push', 'git push origin', 'git push origin HEAD', 'git push origin @']) {
+    for (const action of ['git checkout main && git push', 'git push origin HEAD', 'git push --all', 'git push origin --mirror', 'git push --tags', 'git push origin -f feature-x', 'git push origin --delete feature-x', 'git push origin :main']) {
       assert.deepEqual(await one(action, fakeJev(0), root, undefined, undefined), { action, decision: 'tap', source: 'hard', pTap: null });
     }
-    assert.deepEqual(await one('git push origin', fakeJev(0), root, undefined, undefined, { workerBranch: 'feature/c3' }), { action: 'git push origin', decision: 'allow', source: 'jev', pTap: 0 });
-    assert.deepEqual(await one('git push origin HEAD', fakeJev(0), root, undefined, undefined, { workerBranch: 'main' }), { action: 'git push origin HEAD', decision: 'tap', source: 'hard', pTap: null });
+    for (const action of ['git push', 'git push origin', 'git push origin @']) {
+      assert.deepEqual(await one(action, fakeJev(0), root, undefined, undefined), { action, decision: 'tap', source: 'hard', pTap: null });
+    }
+    assert.deepEqual(await one('git push origin feature-x', fakeJev(0), root, undefined, undefined), { action: 'git push origin feature-x', decision: 'allow', source: 'jev', pTap: 0 });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -16,6 +16,7 @@ const ROUTING_DEFAULTS = {
 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
+const HYGIENE_DEFAULTS = { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 };
 
 const settingsSchema = z.object({
   jev: z.object({
@@ -79,6 +80,12 @@ const settingsSchema = z.object({
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
+  hygiene: z.object({
+    keepNodeModules: z.boolean().default(false),
+    gcSec: z.number().int().positive().default(600),
+    worktreeTtlHours: z.number().positive().default(24),
+    minFreeGb: z.number().positive().default(15),
+  }).default(HYGIENE_DEFAULTS),
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;

@@ -168,6 +168,10 @@ export interface Workspace {
   /** `git worktree add -b <branch> <path> <baseSha>` under root. */
   create(repo: string, root: string, branch: string, baseSha: string): Promise<WorktreeInfo>;
   remove(repo: string, path: string): Promise<void>;
+  prune?(repo: string): Promise<void>;
+  deleteBranch?(repo: string, branch: string): Promise<void>;
+  isTrackedClean?(path: string): Promise<boolean>;
+  contains?(repo: string, head: string): Promise<boolean>;
   head(path: string): Promise<string>;
   isClean(path: string): Promise<boolean>;
   diffStat(path: string, baseSha: string): Promise<string>;

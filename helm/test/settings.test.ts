@@ -25,6 +25,7 @@ test('loadSettings returns the v4 defaults when helm.json is missing', () => {
       routing: { table: { trivial: 'codex/gpt-5.6-luna:medium', small: 'codex/gpt-5.6-luna:medium', medium: 'codex/gpt-5.6-luna:medium', large: 'codex/gpt-5.6-luna:high' }, allowed: ['codex/gpt-5.6-luna:medium', 'codex/gpt-5.6-luna:high'], minClean: 0.5, minN: 8 },
       discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
       deploy: { smokeEnv: [] },
+      hygiene: { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 },
     });
   } finally {
     rmSync(home, { recursive: true, force: true });

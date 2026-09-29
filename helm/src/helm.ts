@@ -80,6 +80,7 @@ import type { PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
 import { createDeploy, type DeployExec, type DeployService } from './deploy.js';
+import { freeSpaceGb, type StatfsResult } from './hygiene.js';
 
 const exec = promisify(execFile);
 
@@ -120,6 +121,7 @@ export type HelmDeps = Readonly<{
   deployFetch?: typeof globalThis.fetch;
   deploySleep?: (ms: number) => Promise<void>;
   deployEnv?: NodeJS.ProcessEnv;
+  statfs?: (path: string) => Promise<StatfsResult>;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -208,6 +210,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
+  private readonly statfs?: (path: string) => Promise<StatfsResult>;
   private readonly jev?: Jev;
   private readonly tapRandomInt?: (min: number, max: number) => number;
   private readonly tapPepper: Buffer;
@@ -242,6 +245,7 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
+    this.statfs = deps.statfs;
     this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;
     this.tapPepper = deps.tapPepper ?? randomBytes(32);
@@ -410,6 +414,8 @@ export class Helm {
 
   async spawn(input: SpawnInput): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string }>> {
     return runGuard(async () => {
+      const freeGb = await freeSpaceGb(this.config.home, this.statfs);
+      if (freeGb !== null && freeGb < this.settings.hygiene.minFreeGb / 2) return refuse('disk low');
       const chosen = await this.chosenModel(input);
       const reason = await this.refusal('worker.spawn', chosen.input);
       if (reason) return refuse(reason);
@@ -523,6 +529,7 @@ export class Helm {
 
   private async steerLocked(input: z.infer<typeof steerInput>): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
     const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+    must(!this.store.listEvents(input.workerId, { limit: 1_000_000 }).some((event) => event.kind === 'worktree.removed'), 'worktree removed; respawn');
     must(STEERABLE_STATES.has(row.state), `worker is ${row.state}, not steerable`);
     must(!this.running.has(input.workerId), 'worker already has a turn in flight');
     must(!this.spendCapExceeded(), 'spend cap reached');
@@ -801,6 +808,8 @@ export class Helm {
   }
 
   async tapTick(): Promise<void> { expireTaps(this.store, this.taps, this.nowDate()); }
+
+  isWorkerRunning(workerId: string): boolean { return this.running.has(workerId); }
 
   async envelopeGet(input: z.infer<typeof envelopeGetInput>): Promise<ToolOutcome<EnvelopeView>> {
     envelopePath(this.config.home, input.project);

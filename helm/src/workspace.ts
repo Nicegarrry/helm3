@@ -66,6 +66,28 @@ export function gitWorkspace(): Workspace {
       await git(repo, ['worktree', 'remove', '--force', path]);
     },
 
+    async prune(repo: string): Promise<void> {
+      await git(repo, ['worktree', 'prune']);
+    },
+
+    async deleteBranch(repo: string, branch: string): Promise<void> {
+      await git(repo, ['branch', '-D', branch]);
+    },
+
+    async isTrackedClean(path: string): Promise<boolean> {
+      const out = await git(path, ['status', '--porcelain', '--untracked-files=no']);
+      return out.trim() === '';
+    },
+
+    async contains(repo: string, head: string): Promise<boolean> {
+      try {
+        const out = await git(repo, ['for-each-ref', '--format=%(refname)', '--contains', head, 'refs/remotes/origin/']);
+        return out.trim().length > 0;
+      } catch {
+        return false;
+      }
+    },
+
     async head(path: string): Promise<string> {
       const out = await git(path, ['rev-parse', 'HEAD']);
       return out.trim();

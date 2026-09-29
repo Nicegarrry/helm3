@@ -32,6 +32,7 @@ import { createReview } from './review.js';
 import { createRetry } from './retry.js';
 import { createEnvelopeTicker } from './envelope.js';
 import { createMemorySync } from './memory-sync.js';
+import { createHygiene } from './hygiene.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -503,7 +504,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const workspace = gitWorkspace();
   const github = ghGitHub();
   const helm = new Helm({
-    config, store, workspace, gates: gateRunner(), github,
+    config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules }), github,
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
@@ -514,13 +515,15 @@ async function cmdServe(args: string[]): Promise<void> {
     claims: createClaims({ jev, store, settings, workspace }),
   });
   helm.markInterruptedOnStart();
+  const hygiene = createHygiene({ home: config.home, store, settings, workspace, github, isRunning: (workerId) => helm.isWorkerRunning(workerId) });
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings, env: process.env })]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopMemory(); };
+  const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();

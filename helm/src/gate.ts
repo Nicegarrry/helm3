@@ -1,7 +1,7 @@
 /** Run checks as child processes, capture output. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
@@ -35,20 +35,29 @@ function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: str
   });
 }
 
-export function gateRunner(): GateRunner {
+export function gateRunner(options: { keepNodeModules?: boolean } = {}): GateRunner {
   return {
     async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
+      const cleanup = !options.keepNodeModules;
+      const nodeModules = [join(cwd, 'node_modules'), join(cwd, 'helm', 'node_modules')];
+      const existed = new Set(nodeModules.filter((path) => existsSync(path)));
       const results: CheckResult[] = [];
       const usedSlugs = new Map<string, number>();
-      for (const check of checks) {
-        const base = slugifyCheckName(check.name);
-        const seen = usedSlugs.get(base) ?? 0;
-        usedSlugs.set(base, seen + 1);
-        const outputSlug = seen === 0 ? base : `${base}-${seen}`;
-        const result = await runCheck(cwd, check, outputSlug, logDir, timeoutMs);
-        results.push(result);
+      try {
+        for (const check of checks) {
+          const base = slugifyCheckName(check.name);
+          const seen = usedSlugs.get(base) ?? 0;
+          usedSlugs.set(base, seen + 1);
+          const outputSlug = seen === 0 ? base : `${base}-${seen}`;
+          const result = await runCheck(cwd, check, outputSlug, logDir, timeoutMs);
+          results.push(result);
+        }
+      } finally {
+        if (cleanup) {
+          await Promise.all(nodeModules.filter((path) => !existed.has(path) && existsSync(path)).map((path) => rm(path, { recursive: true, force: true }).catch(() => {})));
+        }
       }
       const passed = results.every((result) => result.exitCode === 0);
       return { passed, checks: results };

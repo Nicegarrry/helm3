@@ -221,7 +221,7 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number }> & {
+type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
   settings?: Omit<Partial<Settings>, 'budgets'> & { budgets?: Partial<Settings['budgets']> };
 };
 
@@ -241,6 +241,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     runner: overrides.runner ?? succeeded(),
     prompts: FAKE_PROMPTS,
     settings,
+    statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
   });
@@ -313,6 +314,12 @@ test('spawn refuses once active workers reach maxWorkers', async () => {
   const second = await helm.spawn(spawnBody(repo));
   assert.equal(second.ok, false);
   if (!second.ok) assert.match(second.reason, /max workers/);
+});
+
+test('spawn refuses when free disk is below half the hygiene threshold', async () => {
+  const { helm } = makeHelm({ statfs: async () => ({ bavail: 7, bsize: 1024 ** 3 }) });
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.deepEqual(outcome, { ok: false, reason: 'disk low' });
 });
 
 test('two concurrent spawns respect maxWorkers via the admission mutex (F6)', async () => {
@@ -691,6 +698,17 @@ test('steer is refused while running and allowed once idle', async () => {
   assert.equal(afterIdle.ok, true);
   resolveNext({ result: { status: 'succeeded', summary: 'finished', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
   await helm.settle(spawned.workerId);
+});
+
+test('steer refuses a worker whose worktree was removed and explains how to recover', async () => {
+  const { helm, store } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  store.appendEvent(spawned.workerId, 'worktree.removed');
+  assert.deepEqual(await helm.steer({ workerId: spawned.workerId, message: 'continue' }), { ok: false, reason: 'worktree removed; respawn' });
 });
 
 test('two concurrent steer() calls on an idle worker: exactly one succeeds (F2)', async () => {

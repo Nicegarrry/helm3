@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
@@ -57,6 +57,32 @@ test('run: a timeout produces a null exit code', async () => {
     const result = await runner.run(dir, [{ name: 'slow', command: 'sleep 5' }], logDir, { timeoutMs: 200 });
     assert.equal(result.passed, false);
     assert.equal(result.checks[0]?.exitCode, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('run: removes node_modules created by the gate on pass and fail, but preserves existing or opted-in modules', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-hygiene-'));
+  const logDir = join(dir, 'logs');
+  try {
+    const createsModules = 'mkdir -p node_modules helm/node_modules; exit 3';
+    const removed = await gateRunner().run(dir, [{ name: 'fail', command: createsModules }], logDir);
+    assert.equal(removed.passed, false);
+    assert.equal(existsSync(join(dir, 'node_modules')), false);
+    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), false);
+
+    mkdirSync(join(dir, 'node_modules'), { recursive: true });
+    mkdirSync(join(dir, 'helm', 'node_modules'), { recursive: true });
+    await gateRunner().run(dir, [{ name: 'pass', command: 'exit 0' }], logDir);
+    assert.equal(existsSync(join(dir, 'node_modules')), true);
+    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
+
+    rmSync(join(dir, 'node_modules'), { recursive: true, force: true });
+    rmSync(join(dir, 'helm', 'node_modules'), { recursive: true, force: true });
+    await gateRunner({ keepNodeModules: true }).run(dir, [{ name: 'keep', command: 'mkdir -p node_modules helm/node_modules' }], logDir);
+    assert.equal(existsSync(join(dir, 'node_modules')), true);
+    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -15,9 +15,8 @@ lives in `helm/`. Read `helm/README.md` first.
 - Workers report a JSON `WorkerResult`; a model's claim is not evidence until a gate ran.
 
 ## Working method
-- Product changes are PRs from worktrees. Keep `helm/src` under 3.1k lines (raised from 3k on
-  2026-09-21 for the second runtime lane, after cutting the duplicated event summariser and the
-  daemon-less `wait`); cut before adding.
+- Product changes are PRs from worktrees. Keep `helm/src` under 4.3k lines (raised from 3.1k on
+  2026-09-29 for Helm v4 wave A); cut before adding.
 - Builders: the Codex lane when the operator's subscription window allows it, otherwise open
   models via OpenCode or OpenRouter; review from a different model family either way.
 - Run `npm test` in `helm/` before pushing.

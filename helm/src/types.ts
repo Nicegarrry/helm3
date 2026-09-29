@@ -1,5 +1,6 @@
 /** Shared contracts for the Helm harness. */
 import { z } from 'zod';
+import type { DatabaseSync } from 'node:sqlite';
 
 
 export const workerResultSchema = z.object({
@@ -85,6 +86,7 @@ export type SpendSummary = Readonly<{
 
 
 export interface Store {
+  sql: DatabaseSync;
   insertWorker(row: WorkerRow): void;
   updateWorker(workerId: string, patch: Partial<Omit<WorkerRow, 'workerId' | 'createdAt'>>): void;
   getWorker(workerId: string): WorkerRow | undefined;
@@ -94,6 +96,8 @@ export interface Store {
   listEvents(workerId: string, opts?: { afterSeq?: number; limit?: number }): EventRow[];
   /** Events across every worker, ascending seq, `seq > afterSeq`. Default limit 100, capped at 1000. */
   listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[];
+  getCursor(name: string): number;
+  setCursor(name: string, seq: number): void;
   insertGate(row: GateRow): void;
   listGates(workerId: string): GateRow[];
   insertPr(row: PrRow): void;
@@ -231,7 +235,7 @@ export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume
 export const emptyInput = z.object({}).strict();
 
 export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control'] as const;
-export type ToolName = (typeof TOOL_NAMES)[number];
+export type ToolName = string;
 
 
 export type HelmConfig = Readonly<{

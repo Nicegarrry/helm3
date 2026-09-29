@@ -6,7 +6,7 @@ import type { Store } from './types.js';
 type McpClient = Pick<Client, 'connect' | 'callTool' | 'close'>;
 type ClientHandle = { client: McpClient; transport?: unknown; connect?: () => Promise<void>; close?: () => Promise<void> };
 type ClientFactory = (url: string, key: string) => ClientHandle | Promise<ClientHandle>;
-type OutboxRow = { id: number; op: 'write' | 'log'; path: string; args: string };
+type OutboxRow = { id: number; op: 'write' | 'log'; path: string; args: string; error: string | null };
 type SyncOptions = { store: Store; settings: Pick<Settings, 'memory'>; env?: NodeJS.ProcessEnv; clientFactory?: ClientFactory; now?: () => Date };
 
 function redact(value: unknown, key: string): string {
@@ -38,6 +38,11 @@ function readPageSha(result: any): string | undefined {
   return typeof value === 'string' && value ? value : undefined;
 }
 
+function pageContainsEntry(result: any, entry: string): boolean {
+  const data = decodeToolResult(result); const page = data.page as Record<string, unknown> | undefined;
+  return [data.content, data.text, data.body, page?.content, page?.text, page?.body].some((value) => typeof value === 'string' && value.includes(entry));
+}
+
 export function createMemorySync(options: SyncOptions): () => Promise<void> {
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date());
@@ -56,7 +61,7 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
     failureCount += 1; retryAt = now().getTime() + Math.min(300_000, 1_000 * (2 ** (failureCount - 1)));
     if (!failureReported) { failureReported = true; event('memory.cg.error', { reason: redact(error, key) }); }
   };
-  const parked = (row: OutboxRow, error: 'conflict' | 'duplicate') => {
+  const parked = (row: OutboxRow, error: 'blocked' | 'conflict' | 'duplicate') => {
     options.store.sql.prepare('UPDATE memory_outbox SET syncedAt = ?, error = ? WHERE id = ?').run(now().toISOString(), error, row.id);
   };
 
@@ -72,15 +77,36 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
     }
     if (!key) return;
     if (now().getTime() < retryAt) return;
-    const rows = options.store.sql.prepare('SELECT id, op, path, args FROM memory_outbox WHERE syncedAt IS NULL ORDER BY createdAt ASC, id ASC').all() as OutboxRow[];
+    const rows = options.store.sql.prepare('SELECT id, op, path, args, error FROM memory_outbox WHERE syncedAt IS NULL ORDER BY createdAt ASC, id ASC').all() as OutboxRow[];
     if (!rows.length) return;
     let handle: ClientHandle | undefined;
+    let batchSucceeded = true;
     try {
       handle = await makeClient(cg.url, key);
       if (handle.connect) await handle.connect();
       else await handle.client.connect(handle.transport as Parameters<McpClient['connect']>[0]);
       for (const row of rows) {
         const args = JSON.parse(row.args) as Record<string, unknown>;
+        if (row.op === 'log') {
+          const precedingConflict = options.store.sql.prepare('SELECT 1 AS found FROM memory_outbox WHERE op = \'write\' AND path = ? AND id < ? AND error = \'conflict\' LIMIT 1').get(row.path, row.id) as { found: number } | undefined;
+          if (precedingConflict) { parked(row, 'blocked'); continue; }
+          if (row.error === 'inflight') {
+            const read = await handle.client.callTool({ name: 'cg_read', arguments: { path: row.path } });
+            if (classifyToolResult(read) !== 'ok') {
+              const failure = toolFailureReason(read, key);
+              options.store.sql.prepare('UPDATE memory_outbox SET error = ? WHERE id = ?').run(failure, row.id);
+              transportFailure(failure, key);
+              batchSucceeded = false;
+              break;
+            }
+            if (typeof args.entry === 'string' && pageContainsEntry(read, args.entry)) {
+              options.store.sql.prepare('UPDATE memory_outbox SET syncedAt = ?, error = NULL WHERE id = ?').run(now().toISOString(), row.id);
+              resetFailure();
+              continue;
+            }
+          }
+          options.store.sql.prepare('UPDATE memory_outbox SET error = \'inflight\' WHERE id = ?').run(row.id);
+        }
         let result = await handle.client.callTool({ name: row.op === 'log' ? 'cg_log' : 'cg_write', arguments: args });
         let kind = classifyToolResult(result);
         if (kind === 'conflict' && row.op === 'write' && args.type === 'scorecard') {
@@ -99,12 +125,16 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
         const failure = toolFailureReason(result, key);
         options.store.sql.prepare('UPDATE memory_outbox SET error = ? WHERE id = ?').run(failure, row.id);
         transportFailure(failure, key);
+        batchSucceeded = false;
         break;
       }
     } catch (error) {
       transportFailure(error, key);
     } finally {
-      try { if (handle?.close) await handle.close(); else await handle?.client.close(); } catch (error) { transportFailure(error, key); }
+      try { if (handle?.close) await handle.close(); else await handle?.client.close(); } catch (error) {
+        if (batchSucceeded) console.debug('Common Ground client close failed after successful memory sync batch');
+        else transportFailure(error, key);
+      }
     }
   };
 }

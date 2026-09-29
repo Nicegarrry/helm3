@@ -33,6 +33,7 @@ import {
   budgetStatusInput,
   baselineInput,
   envelopeGetInput,
+  envelopeCheckInput,
   tapRequestInput,
   tapConfirmInput,
   gateInput,
@@ -61,6 +62,7 @@ import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import { commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, tapReservationOwned, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
+import { checkEnvelope, type EnvelopeDecision } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -93,6 +95,7 @@ export type BudgetOpenInput = z.infer<typeof budgetOpenInput>;
 export type BudgetCloseInput = z.infer<typeof budgetCloseInput>;
 export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
 export type EnvelopeGetInput = z.infer<typeof envelopeGetInput>;
+export type EnvelopeCheckInput = z.infer<typeof envelopeCheckInput>;
 export type TapRequestInput = z.infer<typeof tapRequestInput>;
 export type TapConfirmInput = z.infer<typeof tapConfirmInput>;
 export type InboxListInput = z.infer<typeof inboxListInput>;
@@ -253,6 +256,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
+  private readonly jev?: Jev;
   private readonly tapRandomInt?: (min: number, max: number) => number;
   private readonly tapPepper: Buffer;
   private readonly taps = new Map<string, TapMemory>();
@@ -285,6 +289,7 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
+    this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;
     this.tapPepper = deps.tapPepper ?? randomBytes(32);
     ensureBudgetTables(this.store);
@@ -834,6 +839,29 @@ export class Helm {
   async envelopeGet(input: EnvelopeGetInput): Promise<ToolOutcome<EnvelopeView>> {
     envelopePath(this.config.home, input.project);
     return { ok: true, ...readEnvelope(this.config.home, input.project) };
+  }
+
+  async envelopeCheck(input: EnvelopeCheckInput): Promise<ToolOutcome<{ decisions: EnvelopeDecision[] }>> {
+    const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
+    const sameProjectWorker = worker?.repoSlug === input.project ? worker : undefined;
+    let repo = sameProjectWorker?.repo;
+    if (!repo && /^[^/]+\/[^/]+$/.test(input.project)) {
+      const candidate = join(this.config.home, 'repos', input.project.replace('/', '__'));
+      if (existsSync(join(candidate, '.git'))) repo = candidate;
+    }
+    let defaultBranch: string | undefined;
+    let branchLookupFailed = !repo;
+    if (repo) {
+      try { defaultBranch = await this.workspace.defaultBranch(repo); } catch { /* protect the built-in branches below */ }
+      branchLookupFailed = !defaultBranch;
+    }
+    return { ok: true, decisions: await checkEnvelope(this.config.home, input, {
+      jev: this.jev,
+      envelopeTapAt: this.settings.factory.envelopeTapAt,
+      defaultBranch,
+      workerBaseRef: sameProjectWorker?.baseRef,
+      branchLookupFailed,
+    }) };
   }
 
   async tapRequest(input: TapRequestInput): Promise<ToolOutcome<{ id: string; expiresAt: string }>> {

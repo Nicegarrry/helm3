@@ -298,6 +298,7 @@ export const budgetOpenInput = z.object({
 export const budgetCloseInput = z.object({ project: z.string().min(1) }).strict();
 export const budgetStatusInput = z.object({ project: z.string().min(1).optional() }).strict();
 export const envelopeGetInput = z.object({ project: z.string().min(1) }).strict();
+export const envelopeCheckInput = z.object({ project: z.string().min(1), actions: z.array(z.string().min(1).max(2000)).min(1).max(13), kind: z.string().min(1).optional(), baseRef: z.string().min(1).optional(), workerId: z.string().min(1).optional() }).strict();
 export const tapRequestInput = z.object({ project: z.string().min(1), kind: z.string().min(1), action: z.string().min(1).max(4000) }).strict();
 export const tapConfirmInput = z.object({ id: z.string().regex(/^t-[0-9a-f]+$/), code: z.string().regex(/^\d{6}$/) }).strict();
 export const inboxListInput = z.object({ project: z.string().min(1).optional(), state: z.enum(INBOX_STATES).default('open') }).strict();
@@ -333,7 +334,7 @@ export const mergeEnqueueInput = z.object({ number: z.number().int().positive() 
 export const mergeQueueInput = z.object({ project: z.string().min(1) }).strict();
 export const mergeDequeueInput = z.object({ number: z.number().int().positive() }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export'] as const;
 export type ToolName = string;
 
 

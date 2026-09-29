@@ -253,6 +253,15 @@ function spawnBody(repo: string, overrides: Partial<SpawnInput> = {}): SpawnInpu
 
 // ---------- tests ----------
 
+test('envelope check does not clone or fetch when branch lookup has no local checkout', async () => {
+  const { helm, cloned, fetched } = makeHelm();
+  const outcome = await helm.envelopeCheck({ project: 'acme/app', actions: ['git push origin feature-x'] });
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) assert.deepEqual(outcome.decisions[0], { action: 'git push origin feature-x', decision: 'tap', source: 'hard', pTap: null });
+  assert.deepEqual(cloned, []);
+  assert.deepEqual(fetched, []);
+});
+
 test('spawn runs a builder turn, commits on success, and reaches succeeded', async () => {
   const { helm, store } = makeHelm();
   const repo = mkTempDir('helm-repo-');

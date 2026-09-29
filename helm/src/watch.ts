@@ -132,17 +132,18 @@ export function createWatcher({ store, settings, jev, now = () => new Date() }: 
     const currentMs = current.getTime();
     for (const worker of store.listWorkers({ state: 'running' })) {
       const events = store.listEvents(worker.workerId);
-      const start = [...events].reverse().find((event) => event.kind === 'turn.start');
+      const workerEvents = events.filter((event) => !event.kind.startsWith('watch.'));
+      const start = [...workerEvents].reverse().find((event) => event.kind === 'turn.start');
       if (!start) continue;
-      const sinceStart = events.filter((event) => event.seq > start.seq);
+      const sinceStart = workerEvents.filter((event) => event.seq > start.seq);
       if (sinceStart.filter((event) => event.kind === 'tool.call').length < 8) continue;
-      const newestSeq = events.at(-1)?.seq ?? 0;
+      const newestSeq = workerEvents.at(-1)?.seq ?? 0;
       if (newestSeq <= (lastAttentionSeq.get(worker.workerId) ?? 0)) continue;
       const previous = lastAttentionAt.get(worker.workerId);
       if (previous !== undefined && currentMs - previous < settings.watch.attentionEverySec * 1000) continue;
 
-      const window = events.slice(-30);
-      const facts = attentionFacts(events, currentMs, start);
+      const window = workerEvents.slice(-30);
+      const facts = attentionFacts(workerEvents, currentMs, start);
       const result = await jev.ask('attention', {
         workerId: worker.workerId,
         project: worker.repoSlug,

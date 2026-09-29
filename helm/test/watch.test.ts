@@ -117,6 +117,8 @@ test('attention uses fake Jev, respects shadow mode, and is rate limited', async
     assert.deepEqual(store.listEvents('w-watch').filter((event) => event.kind === 'watch.shadow').map((event) => event.data), [
       { rule: 'jev.attention', attention: 0.45 },
     ]);
+    await tick();
+    assert.equal(jev.calls, 1);
     append(store, clock, 'notice', { message: 'more work' });
     await tick();
     assert.equal(jev.calls, 1);

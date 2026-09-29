@@ -1,6 +1,7 @@
 /** The `helm` command line. */
 import { spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -18,9 +19,10 @@ import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.
 import { startTicker } from './daemon.js';
 import { listInbox } from './inbox.js';
 import { loadSettings } from './settings.js';
+import { defaultExec, herdrHost, tmuxHost, type Host, type HostExec, type HostStatus } from './host.js';
+import type { SupervisorHost, SupervisorRow } from './types.js';
 import { createWatcher } from './watch.js';
 import { createJev } from './jev.js';
-import { herdrHost, tmuxHost } from './host.js';
 import { createSupervisor } from './supervise.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
@@ -47,6 +49,7 @@ function usage(): void {
   serve [--stdio|--http] [--port n]
   daemon --action status|drain|resume [--json]
   supervisor register <project> --repo <path> --host herdr|tmux --label <text>
+  supervisor start <owner/name> --repo <abs path> [--host herdr|tmux] [--label <text>]
   supervisor list [--json]
   wake <project> "<text>" [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
@@ -257,9 +260,154 @@ const cmdSupervisor = async (args: string[]): Promise<void> => {
     ), { repo: { type: 'string' }, host: { type: 'string' }, label: { type: 'string' } });
     return;
   }
+  if (verb === 'start') {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      options: { repo: { type: 'string' }, host: { type: 'string' }, label: { type: 'string' }, json: { type: 'boolean' } },
+    });
+    const project = positionals[0];
+    if (!project) { usage(); process.exitCode = 2; return; }
+    const { config, store } = openReadStore();
+    try {
+      const listed = createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } }).list();
+      const registered = listed.ok
+        ? listed.supervisors.find((row: SupervisorRow) => row.project === project) ?? null
+        : null;
+      await startSupervisor({
+        project,
+        repo: values.repo as string | undefined,
+        host: values.host as SupervisorHost | undefined,
+        label: values.label as string | undefined,
+        json: values.json === true,
+      }, { registered, settings: loadSettings(config.home), exec: defaultExec });
+    } finally {
+      store.close();
+    }
+    return;
+  }
   usage();
   process.exitCode = 2;
 };
+
+type StartSupervisorInput = Readonly<{
+  project: string;
+  repo?: string;
+  host?: SupervisorHost;
+  label?: string;
+  json?: boolean;
+}>;
+
+type StartSupervisorDeps = Readonly<{
+  host?: Host;
+  exec?: HostExec;
+  hosts?: Readonly<Record<SupervisorHost, Host>>;
+  registered?: SupervisorRow | null;
+  settings?: ReturnType<typeof loadSettings>;
+  daemon?: () => Promise<{ port: number; pid: number }>;
+  register?: (input: { project: string; repo: string; host: SupervisorHost; label: string }) => Promise<unknown>;
+  sleep?: (ms: number) => Promise<void>;
+  clock?: () => number;
+  warn?: (line: string) => void;
+  env?: NodeJS.ProcessEnv;
+  home?: string;
+}>;
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function claudeBinary(env: NodeJS.ProcessEnv): string {
+  const configured = env.HELM_CLAUDE_BIN;
+  if (configured) return configured;
+  const local = join(homedir(), '.local', 'bin', 'claude');
+  return existsSync(local) ? local : 'claude';
+}
+
+function supervisorCommand(project: string, label: string, settings: ReturnType<typeof loadSettings>, env: NodeJS.ProcessEnv): string {
+  if (settings.supervisor.command) return settings.supervisor.command;
+  return `${claudeBinary(env)} --remote-control ${shellQuote(label)} ${shellQuote(`Use the helm-supervisor skill. You are the supervisor for ${project}. Run its startup read order.`)}`;
+}
+
+function preflight(repo: string, warn: (line: string) => void, home: string): void {
+  const mcpPath = join(repo, '.mcp.json');
+  let hasHelm = false;
+  try {
+    const parsed = JSON.parse(readFileSync(mcpPath, 'utf8')) as Record<string, unknown>;
+    const servers = parsed.mcpServers ?? parsed.servers;
+    hasHelm = Boolean(servers && typeof servers === 'object' && Object.keys(servers as object).some((key) => key === 'helm'));
+  } catch { /* warning below is intentionally non-fatal */ }
+  if (!hasHelm) warn(`warning: ${repo}/.mcp.json has no helm server`);
+  const skill = join(home, '.claude', 'skills', 'helm-supervisor');
+  if (!existsSync(skill)) warn(`warning: helm-supervisor skill is missing at ${skill}`);
+}
+
+/** Starts or reattaches the owner session. Dependencies are injectable for fake-exec tests. */
+export async function startSupervisor(input: StartSupervisorInput, deps: StartSupervisorDeps = {}): Promise<void> {
+  const env = deps.env ?? process.env;
+  const warn = deps.warn ?? ((line: string) => console.error(line));
+  const home = deps.home ?? homedir();
+  const settings = deps.settings ?? loadSettings(loadConfig().home);
+  const registered = deps.registered ?? null;
+  const repo = input.repo ? resolve(process.cwd(), input.repo) : registered?.repo;
+  const label = input.label ?? registered?.label;
+  if (!repo || !label) throw new Error('supervisor start needs --repo and --label the first time');
+  preflight(repo, warn, home);
+
+  const exec = deps.exec;
+  let hostName = input.host ?? registered?.host;
+  if (!hostName && !deps.host) {
+    if (!exec) throw new Error('supervisor start cannot detect a host without exec');
+    try { await exec('herdr', ['status', 'server']); hostName = 'herdr'; } catch { hostName = 'tmux'; }
+  }
+  if (!hostName) hostName = 'herdr';
+  if (hostName !== 'herdr' && hostName !== 'tmux') throw new Error(`invalid supervisor host: ${hostName}`);
+  const hosts = deps.hosts ?? { herdr: herdrHost(exec), tmux: tmuxHost(exec) };
+  const host = deps.host ?? hosts[hostName];
+  const command = supervisorCommand(input.project, label, settings, env);
+  let pane = await host.resolve(label);
+  let launched = false;
+  if (pane) {
+    const status = await host.status(pane);
+    if (status === 'unknown') { await host.send(pane, command); launched = true; }
+    else if (!input.json) console.log(`attached ${label} ${pane.id}`);
+  } else {
+    pane = await host.create(label, repo, command);
+    if (!pane) throw new Error(`host did not create a pane for ${label}`);
+    launched = true;
+  }
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms)));
+  const clock = deps.clock ?? (() => Date.now());
+  const warnIfBlocked = (status: HostStatus) => {
+    if (status === 'blocked') warn(`warning: supervisor ${label} is blocked (likely a folder-trust prompt)`);
+  };
+  if (launched) {
+    const deadline = clock() + 8_000;
+    let polls = 0;
+    while (polls < 16) {
+      const status = await host.status(pane);
+      if (status === 'blocked') {
+        warnIfBlocked(status);
+        break;
+      }
+      if (clock() >= deadline) break;
+      polls += 1;
+      await sleep(500);
+    }
+  } else {
+    warnIfBlocked(await host.status(pane));
+  }
+
+  if (deps.daemon) await deps.daemon();
+  if (deps.register) {
+    await deps.register({ project: input.project, repo, host: hostName, label });
+  } else {
+    const config = loadConfig();
+    const serveJsonPath = join(config.home, 'serve.json');
+    if (!readLiveServeJson(serveJsonPath)) await startDetachedDaemon(config.home, serveJsonPath, 0);
+    printOutcome(await postTool('supervisor.register', { project: input.project, repo, host: hostName, label }), input.json === true);
+  }
+}
 
 const cmdWake = (args: string[]) =>
   readCmd(args, (_positionals, values, store) => {

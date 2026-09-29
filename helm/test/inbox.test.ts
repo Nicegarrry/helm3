@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Helm } from '../src/helm.js';
 import { createInboxTriage, insertInbox, listInbox } from '../src/inbox.js';
-import type { Jev, JevResult } from '../src/jev.js';
+import { createJev, type Jev, type JevResult } from '../src/jev.js';
 import { loadSettings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
 import type { GateRunner, GitHub, HelmConfig, WorkerHooks, WorkerRunner, Workspace } from '../src/types.js';
@@ -142,6 +142,16 @@ test('A5b routes outside probability to needs_human even when Jev says the issue
   try { assert.equal(result.item.triage?.route, 'needs_human'); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
 });
 
+test('A5b maps a boolean-false noul with confidence to an outside probability', async () => {
+  const result = await triageCase({ ok: true, answers: { route: { choice: 'answer_from_issue', confidence: 0.99 }, outside: { noul: false, confidence: 0.6 }, inIssue: { noul: true } } });
+  try { assert.equal(result.item.triage?.route, 'needs_human'); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
+});
+
+test('A5b maps a numeric noul answer to an outside probability', async () => {
+  const result = await triageCase({ ok: true, answers: { route: { choice: 'answer_from_issue', confidence: 0.99 }, outside: { noul: 0.97 }, inIssue: { noul: true } } });
+  try { assert.equal(result.item.triage?.route, 'needs_human'); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
+});
+
 test('A5b accepts a high-confidence in-issue answer only inside the envelope', async () => {
   const result = await triageCase({ ok: true, answers: { route: { choice: 'answer_from_issue', confidence: 0.95 }, outside: { noul: false }, inIssue: { noul: true } } });
   try { assert.equal(result.item.triage?.route, 'answer_from_issue'); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
@@ -150,4 +160,31 @@ test('A5b accepts a high-confidence in-issue answer only inside the envelope', a
 test('A5b records the safe default when Jev has no key', async () => {
   const result = await triageCase({ ok: false, reason: 'no key' });
   try { assert.deepEqual(result.item.triage, { route: 'needs_supervisor', reason: 'no key', shadow: true }); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
+});
+
+test('A5b real Jev triage records route confidence in jev_calls', async () => {
+  const d = deps();
+  try {
+    const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', acceptance: 'tests pass', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+    assert.equal(spawned.ok, true);
+    if (!spawned.ok) return;
+    await d.helm.settle(spawned.workerId);
+    const jev = createJev({
+      settings: loadSettings('/definitely/missing/helm-home'),
+      store: d.store,
+      env: { TYPESAFE_API_KEY: 'test-key' },
+      fetch: async () => new Response(JSON.stringify({
+        answers: {
+          route: { choice: 'needs_supervisor', confidence: 0.84, probabilities: { needs_human: 0.05 } },
+          outside: { noul: 0.1 },
+          inIssue: { noul: 0.2 },
+        },
+        usage: { input_tokens: 9 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    });
+    await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev })();
+    const row = d.store.sql.prepare("SELECT purpose, confidence FROM jev_calls WHERE purpose = 'triage'").get() as { purpose: string; confidence: number };
+    assert.equal(row.purpose, 'triage');
+    assert.equal(row.confidence, 0.84);
+  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
 });

@@ -105,9 +105,14 @@ function probability(answer: JevAnswers[string] | undefined, truth: boolean): nu
     const value = probabilities[String(truth)] ?? probabilities[truth ? 'true' : 'false'];
     if (typeof value === 'number') return value;
   }
+  if (typeof answer.noul === 'number') {
+    return truth ? answer.noul : 1 - answer.noul;
+  }
   if (typeof answer.noul === 'boolean') {
-    if (answer.noul !== truth) return 0;
-    return typeof answer.confidence === 'number' ? answer.confidence : 1;
+    const probabilityTrue = typeof answer.confidence === 'number'
+      ? answer.noul ? answer.confidence : 1 - answer.confidence
+      : answer.noul ? 1 : 0;
+    return truth ? probabilityTrue : 1 - probabilityTrue;
   }
   return 0;
 }

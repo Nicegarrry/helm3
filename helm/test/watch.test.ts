@@ -57,6 +57,9 @@ test('silence alerts once per run and never alerts waiting workers', async () =>
     await tick();
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert' && event.data.rule === 'silence').length, 1);
+    const restartedTick = createWatcher({ store, settings, now: () => clock });
+    await restartedTick();
+    assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert' && event.data.rule === 'silence').length, 1);
     store.updateWorker('w-watch', { state: 'waiting' as WorkerRow['state'] });
     clock = new Date(clock.getTime() + 16 * 60_000);
     await tick();

@@ -9,8 +9,6 @@ export type WatchOptions = Readonly<{
   now?: () => Date;
 }>;
 
-type RunState = Readonly<{ startSeq: number; silenceAlerted: boolean }>;
-
 function eventTime(event: EventRow): number {
   const time = Date.parse(event.at);
   return Number.isFinite(time) ? time : 0;
@@ -26,24 +24,13 @@ export function createWatcher({ store, settings, now = () => new Date() }: Watch
   const consume = consumer(store, 'watch', (events) => {
     for (const event of events) processEvent(event);
   });
-  const lastAlerts = new Map<string, number>();
-  const runs = new Map<string, RunState>();
-
-  function alert(event: EventRow, rule: string, detail: Record<string, unknown>, runKey?: number): void {
-    const key = `${event.workerId}:${rule}`;
+  function alert(event: EventRow, rule: string, detail: Record<string, unknown>): void {
     const at = now().getTime();
     const cooldownMs = settings.watch.cooldownMin * 60_000;
-    const previous = lastAlerts.get(key);
-    if (previous !== undefined && at - previous < cooldownMs) return;
-    if (runKey !== undefined) {
-      const run = runs.get(event.workerId);
-      if (run?.startSeq === runKey && run.silenceAlerted) return;
-    }
-    lastAlerts.set(key, at);
+    const previous = store.listEvents(event.workerId).reverse().find((candidate) =>
+      candidate.kind === 'watch.alert' && candidate.data.rule === rule);
+    if (previous && at - eventTime(previous) < cooldownMs) return;
     store.appendEvent(event.workerId, 'watch.alert', { rule, detail });
-    if (runKey !== undefined) {
-      runs.set(event.workerId, { startSeq: runKey, silenceAlerted: true });
-    }
   }
 
   function processEvent(event: EventRow): void {
@@ -66,13 +53,14 @@ export function createWatcher({ store, settings, now = () => new Date() }: Watch
     const events = store.listEvents(worker.workerId);
     const latestStart = [...events].reverse().find((event) => event.kind === 'turn.start');
     const startSeq = latestStart?.seq ?? 0;
-    const prior = runs.get(worker.workerId);
-    if (prior?.startSeq !== startSeq) runs.set(worker.workerId, { startSeq, silenceAlerted: false });
+    const silenceAlert = [...events].reverse().find((event) =>
+      event.kind === 'watch.alert' && event.data.rule === 'silence' && event.seq > startSeq);
+    if (silenceAlert) return;
     const last = events.at(-1);
     const elapsed = now().getTime() - (last ? eventTime(last) : Date.parse(worker.updatedAt));
     if (elapsed < settings.watch.silenceMin * 60_000) return;
     const synthetic = last ?? { seq: startSeq, workerId: worker.workerId, at: worker.updatedAt, kind: 'state', data: {} };
-    alert(synthetic, 'silence', { silenceMin: settings.watch.silenceMin, elapsedMs: elapsed }, startSeq);
+    alert(synthetic, 'silence', { silenceMin: settings.watch.silenceMin, elapsedMs: elapsed });
   }
 
   return async function tick(): Promise<void> {

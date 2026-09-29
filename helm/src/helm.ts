@@ -116,8 +116,8 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Runs `fn` and turns any thrown error (including one from `must`/`requireValue` below) into `{ ok: false, reason }`, so every tool method can express a refusal as a plain throw. */
-async function guard<T>(fn: () => Promise<ToolOutcome<T>>): Promise<ToolOutcome<T>> {
+/** Turns thrown errors into the harness's stable refusal shape. */
+async function runGuard<T>(fn: () => Promise<ToolOutcome<T>>): Promise<ToolOutcome<T>> {
   try {
     return await fn();
   } catch (err) {
@@ -189,9 +189,10 @@ export function modelFamily(model: string): string {
 }
 
 // Explicit model overrides remain available; automatic choices exclude Kimi K3 and Qwen Max.
-const CODEX_MODEL = 'codex/gpt-5.6-terra:medium';
-const REVIEW_MODEL = 'google/gemini-3.8-flash';
-const TASK_MODELS = { normal: CODEX_MODEL, easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'opencode-go/qwen3.8-flash' } as const;
+const TASK_MODELS = { normal: 'codex/gpt-5.6-luna:high', easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'codex/gpt-5.6-luna:medium' } as const;
+
+export type ToolGuard = (input: unknown) => string | null | Promise<string | null>;
+export type ModelChooser = (input: SpawnInput) => string | null | undefined | Promise<string | null | undefined>;
 
 export class Helm {
   readonly lifecycle: Lifecycle;
@@ -212,6 +213,8 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
+  private readonly guards = new Map<string, ToolGuard[]>();
+  private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
   readonly discord?: DiscordService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
@@ -233,6 +236,36 @@ export class Helm {
     ensureBudgetTables(this.store);
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
+  }
+
+  /** Register a refusal hook; hooks run in registration order and the first reason wins. */
+  guard(tool: string, fn: ToolGuard): void {
+    const hooks = this.guards.get(tool) ?? [];
+    hooks.push(fn);
+    this.guards.set(tool, hooks);
+  }
+
+  /** Register model selection before spawn admission takes the mutex. */
+  chooseModel(fn: ModelChooser): void {
+    this.modelChoosers.push(fn);
+  }
+
+  private async refusal(tool: string, input: unknown): Promise<string | null> {
+    for (const fn of this.guards.get(tool) ?? []) {
+      const reason = await fn(input);
+      if (reason) return reason;
+    }
+    return null;
+  }
+
+  private async chosenModel(input: SpawnInput): Promise<SpawnInput> {
+    if (input.model || input.difficulty) return input;
+    let chosen = input;
+    for (const fn of this.modelChoosers) {
+      const model = await fn(chosen);
+      if (model) chosen = { ...chosen, model };
+    }
+    return chosen;
   }
 
   /** Runs `fn` exclusively with respect to every other call queued through this lock. */
@@ -259,7 +292,12 @@ export class Helm {
   }
 
   async spawn(input: SpawnInput): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string }>> {
-    return guard(() => this.withLock(() => this.spawnLocked(input)));
+    return runGuard(async () => {
+      const chosen = await this.chosenModel(input);
+      const reason = await this.refusal('worker.spawn', chosen);
+      if (reason) return refuse(reason);
+      return this.withLock(() => this.spawnLocked(chosen));
+    });
   }
 
   /** Locked spawn admission; onDone keeps review posting inside the worker lifetime. */
@@ -271,7 +309,7 @@ export class Helm {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
       if (existing) return { ok: true, workerId: existing.workerId, branch: existing.branch, worktree: existing.worktree };
     }
-    const model = input.model ?? (input.role === 'reviewer' ? REVIEW_MODEL : TASK_MODELS[input.difficulty ?? 'normal']);
+    const model = input.model ?? TASK_MODELS[input.difficulty ?? 'normal'];
     const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
     must(active < this.config.maxWorkers, `max workers reached (${this.config.maxWorkers})`);
     must(!this.spendCapExceeded(), 'spend cap reached');
@@ -294,6 +332,7 @@ export class Helm {
     };
     try {
       this.store.insertWorker(row);
+      if (input.issue !== undefined) this.store.setMeta(workerId, { issue: input.issue });
       attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
@@ -311,7 +350,7 @@ export class Helm {
     tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
     diffStat: string; result: WorkerResult | null; events: ReturnType<Store['listEvents']>;
   }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       const spend = this.store.spendFor(input.workerId);
       let diffStat = '';
@@ -328,7 +367,7 @@ export class Helm {
   async list(input: ListInput): Promise<ToolOutcome<{
     workers: Array<{ workerId: string; state: WorkerState; role: WorkerRow['role']; model: string; branch: string; head: string | null; createdAt: string }>;
   }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const rows = this.store.listWorkers({ repo: input.repo, state: input.state });
       const workers = rows.map((r) => ({ workerId: r.workerId, state: r.state, role: r.role, model: r.model, branch: r.branch, head: r.head, createdAt: r.createdAt }));
       return { ok: true, workers };
@@ -352,7 +391,7 @@ export class Helm {
   }
 
   async steer(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
-    return guard(() => this.withLock(() => this.steerLocked(input)));
+    return runGuard(() => this.withLock(() => this.steerLocked(input)));
   }
 
   private async steerLocked(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
@@ -368,11 +407,11 @@ export class Helm {
   }
 
   async inboxList(input: InboxListInput): Promise<ToolOutcome<{ inbox: ReturnType<typeof listInbox> }>> {
-    return guard(async () => ({ ok: true, inbox: listInbox(this.store.sql, { project: input.project, state: input.state ?? 'open' }) }));
+    return runGuard(async () => ({ ok: true, inbox: listInbox(this.store.sql, { project: input.project, state: input.state ?? 'open' }) }));
   }
 
   async inboxReply(input: InboxReplyInput): Promise<ToolOutcome<{ id: string; workerId: string; turn: number; state: 'answered'; warning?: string }>> {
-    return guard(() => this.withLock(async () => {
+    return runGuard(() => this.withLock(async () => {
       const item = requireValue(getInbox(this.store.sql, input.id), 'inbox item not found');
       must(item.state === 'open', `inbox item is ${item.state}, not open`);
       const worker = requireValue(this.store.getWorker(item.workerId), 'worker not found');
@@ -389,7 +428,7 @@ export class Helm {
   }
 
   async stop(input: StopInput): Promise<ToolOutcome<{ state: WorkerState }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(row.state === 'running', `worker is not running (state: ${row.state})`);
       this.stopRequested.add(input.workerId);
@@ -408,11 +447,11 @@ export class Helm {
   }
 
   async gate(input: GateInput): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
-      const checks = input.checks ?? (await this.gates.defaultChecks(row.repo));
+      const checks = input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha));
       const gateId = genId('g');
       const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
       const outcome = await this.gates.run(row.worktree, checks, logDir, { timeoutMs: this.config.gateTimeoutMs });
@@ -424,7 +463,9 @@ export class Helm {
   }
 
   async prOpen(input: PrOpenInput): Promise<ToolOutcome<{ number: number; url: string; head: string }>> {
-    return guard(async () => {
+    return runGuard(async () => {
+      const reason = await this.refusal('pr.open', input);
+      if (reason) return refuse(reason);
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       const head = requireValue(row.head, 'worker has no commits yet');
       const passing = this.store.listGates(input.workerId).filter((g) => g.head === head && g.passed);
@@ -441,7 +482,7 @@ export class Helm {
   }
 
   async prStatus(input: PrStatusInput): Promise<ToolOutcome<PrStatus>> {
-    return guard(async () => {
+    return runGuard(async () => {
       let repoSlug: string;
       let number = input.number;
       if (number !== undefined) {
@@ -464,12 +505,13 @@ export class Helm {
   }
 
   async reviewRequest(input: ReviewInput): Promise<ToolOutcome<{ reviewWorkerId: string }>> {
-    return guard(async () => {
+    return runGuard(async () => {
+      if (!input.model) return refuse('record Claude reviews with review.record');
       const byNumber = input.number !== undefined ? this.store.getPrByNumber(input.number) : undefined;
       const byWorker = input.number === undefined && input.workerId ? this.store.getPrByWorker(input.workerId) : undefined;
       const pr = requireValue(byNumber ?? byWorker, 'pr not found');
       const sourceWorker = requireValue(this.store.getWorker(pr.workerId), 'source worker not found');
-      const model = input.model ?? (modelFamily(sourceWorker.model) === 'gemini' ? CODEX_MODEL : REVIEW_MODEL);
+      const model = input.model;
       must(model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
       must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
         `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
@@ -483,7 +525,7 @@ export class Helm {
         await this.github.comment(sourceWorker.repoSlug, pr.number, body);
         this.store.appendEvent(workerId, 'review.posted', { number: pr.number });
       };
-      const outcome = await guard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
+      const outcome = await runGuard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
       if (!outcome.ok) return outcome;
       return { ok: true, reviewWorkerId: outcome.workerId };
     });
@@ -491,7 +533,7 @@ export class Helm {
 
   /** Read-only dashboard data: run status, every worker with spend and last event, and a per-model rollup. */
   async overview(): Promise<ToolOutcome<Overview>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const status = await this.runStatus();
       if (!status.ok) throw new Error(status.reason);
       const now = this.nowIso();
@@ -514,7 +556,7 @@ export class Helm {
 
   /** One worker's drill-down for the dashboard: overview row, result, diff stat, gates, PR and the last events. */
   async workerDetail(workerId: string): Promise<ToolOutcome<WorkerDetail>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const row = requireValue(this.store.getWorker(workerId), 'worker not found');
       let diffStat = '';
       try { diffStat = await this.workspace.diffStat(row.worktree, row.baseSha); } catch { diffStat = ''; }
@@ -534,7 +576,7 @@ export class Helm {
 
   /** Events across every worker with `seq > afterSeq`, ascending, for the dashboard's incremental poll. */
   async recentEvents(afterSeq = 0, limit = EVENTS_DEFAULT_LIMIT): Promise<ToolOutcome<{ events: EventRow[] }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const safeAfter = Number.isFinite(afterSeq) ? Math.max(0, Math.floor(afterSeq)) : 0;
       const safeLimit = Number.isFinite(limit) ? Math.min(EVENTS_MAX_LIMIT, Math.max(1, Math.floor(limit))) : EVENTS_DEFAULT_LIMIT;
       return { ok: true, events: this.store.listAllEvents({ afterSeq: safeAfter, limit: safeLimit }) };
@@ -567,7 +609,7 @@ export class Helm {
   private aboveSoftCap(): boolean { const w = this.spendWarnUsd(); return w > 0 && this.store.spendTotal().spendUsd >= w; }
 
   async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[] }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const total = this.store.spendTotal();
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
       return {
@@ -578,7 +620,7 @@ export class Helm {
   }
 
   async budgetOpen(input: BudgetOpenInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const row = openBudget(this.store, {
         project: input.project, label: input.label, capUsd: input.capUsd, capCodexTokens: input.codexTokens,
         openedAt: this.nowIso(),
@@ -588,14 +630,14 @@ export class Helm {
   }
 
   async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const row = requireValue(closeBudget(this.store, input.project, this.nowIso()), `no open budget for ${input.project}`);
       return { ok: true, budget: budgetStatus(this.store, row) };
     });
   }
 
   async budgetStatus(input: BudgetStatusInput): Promise<ToolOutcome<{ budgets: BudgetStatus[] }>> {
-    return guard(async () => ({ ok: true, budgets: listBudgetStatuses(this.store, input.project) }));
+    return runGuard(async () => ({ ok: true, budgets: listBudgetStatuses(this.store, input.project) }));
   }
 
   /** Wait for a settled worker or timeout; periodically re-read the store, without client polling. */
@@ -603,7 +645,7 @@ export class Helm {
     settled: Array<{ workerId: string; state: WorkerState; head: string | null; result: WorkerRow['result'] }>;
     pending: string[]; timedOut: boolean; waitedMs: number;
   }>> {
-    return guard(async () => {
+    return runGuard(async () => {
       const started = Date.now();
       for (;;) {
         const rows = input.workerIds.map((id) => requireValue(this.store.getWorker(id), `worker not found: ${id}`));
@@ -624,7 +666,9 @@ export class Helm {
   }
 
   async prMerge(input: PrMergeInput): Promise<ToolOutcome<{ merged: true }>> {
-    return guard(async () => {
+    return runGuard(async () => {
+      const reason = await this.refusal('pr.merge', input);
+      if (reason) return refuse(reason);
       const pr = requireValue(this.store.getPrByNumber(input.number), 'pr not found');
       const worker = requireValue(this.store.getWorker(pr.workerId), 'pr worker not found');
       const status = await this.github.prStatus(worker.repoSlug, input.number);

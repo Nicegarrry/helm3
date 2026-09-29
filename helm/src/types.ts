@@ -10,6 +10,8 @@ export const workerResultSchema = z.object({
   commandsRun: z.array(z.string().min(1)).max(200).default([]),
   question: z.string().min(1).max(4000).optional(),
   notes: z.string().max(8000).optional(),
+  claims: z.array(z.string().max(300)).max(12).optional(),
+  acceptance: z.object({ command: z.string().min(1), files: z.array(z.string().min(1)) }).optional(),
 }).strict().superRefine((result, ctx) => {
   if (result.status === 'question' && !result.question) {
     ctx.addIssue({ code: 'custom', path: ['question'], message: 'question is required when status is question' });
@@ -19,7 +21,7 @@ export type WorkerResult = z.infer<typeof workerResultSchema>;
 
 export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded', 'failed', 'stopped', 'interrupted', 'unknown'] as const;
 export type WorkerState = (typeof WORKER_STATES)[number];
-export const WORKER_ROLES = ['builder', 'reviewer'] as const;
+export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
 
 export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
@@ -60,6 +62,16 @@ export type WorkerRow = Readonly<{
   idempotencyKey: string | null;
   createdAt: string;
   updatedAt: string;
+}>;
+
+export type WorkerMeta = Readonly<{
+  workerId: string;
+  issue: number | null;
+  prBase: string | null;
+  baselineId: string | null;
+  band: string | null;
+  complexity: number | null;
+  skills: readonly string[];
 }>;
 
 export type EventRow = Readonly<{
@@ -110,6 +122,8 @@ export interface Store {
   insertWorker(row: WorkerRow): void;
   updateWorker(workerId: string, patch: Partial<Omit<WorkerRow, 'workerId' | 'createdAt'>>): void;
   getWorker(workerId: string): WorkerRow | undefined;
+  getMeta(workerId: string): WorkerMeta | undefined;
+  setMeta(workerId: string, meta: Partial<Omit<WorkerMeta, 'workerId'>>): void;
   findByIdempotencyKey(key: string): WorkerRow | undefined;
   listWorkers(filter?: { repo?: string; state?: WorkerState }): WorkerRow[];
   appendEvent(workerId: string, kind: string, data?: Record<string, unknown>, at?: string): EventRow;
@@ -162,7 +176,7 @@ export interface GateRunner {
   /** Run each check in `cwd` sequentially; capture output to files under `logDir`. */
   run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
   /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
-  defaultChecks(repo: string): Promise<GateCheck[]>;
+  defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }
 
 
@@ -248,6 +262,7 @@ export type WakeRow = Readonly<{
 export const spawnInput = z.object({
   repo: z.string().min(1),
   objective: z.string().min(1).max(20000),
+  issue: z.number().int().positive().optional(),
   acceptance: z.string().max(20000).optional(),
   model: z.string().min(1).optional(),
   difficulty: z.enum(['super-easy', 'easy', 'normal']).optional(),

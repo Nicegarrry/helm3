@@ -986,10 +986,10 @@ test('automatic routing reaches the runner, persists, and survives steer across 
   const registry = createToolRegistry(helm);
   const repo = mkTempDir('helm-routing-');
   for (const [difficulty, expected] of [
-    [undefined, 'codex/gpt-5.6-terra:medium'],
-    ['normal', 'codex/gpt-5.6-terra:medium'],
+    [undefined, 'codex/gpt-5.6-luna:high'],
+    ['normal', 'codex/gpt-5.6-luna:high'],
     ['easy', 'codex/gpt-5.6-luna:medium'],
-    ['super-easy', 'opencode-go/qwen3.8-flash'],
+    ['super-easy', 'codex/gpt-5.6-luna:medium'],
   ] as const) {
     const outcome = await registry.call('worker.spawn', { repo, objective: 'task', ...(difficulty ? { difficulty } : {}) });
     assert.equal(outcome.ok, true);
@@ -1003,7 +1003,7 @@ test('automatic routing reaches the runner, persists, and survives steer across 
     assert.equal(seen.at(-1), expected);
     await helm.gate({ workerId: row.workerId });
     assert.equal((await helm.prOpen({ workerId: row.workerId, draft: true })).ok, true);
-    const review = await helm.reviewRequest({ workerId: row.workerId, allowSameFamily: false });
+    const review = await helm.reviewRequest({ workerId: row.workerId, model: 'google/gemini-3.8-flash', allowSameFamily: false });
     assert.ok(review.ok);
     await helm.settle(review.reviewWorkerId);
     assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'google/gemini-3.8-flash');
@@ -1019,14 +1019,14 @@ test('explicit models override difficulty; a Gemini builder gets an independent 
   assert.equal(store.getWorker(build.workerId)?.model, 'google/gemini-3.8-flash');
   await helm.gate({ workerId: build.workerId });
   await helm.prOpen({ workerId: build.workerId, draft: true });
-  const review = await helm.reviewRequest({ workerId: build.workerId, allowSameFamily: false });
+  const review = await helm.reviewRequest({ workerId: build.workerId, model: 'codex/gpt-5.6-luna:high', allowSameFamily: false });
   assert.ok(review.ok);
   await helm.settle(review.reviewWorkerId);
-  assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'codex/gpt-5.6-terra:medium');
+  assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'codex/gpt-5.6-luna:high');
   const direct = await helm.spawn(spawnBody(repo, { model: undefined, role: 'reviewer', difficulty: 'super-easy' }));
   assert.ok(direct.ok);
   await helm.settle(direct.workerId);
-  assert.equal(store.getWorker(direct.workerId)?.model, 'google/gemini-3.8-flash');
+  assert.equal(store.getWorker(direct.workerId)?.model, 'codex/gpt-5.6-luna:medium');
 });
 
 function deferred() {
@@ -1107,7 +1107,7 @@ test('drain waits for the review callback even after the reviewer state is succe
   await helm.settle(build.workerId);
   await helm.gate({ workerId: build.workerId });
   await helm.prOpen({ workerId: build.workerId, draft: true });
-  const review = await helm.reviewRequest({ workerId: build.workerId, allowSameFamily: false });
+  const review = await helm.reviewRequest({ workerId: build.workerId, model: 'google/gemini-3.8-flash', allowSameFamily: false });
   assert.ok(review.ok);
   await entered.promise;
   assert.equal(store.getWorker(review.reviewWorkerId)?.state, 'succeeded');

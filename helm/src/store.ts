@@ -2,7 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { EventRow, GateRow, PrRow, SpendRow, SpendSummary, Store, WorkerRow, WorkerState } from './types.js';
+import type { EventRow, GateRow, PrRow, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
@@ -64,6 +64,18 @@ function toPrRow(row: Record<string, unknown>): PrRow {
     url: row.url as string,
     head: row.head as string,
     createdAt: row.createdAt as string,
+  };
+}
+
+function toWorkerMeta(row: Record<string, unknown>): WorkerMeta {
+  return {
+    workerId: row.workerId as string,
+    issue: (row.issue as number | null) ?? null,
+    prBase: (row.prBase as string | null) ?? null,
+    baselineId: (row.baselineId as string | null) ?? null,
+    band: (row.band as string | null) ?? null,
+    complexity: (row.complexity as number | null) ?? null,
+    skills: row.skills ? JSON.parse(row.skills as string) : [],
   };
 }
 
@@ -153,12 +165,28 @@ export function openStore(path: string): Store {
       at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS spend_worker ON spend(workerId);
+    CREATE TABLE IF NOT EXISTS worker_meta (
+      workerId TEXT PRIMARY KEY,
+      issue INTEGER,
+      prBase TEXT,
+      baselineId TEXT,
+      band TEXT,
+      complexity REAL,
+      skills TEXT NOT NULL DEFAULT '[]'
+    );
   `);
 
   const insertWorkerStmt = db.prepare(
     `INSERT INTO workers (${WORKER_COLUMNS.join(', ')}) VALUES (${WORKER_COLUMNS.map(() => '?').join(', ')})`,
   );
   const getWorkerStmt = db.prepare('SELECT * FROM workers WHERE workerId = ?');
+  const getMetaStmt = db.prepare('SELECT * FROM worker_meta WHERE workerId = ?');
+  const setMetaStmt = db.prepare(`
+    INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, skills)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(workerId) DO UPDATE SET issue = excluded.issue, prBase = excluded.prBase,
+      baselineId = excluded.baselineId, band = excluded.band, complexity = excluded.complexity, skills = excluded.skills
+  `);
   const findByIdempotencyKeyStmt = db.prepare('SELECT * FROM workers WHERE idempotencyKey = ?');
   const appendEventStmt = db.prepare('INSERT INTO events (workerId, at, kind, data) VALUES (?, ?, ?, ?)');
   const getEventStmt = db.prepare('SELECT * FROM events WHERE seq = ?');
@@ -207,6 +235,17 @@ export function openStore(path: string): Store {
     getWorker(workerId: string): WorkerRow | undefined {
       const row = getWorkerStmt.get(workerId) as Record<string, unknown> | undefined;
       return row ? toWorkerRow(row) : undefined;
+    },
+
+    getMeta(workerId: string): WorkerMeta | undefined {
+      const row = getMetaStmt.get(workerId) as Record<string, unknown> | undefined;
+      return row ? toWorkerMeta(row) : undefined;
+    },
+
+    setMeta(workerId: string, patch: Partial<Omit<WorkerMeta, 'workerId'>>): void {
+      const current = this.getMeta(workerId) ?? { workerId, issue: null, prBase: null, baselineId: null, band: null, complexity: null, skills: [] };
+      const next = { ...current, ...patch };
+      setMetaStmt.run(next.workerId, next.issue, next.prBase, next.baselineId, next.band, next.complexity, JSON.stringify(next.skills));
     },
 
     findByIdempotencyKey(key: string): WorkerRow | undefined {

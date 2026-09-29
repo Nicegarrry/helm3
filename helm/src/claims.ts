@@ -6,11 +6,24 @@ import type { Store, ToolOutcome, Workspace } from './types.js';
 
 const exec = promisify(execFile);
 const MAX_BATCH_DIFF = 70_000;
-const EXCLUDES = [':(exclude)**/*lock*', ':(exclude)**/*.snap', ':(exclude)**/__snapshots__/**'];
+const EXCLUDES = [
+  ':(exclude)**/package-lock.json',
+  ':(exclude)**/npm-shrinkwrap.json',
+  ':(exclude)**/yarn.lock',
+  ':(exclude)**/pnpm-lock.yaml',
+  ':(exclude)**/bun.lockb',
+  ':(exclude)**/Cargo.lock',
+  ':(exclude)**/Gemfile.lock',
+  ':(exclude)**/poetry.lock',
+  ':(exclude)**/composer.lock',
+  ':(exclude)**/go.sum',
+  ':(exclude)**/__snapshots__/**',
+  ':(exclude)**/*.snap',
+];
 const supports = 'The diff contains changes that make the claim true.';
 const contradicts = 'The diff touches the relevant code but it differs from the claim (different name, value, file, count, or the opposite change).';
 const saysNothing = 'The diff contains no evidence about this claim either way.';
-const processClaim = /\bcommitted\b|\b(?:tests?|test suite|typecheck|type-check|lint|build|checks?)\s+(?:pass(?:es|ed)?|succeed(?:s|ed)?|are green|is green)\b|\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint)\b/i;
+const processClaim = /^(?:(?:all\s+\d+\s+)?(?:tests?|test suite|type-?check|lint|build|checks?)\s+(?:pass(?:es|ed)?|succeed(?:s|ed)?|are green|is green)|committed|no push performed|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint))\s*[.!?]?$/i;
 
 export type ClaimsCheckInput = Readonly<{ workerId: string }>;
 export type ClaimsService = Readonly<{
@@ -76,7 +89,7 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
     try { current = await currentHead(input.workerId); } catch (error) { return { ok: false, reason: error instanceof Error ? error.message : String(error) }; }
     const { row, head } = current;
     const result = row.result;
-    const claims = result?.claims?.length ? [...result.claims] : sentences(result?.summary ?? '');
+    const claims = (result?.claims?.length ? [...result.claims] : sentences(result?.summary ?? '')).map((claim) => claim.trim()).filter(Boolean);
     const changedFiles: string[] = result?.changedFiles ?? [];
     const full = await diff(row, head);
     const missingFiles = changedFiles.filter((file) => !full.files.includes(file));
@@ -105,6 +118,16 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
     }
     detail.answers = answers;
     detail.jevCallIds = calls;
+    const checkableClaims = claims.filter((claim) => {
+      const answer = answers[claim];
+      return !(processClaim.test(claim) && answer?.choice === 'says_nothing');
+    });
+    detail.checkableClaims = checkableClaims;
+    if (checkableClaims.length === 0) {
+      detail.reason = 'no checkable claims';
+      store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, 0, ?, ?, ?)').run(input.workerId, head, JSON.stringify(detail), calls[0] ?? null, now().toISOString());
+      return { ok: false, reason: 'no checkable claims' };
+    }
     const failedClaims = claims.filter((claim) => {
       const answer = answers[claim]!;
       return !(processClaim.test(claim) && answer.choice === 'says_nothing') && answer.supports < settings.factory.claimsAt;

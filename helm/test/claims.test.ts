@@ -67,10 +67,34 @@ test('claims use the 0.7 boundary and name a failing claim', async () => {
 test('process claims answered says_nothing are left to the gate', async () => {
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['tests pass', 'src/a.ts adds A'] });
   try {
-    const service = createClaims({ jev: jevFor((_claim, index) => index === 0 ? answer(0, 'says_nothing') : answer(0.9)), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
+    const service = createClaims({ jev: jevFor((claim) => claim === 'tests pass' ? answer(0, 'says_nothing') : answer(0.9)), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
     const result = await service.check({ workerId: worker.workerId });
     assert.equal(result.ok && result.passed, true);
   } finally { store.close(); }
+});
+
+test('only a whole process claim is dropped when Jev says_nothing', async () => {
+  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['tests pass and I added X'] });
+  try {
+    const result = await createClaims({ jev: jevFor(() => answer(0, 'says_nothing')), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
+    assert.equal(result.ok && result.passed, false);
+    assert.deepEqual(result.ok && result.failedClaims, ['tests pass and I added X']);
+  } finally { store.close(); }
+});
+
+test('zero checkable claims fails instead of passing vacuously', async () => {
+  const cases: WorkerRow['result'][] = [
+    { status: 'succeeded', summary: 'summary', changedFiles: [], commandsRun: [], claims: ['tests pass', 'committed'] },
+    { status: 'succeeded', summary: '', changedFiles: [], commandsRun: [], claims: [] },
+    { status: 'succeeded', summary: '   ', changedFiles: [], commandsRun: [], claims: [] },
+  ];
+  for (const [index, result] of cases.entries()) {
+    const { store, worker } = seed(result, true, `w-no-checkable-${index}`);
+    try {
+      const checked = await createClaims({ jev: jevFor(() => answer(0, 'says_nothing')), store, settings: settings(), git: fakeGit([], 'diff') }).check({ workerId: worker.workerId });
+      assert.deepEqual(checked, { ok: false, reason: 'no checkable claims' });
+    } finally { store.close(); }
+  }
 });
 
 test('a changedFiles entry absent from the filtered diff fails', async () => {
@@ -79,6 +103,20 @@ test('a changedFiles entry absent from the filtered diff fails', async () => {
     const result = await createClaims({ jev: jevFor(() => answer(1)), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
     assert.equal(result.ok && result.passed, false);
     assert.deepEqual(result.ok && result.missingFiles, ['src/missing.ts']);
+  } finally { store.close(); }
+});
+
+test('excludes exact lockfile names while keeping src/clock.ts', async () => {
+  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/clock.ts'], commandsRun: [], claims: ['src/clock.ts adds a clock'] });
+  const calls: string[][] = [];
+  try {
+    const result = await createClaims({ jev: jevFor(() => answer(1)), store, settings: settings(), git: fakeGit(['src/clock.ts'], 'diff', calls) }).check({ workerId: worker.workerId });
+    assert.equal(result.ok && result.passed, true);
+    const nameOnly = calls.find((args) => args.includes('--name-only'))!;
+    assert.ok(nameOnly.includes(':(exclude)**/package-lock.json'));
+    assert.ok(!nameOnly.includes(':(exclude)**/*lock*'));
+    assert.ok(nameOnly.includes(':(exclude)**/__snapshots__/**'));
+    assert.ok(nameOnly.includes(':(exclude)**/*.snap'));
   } finally { store.close(); }
 });
 

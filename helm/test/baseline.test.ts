@@ -48,7 +48,7 @@ function deps(store: Store, gates: GateRunner): Helm {
     async resolveSha(_repo, ref) { return ref; }, async defaultBranch() { return 'main'; },
     async create(_repo, path, branch, baseSha) { return { path, branch, baseSha }; }, async remove() {},
     async head() { return SHA; }, async isClean() { return true; }, async diffStat() { return ''; },
-    async commitAll(path) { return path; }, async push() {}, async clone() {}, async fetch() {},
+    async commitAll(path) { return path; }, async push() {}, async clone() {}, async fetch() {}, async patchId() { return 'patch'; },
   };
   const github: GitHub = {
     async openPr() { return { number: 1, url: 'https://example.invalid/1' }; },

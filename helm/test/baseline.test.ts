@@ -102,6 +102,22 @@ test('gate.baseline names non-test files and rejects non-validator workers', asy
   } finally { store.close(); rmSync(repo, { recursive: true, force: true }); }
 });
 
+test('gate.baseline refuses a production-to-test rename and names the old path', async () => {
+  const { repo, baseSha } = makeRepo({ 'src/feature.ts': 'export const x = 1;' });
+  mkdirSync(join(repo, 'test'), { recursive: true });
+  git(repo, ['mv', 'src/feature.ts', 'test/feature.test.ts']);
+  git(repo, ['commit', '-qm', 'rename production file into test path']);
+  const head = git(repo, ['rev-parse', 'HEAD']);
+  const store = openStore(':memory:');
+  const gates: GateRunner = { async run() { throw new Error('must not run'); }, async defaultChecks() { return []; } };
+  const helm = deps(store, gates);
+  try {
+    store.insertWorker(worker(repo, baseSha, head)); store.setMeta('w-validator', { issue: 183 });
+    const refused = await helm.baseline({ workerId: 'w-validator' });
+    assert.equal(refused.ok, false); if (!refused.ok) assert.match(refused.reason, /src\/feature\.ts/);
+  } finally { store.close(); rmSync(repo, { recursive: true, force: true }); }
+});
+
 test('validatorPrompt forbids non-test edits', () => {
   const prompt = validatorPrompt({ objective: 'add behaviour', acceptance: 'the test fails first', contextPaths: [] });
   assert.match(prompt, /only test files/i); assert.match(prompt, /Do not edit production code/i); assert.match(prompt, /acceptance/);

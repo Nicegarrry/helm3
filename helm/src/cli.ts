@@ -27,6 +27,7 @@ import type { SupervisorHost, SupervisorRow } from './types.js';
 import { createWatcher } from './watch.js';
 import { createSupervisor } from './supervise.js';
 import { createDiscord } from './discord.js';
+import { createEnvelopeTicker } from './envelope.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -491,7 +492,7 @@ async function cmdServe(args: string[]): Promise<void> {
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev })]);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home })]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopDiscord = startTicker(1000, [discord.tick]);
   const stopTicker = () => { stopWake(); stopWatch(); stopDiscord(); };

@@ -30,6 +30,7 @@ import {
   budgetCloseInput,
   budgetOpenInput,
   budgetStatusInput,
+  envelopeGetInput,
   gateInput,
   inspectInput,
   listInput,
@@ -49,6 +50,7 @@ import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersede
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
+import { envelopeBudgetGuard, readEnvelope, type EnvelopeView } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { JevCheckService } from './jevcheck.js';
@@ -69,6 +71,7 @@ export type WaitInput = z.infer<typeof waitInput>;
 export type BudgetOpenInput = z.infer<typeof budgetOpenInput>;
 export type BudgetCloseInput = z.infer<typeof budgetCloseInput>;
 export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
+export type EnvelopeGetInput = z.infer<typeof envelopeGetInput>;
 export type InboxListInput = z.infer<typeof inboxListInput>;
 export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
 
@@ -240,6 +243,7 @@ export class Helm {
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
     this.jevChecker = deps.jevChecker;
+    this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput));
   }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
@@ -628,12 +632,18 @@ export class Helm {
 
   async budgetOpen(input: BudgetOpenInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
     return runGuard(async () => {
+      const reason = await this.refusal('budget.open', input);
+      if (reason) return refuse(reason);
       const row = openBudget(this.store, {
         project: input.project, label: input.label, capUsd: input.capUsd, capCodexTokens: input.codexTokens,
         openedAt: this.nowIso(),
       });
       return { ok: true, budget: budgetStatus(this.store, row) };
     });
+  }
+
+  async envelopeGet(input: EnvelopeGetInput): Promise<ToolOutcome<EnvelopeView>> {
+    return { ok: true, ...readEnvelope(this.config.home, input.project) };
   }
 
   async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {

@@ -281,6 +281,7 @@ export const budgetOpenInput = z.object({
 }).strict();
 export const budgetCloseInput = z.object({ project: z.string().min(1) }).strict();
 export const budgetStatusInput = z.object({ project: z.string().min(1).optional() }).strict();
+export const envelopeGetInput = z.object({ project: z.string().min(1) }).strict();
 export const inboxListInput = z.object({ project: z.string().min(1).optional(), state: z.enum(INBOX_STATES).default('open') }).strict();
 export const inboxReplyInput = z.object({ id: z.string().regex(/^q-[0-9a-f]+$/), answer: z.string().min(1).max(20000), by: z.string().min(1).max(200).default('supervisor') }).strict();
 export const waitInput = z.object({
@@ -304,7 +305,7 @@ export const notifyNickInput = z.object({ project: z.string().min(1), text: z.st
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
 export type ToolName = string;
 
 

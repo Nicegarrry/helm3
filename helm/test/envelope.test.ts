@@ -31,10 +31,17 @@ test('budget guard names each exceeded envelope limit and permits in-range budge
   const root = home();
   try {
     put(root, 'acme/app', valid);
-    assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 5 }) ?? '', /maxSprintUsd/);
+    assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 5, codexTokens: 100 }) ?? '', /maxSprintUsd/);
     assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 1, codexTokens: 101 }) ?? '', /maxSprintCodexTokens/);
+    assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 4 }) ?? '', /codexTokens required; max 100/);
     assert.equal(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 4, codexTokens: 100 }), null);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('invalid project slugs cannot escape the Helm home', () => {
+  const root = home();
+  try { assert.throws(() => envelopePath(root, 'a/../../../../tmp/x'), /invalid project/); }
+  finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('envelope ticker emits once per hash change and stays quiet when unchanged', async () => {
@@ -50,5 +57,12 @@ test('envelope ticker emits once per hash change and stays quiet when unchanged'
     const changes = store.listAllEvents().filter((event) => event.kind === 'envelope.changed');
     assert.equal(changes.length, 1);
     assert.equal(changes[0]?.workerId, 'project:acme/app');
+    rmSync(envelopePath(root, 'acme/app'));
+    await tick(); await tick();
+    const deletion = store.listAllEvents().filter((event) => event.kind === 'envelope.changed');
+    assert.equal(deletion.length, 2);
+    assert.equal(deletion[1]?.data.hash, 'default');
+    await tick();
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'envelope.changed').length, 2);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

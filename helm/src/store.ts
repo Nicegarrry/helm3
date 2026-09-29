@@ -120,6 +120,10 @@ export function openStore(path: string): Store {
       data TEXT
     );
     CREATE INDEX IF NOT EXISTS events_worker ON events(workerId, seq);
+    CREATE TABLE IF NOT EXISTS cursors (
+      name TEXT PRIMARY KEY,
+      seq INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS gates (
       gateId TEXT PRIMARY KEY,
       workerId TEXT NOT NULL,
@@ -159,6 +163,8 @@ export function openStore(path: string): Store {
   const appendEventStmt = db.prepare('INSERT INTO events (workerId, at, kind, data) VALUES (?, ?, ?, ?)');
   const getEventStmt = db.prepare('SELECT * FROM events WHERE seq = ?');
   const listAllEventsStmt = db.prepare('SELECT * FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?');
+  const getCursorStmt = db.prepare('SELECT seq FROM cursors WHERE name = ?');
+  const setCursorStmt = db.prepare('INSERT INTO cursors (name, seq) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET seq = excluded.seq');
   const insertGateStmt = db.prepare('INSERT INTO gates (gateId, workerId, head, passed, checks, at) VALUES (?, ?, ?, ?, ?, ?)');
   const listGatesStmt = db.prepare('SELECT * FROM gates WHERE workerId = ? ORDER BY at ASC');
   const insertPrStmt = db.prepare('INSERT INTO prs (number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?)');
@@ -173,6 +179,7 @@ export function openStore(path: string): Store {
   const runningWorkersStmt = db.prepare("SELECT workerId FROM workers WHERE state = 'running'");
 
   return {
+    sql: db,
     insertWorker(row: WorkerRow): void {
       insertWorkerStmt.run(
         row.workerId, row.repo, row.repoSlug, row.role, row.model, row.objective, row.acceptance,
@@ -238,6 +245,15 @@ export function openStore(path: string): Store {
       const limit = Math.min(Math.max(opts?.limit ?? 100, 0), 1000);
       const rows = listAllEventsStmt.all(afterSeq, limit) as Record<string, unknown>[];
       return rows.map(toEventRow);
+    },
+
+    getCursor(name: string): number {
+      const row = getCursorStmt.get(name) as { seq: number } | undefined;
+      return row?.seq ?? 0;
+    },
+
+    setCursor(name: string, seq: number): void {
+      setCursorStmt.run(name, seq);
     },
 
     insertGate(row: GateRow): void {

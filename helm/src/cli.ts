@@ -15,6 +15,7 @@ import { codexWorkerRunner, laneRunner } from './codex.js';
 import { builderPrompt, reviewerPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
+import { startTicker } from './daemon.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -247,8 +248,10 @@ async function cmdServe(args: string[]): Promise<void> {
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
+  const stopTicker = startTicker(1000, []);
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
+    stopTicker();
     await handle.close();
     store.close();
     releaseOwner();

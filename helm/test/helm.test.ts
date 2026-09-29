@@ -33,6 +33,7 @@ function createFakeStore(): Store {
   const gates: GateRow[] = [];
   const prs: PrRow[] = [];
   const spend: SpendRow[] = [];
+  const cursors = new Map<string, number>();
   let seq = 0;
 
   function summarize(rows: SpendRow[]): SpendSummary {
@@ -51,6 +52,7 @@ function createFakeStore(): Store {
   }
 
   return {
+    sql: {} as Store['sql'],
     insertWorker(row) {
       workers.set(row.workerId, row);
     },
@@ -83,6 +85,12 @@ function createFakeStore(): Store {
       const afterSeq = opts?.afterSeq ?? 0;
       const limit = Math.min(opts?.limit ?? 100, 1000);
       return events.filter((e) => e.seq > afterSeq).slice(0, limit);
+    },
+    getCursor(name) {
+      return cursors.get(name) ?? 0;
+    },
+    setCursor(name, cursor) {
+      cursors.set(name, cursor);
     },
     insertGate(row) {
       gates.push(row);

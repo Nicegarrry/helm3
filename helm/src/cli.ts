@@ -16,7 +16,8 @@ import { builderPrompt, reviewerPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
 import { startTicker } from './daemon.js';
-import { listInbox } from './inbox.js';
+import { createInboxTriage, listInbox } from './inbox.js';
+import { createJev } from './jev.js';
 import { loadSettings } from './settings.js';
 import { createWatcher } from './watch.js';
 import { herdrHost, tmuxHost } from './host.js';
@@ -290,15 +291,16 @@ async function cmdServe(args: string[]): Promise<void> {
   if (existsSync(join(config.home, 'upgrade.lock')) && (process.env.HELM_UPGRADE_ID !== pending?.id || pending?.phase !== 'starting' || readMetadata(join(config.home, 'upgrade.lock', 'owner.json'))?.id !== pending?.id)) throw new Error('upgrade owns startup; wait for it to finish');
   const releaseOwner = ownDaemon(config.home);
   const store = openStore(join(config.home, 'helm.sqlite'));
+  const settings = loadSettings(config.home);
   const helm = new Helm({
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
-    supervisor: createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
+    supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const settings = loadSettings(config.home);
-  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined)]);
+  const jev = createJev({ settings, store, env: process.env });
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev })]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings })]);
   const stopTicker = () => { stopWake(); stopWatch(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);

@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Helm } from '../src/helm.js';
-import { insertInbox, listInbox } from '../src/inbox.js';
+import { createInboxTriage, insertInbox, listInbox } from '../src/inbox.js';
+import type { Jev, JevResult } from '../src/jev.js';
+import { loadSettings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
 import type { GateRunner, GitHub, HelmConfig, WorkerHooks, WorkerRunner, Workspace } from '../src/types.js';
 
@@ -98,4 +100,51 @@ test('reply to a non-waiting worker is refused', async () => {
     d.store.close();
     rmSync(d.home, { recursive: true, force: true });
   }
+});
+
+async function triageCase(answers: JevResult) {
+  const d = deps();
+  const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', acceptance: 'tests pass', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) throw new Error('spawn failed');
+  await d.helm.settle(spawned.workerId);
+  const item = listInbox(d.store.sql, { state: 'open' }).find((row) => row.workerId === spawned.workerId);
+  assert.ok(item);
+  const fake: Jev = { shadow: true, async ask() { return answers; } };
+  await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: fake })();
+  return { d, item: listInbox(d.store.sql).find((row) => row.id === item!.id)! };
+}
+
+test('A5b triage sends the envelope context and routes human probability to needs_human', async () => {
+  let captured: Parameters<Jev['ask']> | undefined;
+  const d = deps();
+  try {
+    const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', acceptance: 'tests pass', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+    assert.equal(spawned.ok, true);
+    if (!spawned.ok) return;
+    await d.helm.settle(spawned.workerId);
+    const item = listInbox(d.store.sql, { state: 'open' })[0]!;
+    const fake: Jev = { shadow: true, async ask(...args) { captured = args; return { ok: true, answers: { route: { choice: 'needs_supervisor', probabilities: { needs_human: 0.35 }, confidence: 0.8 }, outside: { noul: false }, inIssue: { noul: false } } }; } };
+    await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: fake })();
+    assert.equal(listInbox(d.store.sql)[0]?.triage?.route, 'needs_human');
+    assert.equal(listInbox(d.store.sql)[0]?.triage?.shadow, true);
+    assert.equal(captured?.[0], 'triage');
+    assert.deepEqual(captured?.[1].state, { envelope: 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, and provider settings.', objective: 'choose an API', acceptance: 'tests pass', question: item.question });
+    assert.equal(captured?.[1].questions.route.criteria.needs_human, 'outside the envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, provider settings');
+  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('A5b routes outside probability to needs_human even when Jev says the issue answers it', async () => {
+  const result = await triageCase({ ok: true, answers: { route: { choice: 'answer_from_issue', confidence: 0.99 }, outside: { probabilities: { true: 0.5, false: 0.5 } }, inIssue: { noul: true } } });
+  try { assert.equal(result.item.triage?.route, 'needs_human'); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
+});
+
+test('A5b accepts a high-confidence in-issue answer only inside the envelope', async () => {
+  const result = await triageCase({ ok: true, answers: { route: { choice: 'answer_from_issue', confidence: 0.95 }, outside: { noul: false }, inIssue: { noul: true } } });
+  try { assert.equal(result.item.triage?.route, 'answer_from_issue'); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
+});
+
+test('A5b records the safe default when Jev has no key', async () => {
+  const result = await triageCase({ ok: false, reason: 'no key' });
+  try { assert.deepEqual(result.item.triage, { route: 'needs_supervisor', reason: 'no key', shadow: true }); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
 });

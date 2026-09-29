@@ -1,6 +1,10 @@
 /** Durable worker questions. A5a uses the Store.sql seam so this module owns only its table. */
 import { randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
+import { consumer } from './daemon.js';
+import type { Jev, JevAnswers } from './jev.js';
+import type { Settings } from './settings.js';
+import type { EventRow, Store } from './types.js';
 import type { InboxRow, InboxState } from './types.js';
 
 export type NewInboxRow = Readonly<Pick<InboxRow, 'id' | 'workerId' | 'project' | 'question' | 'createdAt'>>;
@@ -77,4 +81,87 @@ export function supersedeOpenInbox(sql: DatabaseSync, workerId: string): number 
   ensureInboxTable(sql);
   const result = sql.prepare("UPDATE inbox SET state = 'superseded' WHERE workerId = ? AND state = 'open'").run(workerId);
   return Number(result.changes);
+}
+
+const DEFAULT_ENVELOPE = 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, and provider settings.';
+const TRIAGE_ROUTE_CRITERIA = {
+  answer_from_issue: 'the issue text already states the answer, or the envelope explicitly permits the action',
+  needs_supervisor: 'a judgement call, scope question, conflict or tooling problem not settled by the issue, and inside the envelope',
+  needs_human: 'outside the envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, provider settings',
+} as const;
+
+export type InboxTriage = Readonly<Record<string, unknown>>;
+
+export type InboxTriageOptions = Readonly<{
+  store: Store;
+  settings: Pick<Settings, 'jev' | 'supervisor'>;
+  jev: Jev;
+}>;
+
+function probability(answer: JevAnswers[string] | undefined, truth: boolean): number {
+  if (!answer) return 0;
+  const probabilities = answer.probabilities;
+  if (probabilities) {
+    const value = probabilities[String(truth)] ?? probabilities[truth ? 'true' : 'false'];
+    if (typeof value === 'number') return value;
+  }
+  if (typeof answer.noul === 'boolean') {
+    if (answer.noul !== truth) return 0;
+    return typeof answer.confidence === 'number' ? answer.confidence : 1;
+  }
+  return 0;
+}
+
+function triageFrom(answers: JevAnswers, threshold: number, shadow: boolean): InboxTriage {
+  const routeAnswer = answers.route;
+  const route = routeAnswer?.choice;
+  const outside = probability(answers.outside, true);
+  const human = routeAnswer?.probabilities?.needs_human
+    ?? (route === 'needs_human' ? routeAnswer?.confidence ?? 1 : 0);
+  const confidence = routeAnswer?.confidence;
+  const selected = human >= threshold || outside >= threshold
+    ? 'needs_human'
+    : route === 'answer_from_issue' && typeof confidence === 'number' && confidence >= 0.9 && outside < 0.2
+      ? 'answer_from_issue'
+      : 'needs_supervisor';
+  const inIssue = typeof answers.inIssue?.noul === 'boolean' ? answers.inIssue.noul : probability(answers.inIssue, true);
+  return { route: selected, confidence: confidence ?? null, outside, inIssue, shadow };
+}
+
+function setTriage(sql: DatabaseSync, id: string, triage: InboxTriage): void {
+  ensureInboxTable(sql);
+  sql.prepare('UPDATE inbox SET triage = ? WHERE id = ?').run(JSON.stringify(triage), id);
+}
+
+function triageEvent(options: InboxTriageOptions, event: EventRow): Promise<void> | void {
+  if (event.kind !== 'ask') return;
+  const inboxId = typeof event.data.inboxId === 'string' ? event.data.inboxId : undefined;
+  if (!inboxId) return;
+  const item = getInbox(options.store.sql, inboxId);
+  if (!item || item.triage) return;
+  const worker = options.store.getWorker(event.workerId);
+  if (!worker) return;
+  const envelope = options.settings.supervisor.envelope ?? DEFAULT_ENVELOPE;
+  return options.jev.ask('triage', {
+    workerId: worker.workerId,
+    project: worker.repoSlug,
+    state: { envelope, objective: worker.objective, acceptance: worker.acceptance, question: item.question },
+    questions: {
+      route: { type: 'choice', instructions: 'How should this worker question be routed?', criteria: TRIAGE_ROUTE_CRITERIA },
+      outside: { type: 'noul', instructions: 'Would acting on this require an action outside the autonomy envelope?' },
+      inIssue: { type: 'noul', instructions: 'Does the issue text or envelope already contain the answer?' },
+    },
+  }).then((result) => {
+    const triage = result.ok
+      ? triageFrom(result.answers, options.settings.jev.triageHumanAt, options.jev.shadow)
+      : { route: 'needs_supervisor', reason: result.reason, shadow: options.jev.shadow };
+    setTriage(options.store.sql, item.id, triage);
+  });
+}
+
+/** Create the restart-safe A5b consumer; it never changes wake routing. */
+export function createInboxTriage(options: InboxTriageOptions): () => Promise<void> {
+  return consumer(options.store, 'inbox-triage', async (events) => {
+    for (const event of events) await triageEvent(options, event);
+  });
 }

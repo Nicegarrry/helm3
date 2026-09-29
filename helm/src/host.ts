@@ -103,12 +103,17 @@ function promptEmptyText(text: string): boolean {
   return found && normalText.length === 0;
 }
 
+function rejectLeadingDash(value: string, field: string): void {
+  if (value.startsWith('-')) throw new Error(`herdr ${field} must not start with "-" (Helm never generates one)`);
+}
+
 export function promptEmptyTextForTest(text: string): boolean {
   return promptEmptyText(text);
 }
 
 export function herdrHost(exec: HostExec = defaultExec): Host {
   async function findWorkspace(label: string): Promise<{ id: string; raw: Record<string, unknown> } | null> {
+    rejectLeadingDash(label, 'label');
     const result = json((await exec('herdr', ['workspace', 'list', '--json'])).stdout);
     for (const entry of array(result, ['workspaces', 'items', 'results'])) {
       if (!entry || typeof entry !== 'object') continue;
@@ -147,9 +152,13 @@ export function herdrHost(exec: HostExec = defaultExec): Host {
       return promptEmptyText(stripJsonText(output.stdout));
     },
     async send(pane, line) {
+      rejectLeadingDash(line, 'line');
       await exec('herdr', ['pane', 'run', pane.id, line]);
     },
     async create(label, cwd, command) {
+      rejectLeadingDash(label, 'label');
+      rejectLeadingDash(cwd, 'cwd');
+      rejectLeadingDash(command, 'command');
       const result = json((await exec('herdr', ['workspace', 'create', '--cwd', cwd, '--label', label, '--no-focus', '--json'])).stdout);
       const raw = result && typeof result === 'object' ? result as Record<string, unknown> : {};
       const root = raw.root_pane ?? raw.rootPane ?? raw.pane;
@@ -195,12 +204,12 @@ export function tmuxHost(exec: HostExec = defaultExec, waitMs = 2000): Host {
       return promptEmptyText(await capture(pane));
     },
     async send(pane, line) {
-      await exec('tmux', ['send-keys', '-t', pane.id, '-l', line]);
-      await exec('tmux', ['send-keys', '-t', pane.id, 'Enter']);
+      await exec('tmux', ['send-keys', '-t', pane.id, '-l', '--', line]);
+      await exec('tmux', ['send-keys', '-t', pane.id, '--', 'Enter']);
     },
     async create(label, cwd, command) {
       const session = tmuxSession(label);
-      await exec('tmux', ['new-session', '-d', '-s', session, '-c', cwd, command]);
+      await exec('tmux', ['new-session', '-d', '-s', session, '-c', cwd, '--', command]);
       return { id: session, session, label, host: 'tmux' };
     },
   };

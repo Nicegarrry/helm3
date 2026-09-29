@@ -107,6 +107,53 @@ test('maxPerHour counts coalesced deliveries, not individual wakes', async () =>
   } finally { store.close(); }
 });
 
+test('a refused wake is logged, marked delivered, and does not block later supervisors', async () => {
+  const logs: string[] = [];
+  const calls: string[] = [];
+  const host: Host = {
+    async resolve(label) { return { id: label, label, host: 'herdr' }; },
+    async status() { return 'idle'; },
+    async promptEmpty() { return true; },
+    async send(pane, line) {
+      calls.push(`${pane.id}:${line}`);
+      if (pane.id === 'a') throw new Error('line refused');
+    },
+    async create() { return null; },
+  };
+  const store = openStore(':memory:');
+  const created = createSupervisor({ store, settings, hosts: { herdr: host, tmux: host }, log: (line) => logs.push(line) });
+  try {
+    created.register({ project: 'owner/a', repo: '/repo/a', host: 'herdr', label: 'a' });
+    created.register({ project: 'owner/b', repo: '/repo/b', host: 'herdr', label: 'b' });
+    const refused = created.manualWake('owner/a', 'first wake');
+    const delivered = created.manualWake('owner/b', 'second wake');
+    assert.equal(refused.ok, true);
+    assert.equal(delivered.ok, true);
+    if (!refused.ok || !delivered.ok) return;
+    await created.tick();
+    assert.deepEqual(calls, ['a:first wake', 'b:second wake']);
+    assert.deepEqual(logs, [`wake ${refused.wake.id} refused: line refused`]);
+    const pending = created.wakes({ project: 'owner/a', ack: false });
+    assert.equal(pending.ok, true);
+    if (!pending.ok) return;
+    assert.equal(pending.wakes[0]!.deliveredAt !== null, true);
+    await created.tick();
+    assert.deepEqual(calls, ['a:first wake', 'b:second wake']);
+  } finally { store.close(); }
+});
+
+test('manualWake refuses dash-prefixed text before queueing', () => {
+  const { store, created } = service(fakeHost().host);
+  try {
+    created.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner repo' });
+    assert.throws(() => created.manualWake('owner/repo', '-flag'), /manual wake text must not start with/);
+    const wakes = created.wakes({ project: 'owner/repo', ack: false });
+    assert.equal(wakes.ok, true);
+    if (!wakes.ok) return;
+    assert.deepEqual(wakes.wakes, []);
+  } finally { store.close(); }
+});
+
 test('pane ids are re-resolved by label and rotate delivers two verbatim commands', async () => {
   const fake = fakeHost();
   let current = new Date('2026-09-29T00:00:00.000Z');
@@ -141,8 +188,13 @@ test('tmux host uses a fake exec and sends literal text followed by Enter', asyn
   assert.equal(await host.status(pane), 'idle');
   assert.equal(await host.promptEmpty(pane), true);
   await host.send(pane, '/compact focus');
-  assert.deepEqual(calls.at(-2), ['tmux', 'send-keys', '-t', '%1', '-l', '/compact focus']);
-  assert.deepEqual(calls.at(-1), ['tmux', 'send-keys', '-t', '%1', 'Enter']);
+  assert.deepEqual(calls.at(-2), ['tmux', 'send-keys', '-t', '%1', '-l', '--', '/compact focus']);
+  assert.deepEqual(calls.at(-1), ['tmux', 'send-keys', '-t', '%1', '--', 'Enter']);
+  await host.send(pane, '-literal');
+  assert.deepEqual(calls.at(-2), ['tmux', 'send-keys', '-t', '%1', '-l', '--', '-literal']);
+  assert.deepEqual(calls.at(-1), ['tmux', 'send-keys', '-t', '%1', '--', 'Enter']);
+  await host.create('-label', '-cwd', '-command');
+  assert.deepEqual(calls.at(-1), ['tmux', 'new-session', '-d', '-s', 'helm-label', '-c', '-cwd', '--', '-command']);
 });
 
 test('herdr host passes --ansi when reading the visible prompt and accepts done as idle', async () => {
@@ -160,4 +212,20 @@ test('herdr host passes --ansi when reading the visible prompt and accepts done 
   assert.equal(await host.status(pane), 'idle');
   assert.equal(await host.promptEmpty(pane), true);
   assert.ok(calls.some((args) => args.includes('--ansi')));
+});
+
+test('herdr host refuses dash-prefixed positional values before executing', async () => {
+  const calls: string[][] = [];
+  const fakeExec = async (_command: string, args: readonly string[]) => {
+    calls.push([...args]);
+    if (args[0] === 'workspace') return { stdout: JSON.stringify({ root_pane: { pane_id: 'p-1' }, workspace_id: 'ws-1' }) };
+    return { stdout: '' };
+  };
+  const host = herdrHost(fakeExec);
+  const pane: Pane = { id: 'p-1', host: 'herdr' };
+  await assert.rejects(host.send(pane, '-line'), /herdr line must not start with/);
+  await assert.rejects(host.resolve('-label'), /herdr label must not start with/);
+  await assert.rejects(host.create('label', '-cwd', 'command'), /herdr cwd must not start with/);
+  await assert.rejects(host.create('-label', 'cwd', 'command'), /herdr label must not start with/);
+  assert.deepEqual(calls, []);
 });

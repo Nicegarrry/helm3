@@ -161,6 +161,12 @@ function triageEvent(options: InboxTriageOptions, event: EventRow): Promise<void
       ? triageFrom(result.answers, options.settings.jev.triageHumanAt, options.jev.shadow)
       : { route: 'needs_supervisor', reason: result.reason, shadow: options.jev.shadow };
     setTriage(options.store.sql, item.id, triage);
+    options.store.appendEvent(worker.workerId, 'inbox.triage', {
+      inboxId: item.id,
+      route: triage.route,
+      shadow: triage.shadow,
+      question: item.question.slice(0, 500),
+    });
   });
 }
 

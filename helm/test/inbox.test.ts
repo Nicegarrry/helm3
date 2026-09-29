@@ -162,6 +162,18 @@ test('A5b records the safe default when Jev has no key', async () => {
   try { assert.deepEqual(result.item.triage, { route: 'needs_supervisor', reason: 'no key', shadow: true }); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
 });
 
+test('A5b emits one inbox.triage event with the milestone payload', async () => {
+  const result = await triageCase({ ok: true, answers: { route: { choice: 'needs_human', confidence: 0.8 }, outside: { noul: 0.8 }, inIssue: { noul: 0.1 } } });
+  try {
+    const first = result.d.store.listEvents(result.item.workerId).filter((event) => event.kind === 'inbox.triage');
+    await createInboxTriage({ store: result.d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: { shadow: true, async ask() { throw new Error('must not triage twice'); } } })();
+    const events = result.d.store.listEvents(result.item.workerId).filter((event) => event.kind === 'inbox.triage');
+    assert.equal(first.length, 1);
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0]?.data, { inboxId: result.item.id, route: 'needs_human', shadow: true, question: result.item.question.slice(0, 500) });
+  } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }
+});
+
 test('A5b real Jev triage records route confidence in jev_calls', async () => {
   const d = deps();
   try {

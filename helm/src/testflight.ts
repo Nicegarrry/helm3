@@ -25,7 +25,7 @@ export async function runTestFlight(target: TestFlightTarget, worktree: string, 
   if (target.platform !== undefined && !valid.test(target.platform)) throw new Error('invalid TestFlight platform');
   if (!valid.test(lane)) throw new Error('invalid TestFlight lane');
   const laneArgs = target.platform === undefined ? [lane] : [target.platform, lane];
-  const result = await exec('bundle', ['exec', 'fastlane', ...laneArgs], { cwd: worktree, env, timeout });
+  const result = await withTempHome(env, (minimalEnv) => exec('bundle', ['exec', 'fastlane', ...laneArgs], { cwd: worktree, env: minimalEnv, timeout }));
   const output = [result.stdout, result.stderr ?? ''].filter(Boolean).join('\n');
   const lines = output.split(/\r?\n/); if (lines.at(-1) === '') lines.pop();
   const tail = redact(lines.slice(-40).join('\n'));

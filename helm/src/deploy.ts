@@ -59,8 +59,8 @@ function preview(target: Target): boolean { return /^(preview|pr)$/i.test(typeof
 function lockKey(project: string, target: string): string { return `${project}\u0000${target}`; }
 function envNames(target: Target): Record<string, string> {
   if (target.kind === 'convex') return { CONVEX_DEPLOY_KEY: typeof target.env === 'string' ? target.env : target.env.CONVEX_DEPLOY_KEY ?? 'CONVEX_DEPLOY_KEY' };
-  if (target.mode === 'git') return {};
   const configured = typeof target.env === 'string' ? {} : target.env;
+  if (target.mode === 'git') return configured;
   if (target.kind === 'testflight') return {
     APP_STORE_CONNECT_API_KEY_PATH: configured.APP_STORE_CONNECT_API_KEY_PATH ?? 'APP_STORE_CONNECT_API_KEY_PATH',
     MATCH_PASSWORD: configured.MATCH_PASSWORD ?? 'MATCH_PASSWORD',
@@ -77,8 +77,9 @@ export function createDeploy(options: Options) {
   const exec = options.exec ?? defaultExec; const fetchImpl = options.fetch ?? globalThis.fetch; const now = options.now ?? (() => new Date()); const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   ensureDeployTable(options.store);
   const inProgress = new Set<string>();
-  const secretEnv = (target: Target) => { const source = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) }; const values: Record<string, string> = {}; for (const [key, name] of Object.entries(envNames(target))) { const value = source[name]; if (!value) throw new Error(`missing credential ${name}`); values[key] = value; } return { values, redact: redactor(Object.values(values)) }; };
-  const run = async (file: string, args: string[], target: Target, cwd?: string) => { const credentials = secretEnv(target); const result = await exec(file, args, { cwd, env: { ...process.env, ...(options.env ?? {}), ...credentials.values }, timeout: 300_000 }); if ((result.code ?? 0) !== 0) throw new Error(credentials.redact(result.stderr || result.stdout || `${file} failed`)); return { text: credentials.redact(result.stdout), credentials }; };
+  const sourceEnv = () => ({ ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) });
+  const secretEnv = (target: Target) => { const source = sourceEnv(); const values: Record<string, string> = {}; for (const [key, name] of Object.entries(envNames(target))) { const value = source[name]; if (!value) throw new Error(`missing credential ${name}`); values[key] = value; } return { values, redact: redactor(Object.values(values)) }; };
+  const run = async (file: string, args: string[], target: Target, cwd?: string) => { const credentials = secretEnv(target); const source = sourceEnv(); const result = await withTempHome({ PATH: source.PATH ?? '', ...credentials.values }, (minimalEnv) => exec(file, args, { cwd, env: minimalEnv, timeout: 300_000 })); if ((result.code ?? 0) !== 0) throw new Error(credentials.redact(result.stderr || result.stdout || `${file} failed`)); return { text: credentials.redact(result.stdout), credentials }; };
   const defaultMigrationGlobs = ['convex/schema.ts', 'convex/migrations/**'];
   const globMatch = (file: string, glob: string): boolean => { const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]'); return new RegExp(`^${escaped}$`).test(file); };
   const migrationGlobs = async (repo: string, previousSha: string | null, target: Target, includeTarget = false): Promise<string[]> => {
@@ -101,7 +102,7 @@ export function createDeploy(options: Options) {
   const install = async (worktree: string): Promise<void> => {
     const command: readonly [string, string[]] | null = existsSync(join(worktree, 'package-lock.json')) ? ['npm', ['ci']] : existsSync(join(worktree, 'pnpm-lock.yaml')) ? ['pnpm', ['install', '--frozen-lockfile']] : existsSync(join(worktree, 'yarn.lock')) ? ['yarn', ['install', '--frozen-lockfile']] : null;
     if (!command) throw new Error('Convex deploy requires a package lockfile');
-    const source = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) };
+    const source = sourceEnv();
     const result = await withTempHome({ PATH: source.PATH ?? '' }, (minimalEnv) => exec(command[0], command[1], { cwd: worktree, env: minimalEnv, timeout: 300_000 }));
     if ((result.code ?? 0) !== 0) throw new Error(result.stderr || result.stdout || `${command[0]} install failed`);
   };
@@ -109,7 +110,8 @@ export function createDeploy(options: Options) {
     if (target.kind === 'testflight') {
       if (!worktree) throw new Error('TestFlight deploy requires a deploy worktree');
       const credentials = secretEnv(target);
-      const deployed = await runTestFlight(target, worktree, exec, { ...process.env, ...(options.env ?? {}), ...credentials.values }, credentials.redact);
+      const source = sourceEnv();
+      const deployed = await runTestFlight(target, worktree, exec, { PATH: source.PATH ?? '', ...credentials.values }, credentials.redact);
       return { url: null, deploymentId: deployed.deploymentId };
     }
     if (target.kind === 'convex') { if (!worktree) throw new Error('Convex deploy requires a worktree'); await install(worktree); const result = await run('npx', ['--no-install', 'convex', 'deploy', '--yes'], target, worktree); return { url: null, deploymentId: sha }; }
@@ -137,7 +139,7 @@ export function createDeploy(options: Options) {
     if (target.kind !== 'vercel' || (target.mode ?? 'cli') !== 'cli' || preview(target)) throw new Error('Vercel rollback is only available for a production CLI deployment'); await run('vercel', ['rollback', previousSha], target, cwd);
   };
   const smoke = async (target: Target, url: string | null, cwd: string): Promise<Record<string, unknown>> => {
-    const credentials = secretEnv(target); const result: { commands: unknown[]; http: unknown[] } = { commands: [], http: [] }; const secrets = credentials.redact; const source = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) }; const baseEnv: NodeJS.ProcessEnv = { PATH: source.PATH ?? '', HELM_DEPLOY_URL: url ?? '' };
+    const credentials = secretEnv(target); const result: { commands: unknown[]; http: unknown[] } = { commands: [], http: [] }; const secrets = credentials.redact; const source = sourceEnv(); const baseEnv: NodeJS.ProcessEnv = { PATH: source.PATH ?? '', HELM_DEPLOY_URL: url ?? '' };
     for (const name of options.smokeEnvAllowlist ?? []) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && source[name] !== undefined) baseEnv[name] = source[name];
     return withTempHome(baseEnv, async (smokeEnv) => {
       for (const command of target.smoke.commands ?? []) { const argv = tokens(command.command); const out = await exec(argv[0]!, argv.slice(1), { cwd, env: smokeEnv, timeout: 300_000 }); const output = secrets(`${out.stdout}${out.stderr ?? ''}`).slice(-4000); result.commands.push({ name: command.name, ok: (out.code ?? 0) === 0, output }); if ((out.code ?? 0) !== 0) throw new Error(`smoke command failed: ${command.name}: ${output}`); }

@@ -10,7 +10,7 @@ const settings: Settings = {
   jev: { shadow: true, model: 'jev-latest', triageHumanAt: 0.3, attentionAt: 0.4, timeoutMs: 5000 },
   wake: { minIntervalSec: 120, maxPerHour: 20 },
   watch: { tickSec: 60, silenceMin: 15, sameRefusal: 5, attentionEverySec: 180, cooldownMin: 15 },
-  supervisor: {}, discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
+  supervisor: {}, budgets: { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 }, discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
 };
 
 function worker(workerId = 'w-supervise'): WorkerRow {

@@ -2,6 +2,9 @@
 import type { z } from 'zod';
 import {
   emptyInput,
+  budgetCloseInput,
+  budgetOpenInput,
+  budgetStatusInput,
   daemonInput,
   gateInput,
   inspectInput,
@@ -20,6 +23,7 @@ import {
   supervisorListInput,
   wakeListInput,
   supervisorRotateInput,
+  notifyNickInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -42,6 +46,9 @@ function def<S extends z.ZodObject>(name: ToolName, description: string, inputSc
 
 const TOOLS: readonly ToolDef[] = [
   def('daemon.control', 'Inspect lifecycle, drain new work, resume admissions, safely stop an idle daemon, or apply a staged upgrade when idle. Draining refuses new mutations without replaying them.', daemonInput, (h, i) => h.lifecycle.control(i)),
+  def('budget.open', 'Open a per-project sprint budget; opening one closes the previous budget for that project.', budgetOpenInput, (h, i) => h.budgetOpen(i)),
+  def('budget.close', 'Close the open budget for a project.', budgetCloseInput, (h, i) => h.budgetClose(i)),
+  def('budget.status', 'List project budgets with spend, remaining capacity, and attributed workers.', budgetStatusInput, (h, i) => h.budgetStatus(i)),
   def('worker.spawn', 'Start an isolated worker. Omit model for Codex subscription (Terra); difficulty=easy uses Codex Luna; super-easy uses Qwen 3.8 Flash. Kimi K3 and Qwen 3.8 Max are excluded from automatic selection. Explicit model overrides are honoured.', spawnInput, (h, i) => h.spawn(i)),
   def('worker.inspect', 'Get a worker\'s current state, spend, diff stat, result and recent events.', inspectInput, (h, i) => h.inspect(i)),
   def('worker.list', 'List workers, optionally filtered by repo and/or state, as one summary per worker.', listInput, (h, i) => h.list(i)),
@@ -56,6 +63,7 @@ const TOOLS: readonly ToolDef[] = [
   def('pr.merge', 'Merge a pull request, but only if it is open, mergeable, at the exact expected head commit, and all checks passed.', prMergeInput, (h, i) => h.prMerge(i)),
   def('inbox.list', 'List open worker questions, optionally filtered by project or state.', inboxListInput, (h, i) => h.inboxList(i)),
   def('inbox.reply', 'Answer an open worker question and resume that worker on the same session.', inboxReplyInput, (h, i) => h.inboxReply(i)),
+  def('notify.nick', 'Post an immediate project notification to Nick, rate-limited to once per minute.', notifyNickInput, (h, i) => h.notifyNick(i)),
   def('supervisor.register', 'Register or update the owner supervisor for a project.', supervisorRegisterInput, (h, i) => h.supervisorRegister(i)),
   def('supervisor.list', 'List registered project supervisors.', supervisorListInput, (h) => h.supervisorList()),
   def('wake.list', 'List unacknowledged supervisor wakes for a project, optionally acknowledging them.', wakeListInput, (h, i) => h.wakeList(i)),

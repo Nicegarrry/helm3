@@ -7,18 +7,18 @@ import type { Store, ToolOutcome, Workspace } from './types.js';
 const exec = promisify(execFile);
 const MAX_BATCH_DIFF = 70_000;
 const EXCLUDES = [
-  ':(exclude)**/package-lock.json',
-  ':(exclude)**/npm-shrinkwrap.json',
-  ':(exclude)**/yarn.lock',
-  ':(exclude)**/pnpm-lock.yaml',
-  ':(exclude)**/bun.lockb',
-  ':(exclude)**/Cargo.lock',
-  ':(exclude)**/Gemfile.lock',
-  ':(exclude)**/poetry.lock',
-  ':(exclude)**/composer.lock',
-  ':(exclude)**/go.sum',
-  ':(exclude)**/__snapshots__/**',
-  ':(exclude)**/*.snap',
+  ':(exclude,glob)**/package-lock.json',
+  ':(exclude,glob)**/npm-shrinkwrap.json',
+  ':(exclude,glob)**/yarn.lock',
+  ':(exclude,glob)**/pnpm-lock.yaml',
+  ':(exclude,glob)**/bun.lockb',
+  ':(exclude,glob)**/Cargo.lock',
+  ':(exclude,glob)**/Gemfile.lock',
+  ':(exclude,glob)**/poetry.lock',
+  ':(exclude,glob)**/composer.lock',
+  ':(exclude,glob)**/go.sum',
+  ':(exclude,glob)**/__snapshots__/**',
+  ':(exclude,glob)**/*.snap',
 ];
 const supports = 'The diff contains changes that make the claim true.';
 const contradicts = 'The diff touches the relevant code but it differs from the claim (different name, value, file, count, or the opposite change).';

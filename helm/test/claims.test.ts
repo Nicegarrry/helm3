@@ -1,5 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createClaims, type ClaimsGit } from '../src/claims.js';
 import { Helm } from '../src/helm.js';
 import type { Jev } from '../src/jev.js';
@@ -119,18 +123,38 @@ test('a changedFiles entry absent from the filtered diff fails', async () => {
   } finally { store.close(); }
 });
 
-test('excludes exact lockfile names while keeping src/clock.ts', async () => {
+test('excludes root, nested, and snapshot files while keeping src/clock.ts', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'helm-claims-git-'));
+  const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/clock.ts'], commandsRun: [], claims: ['src/clock.ts adds a clock'] });
-  const calls: string[][] = [];
   try {
-    const result = await createClaims({ jev: jevFor(() => answer(1)), store, settings: settings(), git: fakeGit(['src/clock.ts'], 'diff', calls) }).check({ workerId: worker.workerId });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.name', 'Claims Test');
+    git('config', 'user.email', 'claims@example.test');
+    git('commit', '--allow-empty', '-qm', 'base');
+    const baseSha = git('rev-parse', 'HEAD');
+    mkdirSync(join(repo, 'pkg'), { recursive: true });
+    mkdirSync(join(repo, 'src', '__snapshots__'), { recursive: true });
+    writeFileSync(join(repo, 'package-lock.json'), '{}\n');
+    writeFileSync(join(repo, 'pkg', 'yarn.lock'), '# yarn\n');
+    writeFileSync(join(repo, 'a.snap'), 'snapshot\n');
+    writeFileSync(join(repo, 'src', '__snapshots__', 'clock.txt'), 'snapshot\n');
+    writeFileSync(join(repo, 'src', 'clock.ts'), 'export const clock = true;\n');
+    git('add', '.');
+    git('commit', '-qm', 'files');
+    const headSha = git('rev-parse', 'HEAD');
+    store.updateWorker(worker.workerId, { baseSha, head: headSha, worktree: repo });
+    store.insertGate({ gateId: 'g-claims-real-git', workerId: worker.workerId, head: headSha, passed: true, checks: [], at: new Date().toISOString() });
+    const calls: unknown[] = [];
+    const result = await createClaims({ jev: jevFor(() => answer(1), calls), store, settings: settings() }).check({ workerId: worker.workerId });
     assert.equal(result.ok && result.passed, true);
-    const nameOnly = calls.find((args) => args.includes('--name-only'))!;
-    assert.ok(nameOnly.includes(':(exclude)**/package-lock.json'));
-    assert.ok(!nameOnly.includes(':(exclude)**/*lock*'));
-    assert.ok(nameOnly.includes(':(exclude)**/__snapshots__/**'));
-    assert.ok(nameOnly.includes(':(exclude)**/*.snap'));
-  } finally { store.close(); }
+    const diff = (calls[0] as { input: { state: { diff: string } } }).input.state.diff;
+    assert.match(diff, /src\/clock\.ts/);
+    assert.doesNotMatch(diff, /package-lock\.json|pkg\/yarn\.lock|a\.snap|__snapshots__/);
+  } finally {
+    store.close();
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test('diffs up to 70k use one Jev call and larger diffs use one per claim', async () => {

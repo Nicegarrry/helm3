@@ -224,8 +224,7 @@ export function openStore(path: string): Store {
       return rows.map(toWorkerRow);
     },
 
-    appendEvent(workerId: string, kind: string, data: Record<string, unknown> = {}): EventRow {
-      const at = new Date().toISOString();
+    appendEvent(workerId: string, kind: string, data: Record<string, unknown> = {}, at = new Date().toISOString()): EventRow {
       const result = appendEventStmt.run(workerId, at, kind, JSON.stringify(data));
       const seq = Number(result.lastInsertRowid);
       const row = getEventStmt.get(seq) as Record<string, unknown>;

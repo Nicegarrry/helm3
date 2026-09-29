@@ -23,6 +23,8 @@ import type {
   WorkerRunner,
   WorkerState,
   Workspace,
+  SupervisorRow,
+  WakeRow,
 } from './types.js';
 import {
   budgetCloseInput,
@@ -39,11 +41,15 @@ import {
   steerInput,
   waitInput,
   stopInput,
+  inboxListInput,
+  inboxReplyInput,
 } from './types.js';
+import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
 
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
-import { attachWorker, budgetExhausted, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
+import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
+import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 
 const exec = promisify(execFile);
 
@@ -61,6 +67,8 @@ export type WaitInput = z.infer<typeof waitInput>;
 export type BudgetOpenInput = z.infer<typeof budgetOpenInput>;
 export type BudgetCloseInput = z.infer<typeof budgetCloseInput>;
 export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
+export type InboxListInput = z.infer<typeof inboxListInput>;
+export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
 
 /** What a builder/reviewer prompt is built from. Owned here since types.ts does not define it. */
 export type PromptInput = Readonly<{
@@ -88,9 +96,10 @@ export type HelmDeps = Readonly<{
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
   settings?: Settings;
+  supervisor?: SupervisorService;
 }>;
 
-const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'succeeded', 'failed', 'interrupted']);
+const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
 const ACTIVE_STATES: ReadonlySet<WorkerState> = new Set(['queued', 'running']);
 /** Check conclusions that do not block a merge. Lower-case: github.ts normalises them. */
 const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set(['success', 'neutral', 'skipped']);
@@ -201,6 +210,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
+  readonly supervisor?: SupervisorService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -218,6 +228,7 @@ export class Helm {
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     ensureBudgetTables(this.store);
+    this.supervisor = deps.supervisor;
   }
 
   /** Runs `fn` exclusively with respect to every other call queued through this lock. */
@@ -322,6 +333,22 @@ export class Helm {
     });
   }
 
+  async supervisorRegister(input: SupervisorRegisterInput): Promise<ToolOutcome<{ supervisor: SupervisorRow }>> {
+    return this.supervisor ? this.supervisor.register(input) : { ok: false, reason: 'supervisor service unavailable' };
+  }
+
+  async supervisorList(): Promise<ToolOutcome<{ supervisors: SupervisorRow[] }>> {
+    return this.supervisor ? this.supervisor.list() : { ok: false, reason: 'supervisor service unavailable' };
+  }
+
+  async wakeList(input: WakeListInput): Promise<ToolOutcome<{ wakes: WakeRow[] }>> {
+    return this.supervisor ? this.supervisor.wakes(input) : { ok: false, reason: 'supervisor service unavailable' };
+  }
+
+  async supervisorRotate(input: SupervisorRotateInput): Promise<ToolOutcome<{ wakes: WakeRow[] }>> {
+    return this.supervisor ? this.supervisor.rotate(input) : { ok: false, reason: 'supervisor service unavailable' };
+  }
+
   async steer(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
     return guard(() => this.withLock(() => this.steerLocked(input)));
   }
@@ -341,8 +368,38 @@ export class Helm {
     const currentBudget = budgetStatus(this.store, budget);
     must(!currentBudget.exhausted, `budget exhausted (${budget.label} $${currentBudget.spentUsd.toFixed(2)}/$${currentBudget.capUsd.toFixed(2)})`);
     const priorTurns = this.store.listEvents(input.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
+    // The in-memory Helm test store has no SQLite implementation; the real Store.sql seam
+    // is present for daemon runs and for the durable inbox path.
+    if (typeof (this.store.sql as unknown as { exec?: unknown }).exec === 'function') supersedeOpenInbox(this.store.sql, input.workerId);
     this.startRun(input.workerId, input.message);
     return { ok: true, turn: priorTurns + 1, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
+  }
+
+  async inboxList(input: InboxListInput): Promise<ToolOutcome<{ inbox: ReturnType<typeof listInbox> }>> {
+    return guard(async () => ({ ok: true, inbox: listInbox(this.store.sql, { project: input.project, state: input.state ?? 'open' }) }));
+  }
+
+  async inboxReply(input: InboxReplyInput): Promise<ToolOutcome<{ id: string; workerId: string; turn: number; state: 'answered'; warning?: string }>> {
+    return guard(() => this.withLock(async () => {
+      const item = requireValue(getInbox(this.store.sql, input.id), 'inbox item not found');
+      must(item.state === 'open', `inbox item is ${item.state}, not open`);
+      const worker = requireValue(this.store.getWorker(item.workerId), 'worker not found');
+      must(worker.state === 'waiting', `worker is ${worker.state}, not waiting`);
+      must(!this.running.has(worker.workerId), 'worker already has a turn in flight');
+      must(!this.spendCapExceeded(), 'spend cap reached');
+      let budget = budgetForWorker(this.store, worker.workerId);
+      if (!budget) {
+        budget = this.ensureProjectBudget(worker.repoSlug);
+        attachWorker(this.store, worker.workerId, budget.id);
+      }
+      const currentBudget = budgetStatus(this.store, budget);
+      must(!currentBudget.exhausted, `budget exhausted (${budget.label} $${currentBudget.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`);
+      const answeredAt = this.nowIso();
+      must(answerInbox(this.store.sql, item.id, input.answer, input.by, answeredAt), 'inbox item is no longer open');
+      const priorTurns = this.store.listEvents(worker.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
+      this.startRun(worker.workerId, `Answer to your question: ${input.answer}\nContinue the objective.`);
+      return { ok: true, id: item.id, workerId: worker.workerId, turn: priorTurns + 1, state: 'answered', ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
+    }));
   }
 
   async stop(input: StopInput): Promise<ToolOutcome<{ state: WorkerState }>> {
@@ -721,8 +778,14 @@ export class Helm {
           this.store.appendEvent(workerId, 'error', { message: `commit failed: ${errMessage(err)}` });
         }
       }
+      let inboxId: string | undefined;
+      if (result?.status === 'question') {
+        const question = requireValue(result.question, 'question result is missing question');
+        inboxId = createInboxId();
+        insertInbox(this.store.sql, { id: inboxId, workerId, project: row.repoSlug, question, createdAt: this.nowIso() });
+      }
       let nextState: WorkerState =
-        result === null ? 'failed' : result.status === 'succeeded' ? 'succeeded' : result.status === 'failed' ? 'failed' : 'idle';
+        result === null ? 'failed' : result.status === 'succeeded' ? 'succeeded' : result.status === 'failed' ? 'failed' : result.status === 'question' ? 'waiting' : 'idle';
       // Only report 'stopped' when this turn actually observed the stop request (via
       // hooks.shouldContinue()); a turn that completed on its own keeps its real outcome.
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
@@ -733,6 +796,7 @@ export class Helm {
       const recordedSessionFile = this.store.getWorker(workerId)?.sessionFile ?? row.sessionFile;
       this.store.updateWorker(workerId, { state: nextState, sessionFile: outcome.sessionFile ?? recordedSessionFile, result, rawResultText: result === null ? outcome.rawText : null });
       this.store.appendEvent(workerId, 'result', result ? { ...result } : { rawText: outcome.rawText });
+      if (inboxId && result?.status === 'question') this.store.appendEvent(workerId, 'ask', { inboxId, question: result.question });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: nextState });
       if (onDone) {
         try {

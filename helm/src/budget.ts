@@ -1,6 +1,5 @@
 /** Per-project and per-sprint spend budgets. The tables are owned by this module. */
 import { randomBytes } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
 import type { Store } from './types.js';
 
 export type BudgetRow = Readonly<{
@@ -36,7 +35,7 @@ function memoryState(store: Store): MemoryState {
   return state;
 }
 
-function hasSql(store: Store): store is Store & { sql: DatabaseSync } {
+function hasSql(store: Store): boolean {
   return typeof (store.sql as unknown as { exec?: unknown }).exec === 'function';
 }
 

@@ -4,7 +4,7 @@ import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } f
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import type { EventRow, HelmConfig, Store, WorkerRow } from './types.js';
+import type { EventRow, HelmConfig, InboxState, Store, WorkerRow } from './types.js';
 import { ensureHome, loadConfig } from './config.js';
 import { openStore } from './store.js';
 import { listBudgetStatuses } from './budget.js';
@@ -17,6 +17,11 @@ import { builderPrompt, reviewerPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
 import { startTicker } from './daemon.js';
+import { listInbox } from './inbox.js';
+import { loadSettings } from './settings.js';
+import { createWatcher } from './watch.js';
+import { herdrHost, tmuxHost } from './host.js';
+import { createSupervisor } from './supervise.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -30,6 +35,8 @@ function usage(): void {
   inspect <id> [--tail n] [--json]
   wait <id>... [--timeout ms] [--json]
   steer <id> "<message>" [--json]
+  inbox [--project slug] [--state open|answered|superseded] [--json]
+  reply <question-id> "<answer>" [--json]
   stop <id> [--json]
   gate <id> [--json]
   pr <id> [--title t] [--body b] [--draft] [--json]
@@ -42,6 +49,9 @@ function usage(): void {
   budget [project] [--json]
   serve [--stdio|--http] [--port n]
   daemon --action status|drain|resume [--json]
+  supervisor register <project> --repo <path> --host herdr|tmux --label <text>
+  supervisor list [--json]
+  wake <project> "<text>" [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
   shutdown`);
 }
@@ -131,7 +141,7 @@ async function readCmd(
   extraOptions: CliOptions = {},
 ): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { json: { type: 'boolean' }, ...extraOptions } });
-  const { store } = openReadStore();
+  const { config, store } = openReadStore();
   try {
     await run(positionals, values as ParsedValues, store, config);
   } finally {
@@ -197,6 +207,17 @@ const cmdWait = (args: string[]) =>
 const cmdSteer = (args: string[]) =>
   simpleCmd('worker.steer', args, (p) => (p[0] && p.length > 1 ? { workerId: p[0], message: p.slice(1).join(' ') } : undefined));
 
+const cmdInbox = (args: string[]) =>
+  readCmd(args, (_p, v, store) => {
+    const rows = listInbox(store.sql, { project: v.project as string | undefined, state: (v.state as InboxState | undefined) ?? 'open' });
+    if (v.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    console.log('id\tproject\tworker\tquestion');
+    for (const row of rows) console.log(`${row.id}\t${row.project}\t${row.workerId}\t${row.question}`);
+  }, { project: { type: 'string' }, state: { type: 'string' } });
+
+const cmdReply = (args: string[]) =>
+  simpleCmd('inbox.reply', args, (p) => (p[0] && p.length > 1 ? { id: p[0], answer: p.slice(1).join(' ') } : undefined));
+
 const cmdStop = (args: string[]) => simpleCmd('worker.stop', args, (p) => (p[0] ? { workerId: p[0] } : undefined));
 
 const cmdGate = (args: string[]) => simpleCmd('gate.run', args, (p) => (p[0] ? { workerId: p[0] } : undefined));
@@ -239,7 +260,7 @@ async function cmdBudget(args: string[]): Promise<void> {
     printOutcome(await postTool('budget.close', { project }), values.json === true);
     return;
   }
-  const { config, store } = openReadStore();
+  const { store } = openReadStore();
   try {
     const budgets = listBudgetStatuses(store, action);
     if (values.json === true) console.log(JSON.stringify({ ok: true, budgets }, null, 2));
@@ -248,6 +269,33 @@ async function cmdBudget(args: string[]): Promise<void> {
     store.close();
   }
 }
+
+const cmdSupervisor = async (args: string[]): Promise<void> => {
+  const [verb, ...rest] = args;
+  if (verb === 'list') {
+    await simpleCmd('supervisor.list', rest, () => ({}));
+    return;
+  }
+  if (verb === 'register') {
+    await simpleCmd('supervisor.register', rest, (positionals, values) => (
+      positionals[0] && values.repo && values.host && values.label
+        ? { project: positionals[0], repo: resolve(process.cwd(), values.repo as string), host: values.host, label: values.label }
+        : undefined
+    ), { repo: { type: 'string' }, host: { type: 'string' }, label: { type: 'string' } });
+    return;
+  }
+  usage();
+  process.exitCode = 2;
+};
+
+const cmdWake = (args: string[]) =>
+  readCmd(args, (_positionals, values, store) => {
+    const project = _positionals[0];
+    const text = _positionals.slice(1).join(' ');
+    if (!project || !text) { usage(); process.exitCode = 2; return; }
+    const service = createSupervisor({ store, settings: loadSettings(loadConfig().home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } });
+    printOutcome(service.manualWake(project, text), values.json === true);
+  });
 
 /** HTTP owns the daemon; stdio attaches or starts it. See README.md. */
 async function cmdServe(args: string[]): Promise<void> {
@@ -273,10 +321,14 @@ async function cmdServe(args: string[]): Promise<void> {
   const helm = new Helm({
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
+    supervisor: createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopTicker = startTicker(1000, []);
+  const settings = loadSettings(config.home);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined)]);
+  const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings })]);
+  const stopTicker = () => { stopWake(); stopWatch(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();
@@ -331,6 +383,7 @@ const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) 
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
+  inbox: cmdInbox, reply: cmdReply, supervisor: cmdSupervisor, wake: cmdWake,
 };
 
 async function main(): Promise<void> {

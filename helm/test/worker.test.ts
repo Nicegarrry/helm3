@@ -323,6 +323,7 @@ test('parseWorkerResult accepts a question result and requires its question', ()
 test('parseWorkerResult treats empty optional strings as absent', () => {
   const result = parseWorkerResult(JSON.stringify({ ...validResult, question: '', notes: '  ' }));
   assert.deepEqual(result, validResult);
+  assert.equal(parseWorkerResult(JSON.stringify({ ...validResult, acceptance: { command: '', files: [] } })), null);
 });
 
 test('F10: parseWorkerResult tries fences from last to first, skipping a later fence that does not validate', () => {

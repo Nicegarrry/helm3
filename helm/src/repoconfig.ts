@@ -15,6 +15,7 @@ export const repoConfigSchema = z.object({
     kind: z.enum(['vercel', 'convex', 'testflight']),
     env: z.union([z.string().min(1), z.record(z.string(), z.string().min(1))]),
     mode: z.enum(['cli', 'git']).optional(),
+    platform: z.string().min(1).optional(),
     lane: z.string().min(1).optional(),
     external: z.boolean().optional(),
     timeoutMin: z.number().positive().optional(),

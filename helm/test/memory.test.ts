@@ -27,11 +27,11 @@ test('memory.write renders the CG page shape and enqueues exact cg_write args', 
 
 test('memory.log prepends a dated entry directly below the timeline separator', async () => {
   const { home, store, memory } = setup(); const written = await memory.write(writeInput()); assert.equal(written.ok, true);
-  await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: 'new event\nwith detail' }); await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: 'newer event' });
+  await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: '  new event\nwith detail  ' }); await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: 'newer event' });
   const page = readFileSync(join(home, 'memory/projects/widgets/lesson/a-useful-lesson.md'), 'utf8');
   assert.ok(page.indexOf('- 2026-09-30: newer event') > page.indexOf('The truth'));
   assert.ok(page.indexOf('- 2026-09-30: newer event') < page.indexOf('- 2026-09-30: new event'));
-  assert.match(page, /- 2026-09-30: new event\n  with detail/);
+  assert.match(page, /- 2026-09-30: new event\n  with detail\n/);
   const rows = store.sql.prepare('SELECT op, args FROM memory_outbox ORDER BY id').all() as Array<{ op: string; args: string }>;
   assert.deepEqual(rows.map((row) => row.op), ['write', 'log', 'log']); assert.equal(cgLogSchema.safeParse(JSON.parse(rows[1]!.args)).success, true); assert.equal(cgLogSchema.safeParse(JSON.parse(rows[2]!.args)).success, true);
 });
@@ -71,4 +71,15 @@ test('memory.log refuses traversal paths and leaves outside files unchanged', as
   assert.equal(result.ok, false); assert.equal(readFileSync(victim, 'utf8'), 'safe');
   assert.equal((await memory.log({ path: 'projects/VG/lesson/page.md', entry: 'overwrite' })).ok, false);
   assert.equal((await memory.log({ path: 'projects/vg/Lesson_v1.2/page.md', entry: 'overwrite' })).ok, false);
+});
+
+test('memory.log trims entries and refuses CG divider lines', async () => {
+  const { memory } = setup(); const written = await memory.write(writeInput()); assert.equal(written.ok, true);
+  const path = 'projects/widgets/lesson/a-useful-lesson.md';
+  assert.deepEqual(await memory.log({ path, entry: '  keep this  ' }), { ok: true, path });
+  assert.deepEqual(await memory.log({ path, entry: 'keep\n  ---  ' }), { ok: false, reason: 'entry may not contain a --- line (it separates truth from the timeline); use *** for a divider' });
+});
+
+test('memory.list refuses a malformed project filter', async () => {
+  const { memory } = setup(); assert.deepEqual(await memory.list({ project: 'a//b' }), { ok: false, reason: 'project must be owner/name' });
 });

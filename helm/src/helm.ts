@@ -269,7 +269,7 @@ export class Helm {
     ensureTapTable(this.store);
     this.restartExpiredTaps = expireTapsOnStartup(this.store);
     this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput, (project, kind, expectedActionHash, tapId) =>
-      tapId ? consumeTap(this.store, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required'));
+      tapId ? consumeTap(this.store, project, kind, expectedActionHash, this.tapPepper, tapId, this.nowDate()) : 'tap required'));
   }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }

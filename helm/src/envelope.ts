@@ -18,7 +18,7 @@ export type EnvelopeView = Readonly<{ rules: string[]; summary: string; hash: st
 export const defaultEnvelope = (): Envelope => ({ rules: [DEFAULT_RULES], budget: { maxSprintUsd: 25, maxSprintCodexTokens: 20_000_000 }, deploy: { ...DEFAULT_DEPLOY }, tapOnly: [...DEFAULT_TAP_ONLY] });
 export const BUDGET_TAP_ACTION = 'budget.open';
 export type TapPostResult = { ok: true } | { ok: false; reason: string };
-export type TapRow = Readonly<{ id: string; project: string; kind: string; action: string; actionHash: string; codeHash: string; state: 'pending' | 'granted' | 'used' | 'denied' | 'expired'; attempts: number; requestedAt: string; grantedAt: string | null; usedAt: string | null; expiresAt: string }>;
+export type TapRow = Readonly<{ id: string; project: string; kind: string; action: string; actionHash: string; codeHash: string; grantMac: string | null; state: 'pending' | 'granted' | 'used' | 'denied' | 'expired'; attempts: number; requestedAt: string; grantedAt: string | null; usedAt: string | null; expiresAt: string }>;
 
 export function actionHash(action: string): string { return digest(action); }
 export function budgetTapAction(input: { project: string; label: string; capUsd: number; codexTokens: number }): string {
@@ -28,9 +28,11 @@ export function budgetTapAction(input: { project: string; label: string; capUsd:
 export function ensureTapTable(store: Store): void {
   store.sql.exec(`CREATE TABLE IF NOT EXISTS taps (
     id TEXT PRIMARY KEY, project TEXT NOT NULL, kind TEXT NOT NULL, action TEXT NOT NULL,
-    actionHash TEXT NOT NULL, codeHash TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL,
+    actionHash TEXT NOT NULL, codeHash TEXT NOT NULL, grantMac TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL,
     requestedAt TEXT NOT NULL, grantedAt TEXT, usedAt TEXT, expiresAt TEXT NOT NULL
   )`);
+  const columns = store.sql.prepare('PRAGMA table_info(taps)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'grantMac')) store.sql.exec('ALTER TABLE taps ADD COLUMN grantMac TEXT');
 }
 
 export function expireTapsOnStartup(store: Store): Set<string> {
@@ -41,7 +43,7 @@ export function expireTapsOnStartup(store: Store): Set<string> {
 }
 
 function tapRow(row: Record<string, unknown>): TapRow {
-  return { id: String(row.id), project: String(row.project), kind: String(row.kind), action: String(row.action), actionHash: String(row.actionHash), codeHash: String(row.codeHash), state: row.state as TapRow['state'], attempts: Number(row.attempts), requestedAt: String(row.requestedAt), grantedAt: row.grantedAt ? String(row.grantedAt) : null, usedAt: row.usedAt ? String(row.usedAt) : null, expiresAt: String(row.expiresAt) };
+  return { id: String(row.id), project: String(row.project), kind: String(row.kind), action: String(row.action), actionHash: String(row.actionHash), codeHash: String(row.codeHash), grantMac: row.grantMac ? String(row.grantMac) : null, state: row.state as TapRow['state'], attempts: Number(row.attempts), requestedAt: String(row.requestedAt), grantedAt: row.grantedAt ? String(row.grantedAt) : null, usedAt: row.usedAt ? String(row.usedAt) : null, expiresAt: String(row.expiresAt) };
 }
 
 export async function requestTap(store: Store, input: { project: string; kind: string; action: string }, options: { ttlMin: number; post: (content: string) => Promise<TapPostResult>; pepper: Buffer; now?: () => Date; randomInt?: (min: number, max: number) => number }): Promise<{ ok: true; id: string; expiresAt: string } | { ok: false; reason: string }> {
@@ -57,10 +59,11 @@ export async function requestTap(store: Store, input: { project: string; kind: s
     .run(id, input.project, input.kind, input.action, actionHash(input.action), tapCodeHash(options.pepper, id, code), 'pending', requestedAt.toISOString(), expiresAt);
   try {
     const posted = await options.post(message);
-    if (!posted.ok) throw new Error(posted.reason === 'no tap channel configured' ? posted.reason : 'tap channel post failed');
+    if (!posted.ok) throw new Error(posted.reason === 'no tap channel configured' || posted.reason === 'tap channel must differ from the milestone channel' ? posted.reason : 'tap channel post failed');
   } catch (error) {
     store.sql.prepare('DELETE FROM taps WHERE id = ?').run(id);
-    return { ok: false, reason: error instanceof Error && error.message === 'no tap channel configured' ? error.message : 'tap channel post failed' };
+    const reason = error instanceof Error ? error.message : '';
+    return { ok: false, reason: reason === 'no tap channel configured' || reason === 'tap channel must differ from the milestone channel' ? reason : 'tap channel post failed' };
   }
   return { ok: true, id, expiresAt };
 }
@@ -84,12 +87,12 @@ export function confirmTap(store: Store, input: { id: string; code: string }, pe
     const current = store.sql.prepare('SELECT state FROM taps WHERE id = ?').get(tap.id) as { state: TapRow['state'] };
     return { ok: false, reason: current.state === 'denied' ? 'tap denied' : 'incorrect tap code' };
   }
-  const changed = store.sql.prepare("UPDATE taps SET state = 'granted', grantedAt = ? WHERE id = ? AND state = 'pending' AND expiresAt > ?").run(now.toISOString(), tap.id, now.toISOString());
+  const changed = store.sql.prepare("UPDATE taps SET state = 'granted', grantMac = ?, grantedAt = ? WHERE id = ? AND state = 'pending' AND expiresAt > ?").run(tapGrantMac(pepper, tap), now.toISOString(), tap.id, now.toISOString());
   if (Number(changed.changes) !== 1) return { ok: false, reason: 'tap is no longer pending' };
   return { ok: true, granted: true };
 }
 
-export function consumeTap(store: Store, project: string, kind: string, expectedActionHash: string, tapId?: string, now = new Date()): string | null {
+export function consumeTap(store: Store, project: string, kind: string, expectedActionHash: string, pepper: Buffer, tapId?: string, now = new Date()): string | null {
   ensureTapTable(store);
   const row = (tapId
     ? store.sql.prepare('SELECT * FROM taps WHERE id = ?').get(tapId)
@@ -98,11 +101,14 @@ export function consumeTap(store: Store, project: string, kind: string, expected
   const tap = tapRow(row);
   if (tap.project !== project || tap.kind !== kind || tap.actionHash !== expectedActionHash) return 'tap does not match requested action';
   if (tap.state !== 'granted') return `tap is ${tap.state}`;
+  const actualGrantMac = Buffer.from(tapGrantMac(pepper, tap), 'hex');
+  const storedGrantMac = Buffer.from(tap.grantMac ?? '', 'hex');
+  if (storedGrantMac.length !== actualGrantMac.length || !timingSafeEqual(storedGrantMac, actualGrantMac)) return 'tap not validly granted';
   if (Date.parse(tap.expiresAt) <= now.getTime()) {
     store.sql.prepare("UPDATE taps SET state = 'expired' WHERE id = ? AND state = 'granted'").run(tap.id);
     return 'tap expired';
   }
-  const result = store.sql.prepare("UPDATE taps SET state = 'used', usedAt = ? WHERE id = ? AND state = 'granted' AND expiresAt > ?").run(now.toISOString(), tap.id, now.toISOString());
+  const result = store.sql.prepare("UPDATE taps SET state = 'used', grantMac = NULL, usedAt = ? WHERE id = ? AND state = 'granted' AND expiresAt > ?").run(now.toISOString(), tap.id, now.toISOString());
   return Number(result.changes) === 1 ? null : 'tap is no longer granted';
 }
 
@@ -118,6 +124,7 @@ function projectPath(home: string, project: string): string {
 export function envelopePath(home: string, project: string): string { return projectPath(home, project); }
 function digest(bytes: string | Buffer): string { return createHash('sha256').update(bytes).digest('hex'); }
 function tapCodeHash(pepper: Buffer, id: string, code: string): string { return createHmac('sha256', pepper).update(`${id}:${code}`).digest('hex'); }
+function tapGrantMac(pepper: Buffer, tap: Pick<TapRow, 'id' | 'project' | 'kind' | 'actionHash'>): string { return createHmac('sha256', pepper).update(`${tap.id}:${tap.project}:${tap.kind}:${tap.actionHash}:granted`).digest('hex'); }
 function summary(value: Envelope): string { return `budget $${value.budget.maxSprintUsd}/${value.budget.maxSprintCodexTokens} tokens; deploy ${Object.entries(value.deploy).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'}; tap-only ${value.tapOnly.join(', ') || 'none'}`; }
 
 export function readEnvelope(home: string, project: string, log: (line: string) => void = console.error): EnvelopeView {

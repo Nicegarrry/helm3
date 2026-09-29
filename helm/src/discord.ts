@@ -68,9 +68,14 @@ export function createDiscord(options: Options): DiscordService {
     return name ? env[name] : undefined;
   }
 
+  function isMilestoneWebhook(url: string): boolean {
+    return Object.values(options.settings.discord.projects).some((project) => env[project.webhookEnv] === url);
+  }
+
   async function postTap(content: string): Promise<{ ok: true } | { ok: false; reason: string }> {
     const url = tapWebhook();
     if (!url) return { ok: false, reason: 'no tap channel configured' };
+    if (isMilestoneWebhook(url)) return { ok: false, reason: 'tap channel must differ from the milestone channel' };
     try {
       const response = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, username: 'Helm', allowed_mentions: { parse: [] } }) });
       if (response.status >= 200 && response.status < 300) return { ok: true };

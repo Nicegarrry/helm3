@@ -32,9 +32,17 @@ async function requested(d: ReturnType<typeof setup>, action = BUDGET_TAP_ACTION
 test('tap code is only sent to the tap poster and never enters results, events, rows, or logs', async () => {
   const d = setup();
   const logs: string[] = [];
+  const consoleOutput: string[] = [];
+  const originalConsole = { log: console.log, error: console.error, warn: console.warn };
+  console.log = (...args) => { consoleOutput.push(args.map(String).join(' ')); };
+  console.error = (...args) => { consoleOutput.push(args.map(String).join(' ')); };
+  console.warn = (...args) => { consoleOutput.push(args.map(String).join(' ')); };
+  const home = mkdtempSync(join(tmpdir(), 'helm-tap-sentinel-'));
   const discord = createDiscord({ store: d.store, settings: { discord: { projects: {}, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: { HELM_TAP_WEBHOOK: 'https://discord.test/taps' }, fetch: async (_url, init) => { d.posted.push(String(init?.body)); return new Response('{}', { status: 200 }); }, log: (line) => logs.push(line) });
   try {
-    const result = await requestTap(d.store, { project, kind: 'budget.open', action: 'budget.open' }, { ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER, randomInt: () => Number(CODE) });
+    const helm = new Helm({ config: { home, spendCapUsd: 0, maxWorkers: 2, gateTimeoutMs: 1000 }, store: d.store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never, prompts: { builder: () => '', reviewer: () => '' }, settings: loadSettings('/missing-tap-settings'), discord, randomInt: () => Number(CODE), tapPepper: PEPPER });
+    const tools = createToolRegistry(helm);
+    const result = await tools.call('tap.request', { project, kind: 'budget.open', action: 'budget.open' });
     assert.equal(result.ok, true);
     assert.equal(d.posted.length, 1);
     assert.match(d.posted[0]!, new RegExp(CODE));
@@ -55,9 +63,33 @@ test('tap code is only sent to the tap poster and never enters results, events, 
     assert.equal(eventsDump.includes(PEPPER.toString('hex')), false);
     assert.equal(logDump.includes(PEPPER.toString('hex')), false);
     if (!result.ok) return;
-    assert.deepEqual(confirmTap(d.store, { id: result.id, code: CODE }, PEPPER, d.clock), { ok: true, granted: true });
-    assert.equal(JSON.stringify(d.store.sql.prepare('SELECT * FROM taps').all()).includes(CODE), false);
-  } finally { d.store.close(); }
+    const tap = result as { ok: true; id: string };
+    const confirmed = await tools.call('tap.confirm', { id: tap.id, code: CODE });
+    assert.deepEqual(confirmed, { ok: true, granted: true });
+    assert.equal(JSON.stringify(confirmed).includes(CODE), false);
+    const second = await tools.call('tap.request', { project, kind: 'budget.open', action: 'second' });
+    assert.equal(second.ok, true);
+    if (!second.ok) return;
+    const failed = await tools.call('tap.confirm', { id: (second as { ok: true; id: string }).id, code: '000000' });
+    assert.equal(failed.ok, false);
+    assert.equal(JSON.stringify(failed).includes(CODE), false);
+    const finalDump = JSON.stringify(d.store.sql.prepare('SELECT * FROM taps').all());
+    const finalEventsDump = JSON.stringify(d.store.listAllEvents());
+    const finalLogDump = logs.join('\n');
+    const finalConsoleDump = consoleOutput.join('\n');
+    for (const sentinel of [CODE, PEPPER.toString(), PEPPER.toString('hex')]) {
+      assert.equal(finalDump.includes(sentinel), false);
+      assert.equal(finalEventsDump.includes(sentinel), false);
+      assert.equal(finalLogDump.includes(sentinel), false);
+      assert.equal(finalConsoleDump.includes(sentinel), false);
+    }
+  } finally {
+    console.log = originalConsole.log;
+    console.error = originalConsole.error;
+    console.warn = originalConsole.warn;
+    d.store.close();
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('a granted tap is single-use and mismatches project, kind, or action hash', async () => {
@@ -67,11 +99,13 @@ test('a granted tap is single-use and mismatches project, kind, or action hash',
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.deepEqual(confirmTap(d.store, { id: result.id, code: CODE }, PEPPER, d.clock), { ok: true, granted: true });
-    assert.match(consumeTap(d.store, 'other/app', 'budget.open', actionHash(BUDGET_TAP_ACTION), result.id, d.clock) ?? '', /match/);
-    assert.match(consumeTap(d.store, project, 'deploy.prod', actionHash(BUDGET_TAP_ACTION), result.id, d.clock) ?? '', /match/);
-    assert.match(consumeTap(d.store, project, 'budget.open', actionHash('different'), result.id, d.clock) ?? '', /match/);
-    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), result.id, d.clock), null);
-    assert.match(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), result.id, d.clock) ?? '', /used/);
+    assert.match(consumeTap(d.store, 'other/app', 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock) ?? '', /match/);
+    assert.match(consumeTap(d.store, project, 'deploy.prod', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock) ?? '', /match/);
+    assert.match(consumeTap(d.store, project, 'budget.open', actionHash('different'), PEPPER, result.id, d.clock) ?? '', /match/);
+    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock), null);
+    assert.match(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock) ?? '', /used/);
+    d.store.sql.prepare("UPDATE taps SET state = 'granted' WHERE id = ?").run(result.id);
+    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock), 'tap not validly granted');
   } finally { d.store.close(); }
 });
 
@@ -88,7 +122,7 @@ test('expiry refuses confirmation and consumption, and three wrong codes deny a 
     assert.equal(grantedThenExpired.ok, true);
     if (!grantedThenExpired.ok) return;
     assert.deepEqual(confirmTap(d.store, { id: grantedThenExpired.id, code: CODE }, PEPPER, d.clock), { ok: true, granted: true });
-    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash('deploy.staging'), grantedThenExpired.id, afterExpiry), 'tap expired');
+    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash('deploy.staging'), PEPPER, grantedThenExpired.id, afterExpiry), 'tap expired');
 
     const denied = await requested(d, 'deploy.prod');
     assert.equal(denied.ok, true);
@@ -100,11 +134,31 @@ test('expiry refuses confirmation and consumption, and three wrong codes deny a 
   } finally { d.store.close(); }
 });
 
+test('a database-only granted state is not a valid tap', async () => {
+  const d = setup();
+  try {
+    const result = await requested(d);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    d.store.sql.prepare("UPDATE taps SET state = 'granted' WHERE id = ?").run(result.id);
+    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock), 'tap not validly granted');
+  } finally { d.store.close(); }
+});
+
 test('tap.request refuses without a configured tap channel', async () => {
   const d = setup();
   const discord = createDiscord({ store: d.store, settings: { discord: { projects: {}, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_MISSING_TAP' } }, env: {}, fetch: async () => new Response('{}') });
   const result = await requestTap(d.store, { project, kind: 'budget.open', action: BUDGET_TAP_ACTION }, { ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER });
   assert.deepEqual(result, { ok: false, reason: 'no tap channel configured' });
+  assert.equal((d.store.sql.prepare('SELECT COUNT(*) AS count FROM taps').get() as { count: number }).count, 0);
+  d.store.close();
+});
+
+test('tap.request refuses when the tap channel is a milestone channel', async () => {
+  const d = setup();
+  const discord = createDiscord({ store: d.store, settings: { discord: { projects: { [project]: { webhookEnv: 'HELM_MILESTONE' } }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: { HELM_TAP_WEBHOOK: 'https://discord.test/shared', HELM_MILESTONE: 'https://discord.test/shared' }, fetch: async () => new Response('{}') });
+  const result = await requestTap(d.store, { project, kind: 'budget.open', action: BUDGET_TAP_ACTION }, { ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER });
+  assert.deepEqual(result, { ok: false, reason: 'tap channel must differ from the milestone channel' });
   assert.equal((d.store.sql.prepare('SELECT COUNT(*) AS count FROM taps').get() as { count: number }).count, 0);
   d.store.close();
 });

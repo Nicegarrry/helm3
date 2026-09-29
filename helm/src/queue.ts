@@ -180,8 +180,9 @@ export function createQueue(options: QueueOptions): QueueService {
     if (!files.length) return [];
     const unmerged = await exec('git', ['ls-files', '-u', '--', ...files], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
     if (String(unmerged.stdout).trim()) return files;
-    const markers = await exec('git', ['grep', '-n', '-E', '^(<<<<<<<|>>>>>>>)( |$)', head, '--', ...files], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
-    const found = String(markers.stdout).split(/\r?\n/).map((line) => line.split(':', 1)[0] ?? '').filter((file) => files.includes(file));
+    const markers = await exec('git', ['grep', '-l', '-E', '^(<<<<<<<|>>>>>>>)( |$)', head, '--', ...files], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
+    const prefix = `${head}:`;
+    const found = String(markers.stdout).split(/\r?\n/).map((line) => line.startsWith(prefix) ? line.slice(prefix.length) : line).filter((file) => files.includes(file));
     return [...new Set(found)];
   };
   const mergeResolved = async (worker: WorkerRow, base: string, head: string): Promise<boolean> => {

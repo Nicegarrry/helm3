@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,9 +20,9 @@ function worker(id: string, number: number, head: string, worktree = `/worktree/
   return { workerId: id, repo: '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/test', objective: `PR ${number}`, acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: `helm/${id}`, worktree, state, head, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: at, updatedAt: at };
 }
 
-function setup(options: { gate?: boolean; mergeHead?: string; patchIds?: Record<string, string>; exec?: QueueExec; pending?: boolean; guardReviews?: boolean; fetchError?: boolean; statusError?: boolean; mergeable?: boolean | null; merged?: boolean; retry?: (input: { workerId: string; kind: 'conflict' }) => Promise<{ ok: true; turn: number; message: string } | { ok: false; reason: string }>; workerState?: WorkerRow['state']; missingWorktree?: boolean } = {}) {
+function setup(options: { gate?: boolean; mergeHead?: string; worktree?: string; patchIds?: Record<string, string>; exec?: QueueExec; pending?: boolean; guardReviews?: boolean; fetchError?: boolean; statusError?: boolean; mergeable?: boolean | null; merged?: boolean; retry?: (input: { workerId: string; kind: 'conflict' }) => Promise<{ ok: true; turn: number; message: string } | { ok: false; reason: string }>; workerState?: WorkerRow['state']; missingWorktree?: boolean } = {}) {
   const store = openStore(':memory:');
-  const retryWorktree = options.retry && !options.missingWorktree ? mkdtempSync(join(tmpdir(), 'helm-queue-')) : undefined;
+  const retryWorktree = options.retry && !options.missingWorktree ? options.worktree ?? mkdtempSync(join(tmpdir(), 'helm-queue-')) : undefined;
   const workers = [worker('w-1', 1, h1, retryWorktree, options.workerState), worker('w-2', 2, h2)];
   for (const row of workers) { store.insertWorker(row); store.insertPr({ number: Number(row.workerId.slice(-1)), workerId: row.workerId, url: `https://example.invalid/${row.workerId}`, head: row.head!, createdAt: row.createdAt }); }
   let base = 'base';
@@ -112,9 +113,13 @@ test('trailing whitespace and markdown separators do not trigger a conflict retr
 
 test('leftover conflict markers trigger one second retry, then conflict and a wake', async () => {
   let retries = 0;
-  const d = setup({ retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') return { stdout: '', stderr: 'CONFLICT', code: 1 }; if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'ls-files') return { stdout: '', stderr: '', code: 1 }; if (file === 'git' && args[0] === 'grep') return { stdout: 'conflict.txt:1:<<<<<<< ours\nconflict.txt:3:=======\nconflict.txt:5:>>>>>>> theirs\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'rev-parse') return { stdout: '', stderr: '', code: 1 }; return { stdout: '', stderr: '', code: 0 }; } });
+  const worktree = mkdtempSync(join(tmpdir(), 'helm-queue-git-'));
+  execFileSync('git', ['init', '-q'], { cwd: worktree }); execFileSync('git', ['config', 'user.email', 'helm@example.invalid'], { cwd: worktree }); execFileSync('git', ['config', 'user.name', 'Helm Test'], { cwd: worktree });
+  writeFileSync(join(worktree, 'conflict.txt'), '<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n'); execFileSync('git', ['add', 'conflict.txt'], { cwd: worktree }); execFileSync('git', ['commit', '-qm', 'marker'], { cwd: worktree });
+  const markerHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim();
+  const d = setup({ worktree, mergeHead: markerHead, retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') return { stdout: '', stderr: 'CONFLICT', code: 1 }; if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'merge-base') return { stdout: '', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'rev-parse') return { stdout: '', stderr: '', code: 1 }; if (file === 'git' && (args[0] === 'ls-files' || args[0] === 'grep')) { try { return { stdout: execFileSync(file, args, { cwd: opts.cwd, encoding: 'utf8' }), stderr: '', code: 0 }; } catch (error) { const failure = error as { stdout?: string; stderr?: string; status?: number }; return { stdout: String(failure.stdout ?? ''), stderr: String(failure.stderr ?? ''), code: Number(failure.status ?? 1) }; } } return { stdout: '', stderr: '', code: 0 }; } });
   d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
-  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { head: h3, state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(retries, 2); assert.equal(rows(d)[0]?.state, 'updating'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
+  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { head: h3, state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(retries, 2); assert.equal(rows(d)[0]?.state, 'updating'); assert.deepEqual(d.store.listEvents('w-1').filter((event) => event.kind === 'conflict').at(-1)?.data.files, ['conflict.txt']); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
   finally { d.store.close(); }
 });
 

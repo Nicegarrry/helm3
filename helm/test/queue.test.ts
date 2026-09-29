@@ -31,7 +31,7 @@ function setup(options: { gate?: boolean; mergeHead?: string; patchIds?: Record<
   const workspace: Workspace = {
     async fetch() { if (options.fetchError) throw new Error('network unavailable'); }, async patchId(_repo, patchBase, head) { return options.patchIds?.[`${patchBase}:${head}`] ?? 'same'; },
     async commitAll(path) { const head = options.mergeHead ?? h3; heads.set(path.endsWith('w-2') ? 2 : 1, head); return head; },
-    async push() {}, async head() { return h1; }, async isClean() { return true; }, async diffStat() { return ''; },
+    async push() {}, async head(path) { return heads.get(path.endsWith('w-2') ? 2 : 1) ?? h1; }, async isClean() { return true; }, async diffStat() { return ''; },
     async resolveSha() { return base; }, async defaultBranch() { return 'main'; }, async create(_repo, path, branch, baseSha) { return { path, branch, baseSha }; }, async remove() {}, async clone() {},
   } as Workspace;
   const github: GitHub = {
@@ -84,8 +84,9 @@ test('a red gate fails the item and emits queue.failed', async () => {
 
 test('a merge conflict enters conflict and emits a wake, without force or rebase', async () => {
   const d = setup({ exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stdout: 'CONFLICT (content): conflict.txt', code: 1 }); if (file === 'git' && args[0] === 'diff') return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
+  d.heads.set(1, h3);
   d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
-  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); assert.ok(d.calls.some((call) => call.args.includes('--no-commit'))); assert.equal(d.calls.some((call) => call.args.includes('--force') || call.args.includes('rebase')), false); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
+  try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); assert.equal(rows(d)[0]?.head, h3); assert.equal(d.store.listEvents('w-1').find((event) => event.kind === 'conflict')?.data.head, h3); assert.ok(d.calls.some((call) => call.args.includes('--no-commit'))); assert.equal(d.calls.some((call) => call.args.includes('--force') || call.args.includes('rebase')), false); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
   finally { d.store.close(); }
 });
 

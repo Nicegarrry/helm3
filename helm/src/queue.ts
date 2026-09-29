@@ -12,7 +12,7 @@ export type MergeQueueRow = Readonly<{ id: string; repoSlug: string; number: num
 export type QueueExec = (file: string, args: string[], options: { cwd?: string }) => Promise<{ stdout: string; stderr?: string; code: number }>;
 type GateCall = (input: { workerId: string }) => Promise<ToolOutcome<{ head: string; passed: boolean }>>;
 type MergeCall = (input: { number: number; expectedHead: string }) => Promise<ToolOutcome<{ merged: true }>>;
-type QueueError = Error & { conflict?: boolean; transient?: boolean; stdout?: string; stderr?: string; files?: string[]; baseSha?: string };
+type QueueError = Error & { conflict?: boolean; transient?: boolean; stdout?: string; stderr?: string; files?: string[]; baseSha?: string; currentHead?: string };
 type QueueMeta = { baseSha: string; pendingBaseSha: string | null; priorPatchId: string | null; transientErrors: number; conflictRetries: number; conflictFiles: string[] };
 type ConflictRetry = (input: { workerId: string; kind: 'conflict' }) => Promise<ToolOutcome<{ turn: number; message: string }>>;
 export type QueueService = Readonly<{
@@ -156,10 +156,19 @@ export function createQueue(options: QueueOptions): QueueService {
   async function prepare(row: MergeQueueRow, worker: WorkerRow): Promise<MergeQueueRow> {
     const { base, meta } = await mergeBase(row, worker);
     if (meta.baseSha === base) return row;
-    const updating = setState(row, 'updating');
+    const currentHead = await workspace.head(worker.worktree).catch(() => worker.head ?? row.head);
+    store.updateWorker(worker.workerId, { head: currentHead });
+    const updating = setState(row, 'updating', currentHead);
     const priorPatchId = await workspace.patchId(worker.repo, meta.baseSha, updating.head);
     try { await runMerge(worker); }
-    catch (error) { if ((error as QueueError).conflict) throw Object.assign(error as QueueError, { baseSha: base }); throw error; }
+    catch (error) {
+      if ((error as QueueError).conflict) {
+        const head = await workspace.head(worker.worktree).catch(() => currentHead);
+        store.updateWorker(worker.workerId, { head });
+        throw Object.assign(error as QueueError, { baseSha: base, currentHead: head });
+      }
+      throw error;
+    }
     const head = await workspace.commitAll(worker.worktree, `helm: merge origin/${worker.baseRef}`);
     store.updateWorker(worker.workerId, { head });
     metaWrite.run(row.id, base, null, priorPatchId, 0, 0, '[]');
@@ -181,16 +190,17 @@ export function createQueue(options: QueueOptions): QueueService {
     const mergeHead = await exec('git', ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
     return mergeHead.code !== 0;
   };
-  const sendConflictRetry = async (row: MergeQueueRow, worker: WorkerRow, base: string, files: string[], attempts: number): Promise<MergeQueueRow> => {
-    store.appendEvent(worker.workerId, 'conflict', { project: worker.repoSlug, head: worker.head ?? row.head, files });
-    if (!retry) return conflictState(row, `conflict retry unavailable: ${files.join(', ')}`);
-    if (!existsSync(worker.worktree)) return conflictState(row, `worktree missing: ${worker.worktree}`);
-    if (!['idle', 'waiting', 'succeeded', 'failed', 'interrupted'].includes(worker.state)) return conflictState(row, `worker is ${worker.state}, not steerable`);
+  const sendConflictRetry = async (row: MergeQueueRow, worker: WorkerRow, base: string, files: string[], attempts: number, currentHead = worker.head ?? row.head): Promise<MergeQueueRow> => {
+    const failureRow = currentHead === row.head ? row : { ...row, head: currentHead };
+    store.appendEvent(worker.workerId, 'conflict', { project: worker.repoSlug, head: currentHead, files });
+    if (!retry) return conflictState(failureRow, `conflict retry unavailable: ${files.join(', ')}`);
+    if (!existsSync(worker.worktree)) return conflictState(failureRow, `worktree missing: ${worker.worktree}`);
+    if (!['idle', 'waiting', 'succeeded', 'failed', 'interrupted'].includes(worker.state)) return conflictState(failureRow, `worker is ${worker.state}, not steerable`);
     const result = await retry({ workerId: worker.workerId, kind: 'conflict' });
-    if (!result.ok) return conflictState(row, `conflict retry refused: ${result.reason}`);
+    if (!result.ok) return conflictState(failureRow, `conflict retry refused: ${result.reason}`);
     const meta = readMeta(row.id);
     metaWrite.run(row.id, meta.baseSha, base, meta.priorPatchId, 0, attempts + 1, JSON.stringify(files));
-    return setState(row, 'updating', worker.head ?? row.head, 'conflict retry sent');
+    return setState(row, 'updating', currentHead, 'conflict retry sent');
   };
 
   async function checkAndMerge(row: MergeQueueRow, worker: WorkerRow): Promise<boolean> {
@@ -259,7 +269,7 @@ export function createQueue(options: QueueOptions): QueueService {
       const problem = error as QueueError;
       if (problem.conflict) {
         const meta = readMeta(current.id);
-        await sendConflictRetry(current, worker, problem.baseSha ?? meta.baseSha, problem.files ?? [problem.message], meta.conflictRetries);
+        await sendConflictRetry(current, worker, problem.baseSha ?? meta.baseSha, problem.files ?? [problem.message], meta.conflictRetries, problem.currentHead);
         return true;
       }
       if (problem.transient) return markTransient(current, problem.message) || current.state !== 'review';

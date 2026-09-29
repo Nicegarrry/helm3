@@ -31,8 +31,8 @@ test('budget guard names each exceeded envelope limit and permits in-range budge
   const root = home();
   try {
     put(root, 'acme/app', valid);
-    assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 5 }), /maxSprintUsd/);
-    assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 1, codexTokens: 101 }), /maxSprintCodexTokens/);
+    assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 5 }) ?? '', /maxSprintUsd/);
+    assert.match(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 1, codexTokens: 101 }) ?? '', /maxSprintCodexTokens/);
     assert.equal(envelopeBudgetGuard(root, { project: 'acme/app', capUsd: 4, codexTokens: 100 }), null);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

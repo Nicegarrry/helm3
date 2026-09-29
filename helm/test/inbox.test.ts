@@ -128,9 +128,12 @@ test('A5b triage sends the envelope context and routes human probability to need
     await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: fake })();
     assert.equal(listInbox(d.store.sql)[0]?.triage?.route, 'needs_human');
     assert.equal(listInbox(d.store.sql)[0]?.triage?.shadow, true);
-    assert.equal(captured?.[0], 'triage');
-    assert.deepEqual(captured?.[1].state, { envelope: 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, and provider settings.', objective: 'choose an API', acceptance: 'tests pass', question: item.question });
-    assert.equal(captured?.[1].questions.route.criteria.needs_human, 'outside the envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, provider settings');
+    assert.ok(captured);
+    assert.equal(captured[0], 'triage');
+    assert.deepEqual(captured[1].state, { envelope: 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, provider settings.', objective: 'choose an API', acceptance: 'tests pass', question: item.question });
+    const routeQuestion = captured[1].questions.route;
+    if (!routeQuestion || routeQuestion.type !== 'choice') throw new Error('triage route question is not a choice');
+    assert.equal(routeQuestion.criteria.needs_human, 'outside the envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, provider settings');
   } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
 });
 

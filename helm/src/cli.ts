@@ -21,6 +21,7 @@ import { startTicker } from './daemon.js';
 import { createInboxTriage, listInbox } from './inbox.js';
 import { createJev } from './jev.js';
 import { createJevCheck } from './jevcheck.js';
+import { createClaims } from './claims.js';
 import { loadSettings } from './settings.js';
 import { defaultExec, herdrHost, tmuxHost, type Host, type HostExec, type HostStatus } from './host.js';
 import type { SupervisorHost, SupervisorRow } from './types.js';
@@ -483,11 +484,12 @@ async function cmdServe(args: string[]): Promise<void> {
   const settings = loadSettings(config.home);
   const discord = createDiscord({ store, settings, home: config.home });
   const jev = createJev({ settings, store, env: process.env });
+  const workspace = gitWorkspace();
   const helm = new Helm({
-    config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
+    config, store, workspace, gates: gateRunner(), github: ghGitHub(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
-    discord, jevChecker: createJevCheck({ jev, store }),
+    discord, jevChecker: createJevCheck({ jev, store }), claims: createClaims({ jev, store, settings, workspace }),
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });

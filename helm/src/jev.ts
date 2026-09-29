@@ -31,8 +31,8 @@ export type JevAskInput = Readonly<{
 }>;
 
 export type JevResult =
-  | Readonly<{ ok: true; answers: JevAnswers }>
-  | Readonly<{ ok: false; reason: string }>;
+  | Readonly<{ ok: true; answers: JevAnswers; callId?: number }>
+  | Readonly<{ ok: false; reason: string; callId?: number }>;
 
 export type Jev = Readonly<{
   shadow: boolean;
@@ -203,7 +203,7 @@ export function createJev({
       }
     }
 
-    store.sql.prepare(`
+    const inserted = store.sql.prepare(`
       INSERT INTO jev_calls
         (at, purpose, workerId, project, model, questions, answers, confidence, latencyMs, inputTokens, shadow, error, label)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -223,7 +223,10 @@ export function createJev({
       null,
     );
 
-    return error ? { ok: false, reason: error } : { ok: true, answers: redact(answers, key ?? '') as JevAnswers };
+    const callId = Number(inserted.lastInsertRowid);
+    const result: JevResult = error ? { ok: false, reason: error } : { ok: true, answers: redact(answers, key ?? '') as JevAnswers };
+    Object.defineProperty(result, 'callId', { value: callId, enumerable: false });
+    return result;
   }
 
   return { shadow, ask };

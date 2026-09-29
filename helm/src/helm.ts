@@ -52,6 +52,7 @@ import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, clos
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { JevCheckService } from './jevcheck.js';
+import type { ClaimsService } from './claims.js';
 
 const exec = promisify(execFile);
 
@@ -101,6 +102,7 @@ export type HelmDeps = Readonly<{
   supervisor?: SupervisorService;
   discord?: DiscordService;
   jevChecker?: JevCheckService;
+  claims?: ClaimsService;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -220,6 +222,7 @@ export class Helm {
   readonly supervisor?: SupervisorService;
   readonly discord?: DiscordService;
   readonly jevChecker?: JevCheckService;
+  readonly claims?: ClaimsService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -240,10 +243,16 @@ export class Helm {
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
     this.jevChecker = deps.jevChecker;
+    this.claims = deps.claims;
+    if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
   }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }
+  async claimsCheck(input: import('./claims.js').ClaimsCheckInput): Promise<ToolOutcome<Record<string, unknown>>> {
+    if (!this.claims) return { ok: false, reason: 'claims service unavailable' };
+    return runGuard(() => this.claims!.check(input));
+  }
 
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {

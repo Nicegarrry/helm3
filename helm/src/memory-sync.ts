@@ -38,9 +38,19 @@ function readPageSha(result: any): string | undefined {
   return typeof value === 'string' && value ? value : undefined;
 }
 
-function pageContainsEntry(result: any, entry: string): boolean {
-  const data = decodeToolResult(result); const page = data.page as Record<string, unknown> | undefined;
-  return [data.content, data.text, data.body, page?.content, page?.text, page?.body].some((value) => typeof value === 'string' && value.includes(entry));
+function renderLogEntry(date: string, entry: string): string {
+  const lines = entry.split(/\r\n?|\n/); return [`- ${date}: ${lines[0]}`, ...lines.slice(1).map((line) => `  ${line}`)].join('\n');
+}
+
+function pageContainsEntry(result: any, renderedEntry: string): boolean {
+  const data = decodeToolResult(result); const markdown = data.markdown;
+  if (typeof markdown !== 'string') return false;
+  const lines = markdown.split(/\r\n?|\n/); const frontmatterEnd = lines.indexOf('---', 1);
+  if (frontmatterEnd < 0) return false;
+  const timelineStart = lines.findIndex((line, index) => index > frontmatterEnd && line === '---');
+  if (timelineStart < 0) return false;
+  const entryLines = renderedEntry.split('\n'); const timeline = lines.slice(timelineStart + 1);
+  return timeline.some((line, index) => entryLines.every((entryLine, offset) => timeline[index + offset] === entryLine));
 }
 
 export function createMemorySync(options: SyncOptions): () => Promise<void> {
@@ -88,6 +98,12 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
       for (const row of rows) {
         const args = JSON.parse(row.args) as Record<string, unknown>;
         if (row.op === 'log') {
+          const date = typeof args.date === 'string' && args.date ? args.date : now().toISOString().slice(0, 10);
+          if (args.date !== date) {
+            args.date = date;
+            options.store.sql.prepare('UPDATE memory_outbox SET args = ? WHERE id = ?').run(JSON.stringify(args), row.id);
+          }
+          const renderedEntry = typeof args.entry === 'string' ? renderLogEntry(date, args.entry) : '';
           const precedingConflict = options.store.sql.prepare('SELECT 1 AS found FROM memory_outbox WHERE op = \'write\' AND path = ? AND id < ? AND error = \'conflict\' LIMIT 1').get(row.path, row.id) as { found: number } | undefined;
           if (precedingConflict) { parked(row, 'blocked'); continue; }
           if (row.error === 'inflight') {
@@ -99,7 +115,7 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
               batchSucceeded = false;
               break;
             }
-            if (typeof args.entry === 'string' && pageContainsEntry(read, args.entry)) {
+            if (renderedEntry && pageContainsEntry(read, renderedEntry)) {
               options.store.sql.prepare('UPDATE memory_outbox SET syncedAt = ?, error = NULL WHERE id = ?').run(now().toISOString(), row.id);
               resetFailure();
               continue;
@@ -129,6 +145,7 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
         break;
       }
     } catch (error) {
+      batchSucceeded = false;
       transportFailure(error, key);
     } finally {
       try { if (handle?.close) await handle.close(); else await handle?.client.close(); } catch (error) {

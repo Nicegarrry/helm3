@@ -23,7 +23,6 @@ import { loadSettings } from './settings.js';
 import { defaultExec, herdrHost, tmuxHost, type Host, type HostExec, type HostStatus } from './host.js';
 import type { SupervisorHost, SupervisorRow } from './types.js';
 import { createWatcher } from './watch.js';
-import { createJev } from './jev.js';
 import { createSupervisor } from './supervise.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';

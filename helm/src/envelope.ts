@@ -279,7 +279,7 @@ function pushDestination(token: string): string | undefined {
   return branchName(ref);
 }
 
-function pushToProtectedBranch(action: string, protectedBranches: ReadonlySet<string>): boolean {
+function pushToProtectedBranch(action: string, protectedBranches: ReadonlySet<string>, branchLookupFailed: boolean): boolean {
   if (!/\b(?:git\s+)?push\b|\bforce-push\b/i.test(action)) return false;
   const tokens = shellTokens(action);
   if (!tokens) return true;
@@ -294,17 +294,17 @@ function pushToProtectedBranch(action: string, protectedBranches: ReadonlySet<st
   if (refspecs.some((refspec) => refspec === 'HEAD' || refspec === '@' || refspec.startsWith(':') || refspec.startsWith('+'))) return true;
   const destinations = refspecs.map(pushDestination);
   if (destinations.some((destination) => destination === undefined)) return true;
-  return destinations.some((destination) => protectedBranches.has(destination!));
+  return branchLookupFailed || destinations.some((destination) => protectedBranches.has(destination!));
 }
 
-function hardRule(action: string, kind: string, protectedBranches: ReadonlySet<string>): boolean {
+function hardRule(action: string, kind: string, protectedBranches: ReadonlySet<string>, branchLookupFailed: boolean): boolean {
   const text = `${kind} ${action}`;
   if (/\b(?:eval|xargs)\b|\b(?:sh|bash|zsh|dash|ksh)\s+-c(?:\s|$)/i.test(text)) return true;
   if (/\b(?:git\s+)?push\b|\bforce-push\b/i.test(text)) {
     const command = /\b(?:git\s+)?push\b|\bforce-push\b/i.test(action) ? action : `git push ${action}`;
     if (/[$`()]/.test(command)) return true;
     const segments = shellSegments(command);
-    if (!segments || segments.some((segment) => pushToProtectedBranch(segment, protectedBranches))) return true;
+    if (!segments || segments.some((segment) => pushToProtectedBranch(segment, protectedBranches, branchLookupFailed))) return true;
   }
   if (/--admin\b/i.test(text)) return true;
   const secret = /(?:\.env(?:\.[\w-]+)?\b|secrets?\b|tokens?\b|(?:api|private)[ _-]?keys?\b|credentials?\b)/i.test(text);
@@ -327,7 +327,7 @@ function tapProbability(value: unknown): number | null {
   return null;
 }
 
-type EnvelopeCheckOptions = { jev?: Jev; envelopeTapAt: number; log?: (line: string) => void; defaultBranch?: string; workerBaseRef?: string };
+type EnvelopeCheckOptions = { jev?: Jev; envelopeTapAt: number; log?: (line: string) => void; defaultBranch?: string; workerBaseRef?: string; branchLookupFailed?: boolean };
 
 export async function checkEnvelope(home: string, input: { project: string; actions: readonly string[]; kind?: string; baseRef?: string }, options: EnvelopeCheckOptions): Promise<EnvelopeDecision[]> {
   if (input.actions.length < 1 || input.actions.length > 13) throw new Error('actions must contain 1 to 13 items');
@@ -354,7 +354,7 @@ export async function checkEnvelope(home: string, input: { project: string; acti
   if (envelopeNever) return input.actions.map((action) => ({ action, decision: 'never', source: 'envelope', pTap: null }));
   if (input.actions.some((action) => action.length > MAX_ACTION_CHARS)) return input.actions.map((action) => ({ action, decision: 'tap', source: 'jev', pTap: null }));
   const decisions: Array<EnvelopeDecision | undefined> = input.actions.map((action) => {
-    if (hardRule(action, input.kind ?? '', protectedBranches)) return { action, decision: 'tap', source: 'hard', pTap: null };
+    if (hardRule(action, input.kind ?? '', protectedBranches, options.branchLookupFailed === true)) return { action, decision: 'tap', source: 'hard', pTap: null };
     if (envelopeTap) return { action, decision: 'tap', source: 'envelope', pTap: null };
     return undefined;
   });

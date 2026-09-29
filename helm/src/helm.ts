@@ -794,18 +794,22 @@ export class Helm {
     const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
     const sameProjectWorker = worker?.repoSlug === input.project ? worker : undefined;
     let repo = sameProjectWorker?.repo;
-    if (!repo) {
-      try { repo = await this.resolveRepo(input.project); } catch { /* branch lookup failure stays fail closed */ }
+    if (!repo && /^[^/]+\/[^/]+$/.test(input.project)) {
+      const candidate = join(this.config.home, 'repos', input.project.replace('/', '__'));
+      if (existsSync(join(candidate, '.git'))) repo = candidate;
     }
     let defaultBranch: string | undefined;
+    let branchLookupFailed = !repo;
     if (repo) {
       try { defaultBranch = await this.workspace.defaultBranch(repo); } catch { /* protect the built-in branches below */ }
+      branchLookupFailed = !defaultBranch;
     }
     return { ok: true, decisions: await checkEnvelope(this.config.home, input, {
       jev: this.jev,
       envelopeTapAt: this.settings.factory.envelopeTapAt,
       defaultBranch,
       workerBaseRef: sameProjectWorker?.baseRef,
+      branchLookupFailed,
     }) };
   }
 

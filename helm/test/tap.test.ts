@@ -9,7 +9,7 @@ import { Helm } from '../src/helm.js';
 import { loadSettings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
 import { createToolRegistry } from '../src/tools.js';
-import { createDiscord } from '../src/discord.js';
+import { createDiscord as createDiscordImpl } from '../src/discord.js';
 import type { DiscordService } from '../src/discord.js';
 
 const CODE = '123456';
@@ -17,6 +17,8 @@ const PEPPER = Buffer.from('tap-pepper-sentinel-32-bytes!!xx');
 const OLD_PEPPER = Buffer.alloc(32, 0x11);
 const NEW_PEPPER = Buffer.alloc(32, 0x22);
 const project = 'acme/app';
+const TEST_ENV_FILE = '/definitely-missing/helm-tap-test-env';
+const createDiscord = (options: Parameters<typeof createDiscordImpl>[0]) => createDiscordImpl({ ...options, envFile: TEST_ENV_FILE });
 
 function setup() {
   const store = openStore(':memory:');

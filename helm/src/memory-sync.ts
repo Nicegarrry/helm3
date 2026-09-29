@@ -1,13 +1,16 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { Settings } from './settings.js';
+import { loadEnvFile } from './settings.js';
 import type { Store } from './types.js';
 
 type McpClient = Pick<Client, 'connect' | 'callTool' | 'close'>;
 type ClientHandle = { client: McpClient; transport?: unknown; connect?: () => Promise<void>; close?: () => Promise<void> };
 type ClientFactory = (url: string, key: string) => ClientHandle | Promise<ClientHandle>;
 type OutboxRow = { id: number; op: 'write' | 'log'; path: string; args: string; error: string | null };
-type SyncOptions = { store: Store; settings: Pick<Settings, 'memory'>; env?: NodeJS.ProcessEnv; clientFactory?: ClientFactory; now?: () => Date };
+type SyncOptions = { store: Store; settings: Pick<Settings, 'memory'>; env?: NodeJS.ProcessEnv; envFile?: string; clientFactory?: ClientFactory; now?: () => Date };
 
 function redact(value: unknown, key: string): string {
   const text = value instanceof Error ? value.message : String(value);
@@ -54,7 +57,7 @@ function pageContainsEntry(result: any, renderedEntry: string): boolean {
 }
 
 export function createMemorySync(options: SyncOptions): () => Promise<void> {
-  const env = options.env ?? process.env;
+  const env = { ...loadEnvFile(options.envFile ?? join(homedir(), '.config', 'helm', 'env')), ...(options.env ?? process.env) };
   const now = options.now ?? (() => new Date());
   let keyPresent: boolean | undefined;
   let failureCount = 0;

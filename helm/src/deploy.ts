@@ -24,7 +24,7 @@ type Options = Readonly<{
   envelope: (input: { project: string; actions: string[]; kind: string; baseRef?: string }) => Promise<ToolOutcome<{ decisions: Array<{ decision: string }> }>>;
   reserveTap: (project: string, kind: string, action: string, tapId?: string) => TapReservation | string;
   commitTap: (reservation: TapReservation) => void; rollbackTap: (reservation: TapReservation) => void;
-  exec?: DeployExec; fetch?: typeof globalThis.fetch; sleep?: (ms: number) => Promise<void>; env?: NodeJS.ProcessEnv; smokeEnvAllowlist?: readonly string[]; now?: () => Date;
+  exec?: DeployExec; fetch?: typeof globalThis.fetch; sleep?: (ms: number) => Promise<void>; env?: NodeJS.ProcessEnv; envFile?: string; smokeEnvAllowlist?: readonly string[]; now?: () => Date;
 }>;
 export type DeployService = Readonly<{
   run(input: DeployInput): Promise<ToolOutcome<{ deploy: DeployRow; warning?: string }>>;
@@ -79,7 +79,7 @@ export function createDeploy(options: Options) {
   ensureDeployTable(options.store);
   const inProgress = new Set<string>();
   const daemonEnv = () => ({ ...process.env, ...(options.env ?? {}) });
-  const sourceEnv = () => ({ ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) });
+  const sourceEnv = () => ({ ...loadEnvFile(options.envFile ?? join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) });
   const secretEnv = (target: Target) => { const source = sourceEnv(); const values: Record<string, string> = {}; for (const [key, name] of Object.entries(envNames(target))) { const value = source[name]; if (!value) throw new Error(`missing credential ${name}`); values[key] = value; } return { values, redact: redactor(Object.values(values)) }; };
   const run = async (file: string, args: string[], target: Target, cwd?: string) => { const credentials = secretEnv(target); const source = sourceEnv(); const result = await withTempHome({ PATH: source.PATH ?? '', ...credentials.values }, (minimalEnv) => exec(file, args, { cwd, env: minimalEnv, timeout: 300_000 })); if ((result.code ?? 0) !== 0) throw new Error(credentials.redact(result.stderr || result.stdout || `${file} failed`)); return { text: credentials.redact(result.stdout), credentials }; };
   const runDaemon = async (file: string, args: string[], cwd?: string) => { const result = await exec(file, args, { cwd, env: daemonEnv(), timeout: 300_000 }); if ((result.code ?? 0) !== 0) throw new Error(result.stderr || result.stdout || `${file} failed`); return { text: result.stdout }; };

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDiscord } from '../src/discord.js';
+import { createDiscord as createDiscordImpl } from '../src/discord.js';
 import { openStore } from '../src/store.js';
+
+const TEST_ENV_FILE = '/definitely-missing/helm-discord-test-env';
+const createDiscord = (options: Parameters<typeof createDiscordImpl>[0]) => createDiscordImpl({ ...options, envFile: TEST_ENV_FILE });
 
 function settings(maxPerHour = 20) {
   return { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour } };

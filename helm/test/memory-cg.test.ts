@@ -7,10 +7,12 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { openStore } from '../src/store.js';
-import { createMemorySync } from '../src/memory-sync.js';
+import { createMemorySync as createMemorySyncImpl } from '../src/memory-sync.js';
 import { z } from 'zod';
 
 type Call = { name: string; arguments: Record<string, unknown> };
+const TEST_ENV_FILE = '/definitely-missing/helm-memory-test-env';
+const createMemorySync = (options: Parameters<typeof createMemorySyncImpl>[0]) => createMemorySyncImpl({ ...options, envFile: TEST_ENV_FILE });
 const settings = (enabled: boolean, url = 'http://127.0.0.1:9/mcp') => ({ memory: { cg: { enabled, url, keyEnv: 'CG_TEST_KEY' } } });
 const textResult = (value: Record<string, unknown>) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 const renderedLog = (input: Record<string, unknown>) => {
@@ -194,6 +196,16 @@ test('missing key and disabled sync do not create a client or touch the network'
   await createMemorySync({ store, settings: settings(true), env: {}, clientFactory: () => { made += 1; return fakeClient([], () => textResult({ ok: true })); } })();
   assert.equal(made, 0); assert.equal(store.listAllEvents()[0]?.kind, 'memory.cg.missing_key');
   store.close();
+});
+
+test('memory sync uses the injected env file when HOME is unavailable', async () => {
+  const store = openStore(':memory:');
+  let made = 0;
+  try {
+    await createMemorySyncImpl({ store, settings: settings(true), env: {}, envFile: TEST_ENV_FILE, clientFactory: () => { made += 1; return fakeClient([], () => textResult({ ok: true })); } })();
+    assert.equal(made, 0);
+    assert.equal(store.listAllEvents()[0]?.kind, 'memory.cg.missing_key');
+  } finally { store.close(); }
 });
 
 test('missing keys and connect failures are stateful and back off', async () => {

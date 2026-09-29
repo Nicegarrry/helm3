@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { actionHash, ensureTapTable, reserveTap, type TapMemory } from '../src/envelope.js';
 import { checkEnvelope, envelopePath } from '../src/envelope.js';
-import { createDeploy, ensureDeployTable, type DeployExec } from '../src/deploy.js';
+import { createDeploy as createDeployImpl, ensureDeployTable, type DeployExec } from '../src/deploy.js';
 import { runTestFlight } from '../src/testflight.js';
 import type { Jev } from '../src/jev.js';
 import { loadRepoConfig } from '../src/repoconfig.js';
@@ -15,6 +15,8 @@ import { openStore } from '../src/store.js';
 import type { Workspace } from '../src/types.js';
 
 const token = 'deploy-sentinel-token';
+const TEST_ENV_FILE = '/definitely-missing/helm-test-env';
+const createDeploy = (options: Parameters<typeof createDeployImpl>[0]) => createDeployImpl({ ...options, envFile: TEST_ENV_FILE });
 const target = { name: 'prod', kind: 'vercel' as const, env: { VERCEL_TOKEN: 'VERCEL_TOKEN' }, mode: 'cli' as const, smoke: { commands: [{ name: 'smoke', command: 'false' }] }, rollback: 'auto' as const };
 type DeployTarget = NonNullable<RepoConfig['deploy']>['targets'][number];
 
@@ -44,7 +46,7 @@ function commitConfig(repo: string, target: DeployTarget): string {
 function deployDeps(repo: string, sha: string, exec: DeployExec, decision: 'allow' | 'tap' = 'allow', env: NodeJS.ProcessEnv = { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token }) {
   const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-deploy-home-'));
   const wrapped: DeployExec = async (file, args, options) => { if (file === 'git' && args[0] === 'worktree' && args[1] === 'add') { mkdirSync(args[3]!, { recursive: true }); writeFileSync(join(args[3]!, 'Gemfile.lock'), 'GEM'); } return exec(file, args, options); };
-  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision }] }), reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: wrapped, env, now: () => new Date('2026-09-30T00:00:00.000Z') });
+  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision }] }), reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: wrapped, env, envFile: TEST_ENV_FILE, now: () => new Date('2026-09-30T00:00:00.000Z') });
   return { service, store, home };
 }
 
@@ -112,7 +114,7 @@ test('deployment configuration comes from the requested SHA, not the dirty workt
 test('a granted tap is reserved, committed once, and bound to the envelope kind', async () => {
   const { repo, sha } = repoWithConfig(); const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-deploy-tap-')); const taps = new Map<string, TapMemory>(); ensureTapTable(store); const id = 't-deploy'; const action = `deploy.run:owner/repo:prod:${sha}`; let resolved = 0; const actions: string[] = [];
   taps.set(id, { project: 'owner/repo', kind: 'deploy.prod', actionHash: actionHash(action), codeMac: '', attempts: 0, expiresAt: '2099-01-01T00:00:00.000Z', state: 'granted' }); store.sql.prepare('INSERT INTO taps (id, project, kind, action, actionHash, codeHash, state, attempts, requestedAt, expiresAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, 'owner/repo', 'deploy.prod', action, actionHash(action), '', 'granted', 0, '2026-09-30T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
-  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async ({ actions: currentActions }) => { actions.push(...currentActions); return { ok: true, decisions: [{ decision: 'tap' }] }; }, reserveTap: (project, kind, currentAction, tapId) => reserveTap(store, taps, project, kind, actionHash(currentAction), tapId), commitTap: (reservation) => { store.sql.prepare("UPDATE taps SET state='used' WHERE id=?").run(reservation.tapId); taps.delete(reservation.tapId); }, rollbackTap() {}, exec: async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') { resolved += 1; return { stdout: `${sha}\n`, code: 0 }; } return file === 'vercel' && args[0] === 'deploy' ? { stdout: 'https://tap.example.invalid\n', code: 0 } : { stdout: '', code: 0 }; }, env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token } });
+  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async ({ actions: currentActions }) => { actions.push(...currentActions); return { ok: true, decisions: [{ decision: 'tap' }] }; }, reserveTap: (project, kind, currentAction, tapId) => reserveTap(store, taps, project, kind, actionHash(currentAction), tapId), commitTap: (reservation) => { store.sql.prepare("UPDATE taps SET state='used' WHERE id=?").run(reservation.tapId); taps.delete(reservation.tapId); }, rollbackTap() {}, exec: async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') { resolved += 1; return { stdout: `${sha}\n`, code: 0 }; } return file === 'vercel' && args[0] === 'deploy' ? { stdout: 'https://tap.example.invalid\n', code: 0 } : { stdout: '', code: 0 }; }, env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token }, envFile: TEST_ENV_FILE });
   try { const refused = await service.run({ project: 'owner/repo', target: 'prod', sha: 'main' }); assert.equal(refused.ok, false); assert.match(refused.reason, /deploy\.prod/); const success = await service.run({ project: 'owner/repo', target: 'prod', sha: 'main', tapId: id }); assert.equal(success.ok, true); assert.equal(resolved, 2); assert.deepEqual(actions, [action, action]); assert.equal((store.sql.prepare('SELECT state FROM taps WHERE id=?').get(id) as { state: string }).state, 'used'); }
   finally { store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
 });

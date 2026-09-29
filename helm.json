@@ -1,0 +1,7 @@
+{
+  "gates": [
+    { "name": "install", "command": "test -d node_modules || npm ci --no-audit --no-fund" },
+    { "name": "typecheck", "command": "cd helm && npm run typecheck" },
+    { "name": "test", "command": "cd helm && npm test" }
+  ]
+}

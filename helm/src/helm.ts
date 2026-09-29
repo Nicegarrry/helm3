@@ -50,6 +50,7 @@ import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
+import type { DiscordService } from './discord.js';
 
 const exec = promisify(execFile);
 
@@ -97,6 +98,7 @@ export type HelmDeps = Readonly<{
   waitPollMs?: number;
   settings?: Settings;
   supervisor?: SupervisorService;
+  discord?: DiscordService;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -211,6 +213,7 @@ export class Helm {
   private readonly waitPollMs: number;
   private readonly settings: Settings;
   readonly supervisor?: SupervisorService;
+  readonly discord?: DiscordService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -229,6 +232,7 @@ export class Helm {
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     ensureBudgetTables(this.store);
     this.supervisor = deps.supervisor;
+    this.discord = deps.discord;
   }
 
   /** Runs `fn` exclusively with respect to every other call queued through this lock. */
@@ -634,8 +638,15 @@ export class Helm {
       const failing = status.checks.find((c) => !PASSING_CONCLUSIONS.has(c.conclusion ?? ''));
       if (failing) return refuse(`check "${failing.name}" did not succeed (${failing.conclusion ?? 'no conclusion'})`);
       await this.github.merge(worker.repoSlug, input.number, input.expectedHead);
+      this.store.appendEvent(pr.workerId, 'pr.merged', { number: input.number, url: pr.url, head: input.expectedHead, project: worker.repoSlug });
       return { ok: true, merged: true };
     });
+  }
+
+  async notifyNick(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
+    if (!this.discord) return { ok: false, reason: 'Discord is not configured' };
+    const result = await this.discord.notifyNick(input.project, input.text);
+    return result.ok ? { ok: true, sent: true } : result;
   }
 
   private nowIso(): string {

@@ -11,6 +11,7 @@ in `test/<module>.test.ts`, and must run with `npm test` from `helm/`.
 | `src/types.ts` | contracts | see file |
 | `src/store.ts` | SQLite connection, core tables, events, restart marking; exposes `Store.sql` for feature-owned tables | `openStore(path): Store` |
 | `src/inbox.ts` | Worker-question SQLite table and row operations | `ensureInboxTable`, `insertInbox`, `listInbox`, `answerInbox`, `supersedeOpenInbox` |
+| `src/discord.ts` | Event-driven project milestone digests and Nick notifications | `createDiscord` |
 | `src/budget.ts` | Project and sprint budget tables, attribution, spend status | `openBudget`, `closeBudget`, `listBudgetStatuses` |
 | `src/workspace.ts` | git worktree add/remove, commit, push, diff stat | `gitWorkspace(): Workspace` |
 | `src/gate.ts` | run checks as child processes, capture output | `gateRunner(): GateRunner` |
@@ -36,7 +37,7 @@ Events are the only log. Kinds used by `helm.ts`, `worker.ts` and `codex.ts`:
 ({tool, summary}), `tool.refused` ({tool, reason}), `usage` (SpendRow fields), `result`
 (WorkerResult), `ask` ({inboxId, question}), `result.invalid` ({rawText}), `error` ({message}), `notice` ({message}, a
 Codex-side warning that is not a failure), `gate` ({gateId,passed}), `pr` ({number,url}),
-`stop.requested`. `sessionFile` is a Pi session path on the Pi lane and `codex-thread:<uuid>`
+`stop.requested`, `pr.merged`, `inbox.triage`. `sessionFile` is a Pi session path on the Pi lane and `codex-thread:<uuid>`
 on the Codex lane; only the runner that wrote it reads it.
 
 Tool outcomes never throw across the MCP or HTTP boundary: `{ ok: true, ... }` or

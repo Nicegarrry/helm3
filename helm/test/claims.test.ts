@@ -224,3 +224,26 @@ test('block merge guard uses only the latest claims check at the expected head',
     } finally { store.close(); }
   }
 });
+
+test('unknown claims checks do not override known failures and do not block alone', async () => {
+  const noKey: Jev = { shadow: false, async ask() { return { ok: false, reason: 'no key' }; } };
+  const failed = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['claim'] }, true, 'w-known-fail');
+  failed.store.insertPr({ number: 20, workerId: failed.worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+  try {
+    const service = createClaims({ jev: noKey, store: failed.store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
+    failed.store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, 0, ?, ?, ?)').run(failed.worker.workerId, head, '{}', null, '2026-01-01T00:00:00.000Z');
+    const checked = await service.check({ workerId: failed.worker.workerId });
+    assert.equal(checked.ok && checked.passed, true);
+    assert.equal((failed.store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ? ORDER BY rowid DESC LIMIT 1').get(failed.worker.workerId, head) as { passed: number | null }).passed, null);
+    assert.equal((await mergeHelm(failed.store, service).prMerge({ number: 20, expectedHead: head })).ok, false);
+  } finally { failed.store.close(); }
+
+  const unknown = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['claim'] }, true, 'w-unknown-only');
+  unknown.store.insertPr({ number: 21, workerId: unknown.worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+  try {
+    const service = createClaims({ jev: noKey, store: unknown.store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
+    const checked = await service.check({ workerId: unknown.worker.workerId });
+    assert.equal(checked.ok && checked.passed, true);
+    assert.equal((await mergeHelm(unknown.store, service).prMerge({ number: 21, expectedHead: head })).ok, true);
+  } finally { unknown.store.close(); }
+});

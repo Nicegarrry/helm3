@@ -59,7 +59,7 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
   now?: () => Date;
 }): ClaimsService {
   store.sql.exec(`CREATE TABLE IF NOT EXISTS claims_checks (
-    workerId TEXT NOT NULL, head TEXT NOT NULL, passed INTEGER NOT NULL,
+    workerId TEXT NOT NULL, head TEXT NOT NULL, passed INTEGER,
     detail JSON NOT NULL, jevCallId INTEGER, at TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS claims_checks_worker_head ON claims_checks(workerId, head);`);
 
@@ -112,9 +112,9 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
       detail.warning = warning;
       detail.answers = answers;
       detail.jevCallIds = calls;
-      const unknown = warning === 'no key';
-      store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, ?, ?, ?, ?)').run(input.workerId, head, unknown ? 1 : 0, JSON.stringify(detail), calls[0] ?? latestJevCall(), now().toISOString());
-      return unknown ? { ok: true, passed: true, warning } : { ok: false, reason: warning };
+      const noKey = warning === 'no key';
+      store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, NULL, ?, ?, ?)').run(input.workerId, head, JSON.stringify(detail), calls[0] ?? latestJevCall(), now().toISOString());
+      return noKey ? { ok: true, passed: true, warning } : { ok: false, reason: warning };
     }
     detail.answers = answers;
     detail.jevCallIds = calls;
@@ -140,8 +140,10 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
     const pr = typeof value.number === 'number' ? store.getPrByNumber(value.number) : undefined;
     if (!pr) return 'claims check requires a pull request worker';
     if (!store.getWorker(pr.workerId) || !value.expectedHead) return 'claims check requires a worker and head';
-    const row = store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ? ORDER BY at DESC, rowid DESC LIMIT 1').get(pr.workerId, value.expectedHead) as { passed?: number } | undefined;
-    return row?.passed === 1 ? null : `no passing claims check at head ${value.expectedHead}`;
+    const row = store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ? AND passed IS NOT NULL ORDER BY at DESC, rowid DESC LIMIT 1').get(pr.workerId, value.expectedHead) as { passed?: number } | undefined;
+    if (row) return row.passed === 1 ? null : `no passing claims check at head ${value.expectedHead}`;
+    const unknown = store.sql.prepare('SELECT 1 FROM claims_checks WHERE workerId = ? AND head = ? AND passed IS NULL LIMIT 1').get(pr.workerId, value.expectedHead);
+    return unknown ? null : `no passing claims check at head ${value.expectedHead}`;
   }
   return { check, guard };
 }

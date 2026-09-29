@@ -27,23 +27,35 @@ test('memory.write renders the CG page shape and enqueues exact cg_write args', 
 
 test('memory.log prepends a dated entry directly below the timeline separator', async () => {
   const { home, store, memory } = setup(); const written = await memory.write(writeInput()); assert.equal(written.ok, true);
-  await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: 'new event' }); await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: 'newer event' });
+  await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: 'new event\nwith detail' }); await memory.log({ path: 'projects/widgets/lesson/a-useful-lesson.md', entry: 'newer event' });
   const page = readFileSync(join(home, 'memory/projects/widgets/lesson/a-useful-lesson.md'), 'utf8');
-  assert.ok(page.indexOf('2026-09-30 newer event') > page.indexOf('The truth'));
-  assert.ok(page.indexOf('2026-09-30 newer event') < page.indexOf('2026-09-30 new event'));
+  assert.ok(page.indexOf('- 2026-09-30: newer event') > page.indexOf('The truth'));
+  assert.ok(page.indexOf('- 2026-09-30: newer event') < page.indexOf('- 2026-09-30: new event'));
+  assert.match(page, /- 2026-09-30: new event\n  with detail/);
   const rows = store.sql.prepare('SELECT op, args FROM memory_outbox ORDER BY id').all() as Array<{ op: string; args: string }>;
   assert.deepEqual(rows.map((row) => row.op), ['write', 'log', 'log']); assert.equal(cgLogSchema.safeParse(JSON.parse(rows[1]!.args)).success, true); assert.equal(cgLogSchema.safeParse(JSON.parse(rows[2]!.args)).success, true);
 });
 
-test('memory.write refuses a truth divider and list filters project and type', async () => {
-  const { memory } = setup(); assert.deepEqual(await memory.write({ ...writeInput(), truth: 'bad\n---\ntruth' }), { ok: false, reason: 'truth may not contain a --- line (it separates truth from the timeline); use *** for a divider' });
+test('memory.write refuses CG truth divider lines and list filters type case-insensitively', async () => {
+  const { memory } = setup(); assert.deepEqual(await memory.write({ ...writeInput(), truth: 'bad\n  ----  \ntruth' }), { ok: false, reason: 'truth may not contain a --- line (it separates truth from the timeline); use *** for a divider' });
   assert.equal((await memory.write(writeInput())).ok, true); assert.equal((await memory.write({ ...writeInput(), scope: 'team', project: undefined, type: 'retro', title: 'Team retro' })).ok, true);
-  const projectList = await memory.list({ project: 'acme/widgets' }); const typeList = await memory.list({ type: 'retro' });
+  const projectList = await memory.list({ project: 'acme/widgets' }); const typeList = await memory.list({ type: 'ReTrO' });
   assert.equal(projectList.ok, true); assert.equal(typeList.ok, true);
   if (projectList.ok && typeList.ok) {
     assert.equal(projectList.memories.length, 1);
     assert.equal(typeList.memories.length, 1);
   }
+});
+
+test('memory.write uses the CG slug and preserves an existing timeline', async () => {
+  const { home, memory } = setup(); const input = { ...writeInput(), title: 'Café résumé Design notes' };
+  const first = await memory.write(input); assert.equal(first.ok, true);
+  assert.equal(first.ok && first.path, 'projects/widgets/lesson/cafe-resume-design-notes.md');
+  const capped = await memory.write({ ...writeInput(), title: 'a'.repeat(100) }); assert.equal(capped.ok && capped.path, `projects/widgets/lesson/${'a'.repeat(80)}.md`);
+  await memory.log({ path: first.ok ? first.path : '', entry: 'kept entry' });
+  await memory.write({ ...input, truth: 'updated truth' });
+  const page = readFileSync(join(home, 'memory', first.ok ? first.path : ''), 'utf8');
+  assert.match(page, /updated truth\n---\n- 2026-09-30: kept entry/);
 });
 
 test('memory.log refuses traversal paths and leaves outside files unchanged', async () => {

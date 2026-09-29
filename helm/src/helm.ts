@@ -23,6 +23,8 @@ import type {
   WorkerRunner,
   WorkerState,
   Workspace,
+  SupervisorRow,
+  WakeRow,
 } from './types.js';
 import {
   gateInput,
@@ -39,6 +41,7 @@ import {
 } from './types.js';
 
 import { Lifecycle } from './lifecycle.js';
+import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 
 const exec = promisify(execFile);
 
@@ -79,6 +82,7 @@ export type HelmDeps = Readonly<{
   stopTimeoutMs?: number;
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
+  supervisor?: SupervisorService;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'succeeded', 'failed', 'interrupted']);
@@ -191,6 +195,7 @@ export class Helm {
   private readonly stopObserved = new Set<string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
+  readonly supervisor?: SupervisorService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -206,6 +211,7 @@ export class Helm {
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
+    this.supervisor = deps.supervisor;
   }
 
   /** Runs `fn` exclusively with respect to every other call queued through this lock. */
@@ -304,6 +310,22 @@ export class Helm {
       const workers = rows.map((r) => ({ workerId: r.workerId, state: r.state, role: r.role, model: r.model, branch: r.branch, head: r.head, createdAt: r.createdAt }));
       return { ok: true, workers };
     });
+  }
+
+  async supervisorRegister(input: SupervisorRegisterInput): Promise<ToolOutcome<{ supervisor: SupervisorRow }>> {
+    return this.supervisor ? this.supervisor.register(input) : { ok: false, reason: 'supervisor service unavailable' };
+  }
+
+  async supervisorList(): Promise<ToolOutcome<{ supervisors: SupervisorRow[] }>> {
+    return this.supervisor ? this.supervisor.list() : { ok: false, reason: 'supervisor service unavailable' };
+  }
+
+  async wakeList(input: WakeListInput): Promise<ToolOutcome<{ wakes: WakeRow[] }>> {
+    return this.supervisor ? this.supervisor.wakes(input) : { ok: false, reason: 'supervisor service unavailable' };
+  }
+
+  async supervisorRotate(input: SupervisorRotateInput): Promise<ToolOutcome<{ wakes: WakeRow[] }>> {
+    return this.supervisor ? this.supervisor.rotate(input) : { ok: false, reason: 'supervisor service unavailable' };
   }
 
   async steer(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {

@@ -18,6 +18,8 @@ import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.
 import { startTicker } from './daemon.js';
 import { loadSettings } from './settings.js';
 import { createWatcher } from './watch.js';
+import { herdrHost, tmuxHost } from './host.js';
+import { createSupervisor } from './supervise.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -40,6 +42,9 @@ function usage(): void {
   status [--json]
   serve [--stdio|--http] [--port n]
   daemon --action status|drain|resume [--json]
+  supervisor register <project> --repo <path> --host herdr|tmux --label <text>
+  supervisor list [--json]
+  wake <project> "<text>" [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
   shutdown`);
 }
@@ -223,6 +228,33 @@ const cmdStatus = (args: string[]) =>
     console.log(`unknown-cost events: ${payload.unknownCostEvents}`);
   });
 
+const cmdSupervisor = async (args: string[]): Promise<void> => {
+  const [verb, ...rest] = args;
+  if (verb === 'list') {
+    await simpleCmd('supervisor.list', rest, () => ({}));
+    return;
+  }
+  if (verb === 'register') {
+    await simpleCmd('supervisor.register', rest, (positionals, values) => (
+      positionals[0] && values.repo && values.host && values.label
+        ? { project: positionals[0], repo: resolve(process.cwd(), values.repo as string), host: values.host, label: values.label }
+        : undefined
+    ), { repo: { type: 'string' }, host: { type: 'string' }, label: { type: 'string' } });
+    return;
+  }
+  usage();
+  process.exitCode = 2;
+};
+
+const cmdWake = (args: string[]) =>
+  readCmd(args, (_positionals, values, store) => {
+    const project = _positionals[0];
+    const text = _positionals.slice(1).join(' ');
+    if (!project || !text) { usage(); process.exitCode = 2; return; }
+    const service = createSupervisor({ store, settings: loadSettings(loadConfig().home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } });
+    printOutcome(service.manualWake(project, text), values.json === true);
+  });
+
 /** HTTP owns the daemon; stdio attaches or starts it. See README.md. */
 async function cmdServe(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { stdio: { type: 'boolean' }, http: { type: 'boolean' }, port: { type: 'string' } } });
@@ -247,11 +279,14 @@ async function cmdServe(args: string[]): Promise<void> {
   const helm = new Helm({
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
+    supervisor: createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
   const settings = loadSettings(config.home);
-  const stopTicker = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings })]);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined)]);
+  const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings })]);
+  const stopTicker = () => { stopWake(); stopWatch(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();
@@ -305,7 +340,7 @@ const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
-  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
+  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, daemon: cmdDaemon, supervisor: cmdSupervisor, wake: cmdWake, serve: cmdServe, shutdown: cmdShutdown,
 };
 
 async function main(): Promise<void> {

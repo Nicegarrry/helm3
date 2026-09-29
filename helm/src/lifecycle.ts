@@ -6,7 +6,7 @@ import type { ToolOutcome } from './types.js';
 export const VERSION: string = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const manifest = new URL('../release.json', import.meta.url);
 export const REVISION: string = existsSync(manifest) ? JSON.parse(readFileSync(manifest, 'utf8')).revision : 'development';
-export const READ_TOOLS = new Set(['worker.inspect', 'worker.list', 'worker.wait', 'pr.status', 'run.status', 'daemon.control']);
+export const READ_TOOLS = new Set(['worker.inspect', 'worker.list', 'worker.wait', 'pr.status', 'run.status', 'daemon.control', 'supervisor.list']);
 export function readMetadata(path: string): Record<string, unknown> | null {
   return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
 }

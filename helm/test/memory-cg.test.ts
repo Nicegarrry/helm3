@@ -13,6 +13,9 @@ import { z } from 'zod';
 type Call = { name: string; arguments: Record<string, unknown> };
 const settings = (enabled: boolean, url = 'http://127.0.0.1:9/mcp') => ({ memory: { cg: { enabled, url, keyEnv: 'CG_TEST_KEY' } } });
 const textResult = (value: Record<string, unknown>) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
+const renderedLog = (input: Record<string, unknown>) => {
+  const lines = String(input.entry ?? '').split(/\r\n?|\n/); return [`- ${String(input.date ?? '')}: ${lines[0]}`, ...lines.slice(1).map((line) => `  ${line}`)].join('\n');
+};
 
 function outbox(store: ReturnType<typeof openStore>, rows: Array<{ op: 'write' | 'log'; path: string; args: Record<string, unknown>; at?: string }>): void {
   store.sql.exec('CREATE TABLE IF NOT EXISTS memory_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, path TEXT NOT NULL, args TEXT NOT NULL, createdAt TEXT NOT NULL, syncedAt TEXT, error TEXT)');
@@ -27,6 +30,7 @@ type FakeCg = { url: string; calls: Call[]; auth: string[]; errors: string[]; cl
 
 async function startFakeCg(t: TestContext): Promise<FakeCg | undefined> {
   const fake: Omit<FakeCg, 'url' | 'close'> = { calls: [], auth: [], errors: [] };
+  const markdownByPath = new Map<string, string>();
   const server = createServer(async (req, res) => {
     fake.auth.push(String(req.headers.authorization ?? ''));
     const mcp = new McpServer({ name: 'fake-common-ground', version: '1' });
@@ -34,10 +38,11 @@ async function startFakeCg(t: TestContext): Promise<FakeCg | undefined> {
     for (const name of ['cg_write', 'cg_read', 'cg_log']) mcp.registerTool(name, { description: name, inputSchema: schema }, async (args) => {
       const input = (args ?? {}) as Record<string, unknown>; fake.calls.push({ name, arguments: input });
       const path = String(input.path ?? '');
-      if (name === 'cg_read') return { content: [{ type: 'text', text: JSON.stringify({ sha: 'server-sha' }) }] };
+      if (name === 'cg_read') return { content: [{ type: 'text', text: JSON.stringify({ markdown: markdownByPath.get(path) ?? '---\ntype: "lesson"\n---\ntruth\n---\n', sha: 'server-sha' }) }] };
       if (name === 'cg_write' && path.includes('scorecard') && !input.expectedSha) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: 'conflict' }) }] };
       if (name === 'cg_write' && path.includes('conflict')) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: 'conflict' }) }] };
       if (name === 'cg_write' && path.includes('duplicate')) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: 'near_duplicate' }) }] };
+      if (name === 'cg_log') markdownByPath.set(path, `${markdownByPath.get(path) ?? '---\ntype: "lesson"\n---\ntruth\n---\n'}${markdownByPath.has(path) ? '\n' : ''}${renderedLog(input)}`);
       return { content: [{ type: 'text', text: JSON.stringify({ ok: true }) }] };
     });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -68,6 +73,58 @@ test('CG sync replays ordered rows, uses cg_log for lessons, and is idempotent',
   store.close();
 });
 
+test('an inflight log is reconciled from cg_read after a crash', async () => {
+  const store = openStore(':memory:'); const calls: Call[] = []; let first = true; let now = 0;
+  outbox(store, [{ op: 'log', path: 'team/lesson/one.md', args: { path: 'team/lesson/one.md', entry: 'rule', date: '2026-01-01' } }]);
+  const tick = createMemorySync({ store, settings: settings(true), env: { CG_TEST_KEY: 'secret-key' }, now: () => new Date(now), clientFactory: () => fakeClient(calls, (call) => {
+    if (call.name === 'cg_log' && first) { first = false; throw new Error('crashed after cg_log was applied'); }
+    return call.name === 'cg_read' ? textResult({ markdown: '---\ntype: "lesson"\n---\ntruth\n---\n- 2026-01-01: rule' }) : textResult({ ok: true });
+  }) });
+  await tick(); now = 1_000; await tick();
+  assert.deepEqual(calls.map((call) => call.name), ['cg_log', 'cg_read']);
+  const row = store.sql.prepare('SELECT syncedAt, error FROM memory_outbox').get() as { syncedAt: string | null; error: string | null };
+  assert.ok(row.syncedAt); assert.equal(row.error, null); store.close();
+});
+
+test('an inflight log with only a substring present is sent again', async () => {
+  const store = openStore(':memory:'); const calls: Call[] = [];
+  outbox(store, [{ op: 'log', path: 'team/lesson/one.md', args: { path: 'team/lesson/one.md', entry: 'rule', date: '2026-01-01' } }]);
+  store.sql.prepare("UPDATE memory_outbox SET error = 'inflight'").run();
+  const tick = createMemorySync({ store, settings: settings(true), env: { CG_TEST_KEY: 'secret-key' }, clientFactory: () => fakeClient(calls, (call) => call.name === 'cg_read' ? textResult({ markdown: '---\ntype: "lesson"\n---\ntruth\n---\n- 2026-01-01: rules' }) : textResult({ ok: true })) });
+  await tick();
+  assert.deepEqual(calls.map((call) => call.name), ['cg_read', 'cg_log']); store.close();
+});
+
+test('a failed inflight dedupe read keeps the marker for the next tick', async () => {
+  const store = openStore(':memory:'); const calls: Call[] = []; let now = 0; let failed = true;
+  outbox(store, [{ op: 'log', path: 'team/lesson/one.md', args: { path: 'team/lesson/one.md', entry: 'rule', date: '2026-01-01' } }]);
+  store.sql.prepare("UPDATE memory_outbox SET error = 'inflight'").run();
+  const tick = createMemorySync({ store, settings: settings(true), env: { CG_TEST_KEY: 'secret-key' }, now: () => new Date(now), clientFactory: () => fakeClient(calls, (call) => {
+    if (call.name === 'cg_read' && failed) { failed = false; return textResult({ ok: false, error: 'read failed' }); }
+    return textResult({ markdown: '---\ntype: "lesson"\n---\ntruth\n---\n- 2026-01-01: rule' });
+  }) });
+  await tick();
+  assert.deepEqual(calls.map((call) => call.name), ['cg_read']);
+  assert.equal((store.sql.prepare('SELECT syncedAt, error FROM memory_outbox').get() as { syncedAt: string | null; error: string | null }).error, 'inflight');
+  now = 1_000; await tick();
+  assert.deepEqual(calls.map((call) => call.name), ['cg_read', 'cg_read']);
+  assert.ok((store.sql.prepare('SELECT syncedAt FROM memory_outbox').get() as { syncedAt: string | null }).syncedAt); store.close();
+});
+
+test('a log after a conflicted write is parked as blocked', async () => {
+  const store = openStore(':memory:'); const calls: Call[] = [];
+  outbox(store, [
+    { op: 'write', path: 'projects/repo/page/one.md', args: { path: 'projects/repo/page/one.md', type: 'page' }, at: '2026-01-01' },
+    { op: 'log', path: 'projects/repo/page/one.md', args: { path: 'projects/repo/page/one.md', entry: 'later' }, at: '2026-01-02' },
+    { op: 'log', path: 'projects/repo/page/one.md', args: { path: 'projects/repo/page/one.md', entry: 'still later' }, at: '2026-01-03' },
+  ]);
+  const tick = createMemorySync({ store, settings: settings(true), env: { CG_TEST_KEY: 'secret-key' }, clientFactory: () => fakeClient(calls, () => textResult({ ok: false, error: 'conflict' })) });
+  await tick();
+  const rows = store.sql.prepare('SELECT error, syncedAt FROM memory_outbox ORDER BY id').all() as Array<{ error: string; syncedAt: string | null }>;
+  assert.deepEqual(calls.map((call) => call.name), ['cg_write']); assert.equal(rows[0]?.error, 'conflict'); assert.equal(rows[1]?.error, 'blocked'); assert.equal(rows[2]?.error, 'blocked');
+  assert.ok(rows[1]?.syncedAt); assert.ok(rows[2]?.syncedAt); assert.equal(store.listAllEvents().filter((event) => event.kind === 'memory.conflict').length, 1); assert.equal(store.listAllEvents().filter((event) => event.kind === 'memory.blocked').length, 2); store.close();
+});
+
 test('scorecard conflict reads the sha and retries once with expectedSha', async () => {
   const store = openStore(':memory:'); const calls: Call[] = [];
   outbox(store, [{ op: 'write', path: 'projects/repo/scorecard/one.md', args: { path: 'projects/repo/scorecard/one.md', type: 'scorecard' } }]);
@@ -77,6 +134,26 @@ test('scorecard conflict reads the sha and retries once with expectedSha', async
   assert.equal(calls[2]!.arguments.expectedSha, 'sha-2');
   assert.equal((store.sql.prepare('SELECT syncedAt FROM memory_outbox').get() as { syncedAt: string | null }).syncedAt !== null, true);
   store.close();
+});
+
+test('missing scorecard sha parks the row and emits a conflict event', async () => {
+  const store = openStore(':memory:'); const calls: Call[] = [];
+  outbox(store, [{ op: 'write', path: 'projects/repo/scorecard/one.md', args: { path: 'projects/repo/scorecard/one.md', type: 'scorecard' } }]);
+  const tick = createMemorySync({ store, settings: settings(true), env: { CG_TEST_KEY: 'secret-key' }, clientFactory: () => fakeClient(calls, (call) => call.name === 'cg_read' ? textResult({}) : textResult({ ok: false, error: 'conflict' })) });
+  await tick();
+  assert.deepEqual(calls.map((call) => call.name), ['cg_write', 'cg_read']);
+  assert.equal(store.listAllEvents().filter((event) => event.kind === 'memory.conflict').length, 1); store.close();
+});
+
+test('a close error after a successful batch does not back off or emit an error', async () => {
+  const store = openStore(':memory:'); const calls: Call[] = []; let closeCount = 0;
+  outbox(store, [{ op: 'log', path: 'team/lesson/one.md', args: { path: 'team/lesson/one.md', entry: 'one' } }]);
+  const tick = createMemorySync({ store, settings: settings(true), env: { CG_TEST_KEY: 'secret-key' }, clientFactory: () => ({ client: { connect: async () => undefined, callTool: async (input: Call) => { calls.push(input); return textResult({ ok: true }); }, close: async () => { closeCount += 1; throw new Error('close failed'); } } } as any) });
+  await tick();
+  outbox(store, [{ op: 'log', path: 'team/lesson/two.md', args: { path: 'team/lesson/two.md', entry: 'two' } }]);
+  await tick();
+  assert.equal(closeCount, 2); assert.deepEqual(calls.map((call) => call.name), ['cg_log', 'cg_log']);
+  assert.equal(store.listAllEvents().filter((event) => event.kind === 'memory.cg.error').length, 0); store.close();
 });
 
 test('non-owned conflicts are parked once and rows after them still replay', async () => {

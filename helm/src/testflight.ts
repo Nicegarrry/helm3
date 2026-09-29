@@ -1,16 +1,21 @@
 import type { DeployExec } from './deploy.js';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export type TestFlightTarget = Readonly<{ platform?: string; lane?: string; timeoutMin?: number }>;
+
+export async function withTempHome<T>(env: NodeJS.ProcessEnv, action: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+  const home = mkdtempSync(join(tmpdir(), 'helm-deploy-'));
+  try { return await action({ ...env, HOME: home }); }
+  finally { rmSync(home, { recursive: true, force: true }); }
+}
 
 // Fastfile lanes should print `HELM_BUILD_NUMBER=<digits>` after the build is selected.
 export async function runTestFlight(target: TestFlightTarget, worktree: string, exec: DeployExec, env: NodeJS.ProcessEnv, redact: (value: unknown) => string): Promise<{ deploymentId: string | null }> {
   if (!existsSync(join(worktree, 'Gemfile.lock'))) throw new Error('Gemfile.lock is required for TestFlight deploys');
   const timeout = (target.timeoutMin ?? 60) * 60_000;
-  const minimalEnv: NodeJS.ProcessEnv = {};
-  for (const key of ['PATH', 'HOME']) if (env[key]) minimalEnv[key] = env[key];
-  const bundle = await exec('bundle', ['install', '--deployment'], { cwd: worktree, env: minimalEnv, timeout });
+  const bundle = await withTempHome({ PATH: env.PATH ?? '' }, (minimalEnv) => exec('bundle', ['install', '--deployment'], { cwd: worktree, env: minimalEnv, timeout }));
   if ((bundle.code ?? 0) !== 0) {
     const output = [bundle.stdout, bundle.stderr ?? ''].filter(Boolean).join('\n');
     throw new Error(`bundle install failed\n${redact(output.split(/\r?\n/).slice(-40).join('\n'))}`);

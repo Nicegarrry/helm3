@@ -20,6 +20,16 @@ test('tap posts use the dedicated tap webhook, separate from milestone webhooks'
   } finally { store.close(); }
 });
 
+test('tap webhook comparison normalizes host, trailing slash, query, and fragment', async () => {
+  const store = openStore(':memory:');
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: {
+      HELM_TEST_WEBHOOK: 'HTTPS://DISCORD.TEST/taps/?ignored=1#fragment', HELM_TAP_WEBHOOK: 'https://discord.test/taps',
+    }, fetch: async () => new Response('{}', { status: 200 }) });
+    assert.deepEqual(await discord.postTap('tap message'), { ok: false, reason: 'tap channel must differ from the milestone channel' });
+  } finally { store.close(); }
+});
+
 test('maps milestone events, batches them, and never leaks the webhook URL', async () => {
   const store = openStore(':memory:');
   const sentinel = 'https://discord.test/webhook/sentinel-never-log';

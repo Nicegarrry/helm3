@@ -18,8 +18,7 @@ export type EnvelopeView = Readonly<{ rules: string[]; summary: string; hash: st
 export const defaultEnvelope = (): Envelope => ({ rules: [DEFAULT_RULES], budget: { maxSprintUsd: 25, maxSprintCodexTokens: 20_000_000 }, deploy: { ...DEFAULT_DEPLOY }, tapOnly: [...DEFAULT_TAP_ONLY] });
 export const BUDGET_TAP_ACTION = 'budget.open';
 export type TapPostResult = { ok: true } | { ok: false; reason: string };
-export type TapRow = Readonly<{ id: string; project: string; kind: string; action: string; actionHash: string; codeHash: string; state: 'pending' | 'granted' | 'used' | 'denied' | 'expired'; attempts: number; requestedAt: string; grantedAt: string | null; usedAt: string | null; expiresAt: string }>;
-export type TapMemory = { project: string; kind: string; actionHash: string; codeMac: string; attempts: number; expiresAt: string; state: 'pending' | 'granted' };
+export type TapMemory = { project: string; kind: string; actionHash: string; codeMac: string; attempts: number; expiresAt: string; state: 'pending' | 'granted' | 'reserved' };
 
 export function actionHash(action: string): string { return digest(action); }
 export function budgetTapAction(input: { project: string; label: string; capUsd: number; codexTokens: number }): string {
@@ -37,6 +36,15 @@ export function ensureTapTable(store: Store): void {
 export function expireTapsOnStartup(store: Store): void {
   ensureTapTable(store);
   store.sql.exec("UPDATE taps SET state = 'expired' WHERE state IN ('pending', 'granted')");
+}
+
+export function expireTaps(store: Store, taps: Map<string, TapMemory>, now = new Date()): void {
+  for (const [id, tap] of taps) {
+    if (Date.parse(tap.expiresAt) <= now.getTime()) {
+      taps.delete(id);
+      store.sql.prepare("UPDATE taps SET state = 'expired' WHERE id = ?").run(id);
+    }
+  }
 }
 
 export async function requestTap(store: Store, input: { project: string; kind: string; action: string }, options: { taps: Map<string, TapMemory>; ttlMin: number; post: (content: string) => Promise<TapPostResult>; pepper: Buffer; now?: () => Date; randomInt?: (min: number, max: number) => number }): Promise<{ ok: true; id: string; expiresAt: string } | { ok: false; reason: string }> {
@@ -91,7 +99,7 @@ export function confirmTap(store: Store, taps: Map<string, TapMemory>, input: { 
   return { ok: true, granted: true };
 }
 
-export function consumeTap(store: Store, taps: Map<string, TapMemory>, project: string, kind: string, expectedActionHash: string, tapId?: string, now = new Date()): string | null {
+export function reserveTap(store: Store, taps: Map<string, TapMemory>, project: string, kind: string, expectedActionHash: string, tapId?: string, now = new Date()): string | null {
   ensureTapTable(store);
   const selected = tapId
     ? [tapId, taps.get(tapId)] as const
@@ -106,8 +114,28 @@ export function consumeTap(store: Store, taps: Map<string, TapMemory>, project: 
     store.sql.prepare("UPDATE taps SET state = 'expired' WHERE id = ?").run(id);
     return 'tap expired';
   }
-  taps.delete(id);
-  store.sql.prepare("UPDATE taps SET state = 'used', usedAt = ? WHERE id = ?").run(now.toISOString(), id);
+  tap.state = 'reserved';
+  return null;
+}
+
+export function commitTap(store: Store, taps: Map<string, TapMemory>, tapId: string, now = new Date()): void {
+  const tap = taps.get(tapId);
+  if (!tap || tap.state !== 'reserved') throw new Error('tap reservation is no longer active');
+  taps.delete(tapId);
+  store.sql.prepare("UPDATE taps SET state = 'used', usedAt = ? WHERE id = ?").run(now.toISOString(), tapId);
+}
+
+export function rollbackTap(taps: Map<string, TapMemory>, tapId: string): void {
+  const tap = taps.get(tapId);
+  if (tap?.state === 'reserved') tap.state = 'granted';
+}
+
+export function consumeTap(store: Store, taps: Map<string, TapMemory>, project: string, kind: string, expectedActionHash: string, tapId?: string, now = new Date()): string | null {
+  const reason = reserveTap(store, taps, project, kind, expectedActionHash, tapId, now);
+  if (reason) return reason;
+  const id = tapId ?? [...taps.entries()].find(([, tap]) => tap.project === project && tap.kind === kind && tap.actionHash === expectedActionHash && tap.state === 'reserved')?.[0];
+  if (!id) return 'unknown or expired tap (daemon restarted?)';
+  commitTap(store, taps, id, now);
   return null;
 }
 
@@ -162,9 +190,10 @@ export function envelopeBudgetGuard(home: string, input: { project: string; labe
   return limitReason;
 }
 
-export function createEnvelopeTicker(options: { store: Store; home: string; log?: (line: string) => void }): () => Promise<void> {
+export function createEnvelopeTicker(options: { store: Store; home: string; taps?: Map<string, TapMemory>; now?: () => Date; log?: (line: string) => void }): () => Promise<void> {
   const seen = new Map<string, string>();
   return async () => {
+    if (options.taps) expireTaps(options.store, options.taps, options.now?.() ?? new Date());
     const root = resolve(options.home, 'projects');
     let projects: string[] = [];
     try { projects = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name); } catch { return; }

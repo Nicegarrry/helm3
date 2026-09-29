@@ -69,7 +69,18 @@ export function createDiscord(options: Options): DiscordService {
   }
 
   function isMilestoneWebhook(url: string): boolean {
-    return Object.values(options.settings.discord.projects).some((project) => env[project.webhookEnv] === url);
+    return Object.values(options.settings.discord.projects).some((project) => normalizeWebhook(env[project.webhookEnv]) === normalizeWebhook(url));
+  }
+
+  function normalizeWebhook(url: string | undefined): string | undefined {
+    if (!url) return undefined;
+    try {
+      const parsed = new URL(url);
+      const path = parsed.pathname.replace(/\/+$/, '') || '/';
+      return `${parsed.host.toLowerCase()}${path}`;
+    } catch {
+      return url.toLowerCase().replace(/\/+$/, '');
+    }
   }
 
   async function postTap(content: string): Promise<{ ok: true } | { ok: false; reason: string }> {

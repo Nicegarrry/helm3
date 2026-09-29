@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { BUDGET_TAP_ACTION, actionHash, budgetTapAction, confirmTap, consumeTap, requestTap } from '../src/envelope.js';
+import { BUDGET_TAP_ACTION, actionHash, budgetTapAction, confirmTap, consumeTap, expireTaps, requestTap } from '../src/envelope.js';
 import { Helm } from '../src/helm.js';
 import { loadSettings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
@@ -135,6 +135,18 @@ test('expiry refuses confirmation and consumption, and three wrong codes deny a 
   } finally { d.store.close(); }
 });
 
+test('the daemon sweep evicts expired taps and later confirmation is rejected', async () => {
+  const d = setup();
+  try {
+    const result = await requested(d);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    expireTaps(d.store, d.taps, new Date(d.clock.getTime() + 60 * 60_000));
+    assert.equal(d.taps.has(result.id), false);
+    assert.deepEqual(confirmTap(d.store, d.taps, { id: result.id, code: CODE }, PEPPER, d.clock), { ok: false, reason: 'unknown or expired tap (daemon restarted?)' });
+  } finally { d.store.close(); }
+});
+
 test('database attempts and expiry cannot reset the in-memory tap', async () => {
   const d = setup();
   try {
@@ -184,6 +196,46 @@ test('an over-max budget.open consumes a matching tap exactly once', async () =>
     const input = { ...budget, tapId: tap.id };
     assert.equal((await tools.call('budget.open', input)).ok, true);
     assert.equal((await tools.call('budget.open', input)).ok, false);
+  } finally { d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a failed guarded action rolls its tap back for one later use', async () => {
+  const d = setup();
+  const home = mkdtempSync(join(tmpdir(), 'helm-tap-rollback-'));
+  const discord: DiscordService = { consume: async () => {}, tick: async () => {}, notifyNick: async () => ({ ok: true, sent: true }), postTap: d.post };
+  const helm = new Helm({ config: { home, spendCapUsd: 0, maxWorkers: 2, gateTimeoutMs: 1000 }, store: d.store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never, prompts: { builder: () => '', reviewer: () => '', validator: () => 'validate' }, settings: loadSettings('/missing-tap-settings'), discord, randomInt: () => Number(CODE), tapPepper: PEPPER });
+  const tools = createToolRegistry(helm);
+  try {
+    d.store.sql.exec("CREATE TRIGGER fail_budget BEFORE INSERT ON budgets WHEN NEW.label = 'fail' BEGIN SELECT RAISE(ABORT, 'forced'); END");
+    const budget = { project, label: 'fail', capUsd: 30, codexTokens: 20_000_001 };
+    const requestedResult = await tools.call('tap.request', { project, kind: 'budget.open', action: budgetTapAction(budget) });
+    assert.equal(requestedResult.ok, true);
+    if (!requestedResult.ok) return;
+    const tap = requestedResult as { ok: true; id: string };
+    assert.deepEqual(await tools.call('tap.confirm', { id: tap.id, code: CODE }), { ok: true, granted: true });
+    assert.equal((await tools.call('budget.open', { ...budget, tapId: tap.id })).ok, false);
+    d.store.sql.exec('DROP TRIGGER fail_budget');
+    assert.equal((await tools.call('budget.open', { ...budget, tapId: tap.id })).ok, true);
+    assert.equal((await tools.call('budget.open', { ...budget, tapId: tap.id })).ok, false);
+  } finally { d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('concurrent guarded actions reserve a tap so only one succeeds', async () => {
+  const d = setup();
+  const home = mkdtempSync(join(tmpdir(), 'helm-tap-concurrent-'));
+  const discord: DiscordService = { consume: async () => {}, tick: async () => {}, notifyNick: async () => ({ ok: true, sent: true }), postTap: d.post };
+  const helm = new Helm({ config: { home, spendCapUsd: 0, maxWorkers: 2, gateTimeoutMs: 1000 }, store: d.store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never, prompts: { builder: () => '', reviewer: () => '', validator: () => 'validate' }, settings: loadSettings('/missing-tap-settings'), discord, randomInt: () => Number(CODE), tapPepper: PEPPER });
+  const tools = createToolRegistry(helm);
+  try {
+    const budget = { project, label: 'concurrent', capUsd: 30, codexTokens: 20_000_001 };
+    const requestedResult = await tools.call('tap.request', { project, kind: 'budget.open', action: budgetTapAction(budget) });
+    assert.equal(requestedResult.ok, true);
+    if (!requestedResult.ok) return;
+    const tap = requestedResult as { ok: true; id: string };
+    await tools.call('tap.confirm', { id: tap.id, code: CODE });
+    const results = await Promise.all([tools.call('budget.open', { ...budget, tapId: tap.id }), tools.call('budget.open', { ...budget, tapId: tap.id })]);
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(results.filter((result) => !result.ok).length, 1);
   } finally { d.store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 

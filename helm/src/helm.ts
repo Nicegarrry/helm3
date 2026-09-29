@@ -60,7 +60,7 @@ import { loadRepoConfig } from './repoconfig.js';
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { confirmTap, consumeTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTapsOnStartup, readEnvelope, requestTap, type EnvelopeView, type TapMemory } from './envelope.js';
+import { commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, type EnvelopeView, type TapMemory } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -317,7 +317,7 @@ export class Helm {
     ensureTapTable(this.store);
     expireTapsOnStartup(this.store);
     this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput, (project, kind, expectedActionHash, tapId) =>
-      tapId ? consumeTap(this.store, this.taps, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required'));
+      tapId ? reserveTap(this.store, this.taps, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required'));
     this.claims = deps.claims;
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
     this.retry = deps.retry;
@@ -772,14 +772,25 @@ export class Helm {
   async budgetOpen(input: BudgetOpenInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
     return runGuard(async () => {
       const reason = await this.refusal('budget.open', input);
-      if (reason) return refuse(reason);
-      const row = openBudget(this.store, {
-        project: input.project, label: input.label, capUsd: input.capUsd, capCodexTokens: input.codexTokens,
-        openedAt: this.nowIso(),
-      });
-      return { ok: true, budget: budgetStatus(this.store, row) };
+      if (reason) {
+        if (input.tapId) rollbackTap(this.taps, input.tapId);
+        return refuse(reason);
+      }
+      try {
+        const row = openBudget(this.store, {
+          project: input.project, label: input.label, capUsd: input.capUsd, capCodexTokens: input.codexTokens,
+          openedAt: this.nowIso(),
+        });
+        if (input.tapId) commitTap(this.store, this.taps, input.tapId, this.nowDate());
+        return { ok: true, budget: budgetStatus(this.store, row) };
+      } catch (error) {
+        if (input.tapId) rollbackTap(this.taps, input.tapId);
+        throw error;
+      }
     });
   }
+
+  async tapTick(): Promise<void> { expireTaps(this.store, this.taps, this.nowDate()); }
 
   async envelopeGet(input: EnvelopeGetInput): Promise<ToolOutcome<EnvelopeView>> {
     envelopePath(this.config.home, input.project);

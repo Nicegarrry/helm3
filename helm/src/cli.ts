@@ -505,7 +505,7 @@ async function cmdServe(args: string[]): Promise<void> {
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home })]);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home })]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);

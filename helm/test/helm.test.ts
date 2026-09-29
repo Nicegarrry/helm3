@@ -67,6 +67,9 @@ function createFakeWorkspace() {
     async diffStat() {
       return '1 file changed';
     },
+    async patchId(_repo, _base, head) {
+      return head;
+    },
     async commitAll(path) {
       const wt = worktrees.get(path);
       if (!wt) throw new Error(`unknown worktree: ${path}`);
@@ -123,7 +126,8 @@ function createFakeGitHub() {
       if (!pr) throw new Error(`pr not found: ${number}`);
       return pr;
     },
-    async comment(repoSlug, number, body) {
+    async comment() { return { body: '', issueNumber: 1 }; },
+    async postComment(repoSlug, number, body) {
       comments.push({ repoSlug, number, body });
     },
     async merge(repoSlug, number, expectedHead) {
@@ -1099,8 +1103,8 @@ test('drain tracks a gate after the builder settled and counts accepted requests
 test('drain waits for the review callback even after the reviewer state is succeeded', async () => {
   const entered = deferred(), comment = deferred();
   const gh = createFakeGitHub().github;
-  const { helm, store } = makeHelm({ github: { ...gh, comment: async (...args) => {
-    entered.release(); await comment.promise; return gh.comment(...args);
+  const { helm, store } = makeHelm({ github: { ...gh, postComment: async (...args) => {
+    entered.release(); await comment.promise; return gh.postComment(...args);
   } } });
   const build = await helm.spawn(spawnBody(mkTempDir('helm-drain-')));
   assert.ok(build.ok);

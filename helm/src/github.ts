@@ -1,6 +1,6 @@
 /** `gh` CLI transport: pr create, status, comment, merge. See DESIGN.md. */
 import { execFile } from 'node:child_process';
-import type { GitHub, PrStatus } from './types.js';
+import type { GitHub, GitHubComment, PrStatus } from './types.js';
 
 export type ExecFn = (
   file: string,
@@ -94,7 +94,17 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       return mapPrStatus(parsed);
     },
 
-    async comment(repoSlug: string, number: number, body: string): Promise<void> {
+    async comment(repoSlug: string, id: number): Promise<GitHubComment> {
+      const stdout = await run(exec, ['api', `repos/${repoSlug}/issues/comments/${id}`]);
+      const parsed = JSON.parse(stdout) as { body?: unknown; issue_url?: unknown; pull_request_url?: unknown };
+      if (typeof parsed.body !== 'string') throw new Error('GitHub comment has no body');
+      const issueUrl = typeof parsed.issue_url === 'string' ? parsed.issue_url : undefined;
+      const pullRequestUrl = typeof parsed.pull_request_url === 'string' ? parsed.pull_request_url : undefined;
+      const issueNumber = issueUrl ? Number(issueUrl.match(/\/issues\/(\d+)(?:$|\/)/)?.[1]) : NaN;
+      return { body: parsed.body, issueUrl, pullRequestUrl, ...(Number.isInteger(issueNumber) ? { issueNumber } : {}) };
+    },
+
+    async postComment(repoSlug: string, number: number, body: string): Promise<void> {
       await run(exec, ['pr', 'comment', String(number), '--repo', repoSlug, '--body-file', '-'], { input: body });
     },
 

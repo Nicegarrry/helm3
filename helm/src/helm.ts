@@ -55,6 +55,7 @@ import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
+import type { ReviewRecordInput, ReviewService } from './review.js';
 import type { JevCheckService } from './jevcheck.js';
 
 const exec = promisify(execFile);
@@ -106,6 +107,7 @@ export type HelmDeps = Readonly<{
   settings?: Settings;
   supervisor?: SupervisorService;
   discord?: DiscordService;
+  review?: ReviewService;
   jevChecker?: JevCheckService;
 }>;
 
@@ -225,6 +227,7 @@ export class Helm {
   private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
   readonly discord?: DiscordService;
+  private readonly review?: ReviewService;
   readonly jevChecker?: JevCheckService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
@@ -246,6 +249,8 @@ export class Helm {
     ensureBaselineTable(this.store);
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
+    this.review = deps.review;
+    if (this.review) this.guard('pr.merge', (input) => this.review!.guard(input));
     this.jevChecker = deps.jevChecker;
   }
 
@@ -545,7 +550,7 @@ export class Helm {
       };
       const onDone: OnDone = async (workerId, result) => {
         const body = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
-        await this.github.comment(sourceWorker.repoSlug, pr.number, body);
+        await this.github.postComment(sourceWorker.repoSlug, pr.number, body);
         this.store.appendEvent(workerId, 'review.posted', { number: pr.number });
       };
       const outcome = await runGuard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
@@ -555,6 +560,11 @@ export class Helm {
   }
 
   /** Read-only dashboard data: run status, every worker with spend and last event, and a per-model rollup. */
+  async reviewRecord(input: ReviewRecordInput): Promise<ToolOutcome<unknown>> {
+    if (!this.review) return refuse('review service is not configured');
+    return this.review.record(input);
+  }
+
   async overview(): Promise<ToolOutcome<Overview>> {
     return runGuard(async () => {
       const status = await this.runStatus();

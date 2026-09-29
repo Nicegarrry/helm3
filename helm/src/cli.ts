@@ -27,6 +27,7 @@ import type { SupervisorHost, SupervisorRow } from './types.js';
 import { createWatcher } from './watch.js';
 import { createSupervisor } from './supervise.js';
 import { createDiscord } from './discord.js';
+import { createReview } from './review.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -483,11 +484,15 @@ async function cmdServe(args: string[]): Promise<void> {
   const settings = loadSettings(config.home);
   const discord = createDiscord({ store, settings, home: config.home });
   const jev = createJev({ settings, store, env: process.env });
+  const workspace = gitWorkspace();
+  const github = ghGitHub();
   const helm = new Helm({
-    config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
+    config, store, workspace, gates: gateRunner(), github,
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
-    discord, jevChecker: createJevCheck({ jev, store }),
+    discord,
+    review: createReview({ store, github, workspace, jev, settings }),
+    jevChecker: createJevCheck({ jev, store }),
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });

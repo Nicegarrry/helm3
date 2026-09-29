@@ -19,13 +19,13 @@ function deps() {
     async defaultBranch() { return 'main'; },
     async create(_repo, path, branch, baseSha) { return { path, branch, baseSha }; },
     async remove() {}, async head() { return 'a'.repeat(40); }, async isClean() { return true; },
-    async diffStat() { return ''; }, async commitAll() { return 'b'.repeat(40); }, async push() {},
+    async diffStat() { return ''; }, async patchId() { return 'patch'; }, async commitAll() { return 'b'.repeat(40); }, async push() {},
     async clone() {}, async fetch() {},
   };
   const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
   const github: GitHub = {
     async openPr() { return { number: 1, url: 'https://example.invalid/pr/1' }; },
-    async prStatus() { throw new Error('unused'); }, async comment() {}, async merge() {},
+    async prStatus() { throw new Error('unused'); }, async comment() { return { body: '', issueNumber: 1 }; }, async postComment() {}, async merge() {},
   };
   const sessions: Array<string | null> = [];
   const messages: string[] = [];

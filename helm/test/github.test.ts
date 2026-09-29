@@ -76,9 +76,16 @@ test('prStatus: open state when not merged and not closed', async () => {
 test('comment: pipes the body on stdin via --body-file -', async () => {
   const { exec, calls } = fakeExec(() => ({ stdout: '', stderr: '', code: 0 }));
   const github = ghGitHub(exec);
-  await github.comment('o/r', 3, 'nice work');
+  await github.postComment('o/r', 3, 'nice work');
   assert.deepEqual(calls[0]?.args, ['pr', 'comment', '3', '--repo', 'o/r', '--body-file', '-']);
   assert.equal(calls[0]?.opts.input, 'nice work');
+});
+
+test('comment: fetches a comment through the issue-comment API', async () => {
+  const { exec, calls } = fakeExec(() => ({ stdout: JSON.stringify({ body: 'APPROVE: ok', issue_url: 'https://api.github.com/repos/o/r/issues/3' }), stderr: '', code: 0 }));
+  const comment = await (ghGitHub(exec).comment as (repo: string, id: number) => Promise<{ body: string; issueNumber?: number }>)('o/r', 9);
+  assert.deepEqual(comment, { body: 'APPROVE: ok', issueUrl: 'https://api.github.com/repos/o/r/issues/3', pullRequestUrl: undefined, issueNumber: 3 });
+  assert.deepEqual(calls[0]?.args, ['api', 'repos/o/r/issues/comments/9']);
 });
 
 test('merge: calls gh api PUT with sha and squash', async () => {

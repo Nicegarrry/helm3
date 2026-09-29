@@ -11,6 +11,20 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+async function patchId(repo: string, baseSha: string, head: string): Promise<string> {
+  const diff = await git(repo, ['diff', `${baseSha}...${head}`]);
+  const stdout = await new Promise<string>((resolve, reject) => {
+    const child = execFile('git', ['patch-id', '--stable'], { cwd: repo, maxBuffer: 16 * 1024 * 1024 }, (error, output, stderr) => {
+      if (error) reject(new Error(stderr.trim() || error.message));
+      else resolve(output);
+    });
+    child.stdin?.end(diff);
+  });
+  const id = stdout.trim().split(/\s+/)[0];
+  if (!id) throw new Error(`empty patch id for ${baseSha}...${head}`);
+  return id;
+}
+
 async function refExists(repo: string, ref: string): Promise<boolean> {
   try {
     await git(repo, ['show-ref', '--verify', '--quiet', ref]);
@@ -65,6 +79,8 @@ export function gitWorkspace(): Workspace {
     async diffStat(path: string, baseSha: string): Promise<string> {
       return git(path, ['diff', '--stat', baseSha]);
     },
+
+    patchId,
 
     async commitAll(path: string, message: string): Promise<string> {
       await git(path, ['add', '-A']);

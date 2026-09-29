@@ -167,6 +167,7 @@ export interface Workspace {
   isClean(path: string): Promise<boolean>;
   diffStat(path: string, baseSha: string): Promise<string>;
   /** Stage everything and commit; returns new head. No-op (returns head) if nothing to commit. */
+  patchId(repo: string, baseSha: string, head: string): Promise<string>;
   commitAll(path: string, message: string): Promise<string>;
   push(path: string, branch: string): Promise<void>;
   /** Clone `owner/name` into `dest`, preferring `gh repo clone` (uses gh auth) and falling back to https. */
@@ -201,9 +202,12 @@ export type PrStatus = Readonly<{
 export interface GitHub {
   openPr(input: { cwd: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
-  comment(repoSlug: string, number: number, body: string): Promise<void>;
+  comment(repoSlug: string, id: number): Promise<GitHubComment>;
+  postComment(repoSlug: string, number: number, body: string): Promise<void>;
   merge(repoSlug: string, number: number, expectedHead: string): Promise<void>;
 }
+
+export type GitHubComment = Readonly<{ body: string; issueNumber?: number; issueUrl?: string; pullRequestUrl?: string }>;
 
 
 export type WorkerRunInput = Readonly<{
@@ -301,6 +305,9 @@ export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.stri
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
 export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+export const reviewRecordInput = z.object({
+  number: z.number().int().positive(), head: z.string().regex(/^[0-9a-f]{40}$/), commentUrl: z.string().url(), reviewer: z.string().min(1), verdict: z.enum(['approve', 'request_changes']),
+}).strict();
 export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
 export const supervisorRegisterInput = z.object({ project: z.string().min(1), repo: z.string().min(1), host: z.enum(['herdr', 'tmux']), label: z.string().min(1) }).strict();
@@ -311,7 +318,7 @@ export const notifyNickInput = z.object({ project: z.string().min(1), text: z.st
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
 export type ToolName = string;
 
 

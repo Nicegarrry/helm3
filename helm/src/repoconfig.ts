@@ -19,6 +19,7 @@ export const repoConfigSchema = z.object({
       commands: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).optional(),
       http: z.array(z.object({ path: z.string().min(1), status: z.number().int(), contains: z.string().optional() })).optional(),
     }),
+    migrationGlobs: z.array(z.string().min(1)).optional(),
     rollback: z.enum(['auto', 'manual', 'none']),
   }).strict()) }).optional(),
 }).strict();

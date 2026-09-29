@@ -21,7 +21,7 @@ export function createRetry({ store, settings, github, workspace }: { store: Sto
     }
     return worker.head ?? '';
   };
-  const latest = (workerId: string, kind: RetryKind, head: string): { at: string; evidence: string } | undefined => {
+  const latest = (workerId: string, kind: RetryKind, head: string): { at: string; evidence: string; mergeState?: string; base?: string } | undefined => {
     if (kind === 'gate' || kind === 'acceptance') {
       const gates = store.listGates(workerId).filter((g) => g.head === head).sort((a, b) => b.at.localeCompare(a.at));
       const gate = gates[0];
@@ -50,7 +50,7 @@ export function createRetry({ store, settings, github, workspace }: { store: Sto
     const event = events.at(-1);
     if (!event) return undefined;
     const files = event.data.files ?? event.data.reason ?? event.data.summary ?? 'unknown';
-    return { at: event.at, evidence: Array.isArray(files) ? files.join(', ') : String(files) };
+    return { at: event.at, evidence: Array.isArray(files) ? files.join(', ') : String(files), mergeState: typeof event.data.mergeState === 'string' ? event.data.mergeState : undefined, base: typeof event.data.base === 'string' ? event.data.base : undefined };
   };
   return { retry: async (input, steer) => {
     const worker = store.getWorker(input.workerId);
@@ -67,7 +67,9 @@ export function createRetry({ store, settings, github, workspace }: { store: Sto
     const evidence = chosen === 'review' ? await github.comment(worker.repoSlug, commentId(failure.evidence)).then((c) => c.body.slice(0, 6000)) : failure.evidence;
     const baseline = store.getMeta(input.workerId)?.baselineId ? store.sql.prepare('SELECT files FROM baselines WHERE id = ?').get(store.getMeta(input.workerId)!.baselineId) as { files?: string } | undefined : undefined;
     const noEdit = baseline?.files ? ` Do not edit ${JSON.parse(baseline.files).join(', ')}.` : '';
-    const conflictInstructions = chosen === 'conflict' ? ' A merge is IN PROGRESS in your worktree. Resolve the markers in place and commit; do NOT run `git merge --abort`, reset, or rebase.' : '';
+    const conflictInstructions = chosen !== 'conflict' ? '' : failure.mergeState === 'base_needs_merging'
+      ? ` The base ${failure.base ?? 'commit'} still needs merging in your worktree. Merge it, resolve any markers, and commit; do NOT reset or rebase.`
+      : ' A merge is IN PROGRESS in your worktree. Resolve the markers in place and commit; do NOT run `git merge --abort`, reset, or rebase.';
     const message = `Your last turn was rejected: ${chosen}. ${evidence}. Fix exactly this.${conflictInstructions}${noEdit}`;
     const outcome = await steer(input.workerId, message);
     if (!outcome.ok) return outcome;

@@ -236,9 +236,9 @@ export function createQueue(options: QueueOptions): QueueService {
     const mergeHead = await exec('git', ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], { cwd: worker.worktree }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
     return mergeHead.code !== 0;
   };
-  const sendConflictRetry = async (row: MergeQueueRow, worker: WorkerRow, base: string, files: string[], attempts: number, currentHead = worker.head ?? row.head): Promise<MergeQueueRow> => {
+  const sendConflictRetry = async (row: MergeQueueRow, worker: WorkerRow, base: string, files: string[], attempts: number, currentHead = worker.head ?? row.head, mergeState = 'in_progress'): Promise<MergeQueueRow> => {
     const failureRow = currentHead === row.head ? row : { ...row, head: currentHead };
-    store.appendEvent(worker.workerId, 'conflict', { project: worker.repoSlug, head: currentHead, files });
+    store.appendEvent(worker.workerId, 'conflict', { project: worker.repoSlug, head: currentHead, files, mergeState, base });
     if (!retry) return conflictState(failureRow, `conflict retry unavailable: ${files.join(', ')}`);
     if (!existsSync(worker.worktree)) return conflictState(failureRow, `worktree missing: ${worker.worktree}`);
     if (!['idle', 'waiting', 'succeeded', 'failed', 'interrupted'].includes(worker.state)) return conflictState(failureRow, `worker is ${worker.state}, not steerable`);
@@ -298,13 +298,13 @@ export function createQueue(options: QueueOptions): QueueService {
       catch (error) { conflictState(current, `conflict commit failed: ${errorMessage(error)}`); return true; }
       if (!(await mergeResolved(worker, base, head))) {
         if (meta.conflictRetries >= 2) { conflictState(current, `merge remains unresolved against ${base}`); return true; }
-        await sendConflictRetry(current, worker, base, meta.conflictFiles, meta.conflictRetries);
+        await sendConflictRetry(current, worker, base, meta.conflictFiles, meta.conflictRetries, head, 'base_needs_merging');
         return true;
       }
       const files = await markerFiles(worker, head, meta.conflictFiles);
       if (files.length) {
         if (meta.conflictRetries >= 2) { conflictState(current, `conflict markers remain: ${files.join(', ')}`); return true; }
-        await sendConflictRetry(current, worker, base, files, meta.conflictRetries);
+        await sendConflictRetry(current, worker, base, files, meta.conflictRetries, head);
         return true;
       }
       metaWrite.run(current.id, base, null, meta.priorPatchId, 0, meta.conflictRetries, '[]');

@@ -201,6 +201,8 @@ export type PrStatus = Readonly<{
 
 export interface GitHub {
   openPr(input: { cwd: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
+  findPr?(repoSlug: string, head: string): Promise<{ number: number; url: string } | undefined>;
+  updatePr?(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
   comment(repoSlug: string, id: number): Promise<GitHubComment>;
   postComment(repoSlug: string, number: number, body: string): Promise<void>;
@@ -308,7 +310,7 @@ export const waitInput = z.object({
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
 export const baselineInput = z.object({ workerId: z.string().min(1) }).strict();
 export const claimsCheckInput = z.object({ workerId: z.string().min(1) }).strict();
-export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
+export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true), base: z.string().min(1).optional() }).strict();
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
 export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();

@@ -84,6 +84,19 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       return { number: parsed.number, url: parsed.url };
     },
 
+    async findPr(repoSlug: string, head: string): Promise<{ number: number; url: string } | undefined> {
+      const stdout = await run(exec, ['pr', 'list', '--repo', repoSlug, '--head', head, '--state', 'open', '--json', 'number,url', '--limit', '1']);
+      const parsed = JSON.parse(stdout) as Array<{ number: number; url: string }>;
+      return parsed[0];
+    },
+
+    async updatePr(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void> {
+      const args = ['pr', 'edit', String(number), '--repo', repoSlug];
+      if (input.title !== undefined) args.push('--title', input.title);
+      if (input.body !== undefined) args.push('--body', input.body);
+      if (args.length > 4) await run(exec, args);
+    },
+
     async prStatus(repoSlug: string, number: number): Promise<PrStatus> {
       const stdout = await run(exec, [
         'pr', 'view', String(number),

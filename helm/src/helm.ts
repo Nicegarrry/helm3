@@ -604,7 +604,7 @@ export class Helm {
     });
   }
 
-  async prOpen(input: PrOpenInput): Promise<ToolOutcome<{ number: number; url: string; head: string }>> {
+  async prOpen(input: PrOpenInput): Promise<ToolOutcome<{ number: number; url: string; head: string; updated?: true }>> {
     return runGuard(async () => {
       const reason = await this.refusal('pr.open', input);
       if (reason) {
@@ -619,11 +619,22 @@ export class Helm {
       const passing = this.store.listGates(input.workerId).filter((g) => g.head === head && g.passed);
       must(passing.length > 0, `no passing gate at head ${head}`);
       await this.workspace.push(row.worktree, row.branch);
-      const title = input.title ?? row.result?.summary?.split('\n')[0] ?? row.objective.slice(0, 72);
       const meta = this.store.getMeta(row.workerId);
+      const existing = this.store.getPrByWorker(input.workerId) ?? await this.github.findPr?.(row.repoSlug, row.branch);
+      if (existing) {
+        if (input.title !== undefined || input.body !== undefined) {
+          must(this.github.updatePr, 'GitHub update is unavailable');
+          await this.github.updatePr(row.repoSlug, existing.number, { ...(input.title !== undefined ? { title: input.title } : {}), ...(input.body !== undefined ? { body: input.body } : {}) });
+        }
+        if (!this.store.getPrByWorker(input.workerId)) this.store.insertPr({ number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: this.nowIso() });
+        this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true });
+        return { ok: true, number: existing.number, url: existing.url, head, updated: true };
+      }
+      const title = input.title ?? row.result?.summary?.split('\n')[0] ?? row.objective.slice(0, 72);
       const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
       const body = `${input.body ?? `${row.result?.summary ?? ''}\n\nGate: passed at ${head}`}\n\n${baseline ? `red at ${baseline.baseSha}, green at ${head}` : ''}`;
-      const opened = await this.github.openPr({ cwd: row.worktree, base: meta?.prBase ?? row.baseRef, head: row.branch, title, body, draft: input.draft });
+      const base = input.base ?? meta?.prBase ?? await this.workspace.defaultBranch(row.repo);
+      const opened = await this.github.openPr({ cwd: row.worktree, base, head: row.branch, title, body, draft: input.draft });
       const prRow: PrRow = { number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso() };
       this.store.insertPr(prRow);
       this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url });

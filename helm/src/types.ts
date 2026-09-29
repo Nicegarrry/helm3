@@ -302,6 +302,7 @@ export const waitInput = z.object({
 }).strict();
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
 export const baselineInput = z.object({ workerId: z.string().min(1) }).strict();
+export const claimsCheckInput = z.object({ workerId: z.string().min(1) }).strict();
 export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
 export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
@@ -319,7 +320,7 @@ export const notifyNickInput = z.object({ project: z.string().min(1), text: z.st
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
 export type ToolName = string;
 
 

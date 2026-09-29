@@ -17,6 +17,7 @@ export const RESULT_INSTRUCTION = [
   '  "summary": "one paragraph describing what you did or found",',
   '  "changedFiles": ["path/to/file.ts"],',
   '  "commandsRun": ["npm test"],',
+  '  "claims": ["atomic, diff-checkable statement"],',
   '  "question": "one concrete question when status is question",',
   '  "notes": "optional extra detail"',
   '}',
@@ -39,6 +40,8 @@ export function builderPrompt(input: PromptInput): string {
   const acceptance = input.acceptance ? `\n\nAcceptance criteria:\n${input.acceptance}` : '';
   return [
     `You are a coding agent working in a git worktree. Objective:\n${input.objective}${acceptance}${contextSection(input.contextPaths)}`,
+    '',
+    'For succeeded or partial work, include claims when useful: each claim must be atomic and directly checkable from the committed diff. Keep claims concrete (names, values, files, counts); leave process facts such as tests or commits to commandsRun and the gate.',
     '',
     'Use the read, grep, find and ls tools to understand the code before editing. Use edit or write to',
     'make changes, and bash to run tests or checks. Work only inside this worktree; do not push, open a',

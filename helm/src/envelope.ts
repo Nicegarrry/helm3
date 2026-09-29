@@ -31,7 +31,8 @@ function digest(bytes: string | Buffer): string { return createHash('sha256').up
 function summary(value: Envelope): string { return `budget $${value.budget.maxSprintUsd}/${value.budget.maxSprintCodexTokens} tokens; deploy ${Object.entries(value.deploy).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'}; tap-only ${value.tapOnly.join(', ') || 'none'}`; }
 
 export function readEnvelope(home: string, project: string, log: (line: string) => void = console.error): EnvelopeView {
-  const path = envelopePath(home, project);
+  let path: string;
+  try { path = envelopePath(home, project); } catch { const value = defaultEnvelope(); return { rules: value.rules, summary: summary(value), hash: digest(JSON.stringify(value)) }; }
   let raw: string | undefined;
   try { raw = readFileSync(path, 'utf8'); } catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') log(`invalid envelope ${path}; using defaults`); }
   const parsed = raw === undefined ? undefined : (() => { try { return envelopeSchema.safeParse(JSON.parse(raw)); } catch { return undefined; } })();

@@ -137,6 +137,40 @@ test('A5b triage sends the envelope context and routes human probability to need
   } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
 });
 
+test('A5b basename-slug projects use the built-in envelope rules', async () => {
+  const d = deps();
+  try {
+    const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+    assert.equal(spawned.ok, true);
+    if (!spawned.ok) return;
+    await d.helm.settle(spawned.workerId);
+    let captured: Parameters<Jev['ask']> | undefined;
+    const fake: Jev = { shadow: true, async ask(...args) { captured = args; return { ok: false, reason: 'no key' }; } };
+    await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: fake, home: d.home })();
+    assert.equal((captured?.[1].state as { envelope?: string }).envelope, 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, and provider settings.');
+  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('A5b advances past a throwing item and triages the next ask', async () => {
+  const d = deps();
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const spawned = await d.helm.spawn({ repo: d.home, objective: `choose API ${i}`, model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+      assert.equal(spawned.ok, true);
+      if (spawned.ok) await d.helm.settle(spawned.workerId);
+    }
+    let calls = 0;
+    const fake: Jev = { shadow: true, async ask() { calls += 1; if (calls === 1) throw new Error('synthetic triage failure'); return { ok: false, reason: 'no key' }; } };
+    const logs: string[] = [];
+    await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: fake, home: d.home, log: (line) => logs.push(line) })();
+    assert.equal(calls, 2);
+    assert.equal(listInbox(d.store.sql, { state: 'open' }).filter((item) => item.triage).length, 1);
+    assert.equal(logs.length, 1);
+    const lastAsk = d.store.listAllEvents().filter((event) => event.kind === 'ask').at(-1)?.seq ?? 0;
+    assert.ok(d.store.getCursor('inbox-triage') >= lastAsk);
+  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
+});
+
 test('A5b routes outside probability to needs_human even when Jev says the issue answers it', async () => {
   const result = await triageCase({ ok: true, answers: { route: { choice: 'answer_from_issue', confidence: 0.99 }, outside: { probabilities: { true: 0.5, false: 0.5 } }, inIssue: { noul: true } } });
   try { assert.equal(result.item.triage?.route, 'needs_human'); } finally { result.d.store.close(); rmSync(result.d.home, { recursive: true, force: true }); }

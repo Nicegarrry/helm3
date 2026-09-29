@@ -97,6 +97,7 @@ export type InboxTriageOptions = Readonly<{
   settings: Pick<Settings, 'jev' | 'supervisor'>;
   jev: Jev;
   home?: string;
+  log?: (line: string) => void;
 }>;
 
 function probability(answer: JevAnswers[string] | undefined, truth: boolean): number {
@@ -174,6 +175,9 @@ function triageEvent(options: InboxTriageOptions, event: EventRow): Promise<void
 /** Create the restart-safe A5b consumer; it never changes wake routing. */
 export function createInboxTriage(options: InboxTriageOptions): () => Promise<void> {
   return consumer(options.store, 'inbox-triage', async (events) => {
-    for (const event of events) await triageEvent(options, event);
+    for (const event of events) {
+      try { await triageEvent(options, event); }
+      catch (error) { (options.log ?? console.error)(`inbox triage failed for ${event.workerId}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
   });
 }

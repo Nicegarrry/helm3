@@ -50,7 +50,7 @@ import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersede
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { envelopeBudgetGuard, readEnvelope, type EnvelopeView } from './envelope.js';
+import { envelopeBudgetGuard, envelopePath, readEnvelope, type EnvelopeView } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { JevCheckService } from './jevcheck.js';
@@ -643,6 +643,7 @@ export class Helm {
   }
 
   async envelopeGet(input: EnvelopeGetInput): Promise<ToolOutcome<EnvelopeView>> {
+    envelopePath(this.config.home, input.project);
     return { ok: true, ...readEnvelope(this.config.home, input.project) };
   }
 

@@ -280,8 +280,9 @@ export const supervisorRegisterInput = z.object({ project: z.string().min(1), re
 export const supervisorListInput = emptyInput;
 export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boolean().default(false) }).strict();
 export const supervisorRotateInput = z.object({ project: z.string().min(1), focus: z.string().min(1).max(4000) }).strict();
+export const notifyNickInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick'] as const;
 export type ToolName = string;
 
 

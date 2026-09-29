@@ -45,6 +45,7 @@ import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersede
 
 import { Lifecycle } from './lifecycle.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
+import type { DiscordService } from './discord.js';
 
 const exec = promisify(execFile);
 
@@ -88,6 +89,7 @@ export type HelmDeps = Readonly<{
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
   supervisor?: SupervisorService;
+  discord?: DiscordService;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -201,6 +203,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   readonly supervisor?: SupervisorService;
+  readonly discord?: DiscordService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -217,6 +220,7 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.supervisor = deps.supervisor;
+    this.discord = deps.discord;
   }
 
   /** Runs `fn` exclusively with respect to every other call queued through this lock. */
@@ -599,8 +603,15 @@ export class Helm {
       const failing = status.checks.find((c) => !PASSING_CONCLUSIONS.has(c.conclusion ?? ''));
       if (failing) return refuse(`check "${failing.name}" did not succeed (${failing.conclusion ?? 'no conclusion'})`);
       await this.github.merge(worker.repoSlug, input.number, input.expectedHead);
+      this.store.appendEvent(pr.workerId, 'pr.merged', { number: input.number, url: pr.url, head: input.expectedHead, project: worker.repoSlug });
       return { ok: true, merged: true };
     });
+  }
+
+  async notifyNick(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
+    if (!this.discord) return { ok: false, reason: 'Discord is not configured' };
+    const result = await this.discord.notifyNick(input.project, input.text);
+    return result.ok ? { ok: true, sent: true } : result;
   }
 
   private nowIso(): string {

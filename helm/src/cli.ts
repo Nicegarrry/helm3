@@ -21,6 +21,7 @@ import { loadSettings } from './settings.js';
 import { createWatcher } from './watch.js';
 import { herdrHost, tmuxHost } from './host.js';
 import { createSupervisor } from './supervise.js';
+import { createDiscord } from './discord.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -290,17 +291,20 @@ async function cmdServe(args: string[]): Promise<void> {
   if (existsSync(join(config.home, 'upgrade.lock')) && (process.env.HELM_UPGRADE_ID !== pending?.id || pending?.phase !== 'starting' || readMetadata(join(config.home, 'upgrade.lock', 'owner.json'))?.id !== pending?.id)) throw new Error('upgrade owns startup; wait for it to finish');
   const releaseOwner = ownDaemon(config.home);
   const store = openStore(join(config.home, 'helm.sqlite'));
+  const settings = loadSettings(config.home);
+  const discord = createDiscord({ store, settings, home: config.home });
   const helm = new Helm({
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
-    supervisor: createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
+    supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
+    discord,
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const settings = loadSettings(config.home);
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined)]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings })]);
-  const stopTicker = () => { stopWake(); stopWatch(); };
+  const stopDiscord = startTicker(1000, [discord.tick]);
+  const stopTicker = () => { stopWake(); stopWatch(); stopDiscord(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();

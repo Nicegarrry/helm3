@@ -60,6 +60,8 @@ test('tapOnly and deploy never are enforced by the envelope', async () => {
     assert.equal(tapOnly.decision, 'tap');
     assert.equal(never.source, 'envelope');
     assert.equal(never.decision, 'never');
+    const hardUnderNever = await one('git push origin +main', fakeJev(1, calls), root, 'deploy.prod');
+    assert.deepEqual(hardUnderNever, { action: 'git push origin +main', decision: 'never', source: 'envelope', pTap: null });
     assert.equal(calls.length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -226,7 +226,6 @@ function tapProbability(value: unknown): number | null {
 
 export async function checkEnvelope(home: string, input: { project: string; actions: readonly string[]; kind?: string; baseRef?: string }, options: { jev?: Jev; envelopeTapAt: number; log?: (line: string) => void }): Promise<EnvelopeDecision[]> {
   if (input.actions.length < 1 || input.actions.length > 13) throw new Error('actions must contain 1 to 13 items');
-  if (input.actions.some((action) => action.length > MAX_ACTION_CHARS)) return input.actions.map((action) => ({ action, decision: 'tap', source: 'jev', pTap: null }));
   const value = envelopeValue(home, input.project, options.log);
   const kind = input.kind === undefined ? undefined : normaliseKind(input.kind);
   const deployModes = new Map<string, Envelope['deploy'][string]>();
@@ -235,15 +234,18 @@ export async function checkEnvelope(home: string, input: { project: string; acti
     if (normalisedTarget) deployModes.set(normalisedTarget, mode);
   }
   const tapOnly = new Set(value.tapOnly.map(normaliseKind).filter((entry): entry is string => entry !== undefined));
+  const target = kind?.startsWith('deploy.') ? kind.slice('deploy.'.length) : undefined;
+  const mode = target ? deployModes.get(target) : undefined;
+  const envelopeNever = mode === 'never';
+  const envelopeTap = input.kind !== undefined && (!kind || (!tapOnly.has(kind) && !kind.startsWith('deploy.')))
+    || (kind !== undefined && tapOnly.has(kind))
+    || (kind?.startsWith('deploy.') === true && mode === undefined)
+    || mode === 'tap';
+  if (envelopeNever) return input.actions.map((action) => ({ action, decision: 'never', source: 'envelope', pTap: null }));
+  if (input.actions.some((action) => action.length > MAX_ACTION_CHARS)) return input.actions.map((action) => ({ action, decision: 'tap', source: 'jev', pTap: null }));
   const decisions: Array<EnvelopeDecision | undefined> = input.actions.map((action) => {
     if (hardRule(action, input.kind, input.baseRef)) return { action, decision: 'tap', source: 'hard', pTap: null };
-    if (input.kind !== undefined && (!kind || (!tapOnly.has(kind) && !kind.startsWith('deploy.')))) return { action, decision: 'tap', source: 'envelope', pTap: null };
-    if (kind && tapOnly.has(kind)) return { action, decision: 'tap', source: 'envelope', pTap: null };
-    const target = kind?.startsWith('deploy.') ? kind.slice('deploy.'.length) : undefined;
-    const mode = target ? deployModes.get(target) : undefined;
-    if (kind?.startsWith('deploy.') && mode === undefined) return { action, decision: 'tap', source: 'envelope', pTap: null };
-    if (mode === 'never') return { action, decision: 'never', source: 'envelope', pTap: null };
-    if (mode === 'tap') return { action, decision: 'tap', source: 'envelope', pTap: null };
+    if (envelopeTap) return { action, decision: 'tap', source: 'envelope', pTap: null };
     return undefined;
   });
   const pending = decisions.flatMap((decision, index) => decision ? [] : [index]);

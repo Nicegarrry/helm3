@@ -42,6 +42,7 @@ import {
   reviewInput,
   spawnInput,
   steerInput,
+  retryInput,
   waitInput,
   stopInput,
   inboxListInput,
@@ -65,6 +66,7 @@ import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
 import { createMemory, type MemoryService } from './memory.js';
 import { createQueue, type QueueService } from './queue.js';
+import type { RetryService } from './retry.js';
 
 const exec = promisify(execFile);
 
@@ -72,6 +74,7 @@ export type SpawnInput = z.infer<typeof spawnInput>;
 export type InspectInput = z.infer<typeof inspectInput>;
 export type ListInput = z.infer<typeof listInput>;
 export type SteerInput = z.infer<typeof steerInput>;
+export type RetryInput = z.infer<typeof retryInput>;
 export type StopInput = z.infer<typeof stopInput>;
 export type GateInput = z.infer<typeof gateInput>;
 export type BaselineInput = z.infer<typeof baselineInput>;
@@ -122,6 +125,7 @@ export type HelmDeps = Readonly<{
   review?: ReviewService;
   jevChecker?: JevCheckService;
   claims?: ClaimsService;
+  retry?: RetryService;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -243,6 +247,7 @@ export class Helm {
   private readonly review?: ReviewService;
   readonly jevChecker?: JevCheckService;
   readonly claims?: ClaimsService;
+  private readonly retry?: RetryService;
   private readonly memory: MemoryService;
   readonly queue: QueueService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
@@ -296,6 +301,7 @@ export class Helm {
     this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput));
     this.claims = deps.claims;
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
+    this.retry = deps.retry;
     this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
     this.queue = createQueue({
       store: this.store, workspace: this.workspace, github: this.github, settings: this.settings,
@@ -316,6 +322,11 @@ export class Helm {
   async mergeEnqueue(input: MergeEnqueueInput) { return this.queue.enqueue(input); }
   async mergeQueue(input: MergeQueueInput) { return this.queue.queue(input); }
   async mergeDequeue(input: MergeDequeueInput) { return this.queue.dequeue(input); }
+
+  async retryWorker(input: RetryInput): Promise<ToolOutcome<{ turn: number; kind: import('./retry.js').RetryKind; message: string }>> {
+    if (!this.retry) return refuse('retry service is not configured');
+    return runGuard(() => this.withLock(() => this.retry!.retry(input, (workerId, message) => this.steerLocked({ workerId, message }))));
+  }
 
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {
@@ -564,7 +575,13 @@ export class Helm {
   async prOpen(input: PrOpenInput): Promise<ToolOutcome<{ number: number; url: string; head: string }>> {
     return runGuard(async () => {
       const reason = await this.refusal('pr.open', input);
-      if (reason) return refuse(reason);
+      if (reason) {
+        const worker = this.store.getWorker(input.workerId);
+        let head = worker?.head ?? null;
+        if (worker) { try { head = await this.workspace.head(worker.worktree); } catch { /* retain the durable head */ } }
+        this.store.appendEvent(input.workerId, 'tool.refused', { tool: 'pr.open', reason, head });
+        return refuse(reason);
+      }
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       const head = requireValue(row.head, 'worker has no commits yet');
       const passing = this.store.listGates(input.workerId).filter((g) => g.head === head && g.passed);

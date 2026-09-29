@@ -16,6 +16,10 @@ import {
   steerInput,
   stopInput,
   waitInput,
+  supervisorRegisterInput,
+  supervisorListInput,
+  wakeListInput,
+  supervisorRotateInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -52,6 +56,10 @@ const TOOLS: readonly ToolDef[] = [
   def('pr.merge', 'Merge a pull request, but only if it is open, mergeable, at the exact expected head commit, and all checks passed.', prMergeInput, (h, i) => h.prMerge(i)),
   def('inbox.list', 'List open worker questions, optionally filtered by project or state.', inboxListInput, (h, i) => h.inboxList(i)),
   def('inbox.reply', 'Answer an open worker question and resume that worker on the same session.', inboxReplyInput, (h, i) => h.inboxReply(i)),
+  def('supervisor.register', 'Register or update the owner supervisor for a project.', supervisorRegisterInput, (h, i) => h.supervisorRegister(i)),
+  def('supervisor.list', 'List registered project supervisors.', supervisorListInput, (h) => h.supervisorList()),
+  def('wake.list', 'List unacknowledged supervisor wakes for a project, optionally acknowledging them.', wakeListInput, (h, i) => h.wakeList(i)),
+  def('supervisor.rotate', 'Queue a compact command and the supervisor startup wake.', supervisorRotateInput, (h, i) => h.supervisorRotate(i)),
 ];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

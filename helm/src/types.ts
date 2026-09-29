@@ -112,7 +112,7 @@ export interface Store {
   getWorker(workerId: string): WorkerRow | undefined;
   findByIdempotencyKey(key: string): WorkerRow | undefined;
   listWorkers(filter?: { repo?: string; state?: WorkerState }): WorkerRow[];
-  appendEvent(workerId: string, kind: string, data?: Record<string, unknown>): EventRow;
+  appendEvent(workerId: string, kind: string, data?: Record<string, unknown>, at?: string): EventRow;
   listEvents(workerId: string, opts?: { afterSeq?: number; limit?: number }): EventRow[];
   /** Events across every worker, ascending seq, `seq > afterSeq`. Default limit 100, capped at 1000. */
   listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[];
@@ -224,6 +224,27 @@ export type ToolOk<T> = { ok: true } & T;
 export type ToolErr = { ok: false; reason: string };
 export type ToolOutcome<T> = ToolOk<T> | ToolErr;
 
+export type SupervisorHost = 'herdr' | 'tmux';
+export type SupervisorRow = Readonly<{
+  project: string;
+  repo: string;
+  host: SupervisorHost;
+  label: string;
+  createdAt: string;
+  lastWakeAt: string | null;
+}>;
+export type WakeRow = Readonly<{
+  id: string;
+  project: string;
+  kind: string;
+  workerId: string | null;
+  summary: string;
+  command: boolean;
+  createdAt: string;
+  deliveredAt: string | null;
+  ackedAt: string | null;
+}>;
+
 export const spawnInput = z.object({
   repo: z.string().min(1),
   objective: z.string().min(1).max(20000),
@@ -255,8 +276,12 @@ export const reviewInput = z.object({ workerId: z.string().min(1).optional(), nu
 export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
 export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
+export const supervisorRegisterInput = z.object({ project: z.string().min(1), repo: z.string().min(1), host: z.enum(['herdr', 'tmux']), label: z.string().min(1) }).strict();
+export const supervisorListInput = emptyInput;
+export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boolean().default(false) }).strict();
+export const supervisorRotateInput = z.object({ project: z.string().min(1), focus: z.string().min(1).max(4000) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'inbox.list', 'inbox.reply'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply'] as const;
 export type ToolName = string;
 
 

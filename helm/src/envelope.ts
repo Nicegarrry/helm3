@@ -127,11 +127,82 @@ function digest(bytes: string | Buffer): string { return createHash('sha256').up
 function tapCodeHash(pepper: Buffer, id: string, code: string): string { return createHmac('sha256', pepper).update(`${id}:${code}`).digest('hex'); }
 function summary(value: Envelope): string { return `budget $${value.budget.maxSprintUsd}/${value.budget.maxSprintCodexTokens} tokens; deploy ${Object.entries(value.deploy).map(([k, v]) => `${k}=${v}`).join(', ') || 'none'}; tap-only ${value.tapOnly.join(', ') || 'none'}`; }
 
-function hardRule(action: string, kind = ''): boolean {
+const KIND_PATTERN = /^[a-z0-9]+(?:\.[a-z0-9-]+)*$/;
+const MAX_ACTION_CHARS = 2_000;
+
+function normaliseKind(kind: string): string | undefined {
+  const value = kind.trim().toLowerCase();
+  return KIND_PATTERN.test(value) ? value : undefined;
+}
+
+function branchName(value: string): string | undefined {
+  const branch = value.trim().toLowerCase().replace(/^refs\/heads\//, '').replace(/^refs\/remotes\/origin\//, '');
+  return /^[a-z0-9._/-]+$/.test(branch) ? branch : undefined;
+}
+
+function shellTokens(command: string): string[] | undefined {
+  const tokens: string[] = [];
+  let token = '';
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  const pushToken = () => { if (token) tokens.push(token); token = ''; };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (escaped) { token += char; escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      else if (char === '$' || char === '`') return undefined;
+      else token += char;
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === '$' || char === '`' || char === '|' || char === '<' || char === '>') return undefined;
+    if (char === ';') { pushToken(); return tokens; }
+    if (char === '&') {
+      if (command[index + 1] !== '&') return undefined;
+      pushToken(); return tokens;
+    }
+    if (/\s/.test(char)) { pushToken(); continue; }
+    token += char;
+  }
+  if (quote || escaped) return undefined;
+  pushToken();
+  return tokens;
+}
+
+function pushDestination(token: string): string | undefined {
+  let ref = token.replace(/^\+/, '');
+  const colon = ref.indexOf(':');
+  if (colon >= 0) ref = ref.slice(colon + 1);
+  if (ref.startsWith('refs/heads/')) ref = ref.slice('refs/heads/'.length);
+  return branchName(ref);
+}
+
+function pushToProtectedBranch(action: string, protectedBranches: ReadonlySet<string>): boolean {
+  if (!/\b(?:git\s+)?push\b|\bforce-push\b/i.test(action)) return false;
+  const tokens = shellTokens(action);
+  if (!tokens) return true;
+  const pushIndex = tokens.findIndex((token) => /^(?:push|force-push)$/i.test(token));
+  if (pushIndex < 0) return true;
+  const args = tokens.slice(pushIndex + 1).filter((token) => token !== '--' && !token.startsWith('-'));
+  if (args.length === 0) return true;
+  const refspecs = args.length === 1 && (/[:/]/.test(args[0]!) || args[0]!.startsWith('+')) ? args : args.slice(1);
+  if (refspecs.length === 0) return true;
+  const destinations = refspecs.map(pushDestination);
+  if (destinations.some((destination) => destination === undefined)) return true;
+  return destinations.some((destination) => protectedBranches.has(destination!));
+}
+
+function hardRule(action: string, kind = '', baseRef?: string): boolean {
   const text = `${kind} ${action}`;
-  const push = /\b(?:git\s+)?push\b/i.test(text);
-  const base = /(?:^|[\s/:])\+?(?:main|master)(?=$|[\s:=])/i.test(text);
-  if (push && base) return true;
+  const protectedBranches = new Set(['main', 'master']);
+  const configuredBase = baseRef ? branchName(baseRef) : undefined;
+  if (configuredBase) protectedBranches.add(configuredBase);
+  if (/\b(?:git\s+)?push\b|\bforce-push\b/i.test(text)) {
+    const command = /\b(?:git\s+)?push\b|\bforce-push\b/i.test(action) ? action : `git push ${action}`;
+    if (pushToProtectedBranch(command, protectedBranches)) return true;
+  }
   if (/--admin\b/i.test(text)) return true;
   const secret = /(?:\.env(?:\.[\w-]+)?\b|secrets?\b|tokens?\b|(?:api|private)[ _-]?keys?\b|credentials?\b)/i.test(text);
   if (secret && /\b(?:read|print|cat|echo|show|display|dump|export|inspect|view|open|get|fetch|load|source|access|retrieve|pull|copy)\b/i.test(text)) return true;
@@ -153,14 +224,24 @@ function tapProbability(value: unknown): number | null {
   return null;
 }
 
-export async function checkEnvelope(home: string, input: { project: string; actions: readonly string[]; kind?: string }, options: { jev?: Jev; envelopeTapAt: number; log?: (line: string) => void }): Promise<EnvelopeDecision[]> {
+export async function checkEnvelope(home: string, input: { project: string; actions: readonly string[]; kind?: string; baseRef?: string }, options: { jev?: Jev; envelopeTapAt: number; log?: (line: string) => void }): Promise<EnvelopeDecision[]> {
   if (input.actions.length < 1 || input.actions.length > 13) throw new Error('actions must contain 1 to 13 items');
+  if (input.actions.some((action) => action.length > MAX_ACTION_CHARS)) return input.actions.map((action) => ({ action, decision: 'tap', source: 'jev', pTap: null }));
   const value = envelopeValue(home, input.project, options.log);
+  const kind = input.kind === undefined ? undefined : normaliseKind(input.kind);
+  const deployModes = new Map<string, Envelope['deploy'][string]>();
+  for (const [target, mode] of Object.entries(value.deploy)) {
+    const normalisedTarget = normaliseKind(target);
+    if (normalisedTarget) deployModes.set(normalisedTarget, mode);
+  }
+  const tapOnly = new Set(value.tapOnly.map(normaliseKind).filter((entry): entry is string => entry !== undefined));
   const decisions: Array<EnvelopeDecision | undefined> = input.actions.map((action) => {
-    if (hardRule(action, input.kind)) return { action, decision: 'tap', source: 'hard', pTap: null };
-    if (input.kind && value.tapOnly.includes(input.kind)) return { action, decision: 'tap', source: 'envelope', pTap: null };
-    const deploy = /^deploy\.([A-Za-z0-9._-]+)$/.exec(input.kind ?? '');
-    const mode = deploy ? value.deploy[deploy[1]!] : undefined;
+    if (hardRule(action, input.kind, input.baseRef)) return { action, decision: 'tap', source: 'hard', pTap: null };
+    if (input.kind !== undefined && (!kind || (!tapOnly.has(kind) && !kind.startsWith('deploy.')))) return { action, decision: 'tap', source: 'envelope', pTap: null };
+    if (kind && tapOnly.has(kind)) return { action, decision: 'tap', source: 'envelope', pTap: null };
+    const target = kind?.startsWith('deploy.') ? kind.slice('deploy.'.length) : undefined;
+    const mode = target ? deployModes.get(target) : undefined;
+    if (kind?.startsWith('deploy.') && mode === undefined) return { action, decision: 'tap', source: 'envelope', pTap: null };
     if (mode === 'never') return { action, decision: 'never', source: 'envelope', pTap: null };
     if (mode === 'tap') return { action, decision: 'tap', source: 'envelope', pTap: null };
     return undefined;
@@ -169,7 +250,7 @@ export async function checkEnvelope(home: string, input: { project: string; acti
   if (pending.length === 0) return decisions as EnvelopeDecision[];
   const failClosed = (): EnvelopeDecision[] => decisions.map((decision, index) => decision ?? { action: input.actions[index]!, decision: 'tap', source: 'jev', pTap: null }) as EnvelopeDecision[];
   const questions: Record<string, JevQuestion> = Object.fromEntries(pending.map((index, n) => {
-    const action = JSON.stringify(input.actions[index]!.slice(0, 300));
+    const action = JSON.stringify(input.actions[index]);
     return [`a${n}`, { type: 'noul', instructions: `Proposed supervisor action: ${action}\nDoes this action fall outside the autonomy envelope, so it needs a tap from Nick before it runs? If any rule would require a tap, or the action is irreversible and not clearly allowed, answer true.`, criteria: { true: 'tap required', false: 'clearly allowed by the envelope' } }];
   }));
   let answers: Record<string, { noul?: unknown }> | undefined;

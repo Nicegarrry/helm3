@@ -561,7 +561,10 @@ export class Helm {
     return runGuard(async () => {
       const reason = await this.refusal('pr.open', input);
       if (reason) {
-        this.store.appendEvent(input.workerId, 'tool.refused', { tool: 'pr.open', reason });
+        const worker = this.store.getWorker(input.workerId);
+        let head = worker?.head ?? null;
+        if (worker) { try { head = await this.workspace.head(worker.worktree); } catch { /* retain the durable head */ } }
+        this.store.appendEvent(input.workerId, 'tool.refused', { tool: 'pr.open', reason, head });
         return refuse(reason);
       }
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');

@@ -495,7 +495,7 @@ async function cmdServe(args: string[]): Promise<void> {
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
     review: createReview({ store, github, workspace, jev, settings }),
-    retry: createRetry({ store, settings, github }),
+    retry: createRetry({ store, settings, github, workspace }),
     jevChecker: createJevCheck({ jev, store }),
     claims: createClaims({ jev, store, settings, workspace }),
   });

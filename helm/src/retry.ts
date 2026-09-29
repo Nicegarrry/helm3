@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { GitHub, Store, ToolOutcome, WorkerRow } from './types.js';
+import type { GitHub, Store, ToolOutcome, WorkerRow, Workspace } from './types.js';
 import { retryInput } from './types.js';
 import type { Settings } from './settings.js';
 import type { z } from 'zod';
@@ -13,28 +13,39 @@ const tail = (path: string) => { try { return readFileSync(path, 'utf8').split(/
 const commentId = (url: string) => Number((url.match(/(?:issuecomment-|\/comments\/)(\d+)/) ?? url.match(/(\d+)$/))?.[1]);
 const refusal = (reason: string): ToolOutcome<never> => ({ ok: false, reason });
 
-export function createRetry({ store, settings, github }: { store: Store; settings: Settings; github: GitHub }): RetryService {
+export function createRetry({ store, settings, github, workspace }: { store: Store; settings: Settings; github: GitHub; workspace?: Pick<Workspace, 'head'> }): RetryService {
   store.sql.exec('CREATE TABLE IF NOT EXISTS retries (workerId TEXT NOT NULL, kind TEXT NOT NULL, n INTEGER NOT NULL, at TEXT NOT NULL, PRIMARY KEY(workerId, kind, n))');
-  const latest = (workerId: string, kind: RetryKind): { at: string; evidence: string } | undefined => {
+  const currentHead = async (worker: WorkerRow): Promise<string> => {
+    if (workspace) {
+      try { return await workspace.head(worker.worktree); } catch { /* use the last durable observation */ }
+    }
+    return worker.head ?? '';
+  };
+  const latest = (workerId: string, kind: RetryKind, head: string): { at: string; evidence: string } | undefined => {
     if (kind === 'gate' || kind === 'acceptance') {
-      const rows = store.listGates(workerId).filter((g) => !g.passed).flatMap((g) => g.checks.filter((c) => c.exitCode !== 0 && (kind === 'gate' || c.name === 'acceptance')).map((c) => ({ at: g.at, evidence: `${c.name}\n${tail(c.outputPath)}` })));
-      return rows.sort((a, b) => b.at.localeCompare(a.at))[0];
+      const gates = store.listGates(workerId).filter((g) => g.head === head).sort((a, b) => b.at.localeCompare(a.at));
+      const gate = gates[0];
+      if (!gate || gate.passed) return undefined;
+      const rows = gate.checks.filter((c) => c.exitCode !== 0 && (kind === 'gate' || c.name === 'acceptance')).map((c) => ({ at: gate.at, evidence: `${c.name}\n${tail(c.outputPath)}` }));
+      return rows.length ? { at: gate.at, evidence: rows.map((row) => row.evidence).join('\n') } : undefined;
     }
     if (kind === 'claims') {
-      const row = store.sql.prepare('SELECT detail, at FROM claims_checks WHERE workerId = ? AND passed = 0 ORDER BY at DESC LIMIT 1').get(workerId) as { detail?: string; at?: string } | undefined;
-      if (!row) return undefined;
+      let row: { detail?: string; at?: string; passed?: number } | undefined;
+      try { row = store.sql.prepare('SELECT detail, at, passed FROM claims_checks WHERE workerId = ? AND head = ? ORDER BY at DESC LIMIT 1').get(workerId, head) as typeof row; } catch { return undefined; }
+      if (!row || row.passed) return undefined;
       const detail = JSON.parse(row.detail ?? '{}') as { failedClaims?: string[]; answers?: Record<string, { choice?: string; supports?: number }> };
       const claims = (detail.failedClaims ?? []).map((claim) => `${claim} — ${detail.answers?.[claim]?.choice ?? 'unknown'} (p(supports)=${detail.answers?.[claim]?.supports ?? 0})`).join('\n');
       return { at: row.at ?? '', evidence: claims || JSON.stringify(detail) };
     }
     if (kind === 'review') {
-      const row = store.sql.prepare("SELECT r.commentUrl, r.at FROM reviews r JOIN prs p ON p.number = r.number WHERE p.workerId = ? AND r.verdict IN ('changes','disputed') ORDER BY r.at DESC LIMIT 1").get(workerId) as { commentUrl?: string; at?: string } | undefined;
-      if (!row?.commentUrl) return undefined;
+      let row: { commentUrl?: string; at?: string; verdict?: string } | undefined;
+      try { row = store.sql.prepare("SELECT r.commentUrl, r.at, r.verdict FROM reviews r JOIN prs p ON p.number = r.number WHERE p.workerId = ? AND r.head = ? ORDER BY r.at DESC LIMIT 1").get(workerId, head) as typeof row; } catch { return undefined; }
+      if (!row?.commentUrl || !['changes', 'disputed'].includes(row.verdict ?? '')) return undefined;
       return { at: row.at ?? '', evidence: '' + row.commentUrl };
     }
     const events = store.listEvents(workerId, { limit: 1_000_000 }).filter((e) => {
       const text = JSON.stringify(e.data);
-      return e.kind === 'conflict' && kind === 'conflict' || e.kind === 'tool.refused' && ((kind === 'tests_edited' && /baseline tests edited|test files edited/i.test(text)) || (kind === 'conflict' && /conflict|unmerged/i.test(text)));
+      return (e.data.head === head) && (e.kind === 'conflict' && kind === 'conflict' || e.kind === 'tool.refused' && e.data.tool === 'pr.open' && ((kind === 'tests_edited' && /baseline tests edited|test files edited/i.test(text)) || (kind === 'conflict' && /conflict|unmerged/i.test(text))));
     });
     const event = events.at(-1);
     if (!event) return undefined;
@@ -45,10 +56,12 @@ export function createRetry({ store, settings, github }: { store: Store; setting
     const worker = store.getWorker(input.workerId);
     if (!worker) return refusal('worker not found');
     if (worker.state === 'running' || worker.state === 'queued') return refusal(`worker is ${worker.state}, not retryable`);
-    const chosen = input.kind ?? KINDS.map((kind) => ({ kind, failure: latest(input.workerId, kind) })).filter((x): x is { kind: RetryKind; failure: NonNullable<ReturnType<typeof latest>> } => Boolean(x.failure)).sort((a, b) => b.failure.at.localeCompare(a.failure.at))[0]?.kind;
-    if (!chosen) return refusal('no recorded failure for worker');
-    const failure = latest(input.workerId, chosen);
-    if (!failure) return refusal(`no recorded failure for ${chosen}`);
+    const head = await currentHead(worker);
+    const current = KINDS.map((kind) => ({ kind, failure: latest(input.workerId, kind, head) })).filter((x): x is { kind: RetryKind; failure: NonNullable<ReturnType<typeof latest>> } => Boolean(x.failure));
+    const chosen = input.kind ?? current.sort((a, b) => b.failure.at.localeCompare(a.failure.at))[0]?.kind;
+    if (!chosen) return refusal(input.kind ? `no current ${input.kind} failure at ${head}` : `no current failure at ${head}`);
+    const failure = current.find((item) => item.kind === chosen)?.failure;
+    if (!failure) return refusal(`no current ${chosen} failure at ${head}`);
     const count = Number((store.sql.prepare('SELECT COUNT(*) AS n FROM retries WHERE workerId = ? AND kind = ?').get(input.workerId, chosen) as { n: number }).n);
     if (count >= settings.factory.retryMax) return refusal(`retry limit reached for ${chosen}: respawn or ask Nick`);
     const evidence = chosen === 'review' ? await github.comment(worker.repoSlug, commentId(failure.evidence)).then((c) => c.body.slice(0, 6000)) : failure.evidence;

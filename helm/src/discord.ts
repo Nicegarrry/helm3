@@ -14,6 +14,7 @@ export type DiscordService = Readonly<{
   consume(): Promise<void>;
   tick(): Promise<void>;
   notifyNick(project: string, text: string): Promise<{ ok: true; sent: true } | { ok: false; reason: string }>;
+  postTap(text: string): Promise<{ ok: true } | { ok: false; reason: string }>;
 }>;
 
 type Options = Readonly<{
@@ -60,6 +61,25 @@ export function createDiscord(options: Options): DiscordService {
   function webhook(project: string): string | undefined {
     const name = options.settings.discord.projects[project]?.webhookEnv;
     return name ? env[name] : undefined;
+  }
+
+  function tapWebhook(): string | undefined {
+    const name = options.settings.discord.tapWebhookEnv;
+    return name ? env[name] : undefined;
+  }
+
+  async function postTap(content: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const url = tapWebhook();
+    if (!url) return { ok: false, reason: 'no tap channel configured' };
+    try {
+      const response = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, username: 'Helm', allowed_mentions: { parse: [] } }) });
+      if (response.status >= 200 && response.status < 300) return { ok: true };
+      log('daemon.log: tap Discord post failed');
+      return { ok: false, reason: 'tap channel post failed' };
+    } catch {
+      log('daemon.log: tap Discord post failed');
+      return { ok: false, reason: 'tap channel post failed' };
+    }
   }
 
   options.store.sql.exec(`
@@ -169,5 +189,6 @@ export function createDiscord(options: Options): DiscordService {
       });
     },
     notifyNick,
+    postTap,
   };
 }

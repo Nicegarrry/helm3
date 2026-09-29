@@ -7,6 +7,19 @@ function settings(maxPerHour = 20) {
   return { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour } };
 }
 
+test('tap posts use the dedicated tap webhook, separate from milestone webhooks', async () => {
+  const store = openStore(':memory:');
+  const calls: string[] = [];
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: {
+      HELM_TEST_WEBHOOK: 'https://discord.test/milestones', HELM_TAP_WEBHOOK: 'https://discord.test/taps',
+    }, fetch: async (url) => { calls.push(String(url)); return new Response('{}', { status: 200 }); } });
+    assert.deepEqual(await discord.notifyNick('o/r', 'milestone'), { ok: true, sent: true });
+    assert.deepEqual(await discord.postTap('tap message'), { ok: true });
+    assert.deepEqual(calls, ['https://discord.test/milestones', 'https://discord.test/taps']);
+  } finally { store.close(); }
+});
+
 test('maps milestone events, batches them, and never leaks the webhook URL', async () => {
   const store = openStore(':memory:');
   const sentinel = 'https://discord.test/webhook/sentinel-never-log';

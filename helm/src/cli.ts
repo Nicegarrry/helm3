@@ -54,6 +54,7 @@ function usage(): void {
   budget open <project> <label> <capUsd> [--codex-tokens n]
   budget close <project>
   budget [project] [--json]
+  tap <id> <code> [--json]
   serve [--stdio|--http] [--port n]
   daemon --action status|drain|resume [--json]
   supervisor register <project> --repo <path> --host herdr|tmux --label <text>
@@ -278,6 +279,8 @@ async function cmdBudget(args: string[]): Promise<void> {
     store.close();
   }
 }
+
+const cmdTap = (args: string[]) => simpleCmd('tap.confirm', args, (p) => (p[0] && p[1] ? { id: p[0], code: p[1] } : undefined));
 
 const cmdSupervisor = async (args: string[]): Promise<void> => {
   const [verb, ...rest] = args;
@@ -555,7 +558,7 @@ const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) 
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev,
+  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev,
 };
 
 async function main(): Promise<void> {

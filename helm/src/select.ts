@@ -14,12 +14,23 @@ const lessonNone = 'no lesson fits; a plain edit, command or routine change';
 const skillInstruction = 'Which skill should be loaded for this task? Choose "none" if the task is routine and no skill specifically covers it.';
 const lessonInstruction = 'Which lesson should be applied to this task? Choose "none" if the task is routine and no lesson specifically covers it.';
 
-function text(value: string): string { return value.trim().slice(0, 350); }
-function frontmatter(source: string, key: string): string { const match = source.match(new RegExp(`^${key}:\\s*(.*)$`, 'm')); if (!match) return ''; try { return JSON.parse(match[1]!) as string; } catch { return match[1]!.replace(/^['"]|['"]$/g, ''); } }
+function text(value: string): string { return value.trim().replace(/\s+/g, ' ').slice(0, 350); }
+function scalar(value: string): string { if (value.startsWith('"') && value.endsWith('"')) { try { return JSON.parse(value) as string; } catch { return value.slice(1, -1); } } if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replaceAll("''", "'"); return value; }
+function frontmatter(source: string, key: string): string {
+  const lines = source.split(/\r?\n/); if (lines[0]?.trim() !== '---') return '';
+  for (let index = 1; index < lines.length && lines[index]!.trim() !== '---'; index += 1) {
+    const match = lines[index]!.match(new RegExp(`^${key}:\\s*(.*)$`)); if (!match) continue;
+    const value = match[1]!.trim(); if (!/^[>|][+-]?$/.test(value)) return scalar(value);
+    const block: string[] = []; const folded = value.startsWith('>');
+    for (index += 1; index < lines.length; index += 1) { const line = lines[index]!; if (line && !/^\s/.test(line)) { index -= 1; break; } block.push(line.trim()); }
+    return block.join(folded ? ' ' : '\n').trim();
+  }
+  return '';
+}
 function content(source: string): string { const first = source.indexOf('---'); const second = first < 0 ? -1 : source.indexOf('---', first + 3); return second < 0 ? source : source.slice(second + 3).trim(); }
 function truth(source: string): string { return content(source).split(/\n---\s*(?:\n|$)/, 1)[0]!.trim(); }
 function pathFor(dir: string, name: string): string { if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return ''; const expanded = dir === '~' ? homedir() : dir.startsWith('~/') ? join(homedir(), dir.slice(2)) : dir; return join(resolve(expanded), name, 'SKILL.md'); }
-function readSkill(dirs: readonly string[], id: string): Skill | undefined { for (const dir of dirs) { try { const path = pathFor(dir, id); if (!statSync(path).isFile()) continue; const source = readFileSync(path, 'utf8'); const frontName = frontmatter(source, 'name'); if (!frontName) continue; return { id, name: frontName, description: text(frontmatter(source, 'description')), body: content(source).slice(0, 8000) }; } catch { /* absent or unreadable skills are not catalogued */ } } return undefined; }
+function readSkill(dirs: readonly string[], id: string): Skill | undefined { for (const dir of dirs) { try { const path = pathFor(dir, id); if (!statSync(path).isFile()) continue; const source = readFileSync(path, 'utf8'); const frontName = frontmatter(source, 'name'); if (!frontName) continue; const description = text(frontmatter(source, 'description')) || frontName; return { id, name: frontName, description, body: content(source).slice(0, 8000) }; } catch { /* absent or unreadable skills are not catalogued */ } } return undefined; }
 function answer(answers: Record<string, JevAnswer>, key: string): { choice?: string; confidence: number } { const value = answers[key]; return { choice: value?.choice, confidence: typeof value?.confidence === 'number' ? value.confidence : 0 }; }
 
 export function createSelector(options: { settings: Settings; memory: MemoryService; jev?: Jev; home: string }) {

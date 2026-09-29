@@ -11,13 +11,12 @@ import type { Jev, JevAnswers } from '../src/jev.js';
 import type { MemoryService } from '../src/memory.js';
 import type { GateRunner, GitHub, HelmConfig, PrStatus, WorkerRunner, Workspace } from '../src/types.js';
 
-function fixture(answers: JevAnswers, lessons = true) {
+function fixture(answers: JevAnswers, lessons = true, skillSources: Record<string, string> = { allowed: '---\nname: allowed\ndescription: the allowed skill\n---\nUse this guidance.' }) {
   const home = mkdtempSync(join(tmpdir(), 'helm-select-')); const skills = join(home, 'skills');
-  mkdirSync(join(skills, 'allowed'), { recursive: true });
-  writeFileSync(join(skills, 'allowed', 'SKILL.md'), '---\nname: allowed\ndescription: the allowed skill\n---\nUse this guidance.');
+  for (const [name, source] of Object.entries(skillSources)) { mkdirSync(join(skills, name), { recursive: true }); writeFileSync(join(skills, name, 'SKILL.md'), source); }
   const lessonPath = 'team/lesson/keep.md';
   if (lessons) { mkdirSync(join(home, 'memory', 'team', 'lesson'), { recursive: true }); writeFileSync(join(home, 'memory', lessonPath), '---\ntype: lesson\ntitle: Keep\nsummary: keep the change narrow\nstatus: "active"\n---\nPreserve the existing seam.\n---\n'); }
-  const settings = loadSettings(home); const configured = { ...settings, memory: {}, select: { ...settings.select, skillDirs: [skills], skillAllow: ['allowed'] } };
+  const settings = loadSettings(home); const configured = { ...settings, memory: {}, select: { ...settings.select, skillDirs: [skills], skillAllow: Object.keys(skillSources) } };
   const memory: MemoryService = { write: async () => ({ ok: false, reason: 'unused' }), log: async () => ({ ok: false, reason: 'unused' }), list: async () => ({ ok: true, memories: lessons ? [{ path: lessonPath, title: 'Keep', summary: 'keep the change narrow' }] : [] }) };
   const store = openStore(':memory:'); const calls: Array<{ purpose: string; input: any }> = [];
   const jev: Jev = { shadow: true, async ask(purpose, input) { calls.push({ purpose, input }); return { ok: true, answers }; } };
@@ -63,6 +62,16 @@ test('an explicit skill outside skillAllow is refused', async () => {
 test('a skill outside skillAllow never appears in Jev criteria', async () => {
   const f = fixture({ skill_or_none: { choice: 'none', confidence: 0.9, probabilities: {} }, lesson_or_none: { choice: 'none', confidence: 0.9, probabilities: {} } });
   try { await createSelector({ ...f }).select({ objective: 'task' }); const criteria = f.calls[0]!.input.questions.skill_or_none.criteria; assert.deepEqual(Object.keys(criteria), ['allowed', 'none']); assert.ok(!Object.hasOwn(criteria, 'outside')); } finally { f.store.close(); }
+});
+
+test('skill description frontmatter handles folded, literal, quoted-colon, and missing values', async () => {
+  const f = fixture({ skill_or_none: { choice: 'none', confidence: 0.9, probabilities: {} } }, false, {
+    folded: '---\nname: folded\ndescription: >\n  first folded line\n  second folded line\n---\nbody',
+    literal: '---\nname: literal\ndescription: |\n  first literal line\n  second literal line\n---\nbody',
+    quoted: '---\nname: quoted\ndescription: "quoted: value"\n---\nbody',
+    missing: '---\nname: missing\n---\nbody',
+  });
+  try { await createSelector({ ...f }).select({ objective: 'task' }); const criteria = f.calls[0]!.input.questions.skill_or_none.criteria; assert.equal(criteria.folded, 'first folded line second folded line'); assert.equal(criteria.literal, 'first literal line second literal line'); assert.equal(criteria.quoted, 'quoted: value'); assert.equal(criteria.missing, 'missing'); } finally { f.store.close(); }
 });
 
 test('lessons in shadow mode are suggested but never inlined', async () => {

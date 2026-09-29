@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { Helm } from '../src/helm.js';
 import { ensureBaselineTable } from '../src/baseline.js';
@@ -40,7 +40,7 @@ function harness(fixture: ReturnType<typeof repoFixture>, gateOutcome = { passed
   let opened: { base: string; body: string } | undefined; let recordedChecks: Array<{ name: string; command: string }> = [];
   const workspace: Workspace = {
     async resolveSha(_repo, ref) { return ref === TEST_COMMIT ? fixture.testCommit : ref; }, async defaultBranch() { return 'main'; },
-    async create(_repo, path, branch, baseSha) { created.push(`${branch}:${baseSha}`); return { path, branch, baseSha }; }, async remove() {},
+    async create(_repo, path, branch, baseSha) { created.push(`${branch}:${baseSha}`); execFileSync('ln', ['-s', fixture.repo, path]); return { path, branch, baseSha }; }, async remove() {},
     async head() { return git(fixture.repo, ['rev-parse', 'HEAD']); }, async isClean() { return true; }, async diffStat() { return ''; }, async commitAll() { return fixture.head; }, async push() {}, async clone() {}, async fetch() {}, async patchId() { return 'patch'; },
   };
   const gates: GateRunner = { async run(_cwd, checks) { recordedChecks = [...checks]; return gateOutcome.checks.length > 0 ? gateOutcome : { passed: true, checks: checks.map((check) => ({ ...check, exitCode: 0, outputPath: '/tmp/check', durationMs: 1 })) }; }, async defaultChecks() { return [{ name: 'typecheck', command: 'npm run typecheck' }]; } };
@@ -52,7 +52,7 @@ function harness(fixture: ReturnType<typeof repoFixture>, gateOutcome = { passed
 }
 
 test('B5b binds spawn base, gate acceptance, PR base, and red/green body', async () => {
-  const fixture = repoFixture(); const d = harness(fixture); baseline(d.store, 'owner/repo', fixture.baseSha, fixture.testCommit);
+  const fixture = repoFixture(); const d = harness(fixture); baseline(d.store, basename(fixture.repo), fixture.baseSha, fixture.testCommit);
   try {
     const spawned = await d.helm.spawn({ repo: fixture.repo, objective: 'build', model: 'test/model', baselineId: 'b-test', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true); if (!spawned.ok) return; await d.helm.settle(spawned.workerId);
@@ -66,9 +66,9 @@ test('B5b binds spawn base, gate acceptance, PR base, and red/green body', async
 });
 
 test('B5b refuses edited baseline tests and a failed acceptance check', async () => {
-  const fixture = repoFixture(); const failing = { passed: false, checks: [{ name: 'acceptance', command: 'validator', exitCode: 1, outputPath: '/tmp/a', durationMs: 1 }] }; const d = harness(fixture, failing); baseline(d.store, 'owner/repo', fixture.baseSha, fixture.testCommit);
+  const fixture = repoFixture(); const failing = { passed: false, checks: [{ name: 'acceptance', command: 'validator', exitCode: 1, outputPath: '/tmp/a', durationMs: 1 }] }; const d = harness(fixture, failing); baseline(d.store, basename(fixture.repo), fixture.baseSha, fixture.testCommit);
   try {
-    const row = { workerId: 'w-builder', repo: fixture.repo, repoSlug: 'owner/repo', role: 'builder' as const, model: 'test/model', objective: 'build', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: fixture.testCommit, baseSha: fixture.testCommit, branch: 'helm/w-builder', worktree: fixture.repo, state: 'succeeded' as const, head: fixture.head, sessionFile: null, result: { status: 'succeeded' as const, summary: 'built', changedFiles: ['src.ts'], commandsRun: [] }, rawResultText: null, idempotencyKey: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const row = { workerId: 'w-builder', repo: fixture.repo, repoSlug: basename(fixture.repo), role: 'builder' as const, model: 'test/model', objective: 'build', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: fixture.testCommit, baseSha: fixture.testCommit, branch: 'helm/w-builder', worktree: fixture.repo, state: 'succeeded' as const, head: fixture.head, sessionFile: null, result: { status: 'succeeded' as const, summary: 'built', changedFiles: ['src.ts'], commandsRun: [] }, rawResultText: null, idempotencyKey: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
     d.store.insertWorker(row); d.store.setMeta(row.workerId, { baselineId: 'b-test', prBase: 'main' });
     const failed = await d.helm.prOpen({ workerId: row.workerId, draft: true }); assert.equal(failed.ok, false); if (!failed.ok) assert.match(failed.reason, /acceptance check did not pass/);
     writeFileSync(join(fixture.repo, 'test', 'feature.test.ts'), 'assert.fail();\n// edited'); git(fixture.repo, ['add', '.']); git(fixture.repo, ['commit', '-qm', 'edit test']);

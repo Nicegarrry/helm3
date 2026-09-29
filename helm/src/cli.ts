@@ -14,7 +14,7 @@ import { gateRunner } from './gate.js';
 import { ghGitHub } from './github.js';
 import { piWorkerRunner } from './worker.js';
 import { codexWorkerRunner, laneRunner } from './codex.js';
-import { builderPrompt, reviewerPrompt } from './prompt.js';
+import { builderPrompt, reviewerPrompt, validatorPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
 import { startTicker } from './daemon.js';
@@ -473,7 +473,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const jev = createJev({ settings, store, env: process.env });
   const helm = new Helm({
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
-    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
+    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
   });

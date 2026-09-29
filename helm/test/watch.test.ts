@@ -13,35 +13,39 @@ function worker(state: WorkerRow['state'] = 'running'): WorkerRow {
 
 const settings = { watch: { tickSec: 60, silenceMin: 15, sameRefusal: 3, attentionEverySec: 180, cooldownMin: 15 } };
 
+function append(store: ReturnType<typeof openStore>, clock: Date, kind: string, data: Record<string, unknown> = {}): void {
+  store.appendEvent('w-watch', kind, data, clock.toISOString());
+}
+
 test('watch rules emit alerts and dedupe with a fake clock', async () => {
   const store = openStore(':memory:');
   try {
     store.insertWorker(worker());
-    let clock = new Date();
+    let clock = new Date('2026-01-01T00:00:00.000Z');
     const tick = createWatcher({ store, settings, now: () => clock });
-    store.appendEvent('w-watch', 'turn.start');
-    store.appendEvent('w-watch', 'tool.refused', { reason: 'outside worktree' });
-    store.appendEvent('w-watch', 'tool.refused', { reason: 'outside worktree' });
-    store.appendEvent('w-watch', 'tool.refused', { reason: 'outside worktree' });
+    append(store, clock, 'turn.start');
+    append(store, clock, 'tool.refused', { reason: 'outside worktree' });
+    append(store, clock, 'tool.refused', { reason: 'outside worktree' });
+    append(store, clock, 'tool.refused', { reason: 'outside worktree' });
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert').length, 1);
-    store.appendEvent('w-watch', 'turn.start');
-    store.appendEvent('w-watch', 'tool.refused', { reason: 'outside worktree' });
-    store.appendEvent('w-watch', 'tool.refused', { reason: 'outside worktree' });
+    append(store, clock, 'turn.start');
+    append(store, clock, 'tool.refused', { reason: 'outside worktree' });
+    append(store, clock, 'tool.refused', { reason: 'outside worktree' });
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert').length, 1);
-    store.appendEvent('w-watch', 'spend.warning', { spendUsd: 8 });
-    store.appendEvent('w-watch', 'result.invalid', { message: 'bad result' });
+    append(store, clock, 'spend.warning', { spendUsd: 8 });
+    append(store, clock, 'result.invalid', { message: 'bad result' });
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert').length, 3);
-    store.appendEvent('w-watch', 'error', { message: 'boom' });
+    append(store, clock, 'error', { message: 'boom' });
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert').length, 4);
-    store.appendEvent('w-watch', 'error', { message: 'again' });
+    append(store, clock, 'error', { message: 'again' });
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert').length, 4);
     clock = new Date(clock.getTime() + 16 * 60_000);
-    store.appendEvent('w-watch', 'error', { message: 'again' });
+    append(store, clock, 'error', { message: 'again' });
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert').length, 5);
   } finally { store.close(); }
@@ -51,9 +55,9 @@ test('silence alerts once per run and never alerts waiting workers', async () =>
   const store = openStore(':memory:');
   try {
     store.insertWorker(worker());
-    let clock = new Date(Date.now() + 16 * 60_000);
+    let clock = new Date('2026-01-01T00:16:00.000Z');
     const tick = createWatcher({ store, settings, now: () => clock });
-    store.appendEvent('w-watch', 'turn.start');
+    append(store, new Date(clock.getTime() - 16 * 60_000), 'turn.start');
     await tick();
     await tick();
     assert.equal(store.listEvents('w-watch').filter((event) => event.kind === 'watch.alert' && event.data.rule === 'silence').length, 1);

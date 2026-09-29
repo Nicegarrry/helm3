@@ -92,7 +92,7 @@ export interface Store {
   getWorker(workerId: string): WorkerRow | undefined;
   findByIdempotencyKey(key: string): WorkerRow | undefined;
   listWorkers(filter?: { repo?: string; state?: WorkerState }): WorkerRow[];
-  appendEvent(workerId: string, kind: string, data?: Record<string, unknown>): EventRow;
+  appendEvent(workerId: string, kind: string, data?: Record<string, unknown>, at?: string): EventRow;
   listEvents(workerId: string, opts?: { afterSeq?: number; limit?: number }): EventRow[];
   /** Events across every worker, ascending seq, `seq > afterSeq`. Default limit 100, capped at 1000. */
   listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[];

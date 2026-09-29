@@ -25,12 +25,13 @@ export function createWatcher({ store, settings, now = () => new Date() }: Watch
     for (const event of events) processEvent(event);
   });
   function alert(event: EventRow, rule: string, detail: Record<string, unknown>): void {
-    const at = now().getTime();
+    const current = now();
+    const at = current.getTime();
     const cooldownMs = settings.watch.cooldownMin * 60_000;
     const previous = store.listEvents(event.workerId).reverse().find((candidate) =>
       candidate.kind === 'watch.alert' && candidate.data.rule === rule);
     if (previous && at - eventTime(previous) < cooldownMs) return;
-    store.appendEvent(event.workerId, 'watch.alert', { rule, detail });
+    store.appendEvent(event.workerId, 'watch.alert', { rule, detail }, current.toISOString());
   }
 
   function processEvent(event: EventRow): void {

@@ -13,7 +13,7 @@ type Env = Record<string, string | undefined>;
 export type DiscordService = Readonly<{
   consume(): Promise<void>;
   tick(): Promise<void>;
-  notifyNick(project: string, text: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  notifyNick(project: string, text: string): Promise<{ ok: true; sent: true } | { ok: false; reason: string }>;
 }>;
 
 type Options = Readonly<{
@@ -30,6 +30,7 @@ type Options = Readonly<{
 type Pending = { project: string; lines: string[]; firstAt: number };
 
 function text(value: unknown, fallback: string): string {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
@@ -116,7 +117,7 @@ export function createDiscord(options: Options): DiscordService {
     }
   }
 
-  async function notifyNick(project: string, content: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  async function notifyNick(project: string, content: string): Promise<{ ok: true; sent: true } | { ok: false; reason: string }> {
     const url = webhook(project);
     if (!url) return { ok: false, reason: 'no webhook configured' };
     const current = now().getTime();
@@ -125,7 +126,7 @@ export function createDiscord(options: Options): DiscordService {
     if (!(await post(project, content))) return { ok: false, reason: 'Discord post failed' };
     nickAt.set(project, current);
     sent.set(project, [...(sent.get(project) ?? []).filter((at) => at > current - 60 * 60_000), current]);
-    return { ok: true };
+    return { ok: true, sent: true };
   }
 
   return {

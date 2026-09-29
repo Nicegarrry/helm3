@@ -105,3 +105,24 @@ test('without a Jev key the APPROVE line decides the verdict', async () => {
     if (result.ok) assert.equal(result.review.verdict, 'approve');
   } finally { d.store.close(); }
 });
+
+test('the last non-empty verdict line controls approval', async () => {
+  const d = setup({ body: 'APPROVE: okay\n\nREQUEST_CHANGES: blockers' });
+  try {
+    const result = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-15', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.review.verdict, 'changes');
+  } finally { d.store.close(); }
+});
+
+test('a Jev answer without noul is unknown and stores a null approval score', async () => {
+  const d = setup({ body: 'APPROVE: okay', jev: { shadow: false, async ask() { return { ok: true as const, answers: { verdict: { confidence: 1 } } }; } } });
+  try {
+    const result = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-16', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.review.verdict, 'approve');
+      assert.equal(result.review.jevApprove, null);
+    }
+  } finally { d.store.close(); }
+});

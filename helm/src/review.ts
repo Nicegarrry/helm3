@@ -40,12 +40,15 @@ function issueNumber(comment: GitHubComment): number | undefined {
   const value = comment.issueNumber ?? Number(comment.issueUrl?.match(/\/issues\/(\d+)(?:$|\/)/)?.[1]);
   return Number.isInteger(value) ? value : undefined;
 }
-function approveScore(answer: { noul?: boolean | number; probabilities?: Record<string, number>; confidence?: number } | undefined): number | null {
+function approveScore(answer: { noul?: boolean | number } | undefined): number | null {
   if (!answer) return null;
   if (typeof answer.noul === 'number') return answer.noul;
   if (typeof answer.noul === 'boolean') return answer.noul ? 1 : 0;
-  if (typeof answer.probabilities?.true === 'number') return answer.probabilities.true;
-  return typeof answer.confidence === 'number' ? answer.confidence : null;
+  return null;
+}
+function verdictLine(body: string): 'approve' | 'changes' {
+  const last = body.split(/\r?\n/).filter((line) => line.trim()).at(-1) ?? '';
+  return last.startsWith('APPROVE: ') ? 'approve' : 'changes';
 }
 
 export function createReview({ store, github, workspace, jev, settings, now = () => new Date() }: {
@@ -80,9 +83,9 @@ export function createReview({ store, github, workspace, jev, settings, now = ()
     const score = approveScore(answer);
     const noKey = !scoreResult.ok && scoreResult.reason === 'no key';
     if (noKey) store.appendEvent(pr.workerId, 'review.warning', { project: worker.repoSlug, summary: 'Jev verdict check skipped: no key' });
-    const jevAgrees = noKey ? true : score !== null && (input.verdict === 'approve' ? score >= settings.factory.verdictAt : score < settings.factory.verdictAt);
-    const hasApproveLine = fetched.body.split(/\r?\n/).some((line) => line.startsWith('APPROVE: '));
-    const verdict: ReviewRow['verdict'] = !noKey && !jevAgrees ? 'disputed' : input.verdict === 'approve' && hasApproveLine ? 'approve' : 'changes';
+    const jevAgrees = noKey || score === null || (input.verdict === 'approve' ? score >= settings.factory.verdictAt : score < settings.factory.verdictAt);
+    const lineVerdict = verdictLine(fetched.body);
+    const verdict: ReviewRow['verdict'] = !noKey && !jevAgrees ? 'disputed' : input.verdict === 'approve' && lineVerdict === 'approve' ? 'approve' : 'changes';
     const stored: ReviewRow = { id: 0, repoSlug: worker.repoSlug, number: input.number, head: input.head, patchId: await patchId(worker.repo, worker.baseSha, input.head), reviewer: input.reviewer, stated: input.verdict, jevApprove: score, verdict, commentUrl: input.commentUrl, at: now().toISOString() };
     const result = insert.run(stored.repoSlug, stored.number, stored.head, stored.patchId, stored.reviewer, stored.stated, stored.jevApprove, stored.verdict, stored.commentUrl, stored.at);
     const saved = row({ ...stored, id: Number(result.lastInsertRowid) });

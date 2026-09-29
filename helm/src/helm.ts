@@ -325,6 +325,7 @@ export class Helm {
     this.queue = createQueue({
       store: this.store, workspace: this.workspace, github: this.github, settings: this.settings,
       gate: (input) => this.gate(input), prMerge: (input) => this.prMerge(input),
+      retry: this.retry ? (input) => this.retry!.retry(input, (workerId, message) => this.steer({ workerId, message })) : undefined,
     });
     this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
   }

@@ -67,7 +67,8 @@ export function createRetry({ store, settings, github, workspace }: { store: Sto
     const evidence = chosen === 'review' ? await github.comment(worker.repoSlug, commentId(failure.evidence)).then((c) => c.body.slice(0, 6000)) : failure.evidence;
     const baseline = store.getMeta(input.workerId)?.baselineId ? store.sql.prepare('SELECT files FROM baselines WHERE id = ?').get(store.getMeta(input.workerId)!.baselineId) as { files?: string } | undefined : undefined;
     const noEdit = baseline?.files ? ` Do not edit ${JSON.parse(baseline.files).join(', ')}.` : '';
-    const message = `Your last turn was rejected: ${chosen}. ${evidence}. Fix exactly this.${noEdit}`;
+    const conflictInstructions = chosen === 'conflict' ? ' A merge is IN PROGRESS in your worktree. Resolve the markers in place and commit; do NOT run `git merge --abort`, reset, or rebase.' : '';
+    const message = `Your last turn was rejected: ${chosen}. ${evidence}. Fix exactly this.${conflictInstructions}${noEdit}`;
     const outcome = await steer(input.workerId, message);
     if (!outcome.ok) return outcome;
     store.sql.prepare('INSERT INTO retries (workerId, kind, n, at) VALUES (?, ?, ?, ?)').run(input.workerId, chosen, count + 1, new Date().toISOString());

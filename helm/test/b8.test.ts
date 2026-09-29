@@ -53,6 +53,13 @@ test('B8 carries claims, review, tests-edited and conflict evidence and picks th
   store.close();
 });
 
+test('conflict retry uses the real service message with files and in-place commit instructions', async () => {
+  const store = openStore(':memory:'); const current = 'c'.repeat(40); store.insertWorker(worker('w-conflict')); store.updateWorker('w-conflict', { head: current }); store.appendEvent('w-conflict', 'conflict', { head: current, files: ['src/conflicted.ts', 'docs/merge.md'] });
+  const service = createRetry({ store, settings: settings(), github, workspace: { async head() { return current; } } }); let message = '';
+  const result = await service.retry({ workerId: 'w-conflict', kind: 'conflict' }, async (_id, value) => { message = value; return { ok: true, turn: 1 }; });
+  assert.equal(result.ok, true); assert.match(message, /src\/conflicted\.ts.*docs\/merge\.md/s); assert.match(message, /merge is IN PROGRESS/i); assert.match(message, /resolve the markers in place and commit/i); assert.match(message, /do NOT run `git merge --abort`, reset, or rebase/); store.close();
+});
+
 test('B8 omitted kind selects latest, limits one kind independently, and refuses unknown/running workers', async () => {
   const store = openStore(':memory:'); store.insertWorker(worker('w-limit')); store.appendEvent('w-limit', 'conflict', { head: 'b'.repeat(40), files: ['x.ts'] });
   const service = createRetry({ store, settings: settings(), github }); const steer = async () => ({ ok: true as const, turn: 1 });

@@ -6,6 +6,7 @@ import { z } from 'zod';
 const JEV_DEFAULTS = { shadow: true, model: 'jev-latest', triageHumanAt: 0.3, attentionAt: 0.4, timeoutMs: 5000 };
 const WAKE_DEFAULTS = { minIntervalSec: 120, maxPerHour: 20 };
 const WATCH_DEFAULTS = { tickSec: 60, silenceMin: 15, sameRefusal: 5, attentionEverySec: 180, cooldownMin: 15 };
+const BUDGET_DEFAULTS = { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 
 const settingsSchema = z.object({
@@ -31,6 +32,10 @@ const settingsSchema = z.object({
     command: z.string().optional(),
     envelope: z.string().optional(),
   }).default({}),
+  budgets: z.object({
+    defaultCapUsd: z.number().default(25),
+    defaultCodexTokens: z.number().int().default(20_000_000),
+  }).default(BUDGET_DEFAULTS),
   discord: z.object({
     projects: z.record(z.string(), z.object({ webhookEnv: z.string() })).default({}),
     digestSec: z.number().default(60),

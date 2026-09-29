@@ -14,7 +14,7 @@ export type JevQuestion =
   | { type: 'score'; instructions: string; criteria: ReadonlyArray<string> };
 
 export type JevAnswer = Readonly<{
-  noul?: boolean;
+  noul?: boolean | number;
   choice?: string;
   probabilities?: Record<string, number>;
   score?: string | number;

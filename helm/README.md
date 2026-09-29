@@ -6,7 +6,7 @@ without spending its own context on the mechanics. Two lanes serve the workers: 
 on cheap API models, and the Codex CLI on the operator's ChatGPT subscription (any GPT model
 Codex offers, at $0 marginal cost).
 
-Thirteen tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
+Sixteen tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
 lines of TypeScript.
 
 ## Five-minute start
@@ -68,7 +68,8 @@ lines of TypeScript.
 | `pr.open` | Push the branch and open a PR. Refused unless a gate passed at the current head. |
 | `pr.status` | Mergeability, checks and reviews from GitHub. |
 | `review.request` | Spawn a read-only reviewer on the PR head; posts the verdict as a PR comment. Refused if the reviewer is the builder's model or the same model family (`allowSameFamily` overrides). |
-| `run.status` | Spend, cap, active workers and daemon lifecycle. |
+| `run.status` | Spend, cap, per-project budgets, active workers and daemon lifecycle. |
+| `budget.open` / `budget.close` / `budget.status` | Open, close and inspect per-project sprint budgets. A new budget closes the previous one; worker spend remains attributed to the budget active at spawn. |
 | `daemon.control` | Inspect lifecycle, drain new work, resume admissions, safely shut down, or apply a staged upgrade when idle. |
 | `pr.merge` | Merge only when the PR is open, not a draft, mergeable, every check has finished and succeeded, and the head matches. |
 
@@ -235,14 +236,18 @@ available as JSON at `GET /api/state`, `GET /api/worker/<id>` and `GET /api/even
 
 ## Durability and cost
 
-Everything is in `$HELM_HOME/helm.sqlite`: workers, events, gates, prs, spend. Worktrees
+Everything is in `$HELM_HOME/helm.sqlite`: workers, events, gates, prs, spend, budgets and
+worker-to-budget attribution. Worktrees
 are under `$HELM_HOME/worktrees/`, captured gate output under `$HELM_HOME/logs/`, Pi session
 files under `$HELM_HOME/sessions/`. If the daemon dies, running workers become
 `interrupted` on the next start and `worker.steer` resumes their Pi session. Nothing is
 replayed automatically.
 
-Spend is summed from Pi usage events times the model's catalogue price. `HELM_SPEND_CAP_USD`
-refuses new spawns and stops running workers at the next tool call once reached. A soft cap,
+Spend is summed from Pi usage events times the model's catalogue price. Per-project sprint budgets
+are created automatically at the configured default when a project first spawns a worker;
+`budget.open` starts a new sprint and closes the old one. `HELM_SPEND_CAP_USD` is only a lifetime
+global backstop: it refuses new spawns and stops running workers at the next tool call once reached.
+A value of `0` or an unset variable means no global cap. A soft cap,
 `HELM_SPEND_WARN_USD` (default 80% of the hard cap), never blocks: crossing it records a
 `spend.warning` event, sets `aboveSoftCap` in `run.status`, adds a `warning` field to spawn
 and steer results so the orchestrator sees it, and turns the dashboard bar amber. Models

@@ -1,4 +1,4 @@
-/** Helm service: composes the runtime and implements the worker and control tools. See DESIGN.md. */
+/** Helm service: composes the runtime and implements the worker, budget, and lifecycle tools. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -27,6 +27,9 @@ import type {
   WakeRow,
 } from './types.js';
 import {
+  budgetCloseInput,
+  budgetOpenInput,
+  budgetStatusInput,
   gateInput,
   inspectInput,
   listInput,
@@ -44,6 +47,8 @@ import {
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
 
 import { Lifecycle } from './lifecycle.js';
+import { loadSettings, type Settings } from './settings.js';
+import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 
@@ -60,6 +65,9 @@ export type PrStatusInput = z.infer<typeof prStatusInput>;
 export type ReviewInput = z.infer<typeof reviewInput>;
 export type PrMergeInput = z.infer<typeof prMergeInput>;
 export type WaitInput = z.infer<typeof waitInput>;
+export type BudgetOpenInput = z.infer<typeof budgetOpenInput>;
+export type BudgetCloseInput = z.infer<typeof budgetCloseInput>;
+export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
 export type InboxListInput = z.infer<typeof inboxListInput>;
 export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
 
@@ -88,6 +96,7 @@ export type HelmDeps = Readonly<{
   stopTimeoutMs?: number;
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
+  settings?: Settings;
   supervisor?: SupervisorService;
   discord?: DiscordService;
 }>;
@@ -202,6 +211,7 @@ export class Helm {
   private readonly stopObserved = new Set<string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
+  private readonly settings: Settings;
   readonly supervisor?: SupervisorService;
   readonly discord?: DiscordService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
@@ -219,6 +229,8 @@ export class Helm {
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
+    this.settings = deps.settings ?? loadSettings(deps.config.home);
+    ensureBudgetTables(this.store);
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
   }
@@ -265,6 +277,7 @@ export class Helm {
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
+    const admittedBudget = this.assertBudget(repoSlug);
     const baseRef = input.baseRef ?? (await this.workspace.defaultBranch(repo));
     const baseSha = await this.workspace.resolveSha(repo, baseRef);
     const workerId = genId('w');
@@ -281,6 +294,7 @@ export class Helm {
     };
     try {
       this.store.insertWorker(row);
+      attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
@@ -346,10 +360,9 @@ export class Helm {
     must(STEERABLE_STATES.has(row.state), `worker is ${row.state}, not steerable`);
     must(!this.running.has(input.workerId), 'worker already has a turn in flight');
     must(!this.spendCapExceeded(), 'spend cap reached');
+    this.assertBudget(row.repoSlug, input.workerId);
     const priorTurns = this.store.listEvents(input.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
-    // The in-memory Helm test store has no SQLite implementation; the real Store.sql seam
-    // is present for daemon runs and for the durable inbox path.
-    if (typeof (this.store.sql as unknown as { exec?: unknown }).exec === 'function') supersedeOpenInbox(this.store.sql, input.workerId);
+    supersedeOpenInbox(this.store.sql, input.workerId);
     this.startRun(input.workerId, input.message);
     return { ok: true, turn: priorTurns + 1, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
   }
@@ -366,6 +379,7 @@ export class Helm {
       must(worker.state === 'waiting', `worker is ${worker.state}, not waiting`);
       must(!this.running.has(worker.workerId), 'worker already has a turn in flight');
       must(!this.spendCapExceeded(), 'spend cap reached');
+      this.assertBudget(worker.repoSlug, worker.workerId);
       const answeredAt = this.nowIso();
       must(answerInbox(this.store.sql, item.id, input.answer, input.by, answeredAt), 'inbox item is no longer open');
       const priorTurns = this.store.listEvents(worker.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
@@ -552,15 +566,36 @@ export class Helm {
 
   private aboveSoftCap(): boolean { const w = this.spendWarnUsd(); return w > 0 && this.store.spendTotal().spendUsd >= w; }
 
-  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number }>> {
+  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[] }>> {
     return guard(async () => {
       const total = this.store.spendTotal();
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
       return {
         ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),
-        activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents,
+        activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(this.store),
       };
     });
+  }
+
+  async budgetOpen(input: BudgetOpenInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
+    return guard(async () => {
+      const row = openBudget(this.store, {
+        project: input.project, label: input.label, capUsd: input.capUsd, capCodexTokens: input.codexTokens,
+        openedAt: this.nowIso(),
+      });
+      return { ok: true, budget: budgetStatus(this.store, row) };
+    });
+  }
+
+  async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
+    return guard(async () => {
+      const row = requireValue(closeBudget(this.store, input.project, this.nowIso()), `no open budget for ${input.project}`);
+      return { ok: true, budget: budgetStatus(this.store, row) };
+    });
+  }
+
+  async budgetStatus(input: BudgetStatusInput): Promise<ToolOutcome<{ budgets: BudgetStatus[] }>> {
+    return guard(async () => ({ ok: true, budgets: listBudgetStatuses(this.store, input.project) }));
   }
 
   /** Wait for a settled worker or timeout; periodically re-read the store, without client polling. */
@@ -620,6 +655,28 @@ export class Helm {
 
   private spendCapExceeded(): boolean {
     return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;
+  }
+
+  private ensureProjectBudget(project: string) {
+    const existing = openBudgetFor(this.store, project);
+    if (existing) return existing;
+    const now = this.nowIso();
+    return openBudget(this.store, {
+      project,
+      label: `auto-${now.slice(0, 10)}`,
+      capUsd: this.settings.budgets.defaultCapUsd,
+      capCodexTokens: this.settings.budgets.defaultCodexTokens,
+      openedAt: now,
+    });
+  }
+
+  private assertBudget(project: string, workerId?: string): BudgetStatus {
+    let budget = workerId ? budgetForWorker(this.store, workerId) : openBudgetFor(this.store, project);
+    if (!budget) budget = this.ensureProjectBudget(project);
+    if (workerId) attachWorker(this.store, workerId, budget.id);
+    const current = budgetStatus(this.store, budget);
+    must(!current.exhausted, `budget exhausted (${budget.label} $${current.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`);
+    return current;
   }
 
   /** Absolute local paths are used as-is; `owner/name` is cloned once under $HELM_HOME/repos and fetched on later use. */
@@ -691,6 +748,17 @@ export class Helm {
         const warn = this.spendWarnUsd();
         const after = this.store.spendTotal().spendUsd;
         if (warn > 0 && before < warn && after >= warn) this.store.appendEvent(workerId, 'spend.warning', { spendUsd: after, spendWarnUsd: warn, spendCapUsd: this.config.spendCapUsd });
+        const budget = budgetForWorker(this.store, workerId);
+        if (budget) {
+          const current = budgetStatus(this.store, budget);
+          if (current.warning && !budgetWarningEmitted(this.store, budget.id)) {
+            this.store.appendEvent(workerId, 'spend.warning', {
+              project: budget.project, label: budget.label, budgetId: budget.id,
+              spentUsd: current.spentUsd, capUsd: current.capUsd,
+              spentCodexTokens: current.spentCodexTokens, capCodexTokens: current.capCodexTokens,
+            });
+          }
+        }
       },
       shouldContinue: () => {
         if (this.stopRequested.has(workerId)) {

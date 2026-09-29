@@ -4,135 +4,31 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Helm, modelFamily, type HelmPrompts, type SpawnInput } from '../src/helm.js';
+import { openStore } from '../src/store.js';
 import { createToolRegistry } from '../src/tools.js';
+import { loadSettings, type Settings } from '../src/settings.js';
 import type {
-  EventRow,
   GateRow,
   GateRunner,
   GitHub,
   HelmConfig,
   PrRow,
   PrStatus,
-  SpendRow,
-  SpendSummary,
   Store,
   WorkerHooks,
   WorkerRow,
   WorkerRunInput,
   WorkerRunOutcome,
   WorkerRunner,
-  WorkerState,
   Workspace,
 } from '../src/types.js';
 
-// ---------- in-memory fakes for the five interfaces Helm depends on ----------
+// ---------- fakes for the five interfaces Helm depends on ----------
 
 function createFakeStore(): Store {
-  const workers = new Map<string, WorkerRow>();
-  const events: EventRow[] = [];
-  const gates: GateRow[] = [];
-  const prs: PrRow[] = [];
-  const spend: SpendRow[] = [];
-  const cursors = new Map<string, number>();
-  let seq = 0;
-
-  function summarize(rows: SpendRow[]): SpendSummary {
-    const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-    let spendUsd = 0;
-    let unknownCostEvents = 0;
-    for (const r of rows) {
-      tokens.input += r.inputTokens;
-      tokens.output += r.outputTokens;
-      tokens.cacheRead += r.cacheReadTokens;
-      tokens.cacheWrite += r.cacheWriteTokens;
-      if (r.costUsd === null) unknownCostEvents += 1;
-      else spendUsd += r.costUsd;
-    }
-    return { spendUsd, tokens, unknownCostEvents };
-  }
-
-  return {
-    sql: {} as Store['sql'],
-    insertWorker(row) {
-      workers.set(row.workerId, row);
-    },
-    updateWorker(workerId, patch) {
-      const cur = workers.get(workerId);
-      if (!cur) return;
-      workers.set(workerId, { ...cur, ...patch, updatedAt: new Date().toISOString() } as WorkerRow);
-    },
-    getWorker(workerId) {
-      return workers.get(workerId);
-    },
-    findByIdempotencyKey(key) {
-      return [...workers.values()].find((w) => w.idempotencyKey === key);
-    },
-    listWorkers(filter) {
-      return [...workers.values()].filter((w) => (!filter?.repo || w.repo === filter.repo) && (!filter?.state || w.state === filter.state));
-    },
-    appendEvent(workerId, kind, data = {}) {
-      seq += 1;
-      const row: EventRow = { seq, workerId, at: new Date().toISOString(), kind, data };
-      events.push(row);
-      return row;
-    },
-    listEvents(workerId, opts) {
-      const afterSeq = opts?.afterSeq ?? 0;
-      const limit = opts?.limit ?? 1000;
-      return events.filter((e) => e.workerId === workerId && e.seq > afterSeq).slice(0, limit);
-    },
-    listAllEvents(opts) {
-      const afterSeq = opts?.afterSeq ?? 0;
-      const limit = Math.min(opts?.limit ?? 100, 1000);
-      return events.filter((e) => e.seq > afterSeq).slice(0, limit);
-    },
-    getCursor(name) {
-      return cursors.get(name) ?? 0;
-    },
-    setCursor(name, cursor) {
-      cursors.set(name, cursor);
-    },
-    insertGate(row) {
-      gates.push(row);
-    },
-    listGates(workerId) {
-      return gates.filter((g) => g.workerId === workerId);
-    },
-    insertPr(row) {
-      prs.push(row);
-    },
-    getPrByWorker(workerId) {
-      return [...prs].reverse().find((p) => p.workerId === workerId);
-    },
-    getPrByNumber(number) {
-      return prs.find((p) => p.number === number);
-    },
-    addSpend(row) {
-      spend.push(row);
-    },
-    spendFor(workerId) {
-      return summarize(spend.filter((s) => s.workerId === workerId));
-    },
-    spendTotal() {
-      return summarize(spend);
-    },
-    spendSeries(limit) {
-      return [...spend].sort((a, b) => a.at.localeCompare(b.at)).slice(-limit).map((s) => ({ at: s.at, costUsd: s.costUsd }));
-    },
-    markInterrupted() {
-      const ids: string[] = [];
-      for (const w of workers.values()) {
-        if (w.state === 'running') {
-          workers.set(w.workerId, { ...w, state: 'interrupted' as WorkerState });
-          ids.push(w.workerId);
-        }
-      }
-      return ids;
-    },
-    close() {
-      // no-op
-    },
-  };
+  const store = openStore(':memory:');
+  cleanupStores.push(store);
+  return store;
 }
 
 function createFakeWorkspace() {
@@ -260,6 +156,13 @@ function succeeded(summary = 'did the thing'): WorkerRunner {
   });
 }
 
+function asksOnce(): WorkerRunner {
+  return createFakeRunner(async (input, _message, hooks) => {
+    hooks.onUsage({ model: input.model, inputTokens: 1000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01 });
+    return { result: { status: 'question', summary: 'need an answer', question: 'Which path should I take?', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+}
+
 /** A runner whose turns stay pending until `resolveNext` is called, oldest turn first. */
 function createControllableRunner() {
   const pending: Array<{ resolve: (outcome: WorkerRunOutcome) => void; hooks: WorkerHooks }> = [];
@@ -289,7 +192,9 @@ const FAKE_PROMPTS: HelmPrompts = {
 };
 
 const cleanupDirs: string[] = [];
+const cleanupStores: Store[] = [];
 test.after(() => {
+  for (const store of cleanupStores) store.close();
   for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -299,11 +204,17 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number }> = {}) {
+type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number }> & {
+  settings?: Omit<Partial<Settings>, 'budgets'> & { budgets?: Partial<Settings['budgets']> };
+};
+
+function makeHelm(overrides: HelmTestOverrides = {}) {
   const store = createFakeStore();
   const { workspace, pushed, cloned, fetched, created, removed, markDirty } = createFakeWorkspace();
   const githubFake = createFakeGitHub();
   const config: HelmConfig = { home: mkTempDir('helm-home-'), spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 5000, ...overrides.config };
+  const defaults = loadSettings(config.home);
+  const settings: Settings = { ...defaults, ...overrides.settings, budgets: { ...defaults.budgets, ...overrides.settings?.budgets } };
   const helm = new Helm({
     config,
     store,
@@ -312,6 +223,7 @@ function makeHelm(overrides: Partial<{ config: Partial<HelmConfig>; runner: Work
     github: overrides.github ?? githubFake.github,
     runner: overrides.runner ?? succeeded(),
     prompts: FAKE_PROMPTS,
+    settings,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
   });
@@ -442,6 +354,80 @@ test('spawn refuses once the spend cap is reached', async () => {
   const second = await helm.spawn(spawnBody(repo));
   assert.equal(second.ok, false);
   if (!second.ok) assert.match(second.reason, /spend cap/);
+});
+
+test('spawn refuses an exhausted project budget while another project still spawns', async () => {
+  const { helm } = makeHelm({ settings: { budgets: { defaultCapUsd: 0.01 } } });
+  const firstRepo = mkTempDir('helm-repo-');
+  const otherRepo = mkTempDir('helm-repo-');
+  const first = await helm.spawn(spawnBody(firstRepo));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  await helm.settle(first.workerId);
+
+  const refused = await helm.spawn(spawnBody(firstRepo));
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /budget exhausted/);
+
+  const other = await helm.spawn(spawnBody(otherRepo));
+  assert.equal(other.ok, true);
+  if (other.ok) await helm.settle(other.workerId);
+});
+
+test('implicit project budget uses settings defaultCapUsd', async () => {
+  const { helm } = makeHelm({ settings: { budgets: { defaultCapUsd: 3.25 } } });
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  const status = await helm.runStatus();
+  assert.equal(status.ok, true);
+  if (status.ok) assert.equal(status.projects[0]?.capUsd, 3.25);
+});
+
+test('steer refuses an exhausted project budget', async () => {
+  const { helm } = makeHelm({ settings: { budgets: { defaultCapUsd: 0.01 } } });
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+
+  const refused = await helm.steer({ workerId: spawned.workerId, message: 'continue' });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /budget exhausted/);
+});
+
+test('inbox.reply refuses an exhausted project budget', async () => {
+  const { helm, store } = makeHelm({ runner: asksOnce(), settings: { budgets: { defaultCapUsd: 0.01 } } });
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const ask = store.listEvents(spawned.workerId).find((event) => event.kind === 'ask');
+  assert.ok(ask?.data.inboxId);
+
+  const refused = await helm.inboxReply({ id: ask?.data.inboxId as string, answer: 'use the safe path', by: 'test' });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /budget exhausted/);
+});
+
+test('budget spend.warning fires once at 80% and includes project and label', async () => {
+  const warningRunner = createFakeRunner(async (input, _message, hooks) => {
+    for (const costUsd of [0.016, 0.001]) hooks.onUsage({ model: input.model, inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd });
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const { helm, store } = makeHelm({ runner: warningRunner, settings: { budgets: { defaultCapUsd: 0.02 } } });
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+
+  const warnings = store.listEvents(spawned.workerId).filter((event) => event.kind === 'spend.warning');
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.data.project, store.getWorker(spawned.workerId)?.repoSlug);
+  assert.match(String(warnings[0]?.data.label), /^auto-\d{4}-\d{2}-\d{2}$/);
 });
 
 test('soft spend cap: warning event, run.status flag, and spawn warning, without blocking', async () => {

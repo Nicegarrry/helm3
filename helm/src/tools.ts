@@ -24,6 +24,8 @@ import {
   wakeListInput,
   supervisorRotateInput,
   notifyNickInput,
+  jevCheckInput,
+  jevLabelInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -68,6 +70,8 @@ const TOOLS: readonly ToolDef[] = [
   def('supervisor.list', 'List registered project supervisors.', supervisorListInput, (h) => h.supervisorList()),
   def('wake.list', 'List unacknowledged supervisor wakes for a project, optionally acknowledging them.', wakeListInput, (h, i) => h.wakeList(i)),
   def('supervisor.rotate', 'Queue a compact command and the supervisor startup wake.', supervisorRotateInput, (h, i) => h.supervisorRotate(i)),
+  def('jev.check', 'Run a bounded Jev judgement preset and record the call.', jevCheckInput, (h, i) => h.jevCheck(i)),
+  def('jev.label', 'Label a recorded Jev call for calibration.', jevLabelInput, (h, i) => h.jevLabel(i)),
 ];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

@@ -220,6 +220,11 @@ export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.numb
 export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();
 export const steerInput = z.object({ workerId: z.string().min(1), message: z.string().min(1).max(20000) }).strict();
 export const stopInput = z.object({ workerId: z.string().min(1) }).strict();
+export const budgetOpenInput = z.object({
+  project: z.string().min(1), label: z.string().min(1), capUsd: z.number().positive(), codexTokens: z.number().int().positive().optional(),
+}).strict();
+export const budgetCloseInput = z.object({ project: z.string().min(1) }).strict();
+export const budgetStatusInput = z.object({ project: z.string().min(1).optional() }).strict();
 export const waitInput = z.object({
   workerIds: z.array(z.string().min(1)).min(1).max(20),
   // Bounded under Claude Code's idle window for MCP tool calls (30 minutes on stdio, 5 on
@@ -234,7 +239,7 @@ export const prMergeInput = z.object({ number: z.number().int().positive(), expe
 export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status'] as const;
 export type ToolName = string;
 
 

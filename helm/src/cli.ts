@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import type { EventRow, HelmConfig, Store, WorkerRow } from './types.js';
 import { ensureHome, loadConfig } from './config.js';
 import { openStore } from './store.js';
+import { listBudgetStatuses } from './budget.js';
 import { gitWorkspace } from './workspace.js';
 import { gateRunner } from './gate.js';
 import { ghGitHub } from './github.js';
@@ -36,6 +37,9 @@ function usage(): void {
   review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
   status [--json]
+  budget open <project> <label> <capUsd> [--codex-tokens n]
+  budget close <project>
+  budget [project] [--json]
   serve [--stdio|--http] [--port n]
   daemon --action status|drain|resume [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
@@ -127,7 +131,7 @@ async function readCmd(
   extraOptions: CliOptions = {},
 ): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { json: { type: 'boolean' }, ...extraOptions } });
-  const { config, store } = openReadStore();
+  const { store } = openReadStore();
   try {
     await run(positionals, values as ParsedValues, store, config);
   } finally {
@@ -214,12 +218,36 @@ const cmdStatus = (args: string[]) =>
   readCmd(args, (_p, v, store, config) => {
     const total = store.spendTotal();
     const activeWorkers = store.listWorkers().filter((w) => w.state === 'queued' || w.state === 'running').length;
-    const payload = { spendUsd: total.spendUsd, spendCapUsd: config.spendCapUsd, activeWorkers, maxWorkers: config.maxWorkers, unknownCostEvents: total.unknownCostEvents };
+    const payload = { spendUsd: total.spendUsd, spendCapUsd: config.spendCapUsd, activeWorkers, maxWorkers: config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(store) };
     if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
     console.log(`spend:    $${payload.spendUsd.toFixed(4)}${payload.spendCapUsd > 0 ? ` / $${payload.spendCapUsd.toFixed(2)} cap` : ' (no cap)'}`);
     console.log(`workers:  ${payload.activeWorkers} / ${payload.maxWorkers} active`);
     console.log(`unknown-cost events: ${payload.unknownCostEvents}`);
+    for (const project of payload.projects) console.log(`budget:   ${project.project} ${project.label} $${project.spentUsd.toFixed(2)} / $${project.capUsd.toFixed(2)}${project.exhausted ? ' exhausted' : ''}`);
   });
+
+async function cmdBudget(args: string[]): Promise<void> {
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { json: { type: 'boolean' }, 'codex-tokens': { type: 'string' } } });
+  const [action, project, label, cap] = positionals;
+  if (action === 'open') {
+    if (!project || !label || !cap || !Number.isFinite(Number(cap))) { usage(); process.exitCode = 2; return; }
+    printOutcome(await postTool('budget.open', { project, label, capUsd: Number(cap), ...(values['codex-tokens'] ? { codexTokens: Number(values['codex-tokens']) } : {}) }), values.json === true);
+    return;
+  }
+  if (action === 'close') {
+    if (!project) { usage(); process.exitCode = 2; return; }
+    printOutcome(await postTool('budget.close', { project }), values.json === true);
+    return;
+  }
+  const { config, store } = openReadStore();
+  try {
+    const budgets = listBudgetStatuses(store, action);
+    if (values.json === true) console.log(JSON.stringify({ ok: true, budgets }, null, 2));
+    else for (const budget of budgets) console.log(`${budget.project} ${budget.label}: $${budget.spentUsd.toFixed(2)} / $${budget.capUsd.toFixed(2)} (${budget.remainingUsd.toFixed(2)} remaining, ${budget.workerCount} workers)${budget.exhausted ? ' exhausted' : ''}`);
+  } finally {
+    store.close();
+  }
+}
 
 /** HTTP owns the daemon; stdio attaches or starts it. See README.md. */
 async function cmdServe(args: string[]): Promise<void> {
@@ -302,7 +330,7 @@ const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
-  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
+  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
 };
 
 async function main(): Promise<void> {

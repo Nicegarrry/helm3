@@ -1,4 +1,4 @@
-/** SQLite storage: workers, events, gates, prs, spend. See DESIGN.md. */
+/** SQLite storage for the core tables: workers, events, gates, prs, and spend. Feature modules own their tables via Store.sql. */
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';

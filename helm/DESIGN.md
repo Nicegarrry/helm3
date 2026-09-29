@@ -9,14 +9,14 @@ in `test/<module>.test.ts`, and must run with `npm test` from `helm/`.
 | File | Owns | Exports |
 | --- | --- | --- |
 | `src/types.ts` | contracts | see file |
-| `src/store.ts` | SQLite, five tables, events, restart marking | `openStore(path): Store` |
+| `src/store.ts` | SQLite core tables, events, restart marking | `openStore(path): Store` |
 | `src/workspace.ts` | git worktree add/remove, commit, push, diff stat | `gitWorkspace(): Workspace` |
 | `src/gate.ts` | run checks as child processes, capture output | `gateRunner(): GateRunner` |
 | `src/github.ts` | `gh` CLI transport: pr create, status, comment, merge | `ghGitHub(exec?): GitHub` |
 | `src/worker.ts` | Pi session runtime, tool hook, result parsing, usage | `piWorkerRunner(opts): WorkerRunner` |
 | `src/codex.ts` | Codex CLI runtime (`codex exec` / `exec resume` per turn, Codex's sandbox as policy, JSONL events → Helm events, $0 usage) and the lane switch on the `codex/` model prefix | `codexWorkerRunner(opts): WorkerRunner`, `laneRunner({ pi, codex })`, `parseCodexModel(name)` |
 | `src/prompt.ts` | builder and reviewer prompt text and the result instruction | `buildPrompt(...)`, `RESULT_INSTRUCTION` |
-| `src/helm.ts` | the service: composes the above, implements the twelve tools | `class Helm` |
+| `src/helm.ts` | the service: composes the above, implements the worker, budget, and lifecycle tools | `class Helm` |
 | `src/tools.ts` | tool registry: names, zod inputs, dispatch to `Helm` | `createToolRegistry(helm)` |
 | `src/server.ts` | `helm serve --http`: the daemon (Streamable HTTP MCP, CLI endpoint, dashboard on 127.0.0.1); `serve --stdio`: a per-session front-end that proxies to it | `serve(opts)`, `serveStdioProxy(port)` |
 | `src/cli.ts` | `helm` command line | main |
@@ -24,7 +24,7 @@ in `test/<module>.test.ts`, and must run with `npm test` from `helm/`.
 | `bin/update.mjs` | Standalone release staging and detached handover, surviving the old daemon | `stageRelease`, `launchUpgrade`, `applyUpgrade` |
 | `src/config.ts` | `$HELM_HOME`, spend cap, max workers | `loadConfig(env)` |
 
-Storage layout: `$HELM_HOME/helm.sqlite`, `$HELM_HOME/worktrees/<repoSlug>/<workerId>`,
+Storage layout: `$HELM_HOME/helm.sqlite` (core tables plus feature-owned tables such as budgets), `$HELM_HOME/worktrees/<repoSlug>/<workerId>`,
 `$HELM_HOME/logs/<workerId>/`, `$HELM_HOME/sessions/<workerId>/`.
 
 Worker id: `w-` + 8 hex chars. Branch: `helm/<workerId>`.

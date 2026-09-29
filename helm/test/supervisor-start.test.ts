@@ -16,8 +16,8 @@ const settings: Settings = {
   discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
 };
 
-function fakeHost(statuses: HostStatus[] = ['idle']) {
-  let pane: Pane | null = null;
+function fakeHost(statuses: HostStatus[] = ['idle'], existing = false) {
+  let pane: Pane | null = existing ? { id: 'pane-1', label: 'owner name', host: 'herdr' } : null;
   let resolveCalls = 0;
   let creates = 0;
   const sent: string[] = [];
@@ -63,7 +63,7 @@ test('supervisor start twice creates once and attaches once', async () => {
 });
 
 test('dead agent re-runs the launch command', async () => {
-  const fake = fakeHost(['unknown', 'idle']);
+  const fake = fakeHost(['unknown', 'idle'], true);
   const timing = clockAndSleep();
   await run({ project: 'owner/name', repo: '/repo', label: 'owner name', host: 'herdr' }, { host: fake.host, ...timing });
   assert.equal(fake.creates, 0);

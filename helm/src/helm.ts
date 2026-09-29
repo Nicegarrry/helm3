@@ -791,7 +791,22 @@ export class Helm {
   }
 
   async envelopeCheck(input: EnvelopeCheckInput): Promise<ToolOutcome<{ decisions: EnvelopeDecision[] }>> {
-    return { ok: true, decisions: await checkEnvelope(this.config.home, input, { jev: this.jev, envelopeTapAt: this.settings.factory.envelopeTapAt }) };
+    const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
+    let repo = worker?.repo;
+    if (!repo) {
+      try { repo = await this.resolveRepo(input.project); } catch { /* branch lookup failure stays fail closed */ }
+    }
+    let defaultBranch: string | undefined;
+    if (repo) {
+      try { defaultBranch = await this.workspace.defaultBranch(repo); } catch { /* protect the built-in branches below */ }
+    }
+    return { ok: true, decisions: await checkEnvelope(this.config.home, input, {
+      jev: this.jev,
+      envelopeTapAt: this.settings.factory.envelopeTapAt,
+      defaultBranch,
+      workerBaseRef: worker?.baseRef,
+      workerBranch: worker?.branch,
+    }) };
   }
 
   async tapRequest(input: TapRequestInput): Promise<ToolOutcome<{ id: string; expiresAt: string }>> {

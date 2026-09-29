@@ -75,6 +75,10 @@ function ascii(value: string): string {
   return value.replace(/[^\x20-\x7e]/g, ' ').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function refusalReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function createSupervisor(options: Options): SupervisorService {
   const { store, settings, hosts } = options;
   const now = options.now ?? (() => new Date());
@@ -172,14 +176,23 @@ export function createSupervisor(options: Options): SupervisorService {
       }
 
       if (command) {
-        await host.send(pane, command.summary);
+        try {
+          await host.send(pane, command.summary);
+        } catch (error) {
+          log(`wake ${command.id} refused: ${refusalReason(error)}`);
+        }
         markWakeDeliveredStmt.run(currentIso, command.id);
       } else {
         const byKind = new Map<string, number>();
         for (const wake of pending) byKind.set(wake.kind, (byKind.get(wake.kind) ?? 0) + 1);
         const counts = [...byKind.entries()].map(([kind, count]) => `${count} ${kind}`).join(', ');
         const line = `helm: ${pending.length} new for ${ascii(registered.project)} (${counts}). Call wake.list.`;
-        await host.send(pane, line);
+        try {
+          await host.send(pane, line);
+        } catch (error) {
+          const reason = refusalReason(error);
+          for (const wake of pending) log(`wake ${wake.id} refused: ${reason}`);
+        }
         for (const wake of pending) markWakeDeliveredStmt.run(currentIso, wake.id);
       }
       updateLastWakeStmt.run(currentIso, registered.project);
@@ -211,6 +224,7 @@ export function createSupervisor(options: Options): SupervisorService {
       return { ok: true, wakes };
     },
     manualWake(project, text) {
+      if (text.startsWith('-')) throw new Error('manual wake text must not start with "-" (Helm never generates one)');
       if (!supervisor(project)) return { ok: false, reason: `supervisor not registered: ${project}` };
       return { ok: true, wake: insertWake({ id: `wake-${randomUUID()}`, project, kind: 'manual', workerId: null, summary: text, command: true, createdAt: nowIso(now) }) };
     },

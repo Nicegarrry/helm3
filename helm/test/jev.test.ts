@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
-import { createJev } from '../src/jev.js';
+import { createJev, type JevResult } from '../src/jev.js';
 import { openStore } from '../src/store.js';
 import { loadSettings } from '../src/settings.js';
 
@@ -108,6 +108,35 @@ test('Jev retries a server error twice and never stores the API key', async () =
     assert.equal(attempts, 2);
     const row = store.sql.prepare('SELECT * FROM jev_calls').get() as Record<string, unknown>;
     assert.equal(row.error, null);
+    assert.ok(!JSON.stringify(row).includes(sentinel));
+  } finally {
+    store.close();
+  }
+});
+
+test('Jev redacts the API key from thrown fetch errors and does not throw', async () => {
+  const store = openStore(':memory:');
+  const sentinel = 'sentinel-api-key-in-fetch-error';
+  try {
+    const jev = createJev({
+      settings: settings(),
+      store,
+      env: { TYPESAFE_API_KEY: sentinel },
+      fetch: async () => {
+        throw new Error(`upstream failure: ${sentinel}`);
+      },
+    });
+
+    let result: JevResult | undefined;
+    await assert.doesNotReject(async () => {
+      result = await jev.ask('error', { state: {}, questions: { ok: { type: 'noul', instructions: 'okay?' } } });
+    });
+    assert.ok(result);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.ok(!result.reason.includes(sentinel));
+
+    const row = store.sql.prepare('SELECT * FROM jev_calls').get() as Record<string, unknown>;
+    assert.equal(row.error, 'upstream failure: [redacted]');
     assert.ok(!JSON.stringify(row).includes(sentinel));
   } finally {
     store.close();

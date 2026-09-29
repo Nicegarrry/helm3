@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
+import { loadRepoConfig } from './repoconfig.js';
 
 type CheckResult = { name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number };
 
@@ -53,13 +54,12 @@ export function gateRunner(): GateRunner {
       return { passed, checks: results };
     },
 
-    async defaultChecks(repo: string): Promise<GateCheck[]> {
-      const helmJsonPath = join(repo, 'helm.json');
-      if (existsSync(helmJsonPath)) {
+    async defaultChecks(repo: string, sha?: string): Promise<GateCheck[]> {
+      if (existsSync(join(repo, 'helm.json'))) {
         try {
-          const raw = JSON.parse(await readFile(helmJsonPath, 'utf8')) as { gates?: { name: string; command: string }[] };
-          if (Array.isArray(raw.gates) && raw.gates.length > 0) {
-            return raw.gates.map((gate) => ({ name: gate.name, command: gate.command }));
+          const config = await loadRepoConfig(repo, sha);
+          if (config.gates.length > 0) {
+            return config.gates.map((gate) => ({ name: gate.name, command: gate.command }));
           }
         } catch {
           // fall through to package.json

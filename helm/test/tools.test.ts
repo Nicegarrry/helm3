@@ -82,7 +82,7 @@ test('call() validates and dispatches a valid call to the matching Helm method',
 });
 
 
-test('routing inputs accept omitted models and reject invalid difficulty before dispatch', async () => {
+test('routing inputs accept omitted worker models and reject invalid difficulty before dispatch', async () => {
   const { helm, calls } = createFakeHelm();
   const registry = createToolRegistry(helm);
   assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'task', difficulty: 'super-easy' })).ok, true);

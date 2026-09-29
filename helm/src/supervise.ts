@@ -26,7 +26,18 @@ type Options = Readonly<{
   log?: (line: string) => void;
 }>;
 
-const STATE_WAKE_TARGETS = new Set(['succeeded', 'failed', 'idle', 'waiting', 'unknown', 'stopped']);
+export type WakeKindHandler = (event: EventRow, project: string, now: string) => Omit<WakeRow, 'deliveredAt' | 'ackedAt'> | null;
+export const wakeKinds = new Map<string, WakeKindHandler>();
+
+export function registerWakeKind(kind: string, handler: WakeKindHandler): void {
+  wakeKinds.set(kind, handler);
+}
+
+export function projectOf(event: { workerId: string; data?: Record<string, unknown> }): string | null {
+  if (event.workerId.startsWith('project:')) return event.workerId.slice('project:'.length) || null;
+  const project = event.data?.project;
+  return typeof project === 'string' && project.length > 0 ? project : null;
+}
 
 function nowIso(now: () => Date): string {
   return now().toISOString();
@@ -58,18 +69,16 @@ function toWake(row: Record<string, unknown>): WakeRow {
 }
 
 function eventWake(event: EventRow, project: string, now: string): Omit<WakeRow, 'deliveredAt' | 'ackedAt'> | null {
-  if (event.kind === 'ask') {
-    return { id: `wake-${randomUUID()}`, project, kind: 'ask', workerId: event.workerId, summary: String(event.data.question ?? event.data.summary ?? 'worker asked a question'), command: false, createdAt: now };
-  }
-  if (event.kind === 'watch.alert') {
-    return { id: `wake-${randomUUID()}`, project, kind: 'watch.alert', workerId: event.workerId, summary: String(event.data.detail ?? event.data.summary ?? event.data.rule ?? 'watch alert'), command: false, createdAt: now };
-  }
-  if (event.kind === 'state' && STATE_WAKE_TARGETS.has(String(event.data.to ?? ''))) {
-    const target = String(event.data.to);
-    return { id: `wake-${randomUUID()}`, project, kind: 'state', workerId: event.workerId, summary: `worker ${target}`, command: false, createdAt: now };
-  }
-  return null;
+  return wakeKinds.get(event.kind)?.(event, project, now) ?? null;
 }
+
+registerWakeKind('ask', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'ask', workerId: event.workerId, summary: String(event.data.question ?? event.data.summary ?? 'worker asked a question'), command: false, createdAt: now }));
+registerWakeKind('watch.alert', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'watch.alert', workerId: event.workerId, summary: String(event.data.detail ?? event.data.summary ?? event.data.rule ?? 'watch alert'), command: false, createdAt: now }));
+registerWakeKind('state', (event, project, now) => {
+  const target = String(event.data.to ?? '');
+  if (!new Set(['succeeded', 'failed', 'idle', 'waiting', 'unknown', 'stopped']).has(target)) return null;
+  return { id: `wake-${randomUUID()}`, project, kind: 'state', workerId: event.workerId, summary: `worker ${target}`, command: false, createdAt: now };
+});
 
 function ascii(value: string): string {
   return value.replace(/[^\x20-\x7e]/g, ' ').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -133,10 +142,9 @@ export function createSupervisor(options: Options): SupervisorService {
 
   const consumeEvents = consumer(store, 'supervisor-wakes', async (events) => {
     for (const event of events) {
-      const worker = store.getWorker(event.workerId);
-      if (!worker) continue;
-      if (!supervisor(worker.repoSlug)) continue;
-      const wake = eventWake(event, worker.repoSlug, nowIso(now));
+      const project = projectOf(event) ?? store.getWorker(event.workerId)?.repoSlug;
+      if (!project || !supervisor(project)) continue;
+      const wake = eventWake(event, project, nowIso(now));
       if (wake) insertWake(wake);
     }
   });

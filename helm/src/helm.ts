@@ -60,7 +60,7 @@ import { loadRepoConfig } from './repoconfig.js';
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { confirmTap, consumeTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTapsOnStartup, readEnvelope, requestTap, type EnvelopeView, type TapMemory } from './envelope.js';
+import { commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, tapReservationOwned, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -254,6 +254,7 @@ export class Helm {
   private readonly tapRandomInt?: (min: number, max: number) => number;
   private readonly tapPepper: Buffer;
   private readonly taps = new Map<string, TapMemory>();
+  private readonly tapReservations = new WeakMap<object, TapReservation>();
   private readonly guards = new Map<string, ToolGuard[]>();
   private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
@@ -318,8 +319,13 @@ export class Helm {
     this.jevChecker = deps.jevChecker;
     ensureTapTable(this.store);
     expireTapsOnStartup(this.store);
-    this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput, (project, kind, expectedActionHash, tapId) =>
-      tapId ? consumeTap(this.store, this.taps, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required'));
+    this.guard('budget.open', (input) => {
+      const request = input as BudgetOpenInput;
+      const result = envelopeBudgetGuard(this.config.home, request, (project, kind, expectedActionHash, tapId) =>
+        tapId ? reserveTap(this.store, this.taps, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required',
+        (reservation) => this.tapReservations.set(request, reservation));
+      return result;
+    });
     this.claims = deps.claims;
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
     this.retry = deps.retry;
@@ -777,14 +783,28 @@ export class Helm {
   async budgetOpen(input: BudgetOpenInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
     return runGuard(async () => {
       const reason = await this.refusal('budget.open', input);
-      if (reason) return refuse(reason);
-      const row = openBudget(this.store, {
-        project: input.project, label: input.label, capUsd: input.capUsd, capCodexTokens: input.codexTokens,
-        openedAt: this.nowIso(),
-      });
-      return { ok: true, budget: budgetStatus(this.store, row) };
+      const reservation = this.tapReservations.get(input);
+      this.tapReservations.delete(input);
+      if (reason) {
+        if (reservation) rollbackTap(this.taps, reservation.tapId, reservation.token);
+        return refuse(reason);
+      }
+      try {
+        if (reservation && !tapReservationOwned(this.taps, reservation)) throw new Error('tap reservation is no longer active');
+        const row = openBudget(this.store, {
+          project: input.project, label: input.label, capUsd: input.capUsd, capCodexTokens: input.codexTokens,
+          openedAt: this.nowIso(),
+        });
+        if (reservation) commitTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate());
+        return { ok: true, budget: budgetStatus(this.store, row) };
+      } catch (error) {
+        if (reservation) rollbackTap(this.taps, reservation.tapId, reservation.token);
+        throw error;
+      }
     });
   }
+
+  async tapTick(): Promise<void> { expireTaps(this.store, this.taps, this.nowDate()); }
 
   async envelopeGet(input: EnvelopeGetInput): Promise<ToolOutcome<EnvelopeView>> {
     envelopePath(this.config.home, input.project);

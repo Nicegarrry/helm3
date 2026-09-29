@@ -359,6 +359,7 @@ export class Helm {
       commitTap: (reservation) => commitDeployTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()),
       rollbackTap: (reservation) => rollbackDeployTap(this.taps, reservation.tapId, reservation.token),
       exec: deps.deployExec, fetch: deps.deployFetch, sleep: deps.deploySleep, env: deps.deployEnv,
+      smokeEnvAllowlist: this.settings.deploy?.smokeEnv ?? [],
       now: () => this.nowDate(),
     });
     this.queue = createQueue({

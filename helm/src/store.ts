@@ -196,6 +196,7 @@ export function openStore(path: string): Store {
   const insertGateStmt = db.prepare('INSERT INTO gates (gateId, workerId, head, passed, checks, at) VALUES (?, ?, ?, ?, ?, ?)');
   const listGatesStmt = db.prepare('SELECT * FROM gates WHERE workerId = ? ORDER BY at ASC');
   const insertPrStmt = db.prepare('INSERT INTO prs (number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?)');
+  const updatePrStmt = db.prepare('UPDATE prs SET workerId = ?, url = ?, head = ?, createdAt = ? WHERE number = ?');
   const getPrByWorkerStmt = db.prepare('SELECT * FROM prs WHERE workerId = ? ORDER BY number DESC LIMIT 1');
   const getPrByNumberStmt = db.prepare('SELECT * FROM prs WHERE number = ?');
   const addSpendStmt = db.prepare(
@@ -305,6 +306,10 @@ export function openStore(path: string): Store {
 
     insertPr(row: PrRow): void {
       insertPrStmt.run(row.number, row.workerId, row.url, row.head, row.createdAt);
+    },
+
+    updatePr(row: PrRow): void {
+      updatePrStmt.run(row.workerId, row.url, row.head, row.createdAt, row.number);
     },
 
     getPrByWorker(workerId: string): PrRow | undefined {

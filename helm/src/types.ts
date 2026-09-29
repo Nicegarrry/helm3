@@ -141,6 +141,7 @@ export interface Store {
   insertGate(row: GateRow): void;
   listGates(workerId: string): GateRow[];
   insertPr(row: PrRow): void;
+  updatePr(row: PrRow): void;
   getPrByWorker(workerId: string): PrRow | undefined;
   getPrByNumber(number: number): PrRow | undefined;
   addSpend(row: SpendRow): void;

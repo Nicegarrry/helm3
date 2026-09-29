@@ -112,15 +112,21 @@ function createFakeGitHub() {
   const prs = new Map<number, PrStatus>();
   const comments: Array<{ repoSlug: string; number: number; body: string }> = [];
   const merged: Array<{ repoSlug: string; number: number; expectedHead: string }> = [];
+  const opened: Array<{ base: string; head: string; title: string; body: string }> = [];
+  const updates: Array<{ repoSlug: string; number: number; input: { title?: string; body?: string } }> = [];
+  const existingByHead = new Map<string, { number: number; url: string }>();
   let nextNumber = 1;
 
   const github: GitHub = {
-    async openPr({ head: branch }) {
+    async openPr({ base, head: branch, title, body }) {
+      opened.push({ base, head: branch, title, body });
       const number = nextNumber++;
       const url = `https://github.com/acme/repo/pull/${number}`;
       prs.set(number, { number, state: 'open', head: `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
       return { number, url };
     },
+    async findPr(_repoSlug, head) { return existingByHead.get(head); },
+    async updatePr(repoSlug, number, input) { updates.push({ repoSlug, number, input }); },
     async prStatus(_repoSlug, number) {
       const pr = prs.get(number);
       if (!pr) throw new Error(`pr not found: ${number}`);
@@ -141,9 +147,12 @@ function createFakeGitHub() {
     github,
     comments,
     merged,
+    opened,
+    updates,
+    setExistingPr(head: string, pr: { number: number; url: string }): void { existingByHead.set(head, pr); },
     setPrStatus(number: number, patch: Partial<PrStatus>): void {
       const pr = prs.get(number);
-      if (pr) prs.set(number, { ...pr, ...patch });
+      prs.set(number, { number, state: 'open', head: 'unknown', mergeable: true, draft: false, checks: [], reviews: [], url: `https://example.invalid/${number}`, ...pr, ...patch });
     },
   };
 }
@@ -528,6 +537,107 @@ test('pr.open is refused without a passing gate at head, then allowed once gated
   const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
   assert.equal(opened.ok, true);
   assert.equal(pushed.length, 1);
+});
+
+test('pr.open updates an existing PR row after pushing and only edits passed metadata', async () => {
+  const { helm, store, pushed, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const worker = store.getWorker(spawned.workerId);
+  assert.ok(worker?.head);
+  store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+
+  const updated = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.deepEqual(updated, { ok: true, number: 230, url: 'https://example.invalid/230', head: worker.head, updated: true });
+  assert.equal(pushed.length, 1);
+  assert.equal(store.getPrByWorker(spawned.workerId)?.head, worker.head);
+  assert.deepEqual(github.updates, []);
+
+  const edited = await helm.prOpen({ workerId: spawned.workerId, title: 'Updated title', body: 'Updated body', draft: true });
+  assert.equal(edited.ok, true);
+  assert.deepEqual(github.updates, [{ repoSlug: worker.repoSlug, number: 230, input: { title: 'Updated title', body: 'Updated body' } }]);
+});
+
+test('pr.open refuses an existing PR before pushing when its head has no passing gate', async () => {
+  const { helm, store, pushed } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+
+  const refused = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(refused.ok, false);
+  assert.equal(pushed.length, 0);
+});
+
+test('pr.open records an existing GitHub PR when the local row is missing', async () => {
+  const { helm, store, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const worker = store.getWorker(spawned.workerId);
+  assert.ok(worker?.head);
+  github.setExistingPr(worker.branch, { number: 230, url: 'https://example.invalid/230' });
+  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+
+  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(opened.ok, true);
+  assert.equal(store.getPrByWorker(spawned.workerId)?.head, worker.head);
+});
+
+test('pr.open uses the default branch, worker prBase, and explicit base in order of precedence', async () => {
+  const { helm, store, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const first = await helm.spawn(spawnBody(repo, { baseRef: 'release' }));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  await helm.settle(first.workerId);
+  assert.equal((await helm.gate({ workerId: first.workerId })).ok, true);
+  assert.equal((await helm.prOpen({ workerId: first.workerId, draft: true })).ok, true);
+
+  const second = await helm.spawn(spawnBody(repo, { baseRef: 'release-2' }));
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  await helm.settle(second.workerId);
+  store.setMeta(second.workerId, { prBase: 'develop' });
+  assert.equal((await helm.gate({ workerId: second.workerId })).ok, true);
+  assert.equal((await helm.prOpen({ workerId: second.workerId, draft: true })).ok, true);
+
+  const third = await helm.spawn(spawnBody(repo, { baseRef: 'release-3' }));
+  assert.equal(third.ok, true);
+  if (!third.ok) return;
+  await helm.settle(third.workerId);
+  assert.equal((await helm.gate({ workerId: third.workerId })).ok, true);
+  assert.equal((await helm.prOpen({ workerId: third.workerId, base: 'hotfix', draft: true })).ok, true);
+  assert.deepEqual(github.opened.map((pr) => pr.base), ['main', 'develop', 'hotfix']);
+});
+
+test('merge.enqueue after an existing PR update uses the updated head', async () => {
+  const { helm, store, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  github.setPrStatus(230, { head: opened.head });
+  assert.equal((await helm.queue.enqueue({ number: 230 })).ok, true);
+  await helm.queue.tick();
+  const queued = helm.queue.queue({ project: store.getWorker(spawned.workerId)?.repoSlug ?? '' });
+  assert.equal(queued.ok, true);
+  if (queued.ok) assert.doesNotMatch(queued.items[0]?.reason ?? '', /head changed/);
 });
 
 test('steer is refused while running and allowed once idle', async () => {

@@ -620,13 +620,15 @@ export class Helm {
       must(passing.length > 0, `no passing gate at head ${head}`);
       await this.workspace.push(row.worktree, row.branch);
       const meta = this.store.getMeta(row.workerId);
-      const existing = this.store.getPrByWorker(input.workerId) ?? await this.github.findPr?.(row.repoSlug, row.branch);
+      const savedPr = this.store.getPrByWorker(input.workerId);
+      const existing = savedPr ?? await this.github.findPr?.(row.repoSlug, row.branch);
       if (existing) {
         if (input.title !== undefined || input.body !== undefined) {
           must(this.github.updatePr, 'GitHub update is unavailable');
           await this.github.updatePr(row.repoSlug, existing.number, { ...(input.title !== undefined ? { title: input.title } : {}), ...(input.body !== undefined ? { body: input.body } : {}) });
         }
-        if (!this.store.getPrByWorker(input.workerId)) this.store.insertPr({ number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: this.nowIso() });
+        const updatedPr: PrRow = { number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso() };
+        if (savedPr) this.store.updatePr(updatedPr); else this.store.insertPr(updatedPr);
         this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true });
         return { ok: true, number: existing.number, url: existing.url, head, updated: true };
       }

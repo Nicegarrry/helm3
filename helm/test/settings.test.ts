@@ -17,6 +17,7 @@ test('loadSettings returns the v4 defaults when helm.json is missing', () => {
       wake: { minIntervalSec: 120, maxPerHour: 20 },
       watch: { tickSec: 60, silenceMin: 15, sameRefusal: 5, attentionEverySec: 180, cooldownMin: 15 },
       supervisor: {},
+      budgets: { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 },
       discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
     });
   } finally {

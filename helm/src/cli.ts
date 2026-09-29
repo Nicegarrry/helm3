@@ -20,6 +20,7 @@ import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.
 import { startTicker } from './daemon.js';
 import { createInboxTriage, listInbox } from './inbox.js';
 import { createJev } from './jev.js';
+import { createJevCheck } from './jevcheck.js';
 import { loadSettings } from './settings.js';
 import { defaultExec, herdrHost, tmuxHost, type Host, type HostExec, type HostStatus } from './host.js';
 import type { SupervisorHost, SupervisorRow } from './types.js';
@@ -57,6 +58,7 @@ function usage(): void {
   supervisor start <owner/name> --repo <abs path> [--host herdr|tmux] [--label <text>]
   supervisor list [--json]
   wake <project> "<text>" [--json]
+  jev check --preset <issue|dedupe|verdict|raw> --file <json|md> [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
   shutdown`);
 }
@@ -447,6 +449,16 @@ const cmdWake = (args: string[]) =>
     printOutcome(service.manualWake(project, text), values.json === true);
   });
 
+const cmdJev = async (args: string[]): Promise<void> => {
+  const [verb, ...rest] = args;
+  if (verb !== 'check') { usage(); process.exitCode = 2; return; }
+  const { values } = parseArgs({ args: rest, options: { preset: { type: 'string' }, file: { type: 'string' }, project: { type: 'string' }, json: { type: 'boolean' } } });
+  if (!values.preset || !values.file) { usage(); process.exitCode = 2; return; }
+  const contents = readFileSync(resolve(process.cwd(), values.file as string), 'utf8');
+  const input = (values.file as string).endsWith('.json') ? JSON.parse(contents) : contents;
+  printOutcome(await postTool('jev.check', { preset: values.preset, project: values.project, input }), values.json === true);
+};
+
 /** HTTP owns the daemon; stdio attaches or starts it. See README.md. */
 async function cmdServe(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { stdio: { type: 'boolean' }, http: { type: 'boolean' }, port: { type: 'string' } } });
@@ -475,7 +487,7 @@ async function cmdServe(args: string[]): Promise<void> {
     config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
-    discord,
+    discord, jevChecker: createJevCheck({ jev, store }),
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
@@ -537,7 +549,7 @@ const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) 
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, supervisor: cmdSupervisor, wake: cmdWake,
+  inbox: cmdInbox, reply: cmdReply, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev,
 };
 
 async function main(): Promise<void> {

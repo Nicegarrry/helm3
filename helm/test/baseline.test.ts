@@ -86,6 +86,32 @@ test('gate.baseline refuses a passing validator command', async () => {
   } finally { store.close(); rmSync(repo, { recursive: true, force: true }); }
 });
 
+test('gate.baseline refuses a validator with no changed files', async () => {
+  const { repo, baseSha } = makeRepo({ 'test/feature.test.ts': 'assert.fail()' });
+  git(repo, ['reset', '--hard', baseSha]);
+  const store = openStore(':memory:');
+  const gates: GateRunner = { async run() { throw new Error('must not run'); }, async defaultChecks() { return []; } };
+  const helm = deps(store, gates);
+  try {
+    store.insertWorker(worker(repo, baseSha, baseSha)); store.setMeta('w-validator', { issue: 183 });
+    assert.deepEqual(await helm.baseline({ workerId: 'w-validator' }), { ok: false, reason: 'validator changed no files' });
+  } finally { store.close(); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test('gate.baseline refuses acceptance files missing from the validator diff', async () => {
+  const { repo, baseSha, head } = makeRepo({ 'test/feature.test.ts': 'assert.fail()' });
+  const store = openStore(':memory:');
+  const gates: GateRunner = { async run() { throw new Error('must not run'); }, async defaultChecks() { return []; } };
+  const helm = deps(store, gates);
+  try {
+    const row = worker(repo, baseSha, head);
+    store.insertWorker({ ...row, result: { ...row.result!, acceptance: { command: 'npm test', files: ['test/missing.test.ts'] } } });
+    store.setMeta('w-validator', { issue: 183 });
+    const refused = await helm.baseline({ workerId: 'w-validator' });
+    assert.equal(refused.ok, false); if (!refused.ok) assert.match(refused.reason, /test\/missing\.test\.ts/);
+  } finally { store.close(); rmSync(repo, { recursive: true, force: true }); }
+});
+
 test('gate.baseline names non-test files and rejects non-validator workers', async () => {
   const { repo, baseSha, head } = makeRepo({ 'test/feature.test.ts': 'assert.fail()', 'src/feature.ts': 'export const x = 1;' });
   const store = openStore(':memory:');

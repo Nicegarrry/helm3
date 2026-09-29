@@ -46,6 +46,9 @@ export async function createBaseline(input: { store: Store; gates: GateRunner; c
   if (!testCommit) return { ok: false, reason: 'validator has no head' };
   const patterns = (await loadRepoConfig(worker.repo, worker.baseSha)).acceptance?.testGlobs ?? [];
   const files = await changedFiles(worker);
+  if (files.length === 0) return { ok: false, reason: 'validator changed no files' };
+  const missing = acceptance.files.filter((file) => !files.includes(file));
+  if (missing.length > 0) return { ok: false, reason: `validator acceptance files not changed: ${missing.join(', ')}` };
   const offending = files.filter((file) => !matches(file, patterns));
   if (offending.length > 0) return { ok: false, reason: `validator changed non-test files: ${offending.join(', ')}` };
   const id = `b-${randomBytes(4).toString('hex')}`; const logDir = join(config.home, 'logs', worker.workerId, `baseline-${id}`);

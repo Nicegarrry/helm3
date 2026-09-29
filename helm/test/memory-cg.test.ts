@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -12,8 +15,8 @@ import { z } from 'zod';
 
 type Call = { name: string; arguments: Record<string, unknown> };
 const TEST_ENV_FILE = '/definitely-missing/helm-memory-test-env';
-const createMemorySync = (options: Parameters<typeof createMemorySyncImpl>[0]) => createMemorySyncImpl({ ...options, envFile: TEST_ENV_FILE });
-const settings = (enabled: boolean, url = 'http://127.0.0.1:9/mcp') => ({ memory: { cg: { enabled, url, keyEnv: 'CG_TEST_KEY' } } });
+const createMemorySync = (options: Parameters<typeof createMemorySyncImpl>[0]) => createMemorySyncImpl({ ...options, envFile: options.envFile ?? TEST_ENV_FILE });
+const settings = (enabled: boolean, url = 'http://127.0.0.1:9/mcp', keyEnv = 'CG_TEST_KEY') => ({ memory: { cg: { enabled, url, keyEnv } } });
 const textResult = (value: Record<string, unknown>) => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 const renderedLog = (input: Record<string, unknown>) => {
   const lines = String(input.entry ?? '').split(/\r\n?|\n/); return [`- ${String(input.date ?? '')}: ${lines[0]}`, ...lines.slice(1).map((line) => `  ${line}`)].join('\n');
@@ -206,6 +209,23 @@ test('memory sync uses the injected env file when HOME is unavailable', async ()
     assert.equal(made, 0);
     assert.equal(store.listAllEvents()[0]?.kind, 'memory.cg.missing_key');
   } finally { store.close(); }
+});
+
+test('CG sync reads a missing process key from its injected env file', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'helm-cg-env-'));
+  const envFile = join(directory, 'env');
+  const keyEnv = `CG_TEST_KEY_FROM_FILE_${process.pid}`;
+  writeFileSync(envFile, `${keyEnv}=file-secret\n`);
+  const store = openStore(':memory:'); outbox(store, [{ op: 'log', path: 'team/lesson/from-file.md', args: { path: 'team/lesson/from-file.md', entry: 'from file' } }]);
+  let key: string | undefined;
+  try {
+    const tick = createMemorySync({ store, settings: settings(true, undefined, keyEnv), env: {}, envFile, clientFactory: (_url, receivedKey) => { key = receivedKey; return fakeClient([], () => textResult({ ok: true })); } });
+    await tick();
+    assert.equal(key, 'file-secret');
+    assert.equal((store.sql.prepare('SELECT syncedAt FROM memory_outbox').get() as { syncedAt: string | null }).syncedAt !== null, true);
+  } finally {
+    store.close(); rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('missing keys and connect failures are stateful and back off', async () => {

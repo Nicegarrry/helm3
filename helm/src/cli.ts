@@ -487,7 +487,7 @@ async function cmdServe(args: string[]): Promise<void> {
   if (values.stdio && !values.http) {
     const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port));
     const handle = await serveStdioProxy(live.port);
-    console.error(`helm stdio front-end attached to daemon pid ${live.pid}; status page at http://127.0.0.1:${live.port}/`);
+    console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);
     await handle.closed;
     await handle.close();
     process.exit(0);
@@ -521,7 +521,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
-  const stopMemory = startTicker(1000, [createMemorySync({ store, settings, env: process.env })]);
+  const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
   const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);

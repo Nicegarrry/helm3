@@ -6,7 +6,6 @@ import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { z } from 'zod';
 import type {
-  EventRow,
   BaselineRow,
   GateRow,
   GateRunner,
@@ -172,9 +171,6 @@ function parseOwnerRepo(url: string): string | null {
 }
 
 const SPEND_SERIES_POINTS = 300;
-const DETAIL_EVENT_TAIL = 200;
-const EVENTS_DEFAULT_LIMIT = 100;
-const EVENTS_MAX_LIMIT = 1000;
 
 /** Review family: leading letters of the last model path segment, independent of provider. */
 export function modelFamily(model: string): string {
@@ -715,7 +711,6 @@ export class Helm {
     });
   }
 
-  /** Read-only dashboard data: run status, every worker with spend and last event, and a per-model rollup. */
   async reviewRecord(input: ReviewRecordInput): Promise<ToolOutcome<unknown>> {
     if (!this.review) return refuse('review service is not configured');
     return this.review.record(input);
@@ -743,36 +738,6 @@ export class Helm {
     });
   }
 
-  /** One worker's drill-down for the dashboard: overview row, result, diff stat, gates, PR and the last events. */
-  async workerDetail(workerId: string) {
-    return runGuard(async () => {
-      const row = requireValue(this.store.getWorker(workerId), 'worker not found');
-      let diffStat = '';
-      try { diffStat = await this.workspace.diffStat(row.worktree, row.baseSha); } catch { diffStat = ''; }
-      const events = this.store.listEvents(workerId, { limit: 1_000_000 }).slice(-DETAIL_EVENT_TAIL);
-      return {
-        ok: true,
-        worker: this.overviewWorker(row, this.nowIso()),
-        result: row.result,
-        rawResultText: row.rawResultText,
-        diffStat,
-        gates: this.store.listGates(workerId),
-        pr: this.store.getPrByWorker(workerId) ?? null,
-        events,
-      };
-    });
-  }
-
-  /** Events across every worker with `seq > afterSeq`, ascending, for the dashboard's incremental poll. */
-  async recentEvents(afterSeq = 0, limit = EVENTS_DEFAULT_LIMIT): Promise<ToolOutcome<{ events: EventRow[] }>> {
-    return runGuard(async () => {
-      const safeAfter = Number.isFinite(afterSeq) ? Math.max(0, Math.floor(afterSeq)) : 0;
-      const safeLimit = Number.isFinite(limit) ? Math.min(EVENTS_MAX_LIMIT, Math.max(1, Math.floor(limit))) : EVENTS_DEFAULT_LIMIT;
-      return { ok: true, events: this.store.listAllEvents({ afterSeq: safeAfter, limit: safeLimit }) };
-    });
-  }
-
-  /** The per-worker row shared by overview() and workerDetail(), so both views agree on every field. */
   private overviewWorker(r: WorkerRow, now: string) {
     const spend = this.store.spendFor(r.workerId);
     const last = this.store.listEvents(r.workerId, { limit: 1_000_000 }).at(-1);

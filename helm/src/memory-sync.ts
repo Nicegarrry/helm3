@@ -57,7 +57,7 @@ function pageContainsEntry(result: any, renderedEntry: string): boolean {
 }
 
 export function createMemorySync(options: SyncOptions): () => Promise<void> {
-  const env = { ...loadEnvFile(options.envFile ?? join(homedir(), '.config', 'helm', 'env')), ...(options.env ?? process.env) };
+  const sourceEnv = () => ({ ...loadEnvFile(options.envFile ?? join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) });
   const now = options.now ?? (() => new Date());
   let keyPresent: boolean | undefined;
   let failureCount = 0;
@@ -81,7 +81,7 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
   return async () => {
     const cg = options.settings.memory.cg;
     if (!cg?.enabled) return;
-    const key = env[cg.keyEnv];
+    const key = sourceEnv()[cg.keyEnv];
     const present = Boolean(key);
     if (keyPresent !== present) {
       keyPresent = present;

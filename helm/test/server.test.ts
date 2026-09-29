@@ -15,11 +15,6 @@ import type { Helm } from '../src/helm.js';
 /** A fake Helm: every tool method just returns a canned ok outcome. Enough to exercise the transport. */
 const FAKE_WORKER = { workerId: 'w-abc12345', state: 'idle', role: 'builder', model: 'anthropic/claude', branch: 'helm/w-abc12345', head: '1234567890abcdef', createdAt: '2026-01-01T00:00:00.000Z' };
 const FAKE_OVERVIEW_WORKER = { ...FAKE_WORKER, state: 'running', repoSlug: 'acme/widgets', objective: 'Add a <flag>', updatedAt: '2026-01-01T00:00:05.000Z', elapsedMs: 5000, spendUsd: 0.1234, tokens: 12345, unknownCostEvents: 0, lastEvent: { kind: 'tool.call', at: '2026-01-01T00:00:04.000Z', data: { tool: 'bash', summary: 'npm test' } }, resultStatus: null };
-const FAKE_EVENTS = [
-  { seq: 1, workerId: 'w-abc12345', at: '2026-01-01T00:00:00.000Z', kind: 'spawned', data: {} },
-  { seq: 2, workerId: 'w-abc12345', at: '2026-01-01T00:00:04.000Z', kind: 'tool.call', data: { tool: 'bash', summary: 'npm test' } },
-];
-
 function createFakeHelm(home: string): Helm {
   const ok = (extra: Record<string, unknown> = {}): ToolOutcome<unknown> => ({ ok: true, ...extra });
   const method = (extra: Record<string, unknown> = {}) => async () => ok(extra);
@@ -43,11 +38,6 @@ function createFakeHelm(home: string): Helm {
       models: [{ model: 'anthropic/claude', workers: 1, active: 1, spendUsd: 0.1234, tokens: 12345 }],
       spendSeries: [{ at: '2026-01-01T00:00:01.000Z', spendUsd: 0.05 }, { at: '2026-01-01T00:00:04.000Z', spendUsd: 0.1234 }],
     }),
-    workerDetail: async (workerId: string) =>
-      workerId === FAKE_WORKER.workerId
-        ? ok({ worker: FAKE_OVERVIEW_WORKER, result: null, rawResultText: null, diffStat: ' a.ts | 1 +', gates: [], pr: null, events: FAKE_EVENTS })
-        : { ok: false, reason: 'worker not found' },
-    recentEvents: async (afterSeq = 0, limit = 100) => ok({ events: FAKE_EVENTS.filter((e) => e.seq > afterSeq).slice(0, limit) }),
     prMerge: method({ merged: true }),
   } as unknown as Helm;
 }
@@ -81,20 +71,9 @@ function postWithHost(port: number, path: string, host: string, body: string): P
   });
 }
 
-test('serve http: GET / with Accept: text/html returns the dashboard shell from ui.ts', async () => {
+test('serve http: GET / returns the plain-text CLI table', async () => {
   await withServer(async (port) => {
-    const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { accept: 'text/html' } });
-    assert.equal(res.status, 200);
-    assert.ok(res.headers.get('content-type')?.includes('text/html'));
-    const body = await res.text();
-    assert.match(body, /<title>Helm/);
-    assert.match(body, /<html/);
-  });
-});
-
-test('serve http: GET / without an html Accept header returns the plain-text table', async () => {
-  await withServer(async (port) => {
-    const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { accept: '*/*' } });
+    const res = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(res.status, 200);
     assert.ok(res.headers.get('content-type')?.includes('text/plain'));
     const body = await res.text();
@@ -120,48 +99,6 @@ test('serve http: GET /api/state includes spendSeries', async () => {
     assert.equal(body.ok, true);
     assert.equal(body.spendSeries.length, 2);
     assert.equal(body.spendSeries[1]?.spendUsd, 0.1234);
-  });
-});
-
-test('serve http: GET /api/worker/<id> returns the worker detail JSON', async () => {
-  await withServer(async (port) => {
-    const res = await fetch(`http://127.0.0.1:${port}/api/worker/w-abc12345`);
-    assert.equal(res.status, 200);
-    assert.ok(res.headers.get('content-type')?.includes('application/json'));
-    const body = (await res.json()) as { ok: boolean; worker: { workerId: string }; diffStat: string; gates: unknown[]; pr: unknown; events: Array<{ seq: number }> };
-    assert.equal(body.ok, true);
-    assert.equal(body.worker.workerId, 'w-abc12345');
-    assert.equal(body.diffStat, ' a.ts | 1 +');
-    assert.deepEqual(body.gates, []);
-    assert.equal(body.pr, null);
-    assert.deepEqual(body.events.map((e) => e.seq), [1, 2]);
-  });
-});
-
-test('serve http: GET /api/worker/<unknown> returns ok:false, not a 404 or 500', async () => {
-  await withServer(async (port) => {
-    const res = await fetch(`http://127.0.0.1:${port}/api/worker/nope`);
-    assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: false, reason: 'worker not found' });
-  });
-});
-
-test('serve http: GET /api/events?after=<seq> returns events after the cursor', async () => {
-  await withServer(async (port) => {
-    const all = (await (await fetch(`http://127.0.0.1:${port}/api/events?after=0`)).json()) as { ok: boolean; events: Array<{ seq: number; kind: string }> };
-    assert.equal(all.ok, true);
-    assert.deepEqual(all.events.map((e) => e.seq), [1, 2]);
-    assert.equal(all.events[1]?.kind, 'tool.call');
-
-    const tail = (await (await fetch(`http://127.0.0.1:${port}/api/events?after=1`)).json()) as { ok: boolean; events: Array<{ seq: number }> };
-    assert.deepEqual(tail.events.map((e) => e.seq), [2]);
-
-    const limited = (await (await fetch(`http://127.0.0.1:${port}/api/events?after=0&limit=1`)).json()) as { ok: boolean; events: Array<{ seq: number }> };
-    assert.deepEqual(limited.events.map((e) => e.seq), [1]);
-
-    const noParams = (await (await fetch(`http://127.0.0.1:${port}/api/events`)).json()) as { ok: boolean; events: unknown[] };
-    assert.equal(noParams.ok, true);
-    assert.equal(noParams.events.length, 2);
   });
 });
 

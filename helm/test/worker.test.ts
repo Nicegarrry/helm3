@@ -313,6 +313,12 @@ test('parseWorkerResult: strict JSON, fenced JSON (last wins), and invalid input
   assert.equal(parseWorkerResult(JSON.stringify({ ...validResult, extra: 'field' })), null);
 });
 
+test('parseWorkerResult accepts a question result and requires its question', () => {
+  const question: WorkerResult = { status: 'question', summary: 'blocked on a decision', question: 'Which API should I use?', changedFiles: [], commandsRun: [] };
+  assert.deepEqual(parseWorkerResult(JSON.stringify(question)), question);
+  assert.equal(parseWorkerResult(JSON.stringify({ ...question, question: undefined })), null);
+});
+
 test('F10: parseWorkerResult tries fences from last to first, skipping a later fence that does not validate', () => {
   const unrelated = JSON.stringify({ foo: 'bar', not: 'a worker result' });
   const text = ['```json', JSON.stringify(validResult), '```', 'then some other unrelated json:', '```json', unrelated, '```'].join('\n');

@@ -71,7 +71,7 @@ small { color: var(--mute); font-size: 12px; } td:first-child small { white-spac
 .pill { display:inline-block; padding: 3px 11px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space:nowrap; line-height: 1.4;
   box-shadow: 0 1px 0 rgba(255,255,255,.35) inset; }
 .s-running { color: var(--blue); background: var(--blue-bg); } .s-succeeded { color: var(--green); background: var(--green-bg); }
-.s-failed, .s-unknown { color: var(--red); background: var(--red-bg); } .s-idle, .s-interrupted, .s-queued { color: var(--amber); background: var(--amber-bg); }
+.s-failed, .s-unknown { color: var(--red); background: var(--red-bg); } .s-idle, .s-waiting, .s-interrupted, .s-queued { color: var(--amber); background: var(--amber-bg); }
 .s-stopped { color: var(--gray); background: var(--gray-bg); }
 .tools { display:flex; gap: 10px; align-items:center; flex-wrap:wrap; margin: 0 0 14px; }
 .seg { display:inline-flex; background: var(--hover); border: 1px solid var(--glass-line); border-radius: 999px; padding: 3px; gap: 2px; }
@@ -129,7 +129,7 @@ function summarize(kind, data) {
     default: for (var k in d) if (typeof d[k] === 'string') return d[k]; return '';
   }
 }
-var ACTIVE = { queued: 1, running: 1, idle: 1 }, DONE = { succeeded: 1, stopped: 1 }, FAILED = { failed: 1, unknown: 1, interrupted: 1 };
+var ACTIVE = { queued: 1, running: 1, idle: 1, waiting: 1 }, DONE = { succeeded: 1, stopped: 1 }, FAILED = { failed: 1, unknown: 1, interrupted: 1 };
 var state = null, receivedAt = 0, lastSeq = 0, events = [], filter = 'all', query = '', openId = null, pinned = true, down = false;
 
 function setDown(v) { down = v; $('dot').className = 'live' + (v ? ' down' : ''); $('conn').className = v ? 'on' : ''; }

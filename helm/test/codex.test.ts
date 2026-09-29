@@ -30,7 +30,9 @@ emit({ type: 'item.completed', item: { id: 'i2', type: 'file_change', changes: [
 if (mode === 'hang') { setTimeout(() => {}, 60000); }
 else if (mode === 'fail') { process.stderr.write('codex: not logged in\\n'); process.exit(2); }
 else {
-  const ok = JSON.stringify({ status: 'succeeded', summary: 'did it', changedFiles: ['a.ts'], commandsRun: ['npm test'] });
+  const ok = mode === 'question'
+    ? JSON.stringify({ status: 'question', summary: 'need a decision', question: 'Which option should I choose?', changedFiles: [], commandsRun: [] })
+    : JSON.stringify({ status: 'succeeded', summary: 'did it', changedFiles: ['a.ts'], commandsRun: ['npm test'] });
   const text = mode === 'malformed-first' && !isResume ? 'not json at all' : ok;
   emit({ type: 'item.completed', item: { id: 'i3', type: 'agent_message', text } });
   emit({ type: 'turn.completed', usage: { input_tokens: 1000, cached_input_tokens: 400, cache_write_input_tokens: 0, output_tokens: 50, reasoning_output_tokens: 10 } });
@@ -124,6 +126,15 @@ test('run: a worker with a recorded thread resumes it instead of starting a new 
   assert.equal(outcome.sessionFile, `${CODEX_SESSION_PREFIX}abc-123`);
   const [call] = await f.calls();
   assert.deepEqual(call!.args.slice(0, 3), ['exec', 'resume', 'abc-123']);
+});
+
+test('run: a Codex JSONL question result is parsed and keeps the thread session', async () => {
+  const f = await fixture('question');
+  const { hooks, events } = collectHooks();
+  const outcome = await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Choose an API', hooks);
+  assert.deepEqual(outcome.result, { status: 'question', summary: 'need a decision', question: 'Which option should I choose?', changedFiles: [], commandsRun: [] });
+  assert.equal(outcome.sessionFile, `${CODEX_SESSION_PREFIX}thread-1`);
+  assert.ok(events.some((e) => e.kind === 'result' && e.data.status === 'question'));
 });
 
 test('run: a malformed final message gets exactly one correction turn, on the same thread', async () => {

@@ -1,10 +1,12 @@
-/** The tool registry: maps the twelve tool names to their zod input schemas and dispatches validated calls to a Helm instance. */
+/** The tool registry: maps tool names to their zod input schemas and dispatches validated calls to a Helm instance. */
 import type { z } from 'zod';
 import {
   emptyInput,
   daemonInput,
   gateInput,
   inspectInput,
+  inboxListInput,
+  inboxReplyInput,
   listInput,
   prMergeInput,
   prOpenInput,
@@ -43,8 +45,8 @@ const TOOLS: readonly ToolDef[] = [
   def('worker.spawn', 'Start an isolated worker. Omit model for Codex subscription (Terra); difficulty=easy uses Codex Luna; super-easy uses Qwen 3.8 Flash. Kimi K3 and Qwen 3.8 Max are excluded from automatic selection. Explicit model overrides are honoured.', spawnInput, (h, i) => h.spawn(i)),
   def('worker.inspect', 'Get a worker\'s current state, spend, diff stat, result and recent events.', inspectInput, (h, i) => h.inspect(i)),
   def('worker.list', 'List workers, optionally filtered by repo and/or state, as one summary per worker.', listInput, (h, i) => h.list(i)),
-  def('worker.wait', 'Block until any of the given workers leaves queued/running (to succeeded, failed, idle, stopped or interrupted) or the timeout passes. Use this instead of polling worker.inspect; if it returns timedOut, call it again.', waitInput, (h, i) => h.wait(i)),
-  def('worker.steer', 'Send a follow-up message to an idle, succeeded, failed or interrupted worker to start another turn.', steerInput, (h, i) => h.steer(i)),
+  def('worker.wait', 'Block until any of the given workers leaves queued/running (to succeeded, failed, idle, waiting, stopped or interrupted) or the timeout passes. Use this instead of polling worker.inspect; if it returns timedOut, call it again.', waitInput, (h, i) => h.wait(i)),
+  def('worker.steer', 'Send a follow-up message to an idle, waiting, succeeded, failed or interrupted worker to start another turn.', steerInput, (h, i) => h.steer(i)),
   def('worker.stop', 'Request a running worker to stop at the next turn boundary and wait briefly for it to settle.', stopInput, (h, i) => h.stop(i)),
   def('gate.run', 'Run the repo\'s checks (tests, lint, etc.) against a worker\'s current commit and record pass/fail.', gateInput, (h, i) => h.gate(i)),
   def('pr.open', 'Push a worker\'s branch and open a pull request; requires a passing gate at the worker\'s current head.', prOpenInput, (h, i) => h.prOpen(i)),
@@ -52,6 +54,8 @@ const TOOLS: readonly ToolDef[] = [
   def('review.request', 'Review an open PR. Omit model for Gemini Flash, or Codex Terra when the builder is Gemini, preserving family independence. Posts findings as a PR comment.', reviewInput, (h, i) => h.reviewRequest(i)),
   def('run.status', 'Get overall spend, the spend cap, and how many worker slots are active out of the configured maximum.', emptyInput, (h) => h.runStatus()),
   def('pr.merge', 'Merge a pull request, but only if it is open, mergeable, at the exact expected head commit, and all checks passed.', prMergeInput, (h, i) => h.prMerge(i)),
+  def('inbox.list', 'List open worker questions, optionally filtered by project or state.', inboxListInput, (h, i) => h.inboxList(i)),
+  def('inbox.reply', 'Answer an open worker question and resume that worker on the same session.', inboxReplyInput, (h, i) => h.inboxReply(i)),
   def('supervisor.register', 'Register or update the owner supervisor for a project.', supervisorRegisterInput, (h, i) => h.supervisorRegister(i)),
   def('supervisor.list', 'List registered project supervisors.', supervisorListInput, (h) => h.supervisorList()),
   def('wake.list', 'List unacknowledged supervisor wakes for a project, optionally acknowledging them.', wakeListInput, (h, i) => h.wakeList(i)),

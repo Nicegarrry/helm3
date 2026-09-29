@@ -4,18 +4,38 @@ import type { DatabaseSync } from 'node:sqlite';
 
 
 export const workerResultSchema = z.object({
-  status: z.enum(['succeeded', 'failed', 'partial']),
+  status: z.enum(['succeeded', 'failed', 'partial', 'question']),
   summary: z.string().min(1).max(4000),
   changedFiles: z.array(z.string().min(1)).max(500).default([]),
   commandsRun: z.array(z.string().min(1)).max(200).default([]),
+  question: z.string().min(1).max(4000).optional(),
   notes: z.string().max(8000).optional(),
-}).strict();
+}).strict().superRefine((result, ctx) => {
+  if (result.status === 'question' && !result.question) {
+    ctx.addIssue({ code: 'custom', path: ['question'], message: 'question is required when status is question' });
+  }
+});
 export type WorkerResult = z.infer<typeof workerResultSchema>;
 
-export const WORKER_STATES = ['queued', 'running', 'idle', 'succeeded', 'failed', 'stopped', 'interrupted', 'unknown'] as const;
+export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded', 'failed', 'stopped', 'interrupted', 'unknown'] as const;
 export type WorkerState = (typeof WORKER_STATES)[number];
 export const WORKER_ROLES = ['builder', 'reviewer'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
+
+export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
+export type InboxState = (typeof INBOX_STATES)[number];
+export type InboxRow = Readonly<{
+  id: string;
+  workerId: string;
+  project: string;
+  question: string;
+  state: InboxState;
+  answer: string | null;
+  answeredBy: string | null;
+  triage: Record<string, unknown> | null;
+  createdAt: string;
+  answeredAt: string | null;
+}>;
 
 
 export type WorkerRow = Readonly<{
@@ -92,7 +112,7 @@ export interface Store {
   getWorker(workerId: string): WorkerRow | undefined;
   findByIdempotencyKey(key: string): WorkerRow | undefined;
   listWorkers(filter?: { repo?: string; state?: WorkerState }): WorkerRow[];
-  appendEvent(workerId: string, kind: string, data?: Record<string, unknown>): EventRow;
+  appendEvent(workerId: string, kind: string, data?: Record<string, unknown>, at?: string): EventRow;
   listEvents(workerId: string, opts?: { afterSeq?: number; limit?: number }): EventRow[];
   /** Events across every worker, ascending seq, `seq > afterSeq`. Default limit 100, capped at 1000. */
   listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[];
@@ -241,6 +261,8 @@ export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.numb
 export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();
 export const steerInput = z.object({ workerId: z.string().min(1), message: z.string().min(1).max(20000) }).strict();
 export const stopInput = z.object({ workerId: z.string().min(1) }).strict();
+export const inboxListInput = z.object({ project: z.string().min(1).optional(), state: z.enum(INBOX_STATES).default('open') }).strict();
+export const inboxReplyInput = z.object({ id: z.string().regex(/^q-[0-9a-f]+$/), answer: z.string().min(1).max(20000), by: z.string().min(1).max(200).default('supervisor') }).strict();
 export const waitInput = z.object({
   workerIds: z.array(z.string().min(1)).min(1).max(20),
   // Bounded under Claude Code's idle window for MCP tool calls (30 minutes on stdio, 5 on
@@ -259,7 +281,7 @@ export const supervisorListInput = emptyInput;
 export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boolean().default(false) }).strict();
 export const supervisorRotateInput = z.object({ project: z.string().min(1), focus: z.string().min(1).max(4000) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply'] as const;
 export type ToolName = string;
 
 

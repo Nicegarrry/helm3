@@ -618,10 +618,14 @@ export class Helm {
       const head = requireValue(row.head, 'worker has no commits yet');
       const passing = this.store.listGates(input.workerId).filter((g) => g.head === head && g.passed);
       must(passing.length > 0, `no passing gate at head ${head}`);
-      await this.workspace.push(row.worktree, row.branch);
       const meta = this.store.getMeta(row.workerId);
       const savedPr = this.store.getPrByWorker(input.workerId);
       const existing = savedPr ?? await this.github.findPr?.(row.repoSlug, row.branch);
+      if (existing) {
+        const status = await this.github.prStatus(row.repoSlug, existing.number);
+        must(status.state === 'open', `pull request #${existing.number} is ${status.state}; refusing to push`);
+      }
+      await this.workspace.push(row.worktree, row.branch);
       if (existing) {
         if (input.title !== undefined || input.body !== undefined) {
           must(this.github.updatePr, 'GitHub update is unavailable');

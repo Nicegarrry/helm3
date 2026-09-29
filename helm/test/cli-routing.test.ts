@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 // Exercise the actual CLI parser and HTTP request, without starting any model workers.
-test('CLI forwards optional models and task tiers for spawn and review', async (t) => {
+test('CLI forwards optional models, task tiers, and PR base', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'helm-cli-routing-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -30,7 +30,8 @@ test('CLI forwards optional models and task tiers for spawn and review', async (
   await cli('spawn', '--repo', '/repo', '--objective', 'task', '--difficulty', 'easy');
   await cli('spawn', '--repo', '/repo', '--objective', 'task', '--difficulty', 'super-easy', '--model', 'custom/model');
   await cli('review', 'w-1');
-  assert.equal(calls.length, 4);
+  await cli('pr', 'w-1', '--base', 'develop');
+  assert.equal(calls.length, 5);
   assert.equal(calls[0]!.path, '/tools/worker.spawn');
   assert.equal(calls[0]!.body.model, undefined);
   assert.equal(calls[0]!.body.difficulty, undefined);
@@ -38,4 +39,5 @@ test('CLI forwards optional models and task tiers for spawn and review', async (
   assert.equal(calls[2]!.body.difficulty, 'super-easy');
   assert.equal(calls[2]!.body.model, 'custom/model');
   assert.deepEqual(calls[3], { path: '/tools/review.request', body: { workerId: 'w-1' } });
+  assert.deepEqual(calls[4], { path: '/tools/pr.open', body: { workerId: 'w-1', base: 'develop', draft: true } });
 });

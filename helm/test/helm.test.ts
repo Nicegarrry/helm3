@@ -149,7 +149,10 @@ function createFakeGitHub() {
     merged,
     opened,
     updates,
-    setExistingPr(head: string, pr: { number: number; url: string }): void { existingByHead.set(head, pr); },
+    setExistingPr(head: string, pr: { number: number; url: string }): void {
+      existingByHead.set(head, pr);
+      prs.set(pr.number, { number: pr.number, state: 'open', head: 'unknown', mergeable: true, draft: false, checks: [], reviews: [], url: pr.url });
+    },
     setPrStatus(number: number, patch: Partial<PrStatus>): void {
       const pr = prs.get(number);
       prs.set(number, { number, state: 'open', head: 'unknown', mergeable: true, draft: false, checks: [], reviews: [], url: `https://example.invalid/${number}`, ...pr, ...patch });
@@ -549,6 +552,7 @@ test('pr.open updates an existing PR row after pushing and only edits passed met
   const worker = store.getWorker(spawned.workerId);
   assert.ok(worker?.head);
   store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+  github.setPrStatus(230, { head: worker.head });
   assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
 
   const updated = await helm.prOpen({ workerId: spawned.workerId, draft: true });
@@ -593,6 +597,25 @@ test('pr.open records an existing GitHub PR when the local row is missing', asyn
   assert.equal(store.getPrByWorker(spawned.workerId)?.head, worker.head);
 });
 
+test('pr.open refuses closed or merged existing PRs before pushing', async () => {
+  for (const state of ['closed', 'merged'] as const) {
+    const { helm, store, pushed, github } = makeHelm();
+    const repo = mkTempDir('helm-repo-');
+    const spawned = await helm.spawn(spawnBody(repo));
+    assert.equal(spawned.ok, true);
+    if (!spawned.ok) continue;
+    await helm.settle(spawned.workerId);
+    store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+    github.setPrStatus(230, { state });
+    assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+
+    const refused = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.match(refused.reason, new RegExp(`#230.*${state}`));
+    assert.equal(pushed.length, 0);
+  }
+});
+
 test('pr.open uses the default branch, worker prBase, and explicit base in order of precedence', async () => {
   const { helm, store, github } = makeHelm();
   const repo = mkTempDir('helm-repo-');
@@ -628,6 +651,7 @@ test('merge.enqueue after an existing PR update uses the updated head', async ()
   if (!spawned.ok) return;
   await helm.settle(spawned.workerId);
   store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+  github.setPrStatus(230, { head: store.getWorker(spawned.workerId)?.head ?? 'unknown' });
   assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
   const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
   assert.equal(opened.ok, true);

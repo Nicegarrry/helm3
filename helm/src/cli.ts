@@ -48,7 +48,7 @@ function usage(): void {
   reply <question-id> "<answer>" [--json]
   stop <id> [--json]
   gate <id> [--json]
-  pr <id> [--title t] [--body b] [--draft] [--json]
+  pr <id> [--title t] [--body b] [--base branch] [--draft] [--json]
   pr-status <id|#n> [--json]
   review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
@@ -236,8 +236,8 @@ const cmdStop = (args: string[]) => simpleCmd('worker.stop', args, (p) => (p[0] 
 const cmdGate = (args: string[]) => simpleCmd('gate.run', args, (p) => (p[0] ? { workerId: p[0] } : undefined));
 
 const cmdPr = (args: string[]) =>
-  simpleCmd('pr.open', args, (p, v) => (p[0] ? { workerId: p[0], title: v.title, body: v.body, draft: v.draft ?? true } : undefined),
-    { title: { type: 'string' }, body: { type: 'string' }, draft: { type: 'boolean' } });
+  simpleCmd('pr.open', args, (p, v) => (p[0] ? { workerId: p[0], title: v.title, body: v.body, base: v.base, draft: v.draft ?? true } : undefined),
+    { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' }, draft: { type: 'boolean' } });
 
 const cmdPrStatus = (args: string[]) => simpleCmd('pr.status', args, (p) => (p[0] ? prIdent(p[0]) : undefined));
 

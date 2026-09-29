@@ -114,7 +114,7 @@ export function createSupervisor(options: Options): SupervisorService {
   const markWakeDeliveredStmt = store.sql.prepare('UPDATE wakes SET deliveredAt = ? WHERE id = ? AND deliveredAt IS NULL');
   const markWakesAckedStmt = store.sql.prepare('UPDATE wakes SET ackedAt = ? WHERE project = ? AND ackedAt IS NULL');
   const updateLastWakeStmt = store.sql.prepare('UPDATE supervisors SET lastWakeAt = ? WHERE project = ?');
-  const deliveredSinceStmt = store.sql.prepare('SELECT COUNT(*) AS count FROM wakes WHERE project = ? AND deliveredAt >= ?');
+  const deliveredSinceStmt = store.sql.prepare('SELECT COUNT(DISTINCT deliveredAt) AS count FROM wakes WHERE project = ? AND deliveredAt >= ?');
   const warnedOld = new Set<string>();
 
   function supervisor(project: string): SupervisorRow | null {

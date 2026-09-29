@@ -90,6 +90,23 @@ test('a non-empty prompt defers and the min interval coalesces later events', as
   } finally { store.close(); }
 });
 
+test('maxPerHour counts coalesced deliveries, not individual wakes', async () => {
+  const fake = fakeHost();
+  let current = new Date('2026-09-29T00:00:00.000Z');
+  const { store, created } = service(fake.host, () => current);
+  try {
+    created.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner repo' });
+    store.insertWorker(worker());
+    for (let index = 0; index < 12; index += 1) store.appendEvent('w-supervise', 'ask', { question: `question ${index}` });
+    await created.tick();
+    assert.equal(fake.calls.length, 1);
+    store.appendEvent('w-supervise', 'watch.alert', { detail: 'second delivery' });
+    current = new Date(current.getTime() + 121_000);
+    await created.tick();
+    assert.equal(fake.calls.length, 2);
+  } finally { store.close(); }
+});
+
 test('pane ids are re-resolved by label and rotate delivers two verbatim commands', async () => {
   const fake = fakeHost();
   let current = new Date('2026-09-29T00:00:00.000Z');
@@ -114,7 +131,7 @@ test('tmux host uses a fake exec and sends literal text followed by Enter', asyn
   const fakeExec = async (command: string, args: readonly string[]) => {
     calls.push([command, ...args]);
     if (args[0] === 'list-panes') return { stdout: '%1\n' };
-    if (args[0] === 'capture-pane') return { stdout: '❯\n' };
+    if (args[0] === 'capture-pane') return { stdout: '❯\u001b[2mTry "…"\u001b[0m\n' };
     return { stdout: '' };
   };
   const host = tmuxHost(fakeExec, 0);

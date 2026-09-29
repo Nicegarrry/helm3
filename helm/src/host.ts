@@ -168,7 +168,7 @@ function tmuxSession(label: string): string {
 }
 
 export function tmuxHost(exec: HostExec = defaultExec, waitMs = 2000): Host {
-  const capture = async (pane: Pane): Promise<string> => (await exec('tmux', ['capture-pane', '-p', '-t', pane.id])).stdout;
+  const capture = async (pane: Pane): Promise<string> => (await exec('tmux', ['capture-pane', '-e', '-p', '-t', pane.id])).stdout;
   return {
     async resolve(label) {
       const session = tmuxSession(label);

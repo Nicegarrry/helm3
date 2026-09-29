@@ -33,6 +33,9 @@ import {
   memoryWriteInput,
   memoryLogInput,
   memoryListInput,
+  mergeEnqueueInput,
+  mergeQueueInput,
+  mergeDequeueInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -86,6 +89,9 @@ const TOOLS: readonly ToolDef[] = [
   def('memory.write', 'Write a local Common Ground memory page and queue its CG write.', memoryWriteInput, (h, i) => h.memoryWrite(i)),
   def('memory.log', 'Prepend a dated entry to a local memory page and queue its CG log.', memoryLogInput, (h, i) => h.memoryLog(i)),
   def('memory.list', 'List local memory pages, optionally filtered by project and type.', memoryListInput, (h, i) => h.memoryList(i)),
+  def('merge.enqueue', 'Add a pull request to its repository merge queue.', mergeEnqueueInput, (h, i) => h.mergeEnqueue(i)),
+  def('merge.queue', 'List the pull requests queued for a project.', mergeQueueInput, (h, i) => h.mergeQueue(i)),
+  def('merge.dequeue', 'Remove a queued pull request before processing starts.', mergeDequeueInput, (h, i) => h.mergeDequeue(i)),
 ];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

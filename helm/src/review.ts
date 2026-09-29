@@ -51,6 +51,15 @@ function verdictLine(body: string): 'approve' | 'changes' {
   return last.startsWith('APPROVE: ') ? 'approve' : 'changes';
 }
 
+function patchBase(store: Store, number: number, fallback: string): string {
+  try {
+    const row = store.sql.prepare('SELECT m.baseSha FROM merge_queue q JOIN merge_queue_meta m ON m.id = q.id WHERE q.number = ?').get(number) as { baseSha?: string } | undefined;
+    return row?.baseSha ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function createReview({ store, github, workspace, jev, settings, now = () => new Date() }: {
   store: Store; github: GitHub; workspace: Workspace; jev: Jev; settings: Settings; now?: () => Date;
 }): ReviewService {
@@ -86,7 +95,7 @@ export function createReview({ store, github, workspace, jev, settings, now = ()
     const jevAgrees = noKey || score === null || (input.verdict === 'approve' ? score >= settings.factory.verdictAt : score < settings.factory.verdictAt);
     const lineVerdict = verdictLine(fetched.body);
     const verdict: ReviewRow['verdict'] = !noKey && !jevAgrees ? 'disputed' : input.verdict === 'approve' && lineVerdict === 'approve' ? 'approve' : 'changes';
-    const stored: ReviewRow = { id: 0, repoSlug: worker.repoSlug, number: input.number, head: input.head, patchId: await patchId(worker.repo, worker.baseSha, input.head), reviewer: input.reviewer, stated: input.verdict, jevApprove: score, verdict, commentUrl: input.commentUrl, at: now().toISOString() };
+    const stored: ReviewRow = { id: 0, repoSlug: worker.repoSlug, number: input.number, head: input.head, patchId: await patchId(worker.repo, patchBase(store, input.number, worker.baseSha), input.head), reviewer: input.reviewer, stated: input.verdict, jevApprove: score, verdict, commentUrl: input.commentUrl, at: now().toISOString() };
     const result = insert.run(stored.repoSlug, stored.number, stored.head, stored.patchId, stored.reviewer, stored.stated, stored.jevApprove, stored.verdict, stored.commentUrl, stored.at);
     const saved = row({ ...stored, id: Number(result.lastInsertRowid) });
     if (verdict === 'disputed') store.appendEvent(pr.workerId, 'review.disputed', { project: worker.repoSlug, number: input.number, summary: `review ${input.commentUrl} disagrees with Jev` });
@@ -101,7 +110,7 @@ export function createReview({ store, github, workspace, jev, settings, now = ()
     const worker = pr ? store.getWorker(pr.workerId) : undefined;
     if (!pr || !worker) return `no approving review at ${expectedHead}`;
     const status = await github.prStatus(worker.repoSlug, number);
-    const currentPatch = await patchId(worker.repo, worker.baseSha, status.head).catch(() => undefined);
+    const currentPatch = await patchId(worker.repo, patchBase(store, number, worker.baseSha), status.head).catch(() => undefined);
     const candidates = (list.all(worker.repoSlug, number) as Record<string, unknown>[]).map(row).filter((review) => review.head === status.head || (currentPatch !== undefined && review.patchId === currentPatch));
     const latest = candidates[0];
     if (!latest || latest.verdict !== 'approve') return `no approving review at ${expectedHead}`;

@@ -46,6 +46,9 @@ import {
   stopInput,
   inboxListInput,
   inboxReplyInput,
+  mergeEnqueueInput,
+  mergeQueueInput,
+  mergeDequeueInput,
 } from './types.js';
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
 import { createBaseline, ensureBaselineTable, getBaseline } from './baseline.js';
@@ -61,6 +64,7 @@ import type { ReviewRecordInput, ReviewService } from './review.js';
 import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
 import { createMemory, type MemoryService } from './memory.js';
+import { createQueue, type QueueService } from './queue.js';
 
 const exec = promisify(execFile);
 
@@ -82,6 +86,9 @@ export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
 export type EnvelopeGetInput = z.infer<typeof envelopeGetInput>;
 export type InboxListInput = z.infer<typeof inboxListInput>;
 export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
+export type MergeEnqueueInput = z.infer<typeof mergeEnqueueInput>;
+export type MergeQueueInput = z.infer<typeof mergeQueueInput>;
+export type MergeDequeueInput = z.infer<typeof mergeDequeueInput>;
 
 /** What a builder/reviewer prompt is built from. Owned here since types.ts does not define it. */
 export type PromptInput = Readonly<{
@@ -237,6 +244,7 @@ export class Helm {
   readonly jevChecker?: JevCheckService;
   readonly claims?: ClaimsService;
   private readonly memory: MemoryService;
+  readonly queue: QueueService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -289,6 +297,10 @@ export class Helm {
     this.claims = deps.claims;
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
     this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
+    this.queue = createQueue({
+      store: this.store, workspace: this.workspace, github: this.github, settings: this.settings,
+      gate: (input) => this.gate(input), prMerge: (input) => this.prMerge(input),
+    });
   }
 
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
@@ -301,6 +313,9 @@ export class Helm {
     if (!this.claims) return { ok: false, reason: 'claims service unavailable' };
     return runGuard(() => this.claims!.check(input));
   }
+  async mergeEnqueue(input: MergeEnqueueInput) { return this.queue.enqueue(input); }
+  async mergeQueue(input: MergeQueueInput) { return this.queue.queue(input); }
+  async mergeDequeue(input: MergeDequeueInput) { return this.queue.dequeue(input); }
 
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {

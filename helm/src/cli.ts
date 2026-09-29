@@ -501,8 +501,9 @@ async function cmdServe(args: string[]): Promise<void> {
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home })]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
+  const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopDiscord(); };
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();

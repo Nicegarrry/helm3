@@ -51,6 +51,7 @@ import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
+import type { JevCheckService } from './jevcheck.js';
 
 const exec = promisify(execFile);
 
@@ -99,6 +100,7 @@ export type HelmDeps = Readonly<{
   settings?: Settings;
   supervisor?: SupervisorService;
   discord?: DiscordService;
+  jevChecker?: JevCheckService;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -217,6 +219,7 @@ export class Helm {
   private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
   readonly discord?: DiscordService;
+  readonly jevChecker?: JevCheckService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -236,7 +239,11 @@ export class Helm {
     ensureBudgetTables(this.store);
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
+    this.jevChecker = deps.jevChecker;
   }
+
+  async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
+  async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }
 
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {

@@ -128,10 +128,7 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
       store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, 0, ?, ?, ?)').run(input.workerId, head, JSON.stringify(detail), calls[0] ?? null, now().toISOString());
       return { ok: false, reason: 'no checkable claims' };
     }
-    const failedClaims = claims.filter((claim) => {
-      const answer = answers[claim]!;
-      return !(processClaim.test(claim) && answer.choice === 'says_nothing') && answer.supports < settings.factory.claimsAt;
-    });
+    const failedClaims = checkableClaims.filter((claim) => answers[claim]!.supports < settings.factory.claimsAt);
     const passed = missingFiles.length === 0 && failedClaims.length === 0;
     detail.failedClaims = failedClaims;
     store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, ?, ?, ?, ?)').run(input.workerId, head, passed ? 1 : 0, JSON.stringify(detail), calls[0] ?? null, now().toISOString());
@@ -143,8 +140,8 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
     const pr = typeof value.number === 'number' ? store.getPrByNumber(value.number) : undefined;
     if (!pr) return 'claims check requires a pull request worker';
     if (!store.getWorker(pr.workerId) || !value.expectedHead) return 'claims check requires a worker and head';
-    const row = store.sql.prepare('SELECT 1 FROM claims_checks WHERE workerId = ? AND head = ? AND passed = 1 ORDER BY at DESC LIMIT 1').get(pr.workerId, value.expectedHead);
-    return row ? null : `no passing claims check at head ${value.expectedHead}`;
+    const row = store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ? ORDER BY at DESC, rowid DESC LIMIT 1').get(pr.workerId, value.expectedHead) as { passed?: number } | undefined;
+    return row?.passed === 1 ? null : `no passing claims check at head ${value.expectedHead}`;
   }
   return { check, guard };
 }

@@ -203,3 +203,24 @@ test('shadow never guards merge, block requires a passing check at head, and no 
     assert.equal(result.ok, false); if (!result.ok) assert.match(result.reason, /passing gate/);
   } finally { ungated.store.close(); }
 });
+
+test('block merge guard uses only the latest claims check at the expected head', async () => {
+  const olderHead = 'c'.repeat(40);
+  const cases = [
+    { name: 'pass followed by fail is refused', rows: [[head, 1], [head, 0]], allowed: false },
+    { name: 'fail followed by pass is allowed', rows: [[head, 0], [head, 1]], allowed: true },
+    { name: 'a pass at an older head is refused', rows: [[olderHead, 1]], allowed: false },
+  ] as const;
+  for (const [index, scenario] of cases.entries()) {
+    const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: [], commandsRun: [], claims: [] }, true, `w-latest-${index}`);
+    try {
+      const service = createClaims({ jev: jevFor(() => answer(1)), store, settings: settings(), git: fakeGit([], 'diff') });
+      store.insertPr({ number: 10 + index, workerId: worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+      for (const [checkHead, passed] of scenario.rows) {
+        store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, ?, ?, ?, ?)').run(worker.workerId, checkHead, passed, '{}', null, '2026-01-01T00:00:00.000Z');
+      }
+      const result = await mergeHelm(store, service).prMerge({ number: 10 + index, expectedHead: head });
+      assert.equal(result.ok, scenario.allowed, scenario.name);
+    } finally { store.close(); }
+  }
+});

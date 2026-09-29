@@ -451,7 +451,7 @@ export class Helm {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
-      const checks = input.checks ?? (await this.gates.defaultChecks(row.worktree, head));
+      const checks = input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha));
       const gateId = genId('g');
       const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
       const outcome = await this.gates.run(row.worktree, checks, logDir, { timeoutMs: this.config.gateTimeoutMs });

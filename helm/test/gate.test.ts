@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -68,6 +69,25 @@ test('defaultChecks: reads gates from helm.json when present', async () => {
     writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'custom', command: 'echo hi' }] }));
     const checks = await runner.defaultChecks(dir);
     assert.deepEqual(checks, [{ name: 'custom', command: 'echo hi' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultChecks: a worker helm.json change cannot remove base gates', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
+  const runner = gateRunner();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'base', command: 'echo base' }] }));
+    execFileSync('git', ['add', 'helm.json'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'base'], { cwd: dir });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [] }));
+
+    assert.deepEqual(await runner.defaultChecks(dir, baseSha), [{ name: 'base', command: 'echo base' }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

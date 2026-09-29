@@ -55,7 +55,7 @@ export function gateRunner(): GateRunner {
     },
 
     async defaultChecks(repo: string, sha?: string): Promise<GateCheck[]> {
-      if (existsSync(join(repo, 'helm.json'))) {
+      if (sha || existsSync(join(repo, 'helm.json'))) {
         try {
           const config = await loadRepoConfig(repo, sha);
           if (config.gates.length > 0) {

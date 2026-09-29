@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import type { z } from 'zod';
 import type {
   EventRow,
+  BaselineRow,
   GateRow,
   GateRunner,
   GitHub,
@@ -30,6 +31,7 @@ import {
   budgetCloseInput,
   budgetOpenInput,
   budgetStatusInput,
+  baselineInput,
   gateInput,
   inspectInput,
   listInput,
@@ -45,6 +47,8 @@ import {
   inboxReplyInput,
 } from './types.js';
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
+import { createBaseline, ensureBaselineTable } from './baseline.js';
+import { validatorPrompt } from './prompt.js';
 
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
@@ -61,6 +65,7 @@ export type ListInput = z.infer<typeof listInput>;
 export type SteerInput = z.infer<typeof steerInput>;
 export type StopInput = z.infer<typeof stopInput>;
 export type GateInput = z.infer<typeof gateInput>;
+export type BaselineInput = z.infer<typeof baselineInput>;
 export type PrOpenInput = z.infer<typeof prOpenInput>;
 export type PrStatusInput = z.infer<typeof prStatusInput>;
 export type ReviewInput = z.infer<typeof reviewInput>;
@@ -82,6 +87,7 @@ export type PromptInput = Readonly<{
 export type HelmPrompts = Readonly<{
   builder(input: PromptInput): string;
   reviewer(input: PromptInput): string;
+  validator?: (input: PromptInput) => string;
 }>;
 
 export type HelmDeps = Readonly<{
@@ -237,6 +243,7 @@ export class Helm {
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     ensureBudgetTables(this.store);
+    ensureBaselineTable(this.store);
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
     this.jevChecker = deps.jevChecker;
@@ -347,7 +354,9 @@ export class Helm {
     }
     this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
-    const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput) : this.prompts.builder(promptInput);
+    const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
+      : input.role === 'validator' ? (this.prompts.validator?.(promptInput) ?? validatorPrompt(promptInput))
+        : this.prompts.builder(promptInput);
     this.startRun(workerId, message, onDone);
     return { ok: true, workerId, branch, worktree, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
   }
@@ -466,6 +475,13 @@ export class Helm {
       this.store.insertGate(gateRow);
       this.store.appendEvent(input.workerId, 'gate', { gateId, passed: outcome.passed, head });
       return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
+    });
+  }
+
+  async baseline(input: BaselineInput): Promise<ToolOutcome<BaselineRow>> {
+    return runGuard(async () => {
+      const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+      return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, now: this.nowIso() });
     });
   }
 
@@ -822,7 +838,7 @@ export class Helm {
     try {
       const outcome = await this.runner.run(runInput, message, hooks);
       const result = outcome.result;
-      if (row.role === 'builder' && result?.status !== 'failed') {
+      if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {
         try {
           const commitMessage = result?.summary ?? `helm: ${workerId} turn complete`;
           const head = await this.workspace.commitAll(row.worktree, commitMessage);

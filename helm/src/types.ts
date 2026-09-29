@@ -100,7 +100,7 @@ export type GateRow = Readonly<{
   checks: ReadonlyArray<{ name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number }>;
   at: string;
 }>;
-
+export type BaselineRow = Readonly<{ id: string; repoSlug: string; issue: number; validatorId: string; baseRef: string; baseSha: string; testCommit: string; command: string; files: readonly string[]; red: number; outputPath: string; at: string }>;
 export type PrRow = Readonly<{
   number: number;
   workerId: string;
@@ -108,7 +108,6 @@ export type PrRow = Readonly<{
   head: string;
   createdAt: string;
 }>;
-
 export type SpendRow = Readonly<{
   workerId: string;
   model: string;
@@ -119,14 +118,11 @@ export type SpendRow = Readonly<{
   costUsd: number | null;  // null when the model has no known price
   at: string;
 }>;
-
 export type SpendSummary = Readonly<{
   spendUsd: number;
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   unknownCostEvents: number;
 }>;
-
-
 export interface Store {
   sql: DatabaseSync;
   insertWorker(row: WorkerRow): void;
@@ -300,6 +296,7 @@ export const waitInput = z.object({
   timeoutMs: z.number().int().min(1000).max(1_500_000).default(600_000),
 }).strict();
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
+export const baselineInput = z.object({ workerId: z.string().min(1) }).strict();
 export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
 export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
 export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
@@ -314,7 +311,7 @@ export const notifyNickInput = z.object({ project: z.string().min(1), text: z.st
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
 export type ToolName = string;
 
 

@@ -59,8 +59,20 @@ export function reviewerPrompt(input: PromptInput): string {
     'starts with exactly "APPROVE: " or "REQUEST_CHANGES: " followed by a one-line reason.',
   ].join('\n');
 }
-
+export function validatorPrompt(input: PromptInput): string {
+  const acceptance = input.acceptance ? `\n\nAcceptance criteria:\n${input.acceptance}` : '';
+  return [
+    `You are a validator coding agent working in a git worktree. Objective:\n${input.objective}${acceptance}${contextSection(input.contextPaths)}`,
+    '', 'Write only test files for the issue acceptance. Do not edit production code, configuration, documentation, fixtures, or any non-test file.',
+    'The tests must fail on the current code because the requested behaviour is missing; do not weaken assertions or change production code. Run the acceptance command if useful, then report acceptance as {"command":"...","files":["test/file.ts"]}.',
+    'Use the read, grep, find and ls tools to understand the code before editing. Use edit or write to',
+    'make changes, and bash to run tests or checks. Work only inside this worktree; do not push, open a',
+    'PR, or touch .git internals yourself. When the objective is met (or you are stuck), stop and report.',
+  ].join('\n');
+}
 /** Convenience dispatcher matching DESIGN.md's `buildPrompt` shorthand. */
-export function buildPrompt(role: 'builder' | 'reviewer', input: PromptInput): string {
-  return role === 'reviewer' ? reviewerPrompt(input) : builderPrompt(input);
+export function buildPrompt(role: 'builder' | 'reviewer' | 'validator', input: PromptInput): string {
+  if (role === 'reviewer') return reviewerPrompt(input);
+  if (role === 'validator') return validatorPrompt(input);
+  return builderPrompt(input);
 }

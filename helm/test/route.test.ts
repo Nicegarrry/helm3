@@ -27,9 +27,9 @@ async function choose(route: ReturnType<typeof createRouter>, value: SpawnInput)
   return result as ModelChoice;
 }
 
-function worker(id: string, model = MEDIUM, state: WorkerRow['state'] = 'succeeded'): WorkerRow {
+function worker(id: string, model = MEDIUM, state: WorkerRow['state'] = 'succeeded', overrides: Partial<WorkerRow> = {}): WorkerRow {
   const now = '2026-09-30T00:00:00.000Z';
-  return { workerId: id, repo: '/repo', repoSlug: 'acme/repo', role: 'builder', model, objective: id, acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'a'.repeat(40), branch: id, worktree: `/repo/${id}`, state, head: 'b'.repeat(40), sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
+  return { workerId: id, repo: '/repo', repoSlug: 'acme/repo', role: 'builder', model, objective: id, acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'a'.repeat(40), branch: id, worktree: `/repo/${id}`, state, head: 'b'.repeat(40), sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now, ...overrides };
 }
 
 function routeFixture(reply: JevAnswers, routing = loadSettings('/missing-route-settings').routing) {
@@ -49,8 +49,18 @@ test('large score routes high and records one shared Jev question set', async ()
 });
 
 test('score probabilities use the indexed 0 through 3 shape', async () => {
-  const fixture = routeFixture({ complexity: { probabilities: { '0': 0, '1': 0, '2': 0.6, '3': 0.4 } }, too_big: { noul: false } });
-  try { assert.deepEqual(await choose(fixture.route, input('acme/repo', 'large task')), { model: HIGH, band: 'large', complexity: 2.4 }); } finally { fixture.store.close(); }
+  const fixture = routeFixture({ complexity: { probabilities: { '0': 0, '1': 0, '2': 0.6, '3': 0.4 } }, too_big: { probabilities: { true: 0.6, false: 0.4 } } });
+  try { assert.deepEqual(await choose(fixture.route, input('acme/repo', 'large task')), { model: HIGH, band: 'large', complexity: 2.4, warning: 'split recommended' }); } finally { fixture.store.close(); }
+});
+
+test('Jev failures fall back to high without throwing', async () => {
+  const store = openStore(':memory:'); const settings = loadSettings('/missing-route-settings');
+  try {
+    const failingJeves: Jev[] = [{ shadow: true, async ask() { throw new Error('timeout'); } }, { shadow: true, async ask() { return Promise.reject(new Error('timeout')); } }];
+    for (const jev of failingJeves) {
+      assert.deepEqual(await choose(createRouter({ settings, store, jev }), input('acme/repo', 'task')), { model: HIGH });
+    }
+  } finally { store.close(); }
 });
 
 test('a low medium-band clean rate steps up to high', async () => {
@@ -63,10 +73,65 @@ test('a low medium-band clean rate steps up to high', async () => {
   } finally { fixture.store.close(); }
 });
 
+type RoutingSeed = { model?: string; band?: string; role?: WorkerRow['role']; repoSlug?: string; createdAt?: string };
+
+function stepUpFixture(seeds: RoutingSeed[], minN = 2) {
+  const store = openStore(':memory:'); const defaults = loadSettings('/missing-route-settings');
+  const settings = { ...defaults, routing: { ...defaults.routing, minN, minClean: 0.5, table: { ...defaults.routing.table, medium: MEDIUM }, allowed: [MEDIUM, HIGH] } };
+  const jev: Jev = { shadow: true, async ask() { return { ok: true, answers: answers(1.7) }; } };
+  for (const [index, seed] of seeds.entries()) {
+    const row = worker(`routing-${index}`, seed.model ?? MEDIUM, 'failed', { role: seed.role ?? 'builder', repoSlug: seed.repoSlug ?? 'acme/repo', createdAt: seed.createdAt ?? '2026-09-30T00:00:00.000Z' });
+    store.insertWorker(row); store.setMeta(row.workerId, { issue: index + 1, band: seed.band ?? 'medium' });
+    store.appendEvent(row.workerId, 'result', { status: 'failed' }, row.createdAt);
+  }
+  return { store, route: createRouter({ settings, store, jev, now: () => new Date('2026-09-30T00:00:00.000Z') }) };
+}
+
+test('step-up fires from real builder evidence below minClean at minN', async () => {
+  const fixture = stepUpFixture([{}, {}]);
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, HIGH); } finally { fixture.store.close(); }
+});
+
+test('step-up ignores rows from a different band', async () => {
+  const fixture = stepUpFixture([{ band: 'small' }, { band: 'small' }]);
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
+});
+
+test('step-up ignores rows from a different model', async () => {
+  const fixture = stepUpFixture([{ model: 'codex/other:medium' }, { model: 'codex/other:medium' }]);
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
+});
+
+test('step-up ignores reviewer and validator rows', async () => {
+  const fixture = stepUpFixture([{ role: 'reviewer' }, { role: 'validator' }]);
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
+});
+
+test('step-up ignores fewer than minN rows', async () => {
+  const fixture = stepUpFixture([{}]);
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
+});
+
+test('step-up ignores rows older than 30 days', async () => {
+  const fixture = stepUpFixture([{ createdAt: '2026-08-29T00:00:00.000Z' }, { createdAt: '2026-08-29T00:00:00.000Z' }]);
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
+});
+
+test('step-up ignores rows from another repo', async () => {
+  const fixture = stepUpFixture([{ repoSlug: 'other/repo' }, { repoSlug: 'other/repo' }]);
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
+});
+
 test('a configured model outside allowed is clamped to high', async () => {
   const defaults = loadSettings('/missing-route-settings');
   const fixture = routeFixture(answers(1.7), { ...defaults.routing, table: { ...defaults.routing.table, medium: 'other/model' } });
   try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, HIGH); } finally { fixture.store.close(); }
+});
+
+test('routing clamps to the strongest configured allowed model', async () => {
+  const defaults = loadSettings('/missing-route-settings');
+  const fixture = routeFixture(answers(1.7), { ...defaults.routing, allowed: [MEDIUM], table: { ...defaults.routing.table, medium: 'other/model' } });
+  try { assert.equal((await choose(fixture.route, input('acme/repo', 'medium task'))).model, MEDIUM); } finally { fixture.store.close(); }
 });
 
 test('no Jev key and too_big are safe fallback and warning cases', async () => {
@@ -75,6 +140,8 @@ test('no Jev key and too_big are safe fallback and warning cases', async () => {
     const noKey: Jev = { shadow: true, async ask() { return { ok: false, reason: 'no key' }; } };
     const settings = loadSettings('/missing-route-settings');
     assert.deepEqual(await choose(createRouter({ settings, store, jev: noKey }), input('acme/repo', 'task')), { model: HIGH });
+    const restricted = { ...settings, routing: { ...settings.routing, allowed: [MEDIUM] } };
+    assert.deepEqual(await choose(createRouter({ settings: restricted, store, jev: noKey }), input('acme/repo', 'task')), { model: MEDIUM });
     const warning = routeFixture(answers(1.7, 0.5));
     try { assert.equal((await choose(warning.route, input('acme/repo', 'task'))).warning, 'split recommended'); } finally { warning.store.close(); }
   } finally { store.close(); }

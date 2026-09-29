@@ -54,20 +54,26 @@ function classifyOutcome(input: { later: boolean; state: string; failedGate: boo
 }
 
 export function cleanRateForRouting(store: Store, model: string, band: string, now = new Date(), project?: string): { clean: number; n: number } {
+  if (!project) return { clean: 0, n: 0 };
   const since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const projectSql = project ? ' AND w.repoSlug=?' : '';
-  const workers = store.sql.prepare(`SELECT w.workerId,w.state,w.createdAt,wm.issue FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.role='builder' AND wm.issue IS NOT NULL AND w.model=? AND wm.band=? AND w.createdAt>=?${projectSql}`).all(model, band, since, ...(project ? [project] : [])) as Row[];
-  const projectWorkers = store.sql.prepare(`SELECT w.workerId,w.createdAt,wm.issue FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.role='builder' AND wm.issue IS NOT NULL${projectSql}`).all(...(project ? [project] : [])) as Row[];
-  const reviews = hasTable(store, 'reviews') && hasTable(store, 'prs') ? store.sql.prepare("SELECT p.workerId,r.verdict FROM reviews r JOIN prs p ON p.number=r.number").all() as Row[] : [];
+  const reviewsAvailable = hasTable(store, 'reviews') && hasTable(store, 'prs');
+  const reviewJoins = reviewsAvailable ? " LEFT JOIN prs p ON p.repoSlug=w.repoSlug AND p.workerId=w.workerId LEFT JOIN reviews r ON r.repoSlug=p.repoSlug AND r.number=p.number" : '';
+  const requestChanges = reviewsAvailable ? "MAX(CASE WHEN r.verdict IN ('changes','disputed') THEN 1 ELSE 0 END)" : '0';
+  const workers = store.sql.prepare(`
+    SELECT w.workerId,w.state,w.createdAt,wm.issue,
+      COUNT(DISTINCT CASE WHEN e.kind='turn.start' THEN e.seq END) AS turns,
+      MAX(CASE WHEN g.passed=0 THEN 1 ELSE 0 END) AS failedGate,
+      ${requestChanges} AS requestChanges,
+      EXISTS (SELECT 1 FROM workers later JOIN worker_meta laterMeta ON laterMeta.workerId=later.workerId WHERE later.repoSlug=w.repoSlug AND later.role='builder' AND laterMeta.issue=wm.issue AND later.createdAt>w.createdAt) AS later
+    FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId
+    LEFT JOIN events e ON e.workerId=w.workerId
+    LEFT JOIN gates g ON g.workerId=w.workerId${reviewJoins}
+    WHERE w.role='builder' AND wm.issue IS NOT NULL AND w.model=? AND wm.band=? AND w.createdAt>=? AND w.repoSlug=?
+    GROUP BY w.workerId,w.state,w.createdAt,wm.issue,wm.band
+  `).all(model, band, since, project) as Row[];
   let clean = 0;
   for (const worker of workers) {
-    const workerId = String(worker.workerId);
-    const issue = worker.issue === null || worker.issue === undefined ? undefined : n(worker.issue);
-    const later = issue !== undefined && projectWorkers.some((row) => n(row.issue) === issue && String(row.createdAt) > String(worker.createdAt));
-    const turns = n((store.sql.prepare("SELECT COUNT(*) AS count FROM events WHERE workerId=? AND kind='turn.start'").get(workerId) as Row | undefined)?.count);
-    const failedGate = Boolean(store.sql.prepare('SELECT 1 FROM gates WHERE workerId=? AND passed=0 LIMIT 1').get(workerId));
-    const requestChanges = reviews.some((row) => String(row.workerId) === workerId && (row.verdict === 'changes' || row.verdict === 'disputed'));
-    if (classifyOutcome({ later, state: String(worker.state), failedGate, requestChanges, turns }) === 'clean') clean += 1;
+    if (classifyOutcome({ later: Boolean(worker.later), state: String(worker.state), failedGate: Boolean(worker.failedGate), requestChanges: Boolean(worker.requestChanges), turns: n(worker.turns) }) === 'clean') clean += 1;
   }
   return { clean, n: workers.length };
 }

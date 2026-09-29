@@ -6,7 +6,7 @@ const realExec = promisify(execFile);
 export type ExecResult = Readonly<{ stdout: string; stderr?: string }>;
 export type HostExec = (command: string, args: readonly string[], options?: { cwd?: string }) => Promise<ExecResult>;
 export type Pane = Readonly<{ id: string; workspaceId?: string; session?: string; label?: string; host: 'herdr' | 'tmux' }>;
-export type HostStatus = 'idle' | 'busy' | 'unknown';
+export type HostStatus = 'idle' | 'busy' | 'blocked' | 'unknown';
 
 export type Host = Readonly<{
   resolve(label: string): Promise<Pane | null>;
@@ -16,7 +16,7 @@ export type Host = Readonly<{
   create(label: string, cwd: string, command: string): Promise<Pane | null>;
 }>;
 
-const defaultExec: HostExec = async (command, args, options) => {
+export const defaultExec: HostExec = async (command, args, options) => {
   const result = await realExec(command, [...args], { cwd: options?.cwd, maxBuffer: 16 * 1024 * 1024 });
   return { stdout: result.stdout, stderr: result.stderr };
 };
@@ -60,7 +60,8 @@ function statusOf(value: unknown): HostStatus {
   if (!value || typeof value !== 'object') return 'unknown';
   const status = stringField(value as Record<string, unknown>, 'agent_status', 'agentStatus', 'status')?.toLowerCase();
   if (status === 'idle' || status === 'done') return 'idle';
-  if (status === 'working' || status === 'blocked' || status === 'busy') return 'busy';
+  if (status === 'working' || status === 'busy') return 'busy';
+  if (status === 'blocked') return 'blocked';
   return 'unknown';
 }
 

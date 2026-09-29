@@ -203,3 +203,62 @@ test('shadow never guards merge, block requires a passing check at head, and no 
     assert.equal(result.ok, false); if (!result.ok) assert.match(result.reason, /passing gate/);
   } finally { ungated.store.close(); }
 });
+
+test('block merge guard uses only the latest claims check at the expected head', async () => {
+  const olderHead = 'c'.repeat(40);
+  const cases = [
+    { name: 'pass followed by fail is refused', rows: [[head, 1], [head, 0]], allowed: false },
+    { name: 'fail followed by pass is allowed', rows: [[head, 0], [head, 1]], allowed: true },
+    { name: 'a pass at an older head is refused', rows: [[olderHead, 1]], allowed: false },
+  ] as const;
+  for (const [index, scenario] of cases.entries()) {
+    const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: [], commandsRun: [], claims: [] }, true, `w-latest-${index}`);
+    try {
+      const service = createClaims({ jev: jevFor(() => answer(1)), store, settings: settings(), git: fakeGit([], 'diff') });
+      store.insertPr({ number: 10 + index, workerId: worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+      for (const [checkHead, passed] of scenario.rows) {
+        store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, ?, ?, ?, ?)').run(worker.workerId, checkHead, passed, '{}', null, '2026-01-01T00:00:00.000Z');
+      }
+      const result = await mergeHelm(store, service).prMerge({ number: 10 + index, expectedHead: head });
+      assert.equal(result.ok, scenario.allowed, scenario.name);
+    } finally { store.close(); }
+  }
+});
+
+test('unknown claims checks do not override known failures and do not block alone', async () => {
+  const noKey: Jev = { shadow: false, async ask() { return { ok: false, reason: 'no key' }; } };
+  const failed = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['claim'] }, true, 'w-known-fail');
+  failed.store.insertPr({ number: 20, workerId: failed.worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+  try {
+    const service = createClaims({ jev: noKey, store: failed.store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
+    failed.store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, 0, ?, ?, ?)').run(failed.worker.workerId, head, '{}', null, '2026-01-01T00:00:00.000Z');
+    const checked = await service.check({ workerId: failed.worker.workerId });
+    assert.equal(checked.ok && checked.passed, true);
+    assert.equal((failed.store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ? ORDER BY rowid DESC LIMIT 1').get(failed.worker.workerId, head) as { passed: number | null }).passed, null);
+    assert.equal((await mergeHelm(failed.store, service).prMerge({ number: 20, expectedHead: head })).ok, false);
+  } finally { failed.store.close(); }
+
+  const unknown = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['claim'] }, true, 'w-unknown-only');
+  unknown.store.insertPr({ number: 21, workerId: unknown.worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+  try {
+    const service = createClaims({ jev: noKey, store: unknown.store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
+    const checked = await service.check({ workerId: unknown.worker.workerId });
+    assert.equal(checked.ok && checked.passed, true);
+    assert.equal((await mergeHelm(unknown.store, service).prMerge({ number: 21, expectedHead: head })).ok, true);
+    const warning = unknown.store.listAllEvents({ limit: 100 }).find((event) => event.kind === 'claims.warning');
+    assert.deepEqual(warning?.data, { workerId: unknown.worker.workerId, head, reason: 'no jev key; claims unchecked' });
+  } finally { unknown.store.close(); }
+});
+
+test('a Jev error is a failed claims check and refuses merge', async () => {
+  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['claim'] }, true, 'w-jev-error');
+  store.insertPr({ number: 22, workerId: worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+  try {
+    const jevError: Jev = { shadow: false, async ask() { return { ok: false, reason: 'jev unavailable' }; } };
+    const service = createClaims({ jev: jevError, store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
+    const checked = await service.check({ workerId: worker.workerId });
+    assert.deepEqual(checked, { ok: false, reason: 'jev unavailable' });
+    assert.equal((store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ?').get(worker.workerId, head) as { passed: number | null }).passed, 0);
+    assert.equal((await mergeHelm(store, service).prMerge({ number: 22, expectedHead: head })).ok, false);
+  } finally { store.close(); }
+});

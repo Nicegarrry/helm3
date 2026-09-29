@@ -29,6 +29,7 @@ import { createWatcher } from './watch.js';
 import { createSupervisor } from './supervise.js';
 import { createDiscord } from './discord.js';
 import { createReview } from './review.js';
+import { createRetry } from './retry.js';
 import { createEnvelopeTicker } from './envelope.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
@@ -494,6 +495,7 @@ async function cmdServe(args: string[]): Promise<void> {
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
     review: createReview({ store, github, workspace, jev, settings }),
+    retry: createRetry({ store, settings, github }),
     jevChecker: createJevCheck({ jev, store }),
     claims: createClaims({ jev, store, settings, workspace }),
   });

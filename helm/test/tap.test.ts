@@ -22,11 +22,12 @@ function setup() {
   const store = openStore(':memory:');
   const clock = new Date('2026-09-30T00:00:00.000Z');
   const posted: string[] = [];
-  return { store, clock, posted, post: async (content: string) => { posted.push(content); return { ok: true as const }; } };
+  const taps = new Map<string, import('../src/envelope.js').TapMemory>();
+  return { store, clock, posted, taps, post: async (content: string) => { posted.push(content); return { ok: true as const }; } };
 }
 
 async function requested(d: ReturnType<typeof setup>, action = BUDGET_TAP_ACTION) {
-  return requestTap(d.store, { project, kind: 'budget.open', action }, { ttlMin: 60, now: () => d.clock, post: d.post, pepper: PEPPER, randomInt: () => Number(CODE) });
+  return requestTap(d.store, { project, kind: 'budget.open', action }, { taps: d.taps, ttlMin: 60, now: () => d.clock, post: d.post, pepper: PEPPER, randomInt: () => Number(CODE) });
 }
 
 test('tap code is only sent to the tap poster and never enters results, events, rows, or logs', async () => {
@@ -98,14 +99,14 @@ test('a granted tap is single-use and mismatches project, kind, or action hash',
     const result = await requested(d);
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.deepEqual(confirmTap(d.store, { id: result.id, code: CODE }, PEPPER, d.clock), { ok: true, granted: true });
-    assert.match(consumeTap(d.store, 'other/app', 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock) ?? '', /match/);
-    assert.match(consumeTap(d.store, project, 'deploy.prod', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock) ?? '', /match/);
-    assert.match(consumeTap(d.store, project, 'budget.open', actionHash('different'), PEPPER, result.id, d.clock) ?? '', /match/);
-    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock), null);
-    assert.match(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock) ?? '', /used/);
+    assert.deepEqual(confirmTap(d.store, d.taps, { id: result.id, code: CODE }, PEPPER, d.clock), { ok: true, granted: true });
+    assert.match(consumeTap(d.store, d.taps, 'other/app', 'budget.open', actionHash(BUDGET_TAP_ACTION), result.id, d.clock) ?? '', /match/);
+    assert.match(consumeTap(d.store, d.taps, project, 'deploy.prod', actionHash(BUDGET_TAP_ACTION), result.id, d.clock) ?? '', /match/);
+    assert.match(consumeTap(d.store, d.taps, project, 'budget.open', actionHash('different'), result.id, d.clock) ?? '', /match/);
+    assert.equal(consumeTap(d.store, d.taps, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), result.id, d.clock), null);
+    assert.match(consumeTap(d.store, d.taps, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), result.id, d.clock) ?? '', /unknown or expired/);
     d.store.sql.prepare("UPDATE taps SET state = 'granted' WHERE id = ?").run(result.id);
-    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock), 'tap not validly granted');
+    assert.match(consumeTap(d.store, d.taps, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), result.id, d.clock) ?? '', /unknown or expired/);
   } finally { d.store.close(); }
 });
 
@@ -116,39 +117,42 @@ test('expiry refuses confirmation and consumption, and three wrong codes deny a 
     assert.equal(expired.ok, true);
     if (!expired.ok) return;
     const afterExpiry = new Date(d.clock.getTime() + 60 * 60_000);
-    assert.deepEqual(confirmTap(d.store, { id: expired.id, code: CODE }, PEPPER, afterExpiry), { ok: false, reason: 'tap expired' });
+    assert.deepEqual(confirmTap(d.store, d.taps, { id: expired.id, code: CODE }, PEPPER, afterExpiry), { ok: false, reason: 'tap expired' });
 
     const grantedThenExpired = await requested(d, 'deploy.staging');
     assert.equal(grantedThenExpired.ok, true);
     if (!grantedThenExpired.ok) return;
-    assert.deepEqual(confirmTap(d.store, { id: grantedThenExpired.id, code: CODE }, PEPPER, d.clock), { ok: true, granted: true });
-    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash('deploy.staging'), PEPPER, grantedThenExpired.id, afterExpiry), 'tap expired');
+    assert.deepEqual(confirmTap(d.store, d.taps, { id: grantedThenExpired.id, code: CODE }, PEPPER, d.clock), { ok: true, granted: true });
+    assert.equal(consumeTap(d.store, d.taps, project, 'budget.open', actionHash('deploy.staging'), grantedThenExpired.id, afterExpiry), 'tap expired');
 
     const denied = await requested(d, 'deploy.prod');
     assert.equal(denied.ok, true);
     if (!denied.ok) return;
-    assert.equal(confirmTap(d.store, { id: denied.id, code: '000000' }, PEPPER, d.clock).ok, false);
-    assert.equal(confirmTap(d.store, { id: denied.id, code: '000000' }, PEPPER, d.clock).ok, false);
-    assert.deepEqual(confirmTap(d.store, { id: denied.id, code: '000000' }, PEPPER, d.clock), { ok: false, reason: 'tap denied' });
+    assert.equal(confirmTap(d.store, d.taps, { id: denied.id, code: '000000' }, PEPPER, d.clock).ok, false);
+    assert.equal(confirmTap(d.store, d.taps, { id: denied.id, code: '000000' }, PEPPER, d.clock).ok, false);
+    assert.deepEqual(confirmTap(d.store, d.taps, { id: denied.id, code: '000000' }, PEPPER, d.clock), { ok: false, reason: 'tap denied' });
     assert.equal((d.store.sql.prepare('SELECT state, attempts FROM taps WHERE id = ?').get(denied.id) as { state: string; attempts: number }).state, 'denied');
   } finally { d.store.close(); }
 });
 
-test('a database-only granted state is not a valid tap', async () => {
+test('database attempts and expiry cannot reset the in-memory tap', async () => {
   const d = setup();
   try {
     const result = await requested(d);
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    d.store.sql.prepare("UPDATE taps SET state = 'granted' WHERE id = ?").run(result.id);
-    assert.equal(consumeTap(d.store, project, 'budget.open', actionHash(BUDGET_TAP_ACTION), PEPPER, result.id, d.clock), 'tap not validly granted');
+    assert.equal(confirmTap(d.store, d.taps, { id: result.id, code: '000000' }, PEPPER, d.clock).ok, false);
+    assert.equal(confirmTap(d.store, d.taps, { id: result.id, code: '000000' }, PEPPER, d.clock).ok, false);
+    assert.deepEqual(confirmTap(d.store, d.taps, { id: result.id, code: '000000' }, PEPPER, d.clock), { ok: false, reason: 'tap denied' });
+    d.store.sql.prepare("UPDATE taps SET attempts = 0, expiresAt = ? WHERE id = ?").run(new Date(d.clock.getTime() + 24 * 60 * 60_000).toISOString(), result.id);
+    assert.deepEqual(confirmTap(d.store, d.taps, { id: result.id, code: CODE }, PEPPER, d.clock), { ok: false, reason: 'unknown or expired tap (daemon restarted?)' });
   } finally { d.store.close(); }
 });
 
 test('tap.request refuses without a configured tap channel', async () => {
   const d = setup();
   const discord = createDiscord({ store: d.store, settings: { discord: { projects: {}, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_MISSING_TAP' } }, env: {}, fetch: async () => new Response('{}') });
-  const result = await requestTap(d.store, { project, kind: 'budget.open', action: BUDGET_TAP_ACTION }, { ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER });
+  const result = await requestTap(d.store, { project, kind: 'budget.open', action: BUDGET_TAP_ACTION }, { taps: d.taps, ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER });
   assert.deepEqual(result, { ok: false, reason: 'no tap channel configured' });
   assert.equal((d.store.sql.prepare('SELECT COUNT(*) AS count FROM taps').get() as { count: number }).count, 0);
   d.store.close();
@@ -157,7 +161,7 @@ test('tap.request refuses without a configured tap channel', async () => {
 test('tap.request refuses when the tap channel is a milestone channel', async () => {
   const d = setup();
   const discord = createDiscord({ store: d.store, settings: { discord: { projects: { [project]: { webhookEnv: 'HELM_MILESTONE' } }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: { HELM_TAP_WEBHOOK: 'https://discord.test/shared', HELM_MILESTONE: 'https://discord.test/shared' }, fetch: async () => new Response('{}') });
-  const result = await requestTap(d.store, { project, kind: 'budget.open', action: BUDGET_TAP_ACTION }, { ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER });
+  const result = await requestTap(d.store, { project, kind: 'budget.open', action: BUDGET_TAP_ACTION }, { taps: d.taps, ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER });
   assert.deepEqual(result, { ok: false, reason: 'tap channel must differ from the milestone channel' });
   assert.equal((d.store.sql.prepare('SELECT COUNT(*) AS count FROM taps').get() as { count: number }).count, 0);
   d.store.close();
@@ -196,7 +200,7 @@ test('a tap from before daemon restart is expired with the restart refusal', asy
     const tap = requestedResult as { ok: true; id: string };
     const second = new Helm({ config, store: d.store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never, prompts: { builder: () => '', reviewer: () => '' }, settings: loadSettings('/missing-tap-settings'), discord, randomInt: () => Number(CODE), tapPepper: NEW_PEPPER });
     const confirmed = await createToolRegistry(second).call('tap.confirm', { id: tap.id, code: CODE });
-    assert.deepEqual(confirmed, { ok: false, reason: 'tap expired (daemon restarted); request a new tap' });
+    assert.deepEqual(confirmed, { ok: false, reason: 'unknown or expired tap (daemon restarted?)' });
     assert.equal((d.store.sql.prepare('SELECT state FROM taps WHERE id = ?').get(tap.id) as { state: string }).state, 'expired');
   } finally { d.store.close(); rmSync(home, { recursive: true, force: true }); }
 });

@@ -56,7 +56,7 @@ import { validatorPrompt } from './prompt.js';
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { confirmTap, consumeTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTapsOnStartup, readEnvelope, requestTap, type EnvelopeView } from './envelope.js';
+import { confirmTap, consumeTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTapsOnStartup, readEnvelope, requestTap, type EnvelopeView, type TapMemory } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -234,7 +234,7 @@ export class Helm {
   private readonly settings: Settings;
   private readonly tapRandomInt?: (min: number, max: number) => number;
   private readonly tapPepper: Buffer;
-  private readonly restartExpiredTaps: ReadonlySet<string>;
+  private readonly taps = new Map<string, TapMemory>();
   private readonly guards = new Map<string, ToolGuard[]>();
   private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
@@ -267,9 +267,9 @@ export class Helm {
     if (this.review) this.guard('pr.merge', (input) => this.review!.guard(input));
     this.jevChecker = deps.jevChecker;
     ensureTapTable(this.store);
-    this.restartExpiredTaps = expireTapsOnStartup(this.store);
+    expireTapsOnStartup(this.store);
     this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput, (project, kind, expectedActionHash, tapId) =>
-      tapId ? consumeTap(this.store, project, kind, expectedActionHash, this.tapPepper, tapId, this.nowDate()) : 'tap required'));
+      tapId ? consumeTap(this.store, this.taps, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required'));
   }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
@@ -693,6 +693,7 @@ export class Helm {
         ttlMin: this.settings.factory.tapTtlMin,
         now: () => this.nowDate(),
         randomInt: this.tapRandomInt,
+        taps: this.taps,
         pepper: this.tapPepper,
         post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: 'no tap channel configured' }),
       });
@@ -701,7 +702,7 @@ export class Helm {
   }
 
   async tapConfirm(input: TapConfirmInput): Promise<ToolOutcome<{ granted: true }>> {
-    return runGuard(async () => confirmTap(this.store, input, this.tapPepper, this.nowDate(), this.restartExpiredTaps));
+    return runGuard(async () => confirmTap(this.store, this.taps, input, this.tapPepper, this.nowDate()));
   }
 
   async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {

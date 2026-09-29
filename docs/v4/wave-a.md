@@ -4,7 +4,7 @@ Status: ready to dispatch. Owner: Nick. Scope: drops 1–3 + Jev module. Vision:
 Gate for every ticket: `npm test` + `npm run typecheck` in `helm/` (no lint script exists).
 Tests use `node:test`, no network: fake `fetch`, fake `exec` (pattern of `ghGitHub(exec?)`), `:memory:` store.
 `src/types.ts` is the contract; tickets that change it say so, and the coordinator reviews them.
-Cross-family review on every PR (codex builds → gemini/deepseek review; and vice versa).
+Lanes (Nick, 2026-09-29): builders Codex only; reviews by Claude subagents outside Helm (posted as PR comments); Jev for judgement. Per-ticket lane lines below that name deepseek/gemini are superseded: use codex/gpt-5.6-luna.
 
 ## Design decisions (made here; reverse deliberately)
 
@@ -199,7 +199,7 @@ Soak on one project for 2–3 days with shadow on. Then label `jev_calls` from o
 ## A9 — Spend budgets per project and per sprint
 **Why:** the lifetime `HELM_SPEND_CAP_USD` blocks every project once the all-time total crosses it (it blocked round 2 on 2026-09-29). Budgets should follow the work: per project, ideally per sprint.
 **Scope:**
-- New `src/budget.ts`, table `budgets(id 'b-'+hex, project, label, capUsd REAL, openedAt, closedAt NULL)`. At most one open budget per project; opening a new one closes the previous.
+- New `src/budget.ts`, table `budgets(id 'b-'+hex, project, label, capUsd REAL, capCodexTokens INTEGER NULL, openedAt, closedAt NULL)`. Codex spend is recorded as $0, so a budget also caps Codex tokens (input+output from the spend table) when `capCodexTokens` is set; either limit exhausts it. `budget.open` takes optional `codexTokens`; `budgets.defaultCodexTokens` in settings (default 20,000,000). At most one open budget per project; opening a new one closes the previous.
 - A worker's spend counts against the budget that was open for its project (`repoSlug`) when it was spawned: store `budgetId` on the worker via a `worker_budget(workerId PK, budgetId)` table, so `types.ts` stays unchanged.
 - Spawn and steer checks, in `helm.ts` next to the existing cap:
   - refuse `budget exhausted (<label> $spent/$cap)` when the project's open budget is spent;

@@ -245,5 +245,20 @@ test('unknown claims checks do not override known failures and do not block alon
     const checked = await service.check({ workerId: unknown.worker.workerId });
     assert.equal(checked.ok && checked.passed, true);
     assert.equal((await mergeHelm(unknown.store, service).prMerge({ number: 21, expectedHead: head })).ok, true);
+    const warning = unknown.store.listAllEvents({ limit: 100 }).find((event) => event.kind === 'claims.warning');
+    assert.deepEqual(warning?.data, { workerId: unknown.worker.workerId, head, reason: 'no jev key; claims unchecked' });
   } finally { unknown.store.close(); }
+});
+
+test('a Jev error is a failed claims check and refuses merge', async () => {
+  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['claim'] }, true, 'w-jev-error');
+  store.insertPr({ number: 22, workerId: worker.workerId, url: 'https://example.test/pr', head, createdAt: new Date().toISOString() });
+  try {
+    const jevError: Jev = { shadow: false, async ask() { return { ok: false, reason: 'jev unavailable' }; } };
+    const service = createClaims({ jev: jevError, store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
+    const checked = await service.check({ workerId: worker.workerId });
+    assert.deepEqual(checked, { ok: false, reason: 'jev unavailable' });
+    assert.equal((store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ?').get(worker.workerId, head) as { passed: number | null }).passed, 0);
+    assert.equal((await mergeHelm(store, service).prMerge({ number: 22, expectedHead: head })).ok, false);
+  } finally { store.close(); }
 });

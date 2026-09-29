@@ -41,7 +41,7 @@ function deps() {
       return { result: { status: 'question', summary: 'need a decision', question: 'Which API should I use?', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: 'pi-session' };
     },
   };
-  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'objective', reviewer: () => 'review' } });
+  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'objective', reviewer: () => 'review', validator: () => 'validate' } });
   return { helm, store, home, sessions, messages, turns };
 }
 

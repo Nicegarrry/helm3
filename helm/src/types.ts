@@ -277,6 +277,7 @@ export const spawnInput = z.object({
   model: z.string().min(1).optional(),
   difficulty: z.enum(['super-easy', 'easy', 'normal']).optional(),
   baseRef: z.string().min(1).optional(),
+  baselineId: z.string().min(1).optional(),
   role: z.enum(WORKER_ROLES).default('builder'),
   contextPaths: z.array(z.string().min(1)).max(64).default([]),
   allowWorkflows: z.boolean().default(false),

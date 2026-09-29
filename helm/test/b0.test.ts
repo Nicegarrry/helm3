@@ -28,7 +28,7 @@ function deps() {
     async comment() { return { body: '', issueNumber: 1 }; }, async postComment() {}, async merge() {},
   };
   const runner: WorkerRunner = { async run(_input, _message, _hooks) { return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } };
-  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'build', reviewer: () => 'review' }, settings: loadSettings(home) });
+  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'build', reviewer: () => 'review', validator: () => 'validate' }, settings: loadSettings(home) });
   return { helm, store, home };
 }
 

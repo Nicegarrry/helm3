@@ -48,8 +48,8 @@ import {
   inboxReplyInput,
 } from './types.js';
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
-import { createBaseline, ensureBaselineTable } from './baseline.js';
-import { validatorPrompt } from './prompt.js';
+import { createBaseline, ensureBaselineTable, getBaseline } from './baseline.js';
+import { loadRepoConfig } from './repoconfig.js';
 
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
@@ -93,7 +93,7 @@ export type PromptInput = Readonly<{
 export type HelmPrompts = Readonly<{
   builder(input: PromptInput): string;
   reviewer(input: PromptInput): string;
-  validator?: (input: PromptInput) => string;
+  validator(input: PromptInput): string;
 }>;
 
 export type HelmDeps = Readonly<{
@@ -258,6 +258,31 @@ export class Helm {
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
     this.review = deps.review;
+    this.guard('pr.open', async (raw) => {
+      const input = raw as PrOpenInput;
+      const worker = this.store.getWorker(input.workerId);
+      const meta = worker ? this.store.getMeta(worker.workerId) : undefined;
+      if (!worker || !meta?.baselineId) return null;
+      const baseline = getBaseline(this.store, meta.baselineId);
+      if (!baseline) return `baseline not found: ${meta.baselineId}`;
+      let head: string;
+      try { head = await this.workspace.head(worker.worktree); } catch (err) {
+        return `could not read worker head: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      const acceptance = this.store.listGates(worker.workerId)
+        .filter((gate) => gate.head === head)
+        .flatMap((gate) => gate.checks)
+        .find((check) => check.name === 'acceptance');
+      if (!acceptance || acceptance.exitCode !== 0) return `acceptance check did not pass at head ${head ?? 'unknown'}`;
+      try {
+        const { stdout } = await exec('git', ['diff', '--name-only', `${baseline.testCommit}..${head}`, '--', ...baseline.files], { cwd: worker.worktree });
+        const edited = stdout.split('\n').map((file) => file.trim()).filter(Boolean);
+        if (edited.length > 0) return `baseline tests edited: ${edited.join(', ')}`;
+      } catch (err) {
+        return `could not verify baseline tests: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      return null;
+    });
     if (this.review) this.guard('pr.merge', (input) => this.review!.guard(input));
     this.jevChecker = deps.jevChecker;
     this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput));
@@ -355,7 +380,9 @@ export class Helm {
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
     const admittedBudget = this.assertBudget(repoSlug);
-    const baseRef = input.baseRef ?? (await this.workspace.defaultBranch(repo));
+    const baseline = input.baselineId ? requireValue(getBaseline(this.store, input.baselineId), `baseline not found: ${input.baselineId}`) : undefined;
+    if (baseline && baseline.repoSlug !== repoSlug) return refuse(`baseline belongs to ${baseline.repoSlug}, not ${repoSlug}`);
+    const baseRef = baseline?.testCommit ?? input.baseRef ?? (await this.workspace.defaultBranch(repo));
     const baseSha = await this.workspace.resolveSha(repo, baseRef);
     const workerId = genId('w');
     const branch = `helm/${workerId}`;
@@ -371,7 +398,10 @@ export class Helm {
     };
     try {
       this.store.insertWorker(row);
-      if (input.issue !== undefined) this.store.setMeta(workerId, { issue: input.issue });
+      if (input.issue !== undefined || baseline) this.store.setMeta(workerId, {
+        ...(input.issue !== undefined ? { issue: input.issue } : {}),
+        ...(baseline ? { issue: baseline.issue, baselineId: baseline.id, prBase: baseline.baseRef } : {}),
+      });
       attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
@@ -380,7 +410,7 @@ export class Helm {
     this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
-      : input.role === 'validator' ? (this.prompts.validator?.(promptInput) ?? validatorPrompt(promptInput))
+      : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
     this.startRun(workerId, message, onDone);
     return { ok: true, workerId, branch, worktree, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
@@ -492,7 +522,13 @@ export class Helm {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
-      const checks = input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha));
+      const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
+      const meta = this.store.getMeta(row.workerId);
+      const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
+      if (baseline) {
+        const command = (await loadRepoConfig(row.repo, baseline.baseSha, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
+        checks.push({ name: 'acceptance', command });
+      }
       const gateId = genId('g');
       const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
       const outcome = await this.gates.run(row.worktree, checks, logDir, { timeoutMs: this.config.gateTimeoutMs });
@@ -520,8 +556,10 @@ export class Helm {
       must(passing.length > 0, `no passing gate at head ${head}`);
       await this.workspace.push(row.worktree, row.branch);
       const title = input.title ?? row.result?.summary?.split('\n')[0] ?? row.objective.slice(0, 72);
-      const body = input.body ?? `${row.result?.summary ?? ''}\n\nGate: passed at ${head}`;
-      const opened = await this.github.openPr({ cwd: row.worktree, base: row.baseRef, head: row.branch, title, body, draft: input.draft });
+      const meta = this.store.getMeta(row.workerId);
+      const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
+      const body = `${input.body ?? `${row.result?.summary ?? ''}\n\nGate: passed at ${head}`}\n\n${baseline ? `red at ${baseline.baseSha}, green at ${head}` : ''}`;
+      const opened = await this.github.openPr({ cwd: row.worktree, base: meta?.prBase ?? row.baseRef, head: row.branch, title, body, draft: input.draft });
       const prRow: PrRow = { number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso() };
       this.store.insertPr(prRow);
       this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url });

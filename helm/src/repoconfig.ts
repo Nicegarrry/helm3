@@ -15,12 +15,13 @@ export const repoConfigSchema = z.object({
 
 export type RepoConfig = z.infer<typeof repoConfigSchema>;
 
-export async function loadRepoConfig(repo: string, sha?: string): Promise<RepoConfig> {
+export async function loadRepoConfig(repo: string, sha?: string, fallbackToWorktree = true): Promise<RepoConfig> {
   let raw: string;
   if (sha) {
     try {
       ({ stdout: raw } = await exec('git', ['show', `${sha}:helm.json`], { cwd: repo }));
     } catch {
+      if (!fallbackToWorktree) throw new Error(`helm.json not found at ${sha}`);
       raw = await readFile(join(repo, 'helm.json'), 'utf8');
     }
   } else {

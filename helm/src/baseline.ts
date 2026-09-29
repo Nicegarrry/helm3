@@ -14,6 +14,9 @@ export function listBaselines(store: Store, validatorId?: string): BaselineRow[]
   const rows = (validatorId ? store.sql.prepare('SELECT * FROM baselines WHERE validatorId = ? ORDER BY at ASC').all(validatorId) : store.sql.prepare('SELECT * FROM baselines ORDER BY at ASC').all()) as Record<string, unknown>[];
   return rows.map((row) => ({ id: row.id as string, repoSlug: row.repoSlug as string, issue: Number(row.issue), validatorId: row.validatorId as string, baseRef: row.baseRef as string, baseSha: row.baseSha as string, testCommit: row.testCommit as string, command: row.command as string, files: JSON.parse(row.files as string), red: Number(row.red), outputPath: row.outputPath as string, at: row.at as string }));
 }
+export function getBaseline(store: Store, id: string): BaselineRow | undefined {
+  return listBaselines(store).find((baseline) => baseline.id === id);
+}
 function glob(globPattern: string): RegExp {
   let source = '^';
   for (let i = 0; i < globPattern.length; i += 1) {

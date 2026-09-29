@@ -95,6 +95,22 @@ test('an inflight log with only a substring present is sent again', async () => 
   assert.deepEqual(calls.map((call) => call.name), ['cg_read', 'cg_log']); store.close();
 });
 
+test('a failed inflight dedupe read keeps the marker for the next tick', async () => {
+  const store = openStore(':memory:'); const calls: Call[] = []; let now = 0; let failed = true;
+  outbox(store, [{ op: 'log', path: 'team/lesson/one.md', args: { path: 'team/lesson/one.md', entry: 'rule', date: '2026-01-01' } }]);
+  store.sql.prepare("UPDATE memory_outbox SET error = 'inflight'").run();
+  const tick = createMemorySync({ store, settings: settings(true), env: { CG_TEST_KEY: 'secret-key' }, now: () => new Date(now), clientFactory: () => fakeClient(calls, (call) => {
+    if (call.name === 'cg_read' && failed) { failed = false; return textResult({ ok: false, error: 'read failed' }); }
+    return textResult({ markdown: '---\ntype: "lesson"\n---\ntruth\n---\n- 2026-01-01: rule' });
+  }) });
+  await tick();
+  assert.deepEqual(calls.map((call) => call.name), ['cg_read']);
+  assert.equal((store.sql.prepare('SELECT syncedAt, error FROM memory_outbox').get() as { syncedAt: string | null; error: string | null }).error, 'inflight');
+  now = 1_000; await tick();
+  assert.deepEqual(calls.map((call) => call.name), ['cg_read', 'cg_read']);
+  assert.ok((store.sql.prepare('SELECT syncedAt FROM memory_outbox').get() as { syncedAt: string | null }).syncedAt); store.close();
+});
+
 test('a log after a conflicted write is parked as blocked', async () => {
   const store = openStore(':memory:'); const calls: Call[] = [];
   outbox(store, [
@@ -106,7 +122,7 @@ test('a log after a conflicted write is parked as blocked', async () => {
   await tick();
   const rows = store.sql.prepare('SELECT error, syncedAt FROM memory_outbox ORDER BY id').all() as Array<{ error: string; syncedAt: string | null }>;
   assert.deepEqual(calls.map((call) => call.name), ['cg_write']); assert.equal(rows[0]?.error, 'conflict'); assert.equal(rows[1]?.error, 'blocked'); assert.equal(rows[2]?.error, 'blocked');
-  assert.ok(rows[1]?.syncedAt); assert.ok(rows[2]?.syncedAt); assert.equal(store.listAllEvents().filter((event) => event.kind === 'memory.conflict').length, 1); store.close();
+  assert.ok(rows[1]?.syncedAt); assert.ok(rows[2]?.syncedAt); assert.equal(store.listAllEvents().filter((event) => event.kind === 'memory.conflict').length, 1); assert.equal(store.listAllEvents().filter((event) => event.kind === 'memory.blocked').length, 2); store.close();
 });
 
 test('scorecard conflict reads the sha and retries once with expectedSha', async () => {

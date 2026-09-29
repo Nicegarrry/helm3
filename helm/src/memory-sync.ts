@@ -105,12 +105,11 @@ export function createMemorySync(options: SyncOptions): () => Promise<void> {
           }
           const renderedEntry = typeof args.entry === 'string' ? renderLogEntry(date, args.entry) : '';
           const precedingConflict = options.store.sql.prepare('SELECT 1 AS found FROM memory_outbox WHERE op = \'write\' AND path = ? AND id < ? AND error = \'conflict\' LIMIT 1').get(row.path, row.id) as { found: number } | undefined;
-          if (precedingConflict) { parked(row, 'blocked'); continue; }
+          if (precedingConflict) { parked(row, 'blocked'); event('memory.blocked', { id: row.id, path: row.path }); continue; }
           if (row.error === 'inflight') {
             const read = await handle.client.callTool({ name: 'cg_read', arguments: { path: row.path } });
             if (classifyToolResult(read) !== 'ok') {
               const failure = toolFailureReason(read, key);
-              options.store.sql.prepare('UPDATE memory_outbox SET error = ? WHERE id = ?').run(failure, row.id);
               transportFailure(failure, key);
               batchSucceeded = false;
               break;

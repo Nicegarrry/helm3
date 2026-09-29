@@ -296,12 +296,15 @@ type StartSupervisorInput = Readonly<{
 }>;
 
 type StartSupervisorDeps = Readonly<{
+  host?: Host;
   exec?: HostExec;
   hosts?: Readonly<Record<SupervisorHost, Host>>;
   registered?: SupervisorRow | null;
   settings?: ReturnType<typeof loadSettings>;
   daemon?: () => Promise<{ port: number; pid: number }>;
   register?: (input: { project: string; repo: string; host: SupervisorHost; label: string }) => Promise<unknown>;
+  sleep?: (ms: number) => Promise<void>;
+  clock?: () => number;
   warn?: (line: string) => void;
   env?: NodeJS.ProcessEnv;
   home?: string;
@@ -350,25 +353,47 @@ export async function startSupervisor(input: StartSupervisorInput, deps: StartSu
 
   const exec = deps.exec;
   let hostName = input.host ?? registered?.host;
-  if (!hostName) {
+  if (!hostName && !deps.host) {
     if (!exec) throw new Error('supervisor start cannot detect a host without exec');
     try { await exec('herdr', ['status', 'server']); hostName = 'herdr'; } catch { hostName = 'tmux'; }
   }
+  if (!hostName) hostName = 'herdr';
   if (hostName !== 'herdr' && hostName !== 'tmux') throw new Error(`invalid supervisor host: ${hostName}`);
   const hosts = deps.hosts ?? { herdr: herdrHost(exec), tmux: tmuxHost(exec) };
-  const host = hosts[hostName];
+  const host = deps.host ?? hosts[hostName];
   const command = supervisorCommand(input.project, label, settings, env);
   let pane = await host.resolve(label);
+  let launched = false;
   if (pane) {
     const status = await host.status(pane);
-    if (status === 'unknown') await host.send(pane, command);
+    if (status === 'unknown') { await host.send(pane, command); launched = true; }
     else if (!input.json) console.log(`attached ${label} ${pane.id}`);
   } else {
     pane = await host.create(label, repo, command);
     if (!pane) throw new Error(`host did not create a pane for ${label}`);
+    launched = true;
   }
-  const afterLaunch: HostStatus = await host.status(pane);
-  if (afterLaunch === 'blocked') warn(`warning: supervisor ${label} is blocked (likely a folder-trust prompt)`);
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms)));
+  const clock = deps.clock ?? (() => Date.now());
+  const warnIfBlocked = (status: HostStatus) => {
+    if (status === 'blocked') warn(`warning: supervisor ${label} is blocked (likely a folder-trust prompt)`);
+  };
+  if (launched) {
+    const deadline = clock() + 8_000;
+    let polls = 0;
+    while (polls < 16) {
+      const status = await host.status(pane);
+      if (status === 'blocked') {
+        warnIfBlocked(status);
+        break;
+      }
+      if (clock() >= deadline) break;
+      polls += 1;
+      await sleep(500);
+    }
+  } else {
+    warnIfBlocked(await host.status(pane));
+  }
 
   if (deps.daemon) await deps.daemon();
   if (deps.register) {

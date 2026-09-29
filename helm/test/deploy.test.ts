@@ -30,9 +30,9 @@ function workspace(sha: string): Workspace {
   return { async resolveSha() { return sha; }, async defaultBranch() { return 'main'; }, async create() { return { path: '', branch: '', baseSha: sha }; }, async remove() {}, async head() { return sha; }, async isClean() { return true; }, async diffStat() { return ''; }, async patchId() { return ''; }, async commitAll() { return sha; }, async push() {}, async clone() {}, async fetch() {} };
 }
 
-function deployDeps(repo: string, sha: string, exec: DeployExec, decision: 'allow' | 'tap' = 'allow') {
+function deployDeps(repo: string, sha: string, exec: DeployExec, decision: 'allow' | 'tap' = 'allow', env: NodeJS.ProcessEnv = { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token }) {
   const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-deploy-home-'));
-  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision }] }), reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec, env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token }, now: () => new Date('2026-09-30T00:00:00.000Z') });
+  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision }] }), reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec, env, now: () => new Date('2026-09-30T00:00:00.000Z') });
   return { service, store, home };
 }
 
@@ -95,4 +95,25 @@ test('git mode uses the successful deployment status environment URL', async () 
   const config = { ...target, mode: 'git' as const }; const { repo, sha } = repoWithConfig(config); const d = deployDeps(repo, sha, async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'gh' && args[1]?.includes('/statuses')) return { stdout: JSON.stringify([{ state: 'success', environment_url: 'https://environment.example.invalid', target_url: 'https://target.example.invalid' }]), code: 0 }; if (file === 'gh') return { stdout: JSON.stringify([{ id: 42, url: 'https://api.example.invalid' }]), code: 0 }; return { stdout: '', code: 0 }; });
   try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, true); assert.equal(result.deploy.url, 'https://environment.example.invalid'); }
   finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('TestFlight records the fastlane build number and keeps credentials out of argv', async () => {
+  const config = { name: 'beta', kind: 'testflight' as const, env: { APP_STORE_CONNECT_API_KEY_PATH: 'ASC_SECRET', MATCH_PASSWORD: 'MATCH_SECRET' }, lane: 'internal', smoke: {}, rollback: 'none' as const }; const { repo, sha } = repoWithConfig(config); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = [];
+  const d = deployDeps(repo, sha, async (file, args, options) => { calls.push({ file, args, options }); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'bundle') return { stdout: 'Successfully uploaded build 42\n', code: 0 }; return { stdout: '', code: 0 }; }, 'allow', { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' });
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'beta' }); assert.equal(result.ok, true); assert.equal(result.deploy.deploymentId, '42'); assert.deepEqual(calls.find((call) => call.file === 'bundle')?.args, ['exec', 'fastlane', 'internal']); const fastlane = calls.find((call) => call.file === 'bundle')!; assert.equal(fastlane.options.env?.APP_STORE_CONNECT_API_KEY_PATH, '/tmp/key.json'); assert.equal(fastlane.options.env?.MATCH_PASSWORD, 'match-password'); assert.ok(fastlane.args.every((arg) => !arg.includes('password') && !arg.includes('key.json'))); const event = d.store.listEvents('project:owner/repo').find((entry) => entry.kind === 'deploy'); assert.equal(event?.data.deploymentId, '42'); }
+  finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('TestFlight failure stores and emits only a redacted last-40-line tail', async () => {
+  const config = { name: 'beta', kind: 'testflight' as const, env: { APP_STORE_CONNECT_API_KEY_PATH: 'ASC_SECRET', MATCH_PASSWORD: 'MATCH_SECRET' }, smoke: {}, rollback: 'none' as const }; const { repo, sha } = repoWithConfig(config); const secret = 'fastlane-secret';
+  const log = Array.from({ length: 50 }, (_, index) => index === 45 ? secret : `line-${index + 1}`).join('\n'); const d = deployDeps(repo, sha, async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'bundle') return { stdout: log, code: 1 }; return { stdout: '', code: 0 }; }, 'allow', { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: secret });
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'beta' }); assert.equal(result.ok, false); assert.doesNotMatch(result.reason, new RegExp(secret)); const saved = d.store.sql.prepare("SELECT state, smoke FROM deploys WHERE target = 'beta'").get() as { state: string; smoke: string }; assert.equal(saved.state, 'failed'); assert.doesNotMatch(saved.smoke, new RegExp(secret)); assert.match(saved.smoke, /line-50/); const event = d.store.listEvents('project:owner/repo').find((entry) => entry.kind === 'deploy.failed'); assert.doesNotMatch(JSON.stringify(event?.data), new RegExp(secret)); assert.match(String(event?.data.reason), /line-50/); }
+  finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('external TestFlight distribution requires the testflight.external tap', async () => {
+  const config = { name: 'external', kind: 'testflight' as const, external: true, env: { APP_STORE_CONNECT_API_KEY_PATH: 'ASC_SECRET', MATCH_PASSWORD: 'MATCH_SECRET' }, smoke: {}, rollback: 'none' as const }; const { repo, sha } = repoWithConfig(config); let envelopeKind = '';
+  const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-testflight-tap-')); const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { envelopeKind = kind; return { ok: true, decisions: [{ decision: 'tap' }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: async (file, args) => file === 'git' && args[0] === 'rev-parse' ? { stdout: `${sha}\n`, code: 0 } : { stdout: '', code: 0 }, env: { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' } });
+  try { const result = await service.run({ project: 'owner/repo', target: 'external' }); assert.equal(result.ok, false); assert.match(result.reason, /tap required for testflight\.external/); assert.equal(envelopeKind, 'testflight.external'); }
+  finally { store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
 });

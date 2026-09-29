@@ -7,7 +7,7 @@ import type { Store } from './types.js';
 
 export const DEFAULT_RULES = 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, and provider settings.';
 const DEFAULT_DEPLOY = { prod: 'tap' as const, staging: 'tap' as const, preview: 'tap' as const };
-const DEFAULT_TAP_ONLY = ['deploy.prod', 'convex.migration', 'dependency.major', 'external.message', 'skill.merge', 'merge.unreviewed'];
+const DEFAULT_TAP_ONLY = ['deploy.prod', 'testflight.external', 'convex.migration', 'dependency.major', 'external.message', 'skill.merge', 'merge.unreviewed'];
 const envelopeSchema = z.object({
   rules: z.array(z.string().min(1)),
   budget: z.object({ maxSprintUsd: z.number().nonnegative(), maxSprintCodexTokens: z.number().int().nonnegative() }),

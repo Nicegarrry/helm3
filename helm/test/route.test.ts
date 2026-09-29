@@ -140,6 +140,8 @@ test('no Jev key and too_big are safe fallback and warning cases', async () => {
     const noKey: Jev = { shadow: true, async ask() { return { ok: false, reason: 'no key' }; } };
     const settings = loadSettings('/missing-route-settings');
     assert.deepEqual(await choose(createRouter({ settings, store, jev: noKey }), input('acme/repo', 'task')), { model: HIGH });
+    const restricted = { ...settings, routing: { ...settings.routing, allowed: [MEDIUM] } };
+    assert.deepEqual(await choose(createRouter({ settings: restricted, store, jev: noKey }), input('acme/repo', 'task')), { model: MEDIUM });
     const warning = routeFixture(answers(1.7, 0.5));
     try { assert.equal((await choose(warning.route, input('acme/repo', 'task'))).warning, 'split recommended'); } finally { warning.store.close(); }
   } finally { store.close(); }

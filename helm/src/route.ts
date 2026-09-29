@@ -20,6 +20,7 @@ function project(repo: string): string | undefined {
 }
 
 export function createRouter(options: { settings: Settings; store: Store; jev: Jev; now?: () => Date; resolveProject?: (repo: string) => Promise<string | undefined> }): ModelChooser {
+  const fallbackModel = () => allowed(HIGH, options.settings);
   return async (input: SpawnInput): Promise<ModelChoice> => {
     if (input.model || input.difficulty) return { model: input.model ?? HIGH };
     const projectName = project(input.repo) ?? (options.resolveProject ? await options.resolveProject(input.repo).catch(() => undefined) : undefined);
@@ -32,13 +33,13 @@ export function createRouter(options: { settings: Settings; store: Store; jev: J
         questions: { complexity: questions.complexity!, too_big: questions.too_big! },
       });
     } catch {
-      return { model: HIGH };
+      return { model: fallbackModel() };
     }
-    if (!result.ok) return { model: HIGH };
+    if (!result.ok) return { model: fallbackModel() };
     const splitRecommended = tooBig(result.answers.too_big);
     const complexity = score(result.answers.complexity);
     const complexityBand = band(complexity);
-    if (complexityBand === undefined) return { model: HIGH, ...(splitRecommended ? { warning: 'split recommended' } : {}) };
+    if (complexityBand === undefined) return { model: fallbackModel(), ...(splitRecommended ? { warning: 'split recommended' } : {}) };
     let model = allowed(options.settings.routing.table[complexityBand] ?? HIGH, options.settings);
     const rate = cleanRateForRouting(options.store, model, complexityBand, options.now?.() ?? new Date(), projectName);
     if (rate.n >= options.settings.routing.minN && rate.clean / rate.n < options.settings.routing.minClean) model = allowed(HIGH, options.settings);

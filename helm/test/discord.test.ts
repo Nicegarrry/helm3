@@ -1,11 +1,47 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDiscord } from '../src/discord.js';
+import { createDiscord as createDiscordImpl } from '../src/discord.js';
 import { openStore } from '../src/store.js';
+
+const TEST_ENV_FILE = '/definitely-missing/helm-discord-test-env';
+const createDiscord = (options: Parameters<typeof createDiscordImpl>[0]) => createDiscordImpl({ ...options, envFile: TEST_ENV_FILE });
 
 function settings(maxPerHour = 20) {
   return { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour } };
 }
+
+test('tap posts use the dedicated tap webhook, separate from milestone webhooks', async () => {
+  const store = openStore(':memory:');
+  const calls: string[] = [];
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: {
+      HELM_TEST_WEBHOOK: 'https://discord.test/milestones', HELM_TAP_WEBHOOK: 'https://discord.test/taps',
+    }, fetch: async (url) => { calls.push(String(url)); return new Response('{}', { status: 200 }); } });
+    assert.deepEqual(await discord.notifyNick('o/r', 'milestone'), { ok: true, sent: true });
+    assert.deepEqual(await discord.postTap('tap message'), { ok: true });
+    assert.deepEqual(calls, ['https://discord.test/milestones', 'https://discord.test/taps']);
+  } finally { store.close(); }
+});
+
+test('tap webhook comparison normalizes host, trailing slash, query, and fragment', async () => {
+  const store = openStore(':memory:');
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: {
+      HELM_TEST_WEBHOOK: 'HTTPS://DISCORD.TEST/taps/?ignored=1#fragment', HELM_TAP_WEBHOOK: 'https://discord.test/taps',
+    }, fetch: async () => new Response('{}', { status: 200 }) });
+    assert.deepEqual(await discord.postTap('tap message'), { ok: false, reason: 'tap channel must differ from the milestone channel' });
+  } finally { store.close(); }
+});
+
+test('tap webhook comparison canonicalizes Discord webhook host and API version forms', async () => {
+  const store = openStore(':memory:');
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' } }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: {
+      HELM_TEST_WEBHOOK: 'https://discordapp.com/api/v10/webhooks/123/token', HELM_TAP_WEBHOOK: 'https://discord.com/api/webhooks/123/token',
+    }, fetch: async () => new Response('{}', { status: 200 }) });
+    assert.deepEqual(await discord.postTap('tap message'), { ok: false, reason: 'tap channel must differ from the milestone channel' });
+  } finally { store.close(); }
+});
 
 test('maps milestone events, batches them, and never leaks the webhook URL', async () => {
   const store = openStore(':memory:');

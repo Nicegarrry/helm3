@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
@@ -62,6 +62,32 @@ test('run: a timeout produces a null exit code', async () => {
   }
 });
 
+test('run: removes node_modules created by the gate on pass and fail, but preserves existing or opted-in modules', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-hygiene-'));
+  const logDir = join(dir, 'logs');
+  try {
+    const createsModules = 'mkdir -p node_modules helm/node_modules; exit 3';
+    const removed = await gateRunner().run(dir, [{ name: 'fail', command: createsModules }], logDir);
+    assert.equal(removed.passed, false);
+    assert.equal(existsSync(join(dir, 'node_modules')), false);
+    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), false);
+
+    mkdirSync(join(dir, 'node_modules'), { recursive: true });
+    mkdirSync(join(dir, 'helm', 'node_modules'), { recursive: true });
+    await gateRunner().run(dir, [{ name: 'pass', command: 'exit 0' }], logDir);
+    assert.equal(existsSync(join(dir, 'node_modules')), true);
+    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
+
+    rmSync(join(dir, 'node_modules'), { recursive: true, force: true });
+    rmSync(join(dir, 'helm', 'node_modules'), { recursive: true, force: true });
+    await gateRunner({ keepNodeModules: true }).run(dir, [{ name: 'keep', command: 'mkdir -p node_modules helm/node_modules' }], logDir);
+    assert.equal(existsSync(join(dir, 'node_modules')), true);
+    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('defaultChecks: reads gates from helm.json when present', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
   const runner = gateRunner();
@@ -90,6 +116,40 @@ test('defaultChecks: a worker helm.json change cannot remove base gates', async 
     assert.deepEqual(await runner.defaultChecks(dir, baseSha), [{ name: 'base', command: 'echo base' }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultChecks: an untracked operator helm.json is used when absent at the base sha', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
+  const runner = gateRunner();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'base', '--allow-empty'], { cwd: dir });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'local', command: 'echo local' }] }));
+    assert.deepEqual(await runner.defaultChecks(dir, baseSha), [{ name: 'local', command: 'echo local' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaultChecks: a helm.json in a separate worker worktree is not used', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
+  const worker = mkdtempSync(join(tmpdir(), 'helm-gate-worker-'));
+  const runner = gateRunner();
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'base', '--allow-empty'], { cwd: dir });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(worker, 'helm.json'), JSON.stringify({ gates: [{ name: 'worker', command: 'echo worker' }] }));
+    assert.deepEqual(await runner.defaultChecks(dir, baseSha), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(worker, { recursive: true, force: true });
   }
 });
 

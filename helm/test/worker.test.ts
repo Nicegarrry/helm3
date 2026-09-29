@@ -317,6 +317,13 @@ test('parseWorkerResult accepts a question result and requires its question', ()
   const question: WorkerResult = { status: 'question', summary: 'blocked on a decision', question: 'Which API should I use?', changedFiles: [], commandsRun: [] };
   assert.deepEqual(parseWorkerResult(JSON.stringify(question)), question);
   assert.equal(parseWorkerResult(JSON.stringify({ ...question, question: undefined })), null);
+  assert.equal(parseWorkerResult(JSON.stringify({ ...question, question: '' })), null);
+});
+
+test('parseWorkerResult treats empty optional strings as absent', () => {
+  const result = parseWorkerResult(JSON.stringify({ ...validResult, question: '', notes: '  ' }));
+  assert.deepEqual(result, validResult);
+  assert.equal(parseWorkerResult(JSON.stringify({ ...validResult, acceptance: { command: '', files: [] } })), null);
 });
 
 test('F10: parseWorkerResult tries fences from last to first, skipping a later fence that does not validate', () => {

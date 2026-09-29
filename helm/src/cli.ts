@@ -14,19 +14,25 @@ import { gateRunner } from './gate.js';
 import { ghGitHub } from './github.js';
 import { piWorkerRunner } from './worker.js';
 import { codexWorkerRunner, laneRunner } from './codex.js';
-import { builderPrompt, reviewerPrompt } from './prompt.js';
+import { builderPrompt, reviewerPrompt, validatorPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
 import { startTicker } from './daemon.js';
 import { createInboxTriage, listInbox } from './inbox.js';
 import { createJev } from './jev.js';
 import { createJevCheck } from './jevcheck.js';
+import { createClaims } from './claims.js';
 import { loadSettings } from './settings.js';
 import { defaultExec, herdrHost, tmuxHost, type Host, type HostExec, type HostStatus } from './host.js';
 import type { SupervisorHost, SupervisorRow } from './types.js';
 import { createWatcher } from './watch.js';
 import { createSupervisor } from './supervise.js';
 import { createDiscord } from './discord.js';
+import { createReview } from './review.js';
+import { createRetry } from './retry.js';
+import { createEnvelopeTicker } from './envelope.js';
+import { createMemorySync } from './memory-sync.js';
+import { createHygiene } from './hygiene.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -44,7 +50,7 @@ function usage(): void {
   reply <question-id> "<answer>" [--json]
   stop <id> [--json]
   gate <id> [--json]
-  pr <id> [--title t] [--body b] [--draft] [--json]
+  pr <id> [--title t] [--body b] [--base branch] [--draft] [--json]
   pr-status <id|#n> [--json]
   review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
@@ -52,12 +58,17 @@ function usage(): void {
   budget open <project> <label> <capUsd> [--codex-tokens n]
   budget close <project>
   budget [project] [--json]
+  tap <id> <code> [--json]
   serve [--stdio|--http] [--port n]
   daemon --action status|drain|resume [--json]
   supervisor register <project> --repo <path> --host herdr|tmux --label <text>
   supervisor start <owner/name> --repo <abs path> [--host herdr|tmux] [--label <text>]
   supervisor list [--json]
   wake <project> "<text>" [--json]
+  scorecard <project> [--budget <id>] [--since <iso>] [--json]
+  deploy run <project> <target> [--sha <sha>] [--tap-id <id>] [--json]
+  deploy status [project] [--id <id>] [--json]
+  deploy rollback <id> [--tap-id <id>] [--json]
   jev check --preset <issue|dedupe|verdict|raw> --file <json|md> [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
   shutdown`);
@@ -68,8 +79,10 @@ function openReadStore() {
   return { config, store: openStore(join(config.home, 'helm.sqlite')) };
 }
 
-function prIdent(ref: string): { number: number } | { workerId: string } {
+function prIdent(ref: string): { repoSlug?: string; number: number } | { workerId: string } {
   const stripped = ref.startsWith('#') ? ref.slice(1) : ref;
+  const scoped = stripped.match(/^([^#]+)#(\d+)$/);
+  if (scoped) return { repoSlug: scoped[1], number: Number(scoped[2]) };
   return /^\d+$/.test(stripped) ? { number: Number(stripped) } : { workerId: ref };
 }
 
@@ -230,8 +243,8 @@ const cmdStop = (args: string[]) => simpleCmd('worker.stop', args, (p) => (p[0] 
 const cmdGate = (args: string[]) => simpleCmd('gate.run', args, (p) => (p[0] ? { workerId: p[0] } : undefined));
 
 const cmdPr = (args: string[]) =>
-  simpleCmd('pr.open', args, (p, v) => (p[0] ? { workerId: p[0], title: v.title, body: v.body, draft: v.draft ?? true } : undefined),
-    { title: { type: 'string' }, body: { type: 'string' }, draft: { type: 'boolean' } });
+  simpleCmd('pr.open', args, (p, v) => (p[0] ? { workerId: p[0], title: v.title, body: v.body, base: v.base, draft: v.draft ?? true } : undefined),
+    { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' }, draft: { type: 'boolean' } });
 
 const cmdPrStatus = (args: string[]) => simpleCmd('pr.status', args, (p) => (p[0] ? prIdent(p[0]) : undefined));
 
@@ -239,7 +252,10 @@ const cmdReview = (args: string[]) =>
   simpleCmd('review.request', args, (p, v) => (p[0] ? { ...prIdent(p[0]), model: v.model } : undefined), { model: { type: 'string' } });
 
 const cmdMerge = (args: string[]) =>
-  simpleCmd('pr.merge', args, (p, v) => (p[0] && v.head ? { number: Number(p[0].replace('#', '')), expectedHead: v.head } : undefined),
+  simpleCmd('pr.merge', args, (p, v) => {
+    const ident = p[0] ? prIdent(p[0]) : undefined;
+    return ident && 'number' in ident && v.head ? { ...ident, expectedHead: v.head } : undefined;
+  },
     { head: { type: 'string' } });
 
 const cmdStatus = (args: string[]) =>
@@ -276,6 +292,8 @@ async function cmdBudget(args: string[]): Promise<void> {
     store.close();
   }
 }
+
+const cmdTap = (args: string[]) => simpleCmd('tap.confirm', args, (p) => (p[0] && p[1] ? { id: p[0], code: p[1] } : undefined));
 
 const cmdSupervisor = async (args: string[]): Promise<void> => {
   const [verb, ...rest] = args;
@@ -469,7 +487,7 @@ async function cmdServe(args: string[]): Promise<void> {
   if (values.stdio && !values.http) {
     const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port));
     const handle = await serveStdioProxy(live.port);
-    console.error(`helm stdio front-end attached to daemon pid ${live.pid}; status page at http://127.0.0.1:${live.port}/`);
+    console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);
     await handle.closed;
     await handle.close();
     process.exit(0);
@@ -483,18 +501,29 @@ async function cmdServe(args: string[]): Promise<void> {
   const settings = loadSettings(config.home);
   const discord = createDiscord({ store, settings, home: config.home });
   const jev = createJev({ settings, store, env: process.env });
+  const workspace = gitWorkspace();
+  const github = ghGitHub();
   const helm = new Helm({
-    config, store, workspace: gitWorkspace(), gates: gateRunner(), github: ghGitHub(),
-    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt },
+    config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules }), github,
+    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
-    discord, jevChecker: createJevCheck({ jev, store }),
+    discord,
+    review: createReview({ store, github, workspace, jev, settings }),
+    retry: createRetry({ store, settings, github, workspace }),
+    jevChecker: createJevCheck({ jev, store }),
+    jev,
+    claims: createClaims({ jev, store, settings, workspace }),
   });
   helm.markInterruptedOnStart();
+  const hygiene = createHygiene({ home: config.home, store, settings, workspace, github, isRunning: (workerId) => helm.isWorkerRunning(workerId), withWorkerLock: (workerId, fn) => helm.withWorkerLock(workerId, fn), deployInProgress: (project, target) => helm.deploy.isInProgress(project, target) });
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev })]);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
+  const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopDiscord(); };
+  const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
+  const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();
@@ -544,12 +573,20 @@ async function cmdShutdown(): Promise<void> {
   printOutcome(await postTool('daemon.control', { action: 'shutdown' }), false);
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
+const cmdScorecard = (args: string[]) => simpleCmd('scorecard.export', args, (p, v) => (p[0] ? { project: p[0], ...(v.budget ? { budgetId: v.budget } : {}), ...(v.since ? { since: v.since } : {}) } : undefined), { budget: { type: 'string' }, since: { type: 'string' } });
+const cmdDeploy = async (args: string[]): Promise<void> => {
+  const [verb, ...rest] = args;
+  if (verb === 'run') { await simpleCmd('deploy.run', rest, (p, v) => p[0] && p[1] ? { project: p[0], target: p[1], ...(v.sha ? { sha: v.sha } : {}), ...(v['tap-id'] ? { tapId: v['tap-id'] } : {}) } : undefined, { sha: { type: 'string' }, 'tap-id': { type: 'string' } }); return; }
+  if (verb === 'status') { await simpleCmd('deploy.status', rest, (p, v) => ({ ...(p[0] ? { project: p[0] } : {}), ...(v.id ? { id: v.id } : {}) }), { id: { type: 'string' } }); return; }
+  if (verb === 'rollback') { await simpleCmd('deploy.rollback', rest, (p, v) => p[0] ? { id: p[0], ...(v['tap-id'] ? { tapId: v['tap-id'] } : {}) } : undefined, { 'tap-id': { type: 'string' } }); return; }
+  usage(); process.exitCode = 2;
+};
 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev,
+  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, deploy: cmdDeploy,
 };
 
 async function main(): Promise<void> {

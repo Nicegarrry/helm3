@@ -1,0 +1,185 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import type { Jev } from '../src/jev.js';
+import { Helm } from '../src/helm.js';
+import { createReview } from '../src/review.js';
+import { createSupervisor } from '../src/supervise.js';
+import { openStore } from '../src/store.js';
+import { loadSettings } from '../src/settings.js';
+import type { GateRunner, GitHub, HelmConfig, PrStatus, WorkerRow, WorkerRunner, Workspace } from '../src/types.js';
+
+const head1 = 'a'.repeat(40);
+const head2 = 'b'.repeat(40);
+
+function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchIds?: Record<string, string> } = {}) {
+  const store = openStore(':memory:');
+  const now = new Date().toISOString();
+  const worker: WorkerRow = { workerId: 'w-review', repo: '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-5.6-luna:high', objective: 'work', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: 'helm/review', worktree: '/repo', state: 'succeeded', head: head1, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
+  store.insertWorker(worker);
+  store.insertPr({ number: 1, workerId: worker.workerId, url: 'https://github.com/owner/repo/pull/1', head: head1, createdAt: now });
+  let currentHead = head1;
+  let merges = 0;
+  const workspace = { patchId: async (_repo: string, _base: string, head: string) => options.patchIds?.[head] ?? head } as Workspace;
+  const github = {
+    async openPr() { return { number: 1, url: worker.repoSlug }; },
+    async prStatus(_repo: string, number: number): Promise<PrStatus> { return { number, state: 'open', head: currentHead, mergeable: true, draft: false, checks: [], reviews: [], url: worker.repoSlug }; },
+    async comment() { return { body: options.body ?? 'APPROVE: ok', issueNumber: options.issueNumber ?? 1 }; },
+    async postComment() {},
+    async merge() { merges += 1; },
+  } as unknown as GitHub;
+  const jev = options.jev ?? { shadow: false, async ask() { return { ok: true as const, answers: { approve: { noul: 1 } } }; } };
+  const review = createReview({ store, github, workspace, jev, settings: loadSettings('/missing-review-settings') });
+  const config: HelmConfig = { home: '/tmp/helm-review', spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 1000 };
+  const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
+  const runner: WorkerRunner = { async run() { return { result: null, rawText: '', sessionFile: null }; } };
+  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, review });
+  return { store, helm, review, github, setHead: (head: string) => { currentHead = head; }, merged: () => merges };
+}
+
+test('pr.merge refuses without an approving review at the expected head', async () => {
+  const d = setup();
+  try { assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: `no approving review at ${head1}` }); }
+  finally { d.store.close(); }
+});
+
+test('review.record and pr.merge stay scoped to the requested repository when numbers collide', async () => {
+  const d = setup();
+  try {
+    const source = d.store.getWorker('w-review')!;
+    const other = { ...source, workerId: 'w-other', repoSlug: 'owner/other', branch: 'helm/other', worktree: '/other' };
+    d.store.insertWorker(other);
+    d.store.insertPr({ repoSlug: other.repoSlug, number: 1, workerId: other.workerId, url: 'https://github.com/owner/other/pull/1', head: head1, createdAt: other.createdAt });
+
+    const recorded = await d.review.record({ project: 'owner/other', number: 1, head: head1, commentUrl: 'https://github.com/owner/other/pull/1#issuecomment-20', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    if (recorded.ok) assert.equal(recorded.review.repoSlug, 'owner/other');
+    assert.deepEqual(await d.helm.prMerge({ project: 'owner/other', number: 1, expectedHead: head1 }), { ok: true, merged: true });
+  } finally { d.store.close(); }
+});
+
+test('number-only PR calls resolve from PR rows even when workers span four repositories', async () => {
+  const d = setup();
+  try {
+    const source = d.store.getWorker('w-review')!;
+    for (const [index, repoSlug] of ['owner/two', 'owner/three', 'owner/four'].entries()) {
+      d.store.insertWorker({ ...source, workerId: `w-${index + 2}`, repoSlug, branch: `helm/${repoSlug.replace('/', '-')}`, worktree: `/${repoSlug.replace('/', '-')}` });
+    }
+    const status = await d.helm.prStatus({ number: 1 });
+    assert.equal(status.ok, true);
+    if (status.ok) assert.equal(status.url, 'owner/repo');
+    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-21', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: true, merged: true });
+  } finally { d.store.close(); }
+});
+
+test('number-only PR calls refuse an ambiguous number and project selects the requested row', async () => {
+  const d = setup();
+  try {
+    const source = d.store.getWorker('w-review')!;
+    const other = { ...source, workerId: 'w-other', repoSlug: 'owner/other', branch: 'helm/other', worktree: '/other' };
+    d.store.insertWorker(other);
+    d.store.insertPr({ repoSlug: other.repoSlug, number: 1, workerId: other.workerId, url: 'https://github.com/owner/other/pull/1', head: head1, createdAt: other.createdAt });
+    const ambiguous = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-22', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.deepEqual(ambiguous, { ok: false, reason: 'PR #1 is ambiguous across repos: owner/other, owner/repo; pass project' });
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: 'PR #1 is ambiguous across repos: owner/other, owner/repo; pass project' });
+    const merge = await d.helm.prMerge({ project: 'owner/other', number: 1, expectedHead: head1 });
+    assert.deepEqual(merge, { ok: false, reason: `no approving review at ${head1}` });
+  } finally { d.store.close(); }
+});
+
+test('a Jev disagreement records disputed and emits a supervisor wake', async () => {
+  const d = setup({ body: 'APPROVE blockers are items 1 and 2', jev: { shadow: false, async ask() { return { ok: true as const, answers: { approve: { noul: 0.11 } } }; } } });
+  const supervisor = createSupervisor({ store: d.store, settings: loadSettings('/missing-review-settings'), hosts: { herdr: {} as never, tmux: {} as never } });
+  supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'review' });
+  try {
+    const result = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-9', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.review.verdict, 'disputed');
+    await supervisor.consume();
+    const wakes = supervisor.wakes({ project: 'owner/repo', ack: false });
+    assert.equal(wakes.ok, true);
+    if (wakes.ok) assert.equal(wakes.wakes[0]?.kind, 'review.disputed');
+  } finally { d.store.close(); }
+});
+
+test('an old-head review is rejected, then carried by the same patch id', async () => {
+  const d = setup({ patchIds: { [head1]: 'patch-1', [head2]: 'patch-1' } });
+  try {
+    assert.deepEqual(await d.review.record({ number: 1, head: head2, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-10', reviewer: 'claude-sonnet', verdict: 'approve' }), {
+      ok: false, reason: `head mismatch: expected ${head2}, got ${head1}`,
+    });
+    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-10', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    d.setHead(head2);
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head2 }), { ok: true, merged: true });
+    assert.equal(d.merged(), 1);
+  } finally { d.store.close(); }
+});
+
+test('pr.merge refuses an old-head approval when the patch id changes', async () => {
+  const d = setup({ patchIds: { [head1]: 'patch-1', [head2]: 'patch-2' } });
+  try {
+    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-17', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    d.setHead(head2);
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head2 }), { ok: false, reason: `no approving review at ${head2}` });
+    assert.equal(d.merged(), 0);
+  } finally { d.store.close(); }
+});
+
+test('review.record refuses a stale head', async () => {
+  const d = setup();
+  try {
+    assert.deepEqual(await d.review.record({ number: 1, head: head2, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-13', reviewer: 'claude-sonnet', verdict: 'approve' }), {
+      ok: false, reason: `head mismatch: expected ${head2}, got ${head1}`,
+    });
+  } finally { d.store.close(); }
+});
+
+test('pr.merge refuses a review from the builder model family', async () => {
+  const d = setup();
+  try {
+    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-14', reviewer: 'codex/gpt-5.6-luna:high', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: "reviewer model family 'gpt' matches the builder's" });
+  } finally { d.store.close(); }
+});
+
+test('a comment from another PR is refused', async () => {
+  const d = setup({ issueNumber: 2 });
+  try {
+    const result = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-11', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.deepEqual(result, { ok: false, reason: 'comment does not belong to this PR' });
+  } finally { d.store.close(); }
+});
+
+test('without a Jev key the APPROVE line decides the verdict', async () => {
+  const d = setup({ jev: { shadow: false, async ask() { return { ok: false as const, reason: 'no key' }; } }, body: 'APPROVE: ok' });
+  try {
+    const result = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-12', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.review.verdict, 'approve');
+  } finally { d.store.close(); }
+});
+
+test('the last non-empty verdict line controls approval', async () => {
+  const d = setup({ body: 'APPROVE: okay\n\nREQUEST_CHANGES: blockers' });
+  try {
+    const result = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-15', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.review.verdict, 'changes');
+  } finally { d.store.close(); }
+});
+
+test('a Jev answer without noul is unknown and stores a null approval score', async () => {
+  const d = setup({ body: 'APPROVE: okay', jev: { shadow: false, async ask() { return { ok: true as const, answers: { verdict: { confidence: 1 } } }; } } });
+  try {
+    const result = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-16', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.review.verdict, 'approve');
+      assert.equal(result.review.jevApprove, null);
+    }
+  } finally { d.store.close(); }
+});

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -246,10 +247,53 @@ test('gates and prs round-trip', () => {
 
     store.insertPr({ number: 7, workerId: 'w-gate', url: 'https://github.com/o/r/pull/7', head: 'a'.repeat(40), createdAt: new Date().toISOString() });
     assert.equal(store.getPrByWorker('w-gate')?.number, 7);
-    assert.equal(store.getPrByNumber(7)?.workerId, 'w-gate');
-    assert.equal(store.getPrByNumber(999), undefined);
+    assert.equal(store.getPrByNumber('o/r', 7)?.workerId, 'w-gate');
+    assert.equal(store.getPrByNumber('o/r', 999), undefined);
   } finally {
     store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('PRs with the same number coexist when their repositories differ', () => {
+  const store = openStore(':memory:');
+  try {
+    store.insertWorker(makeWorker({ workerId: 'w-a', repoSlug: 'owner/a' }));
+    store.insertWorker(makeWorker({ workerId: 'w-b', repoSlug: 'owner/b', branch: 'helm/w-b', worktree: '/tmp/repo/worktrees/w-b' }));
+    store.insertPr({ repoSlug: 'owner/a', number: 230, workerId: 'w-a', url: 'https://github.com/owner/a/pull/230', head: 'a'.repeat(40), createdAt: '2026-01-01' });
+    store.insertPr({ repoSlug: 'owner/b', number: 230, workerId: 'w-b', url: 'https://github.com/owner/b/pull/230', head: 'b'.repeat(40), createdAt: '2026-01-01' });
+
+    assert.equal(store.getPrByNumber('owner/a', 230)?.workerId, 'w-a');
+    assert.equal(store.getPrByNumber('owner/b', 230)?.workerId, 'w-b');
+    assert.deepEqual(store.resolvePrByNumber(230), { reason: 'PR #230 is ambiguous across repos: owner/a, owner/b; pass project' });
+    assert.equal(store.resolvePrByNumber(230, 'owner/a').pr?.workerId, 'w-a');
+    assert.equal((store.sql.prepare('SELECT COUNT(*) AS count FROM prs').get() as { count: number }).count, 2);
+  } finally {
+    store.close();
+  }
+});
+
+test('opening an old PR schema migrates every row and is idempotent', () => {
+  const { dir, path } = tempDbPath();
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE prs (number INTEGER PRIMARY KEY, workerId TEXT NOT NULL, url TEXT NOT NULL, head TEXT NOT NULL, createdAt TEXT NOT NULL);
+    INSERT INTO prs VALUES (230, 'w-a', 'https://github.com/owner/a/pull/230', 'a', '2026-01-01');
+    INSERT INTO prs VALUES (231, 'https://worker-b', 'https://github.com/owner/b/pull/231', 'b', '2026-01-02');
+  `);
+  legacy.close();
+  try {
+    const store = openStore(path);
+    assert.equal(store.getPrByNumber('owner/a', 230)?.workerId, 'w-a');
+    assert.equal(store.getPrByNumber('owner/b', 231)?.workerId, 'https://worker-b');
+    assert.equal((store.sql.prepare('SELECT COUNT(*) AS count FROM prs').get() as { count: number }).count, 2);
+    store.close();
+
+    const reopened = openStore(path);
+    assert.equal((reopened.sql.prepare('SELECT COUNT(*) AS count FROM prs').get() as { count: number }).count, 2);
+    assert.equal(reopened.getPrByNumber('owner/b', 231)?.url, 'https://github.com/owner/b/pull/231');
+    reopened.close();
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

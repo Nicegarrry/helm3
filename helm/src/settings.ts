@@ -15,6 +15,8 @@ const ROUTING_DEFAULTS = {
   allowed: ['codex/gpt-5.6-luna:medium', 'codex/gpt-5.6-luna:high'], minClean: 0.5, minN: 8,
 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
+const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
+const HYGIENE_DEFAULTS = { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 };
 
 const settingsSchema = z.object({
   jev: z.object({
@@ -63,7 +65,7 @@ const settingsSchema = z.object({
     skillDirs: z.array(z.string()).default(['~/code/skills']),
     skillAllow: z.array(z.string()).default([]),
     autoAt: z.number().default(0.7),
-    lessons: z.enum(['off', 'shadow', 'block']).default('shadow'),
+    lessons: z.enum(['off', 'shadow', 'on']).default('shadow'),
   }).default(SELECT_DEFAULTS),
   routing: z.object({
     table: z.record(z.string(), z.string()).default(ROUTING_DEFAULTS.table),
@@ -77,9 +79,17 @@ const settingsSchema = z.object({
     maxPerHour: z.number().default(20),
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
+  deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
+  hygiene: z.object({
+    keepNodeModules: z.boolean().default(false),
+    gcSec: z.number().int().positive().default(600),
+    worktreeTtlHours: z.number().positive().default(24),
+    minFreeGb: z.number().positive().default(15),
+  }).default(HYGIENE_DEFAULTS),
 });
 
-export type Settings = z.infer<typeof settingsSchema>;
+type ParsedSettings = z.infer<typeof settingsSchema>;
+export type Settings = Omit<ParsedSettings, 'deploy'> & { deploy?: ParsedSettings['deploy'] };
 
 const DEFAULT_SETTINGS = settingsSchema.parse({});
 

@@ -14,6 +14,7 @@ export type DiscordService = Readonly<{
   consume(): Promise<void>;
   tick(): Promise<void>;
   notifyNick(project: string, text: string): Promise<{ ok: true; sent: true } | { ok: false; reason: string }>;
+  postTap(text: string): Promise<{ ok: true } | { ok: false; reason: string }>;
 }>;
 
 type Options = Readonly<{
@@ -42,6 +43,10 @@ function milestone(event: EventRow): string | null {
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
+  if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;
+  if (event.kind === 'deploy') return `Deployed: ${text(event.data.target, 'target')}${event.data.url ? ` ${text(event.data.url, '')}` : ''}`;
+  if (event.kind === 'deploy.rolledback') return `Deploy rolled back: ${text(event.data.target, 'target')}`;
+  if (event.kind === 'deploy.failed') return `Deploy failed: ${text(event.data.target, 'target')}`;
   return null;
 }
 
@@ -59,6 +64,45 @@ export function createDiscord(options: Options): DiscordService {
   function webhook(project: string): string | undefined {
     const name = options.settings.discord.projects[project]?.webhookEnv;
     return name ? env[name] : undefined;
+  }
+
+  function tapWebhook(): string | undefined {
+    const name = options.settings.discord.tapWebhookEnv;
+    return name ? env[name] : undefined;
+  }
+
+  function isMilestoneWebhook(url: string): boolean {
+    return Object.values(options.settings.discord.projects).some((project) => normalizeWebhook(env[project.webhookEnv]) === normalizeWebhook(url));
+  }
+
+  function normalizeWebhook(url: string | undefined): string | undefined {
+    if (!url) return undefined;
+    try {
+      const parsed = new URL(url);
+      const webhook = /^\/api\/(?:v\d+\/)?webhooks\/([^/]+)\/([^/]+)\/?$/i.exec(parsed.pathname);
+      if (webhook && ['discord.com', 'discordapp.com', 'ptb.discord.com', 'canary.discord.com'].includes(parsed.hostname.toLowerCase())) {
+        return `discord-webhook:${webhook[1]}/${webhook[2]}`;
+      }
+      const path = parsed.pathname.replace(/\/+$/, '') || '/';
+      return `${parsed.host.toLowerCase()}${path}`;
+    } catch {
+      return url.toLowerCase().replace(/\/+$/, '');
+    }
+  }
+
+  async function postTap(content: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const url = tapWebhook();
+    if (!url) return { ok: false, reason: 'no tap channel configured' };
+    if (isMilestoneWebhook(url)) return { ok: false, reason: 'tap channel must differ from the milestone channel' };
+    try {
+      const response = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, username: 'Helm', allowed_mentions: { parse: [] } }) });
+      if (response.status >= 200 && response.status < 300) return { ok: true };
+      log('daemon.log: tap Discord post failed');
+      return { ok: false, reason: 'tap channel post failed' };
+    } catch {
+      log('daemon.log: tap Discord post failed');
+      return { ok: false, reason: 'tap channel post failed' };
+    }
   }
 
   options.store.sql.exec(`
@@ -168,5 +212,6 @@ export function createDiscord(options: Options): DiscordService {
       });
     },
     notifyNick,
+    postTap,
   };
 }

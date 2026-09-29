@@ -6,6 +6,7 @@ import type { Jev, JevAnswers } from './jev.js';
 import type { Settings } from './settings.js';
 import type { EventRow, Store } from './types.js';
 import type { InboxRow, InboxState } from './types.js';
+import { DEFAULT_RULES, readEnvelope } from './envelope.js';
 
 export type NewInboxRow = Readonly<Pick<InboxRow, 'id' | 'workerId' | 'project' | 'question' | 'createdAt'>>;
 
@@ -83,7 +84,6 @@ export function supersedeOpenInbox(sql: DatabaseSync, workerId: string): number 
   return Number(result.changes);
 }
 
-const DEFAULT_ENVELOPE = 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, and provider settings.';
 const TRIAGE_ROUTE_CRITERIA = {
   answer_from_issue: 'the issue text already states the answer, or the envelope explicitly permits the action',
   needs_supervisor: 'a judgement call, scope question, conflict or tooling problem not settled by the issue, and inside the envelope',
@@ -96,6 +96,8 @@ export type InboxTriageOptions = Readonly<{
   store: Store;
   settings: Pick<Settings, 'jev' | 'supervisor'>;
   jev: Jev;
+  home?: string;
+  log?: (line: string) => void;
 }>;
 
 function probability(answer: JevAnswers[string] | undefined, truth: boolean): number {
@@ -146,7 +148,7 @@ function triageEvent(options: InboxTriageOptions, event: EventRow): Promise<void
   if (!item || item.triage) return;
   const worker = options.store.getWorker(event.workerId);
   if (!worker) return;
-  const envelope = options.settings.supervisor.envelope ?? DEFAULT_ENVELOPE;
+  const envelope = options.home ? readEnvelope(options.home, worker.repoSlug).rules.join('\n') : (options.settings.supervisor.envelope ?? DEFAULT_RULES);
   return options.jev.ask('triage', {
     workerId: worker.workerId,
     project: worker.repoSlug,
@@ -173,6 +175,9 @@ function triageEvent(options: InboxTriageOptions, event: EventRow): Promise<void
 /** Create the restart-safe A5b consumer; it never changes wake routing. */
 export function createInboxTriage(options: InboxTriageOptions): () => Promise<void> {
   return consumer(options.store, 'inbox-triage', async (events) => {
-    for (const event of events) await triageEvent(options, event);
+    for (const event of events) {
+      try { await triageEvent(options, event); }
+      catch (error) { (options.log ?? console.error)(`inbox triage failed for ${event.workerId}: ${error instanceof Error ? error.message : String(error)}`); }
+    }
   });
 }

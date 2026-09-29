@@ -245,7 +245,7 @@ Round 1: C1a, C3, C4 · Round 2: C1b, C2a · Round 3: C2b, C2c, C5 · Round 4: N
 ## C2c — TestFlight adapter (fastlane)
 **Scope:**
 - Run `bundle exec fastlane <lane='beta'>` in the deploy worktree, with env names for the ASC API key (`APP_STORE_CONNECT_API_KEY_PATH`) and `MATCH_PASSWORD`.
-- Parse the build number. Smoke = exit 0 plus optional commands. Rollback `none`.
+- Parse an explicit `HELM_BUILD_NUMBER=<digits>` marker printed by the Fastfile lane (or fastlane's exact build-number forms). Smoke = exit 0 plus optional commands. Rollback `none`.
 - `testflight.external` (external testers) is envelope `tapOnly` by default.
 **Acceptance:** a fake fastlane log → build number recorded; non-zero exit → failed with a redacted 40-line tail. **Size** S (~70). **Lane** codex luna:medium. **Deps** C2a.
 

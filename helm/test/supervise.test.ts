@@ -14,6 +14,7 @@ const settings: Settings = {
   factory: { claims: 'block', claimsAt: 0.7, verdictAt: 0.5, retryMax: 2, envelopeTapAt: 0.5, tapTtlMin: 60 },
   queue: { tickSec: 30, checksTimeoutMin: 30 }, memory: {}, select: { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' },
   routing: { table: {}, allowed: [], minClean: 0.5, minN: 8 },
+  hygiene: { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 },
 };
 
 function worker(workerId = 'w-supervise'): WorkerRow {

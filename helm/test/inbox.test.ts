@@ -19,13 +19,13 @@ function deps() {
     async defaultBranch() { return 'main'; },
     async create(_repo, path, branch, baseSha) { return { path, branch, baseSha }; },
     async remove() {}, async head() { return 'a'.repeat(40); }, async isClean() { return true; },
-    async diffStat() { return ''; }, async commitAll() { return 'b'.repeat(40); }, async push() {},
+    async diffStat() { return ''; }, async patchId() { return 'patch'; }, async commitAll() { return 'b'.repeat(40); }, async push() {},
     async clone() {}, async fetch() {},
   };
   const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
   const github: GitHub = {
     async openPr() { return { number: 1, url: 'https://example.invalid/pr/1' }; },
-    async prStatus() { throw new Error('unused'); }, async comment() {}, async merge() {},
+    async prStatus() { throw new Error('unused'); }, async comment() { return { body: '', issueNumber: 1 }; }, async postComment() {}, async merge() {},
   };
   const sessions: Array<string | null> = [];
   const messages: string[] = [];
@@ -41,7 +41,7 @@ function deps() {
       return { result: { status: 'question', summary: 'need a decision', question: 'Which API should I use?', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: 'pi-session' };
     },
   };
-  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'objective', reviewer: () => 'review' } });
+  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'objective', reviewer: () => 'review', validator: () => 'validate' } });
   return { helm, store, home, sessions, messages, turns };
 }
 
@@ -134,6 +134,40 @@ test('A5b triage sends the envelope context and routes human probability to need
     const routeQuestion = captured[1].questions.route;
     if (!routeQuestion || routeQuestion.type !== 'choice') throw new Error('triage route question is not a choice');
     assert.equal(routeQuestion.criteria.needs_human, 'outside the envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, provider settings');
+  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('A5b basename-slug projects use the built-in envelope rules', async () => {
+  const d = deps();
+  try {
+    const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+    assert.equal(spawned.ok, true);
+    if (!spawned.ok) return;
+    await d.helm.settle(spawned.workerId);
+    let captured: Parameters<Jev['ask']> | undefined;
+    const fake: Jev = { shadow: true, async ask(...args) { captured = args; return { ok: false, reason: 'no key' }; } };
+    await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: fake, home: d.home })();
+    assert.equal((captured?.[1].state as { envelope?: string }).envelope, 'Work only in the assigned worktree. Outside the autonomy envelope: production data or migrations, spending money, deleting data, secrets, merging or force-pushing main, and provider settings.');
+  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('A5b advances past a throwing item and triages the next ask', async () => {
+  const d = deps();
+  try {
+    for (let i = 0; i < 2; i += 1) {
+      const spawned = await d.helm.spawn({ repo: d.home, objective: `choose API ${i}`, model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+      assert.equal(spawned.ok, true);
+      if (spawned.ok) await d.helm.settle(spawned.workerId);
+    }
+    let calls = 0;
+    const fake: Jev = { shadow: true, async ask() { calls += 1; if (calls === 1) throw new Error('synthetic triage failure'); return { ok: false, reason: 'no key' }; } };
+    const logs: string[] = [];
+    await createInboxTriage({ store: d.store, settings: loadSettings('/definitely/missing/helm-home'), jev: fake, home: d.home, log: (line) => logs.push(line) })();
+    assert.equal(calls, 2);
+    assert.equal(listInbox(d.store.sql, { state: 'open' }).filter((item) => item.triage).length, 1);
+    assert.equal(logs.length, 1);
+    const lastAsk = d.store.listAllEvents().filter((event) => event.kind === 'ask').at(-1)?.seq ?? 0;
+    assert.ok(d.store.getCursor('inbox-triage') >= lastAsk);
   } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
 });
 

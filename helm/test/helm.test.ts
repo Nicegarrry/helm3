@@ -67,6 +67,9 @@ function createFakeWorkspace() {
     async diffStat() {
       return '1 file changed';
     },
+    async patchId(_repo, _base, head) {
+      return head;
+    },
     async commitAll(path) {
       const wt = worktrees.get(path);
       if (!wt) throw new Error(`unknown worktree: ${path}`);
@@ -109,21 +112,28 @@ function createFakeGitHub() {
   const prs = new Map<number, PrStatus>();
   const comments: Array<{ repoSlug: string; number: number; body: string }> = [];
   const merged: Array<{ repoSlug: string; number: number; expectedHead: string }> = [];
+  const opened: Array<{ base: string; head: string; title: string; body: string }> = [];
+  const updates: Array<{ repoSlug: string; number: number; input: { title?: string; body?: string } }> = [];
+  const existingByHead = new Map<string, { number: number; url: string }>();
   let nextNumber = 1;
 
   const github: GitHub = {
-    async openPr({ head: branch }) {
+    async openPr({ base, head: branch, title, body }) {
+      opened.push({ base, head: branch, title, body });
       const number = nextNumber++;
       const url = `https://github.com/acme/repo/pull/${number}`;
       prs.set(number, { number, state: 'open', head: `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
       return { number, url };
     },
+    async findPr(_repoSlug, head) { return existingByHead.get(head); },
+    async updatePr(repoSlug, number, input) { updates.push({ repoSlug, number, input }); },
     async prStatus(_repoSlug, number) {
       const pr = prs.get(number);
       if (!pr) throw new Error(`pr not found: ${number}`);
       return pr;
     },
-    async comment(repoSlug, number, body) {
+    async comment() { return { body: '', issueNumber: 1 }; },
+    async postComment(repoSlug, number, body) {
       comments.push({ repoSlug, number, body });
     },
     async merge(repoSlug, number, expectedHead) {
@@ -137,9 +147,15 @@ function createFakeGitHub() {
     github,
     comments,
     merged,
+    opened,
+    updates,
+    setExistingPr(head: string, pr: { number: number; url: string }): void {
+      existingByHead.set(head, pr);
+      prs.set(pr.number, { number: pr.number, state: 'open', head: 'unknown', mergeable: true, draft: false, checks: [], reviews: [], url: pr.url });
+    },
     setPrStatus(number: number, patch: Partial<PrStatus>): void {
       const pr = prs.get(number);
-      if (pr) prs.set(number, { ...pr, ...patch });
+      prs.set(number, { number, state: 'open', head: 'unknown', mergeable: true, draft: false, checks: [], reviews: [], url: `https://example.invalid/${number}`, ...pr, ...patch });
     },
   };
 }
@@ -189,6 +205,7 @@ function createControllableRunner() {
 const FAKE_PROMPTS: HelmPrompts = {
   builder: (i) => `BUILD: ${i.objective}`,
   reviewer: (i) => `REVIEW: ${i.objective}`,
+  validator: (i) => `VALIDATE: ${i.objective}`,
 };
 
 const cleanupDirs: string[] = [];
@@ -204,7 +221,7 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number }> & {
+type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
   settings?: Omit<Partial<Settings>, 'budgets'> & { budgets?: Partial<Settings['budgets']> };
 };
 
@@ -224,6 +241,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     runner: overrides.runner ?? succeeded(),
     prompts: FAKE_PROMPTS,
     settings,
+    statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
   });
@@ -235,6 +253,15 @@ function spawnBody(repo: string, overrides: Partial<SpawnInput> = {}): SpawnInpu
 }
 
 // ---------- tests ----------
+
+test('envelope check does not clone or fetch when branch lookup has no local checkout', async () => {
+  const { helm, cloned, fetched } = makeHelm();
+  const outcome = await helm.envelopeCheck({ project: 'acme/app', actions: ['git push origin feature-x'] });
+  assert.equal(outcome.ok, true);
+  if (outcome.ok) assert.deepEqual(outcome.decisions[0], { action: 'git push origin feature-x', decision: 'tap', source: 'hard', pTap: null });
+  assert.deepEqual(cloned, []);
+  assert.deepEqual(fetched, []);
+});
 
 test('spawn runs a builder turn, commits on success, and reaches succeeded', async () => {
   const { helm, store } = makeHelm();
@@ -287,6 +314,12 @@ test('spawn refuses once active workers reach maxWorkers', async () => {
   const second = await helm.spawn(spawnBody(repo));
   assert.equal(second.ok, false);
   if (!second.ok) assert.match(second.reason, /max workers/);
+});
+
+test('spawn refuses when free disk is below half the hygiene threshold', async () => {
+  const { helm } = makeHelm({ statfs: async () => ({ bavail: 7, bsize: 1024 ** 3 }) });
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.deepEqual(outcome, { ok: false, reason: 'disk low' });
 });
 
 test('two concurrent spawns respect maxWorkers via the admission mutex (F6)', async () => {
@@ -525,6 +558,128 @@ test('pr.open is refused without a passing gate at head, then allowed once gated
   assert.equal(pushed.length, 1);
 });
 
+test('pr.open updates an existing PR row after pushing and only edits passed metadata', async () => {
+  const { helm, store, pushed, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const worker = store.getWorker(spawned.workerId);
+  assert.ok(worker?.head);
+  store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+  github.setPrStatus(230, { head: worker.head });
+  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+
+  const updated = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.deepEqual(updated, { ok: true, number: 230, url: 'https://example.invalid/230', head: worker.head, updated: true });
+  assert.equal(pushed.length, 1);
+  assert.equal(store.getPrByWorker(spawned.workerId)?.head, worker.head);
+  assert.deepEqual(github.updates, []);
+
+  const edited = await helm.prOpen({ workerId: spawned.workerId, title: 'Updated title', body: 'Updated body', draft: true });
+  assert.equal(edited.ok, true);
+  assert.deepEqual(github.updates, [{ repoSlug: worker.repoSlug, number: 230, input: { title: 'Updated title', body: 'Updated body' } }]);
+});
+
+test('pr.open refuses an existing PR before pushing when its head has no passing gate', async () => {
+  const { helm, store, pushed } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+
+  const refused = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(refused.ok, false);
+  assert.equal(pushed.length, 0);
+});
+
+test('pr.open records an existing GitHub PR when the local row is missing', async () => {
+  const { helm, store, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const worker = store.getWorker(spawned.workerId);
+  assert.ok(worker?.head);
+  github.setExistingPr(worker.branch, { number: 230, url: 'https://example.invalid/230' });
+  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+
+  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(opened.ok, true);
+  assert.equal(store.getPrByWorker(spawned.workerId)?.head, worker.head);
+});
+
+test('pr.open refuses closed or merged existing PRs before pushing', async () => {
+  for (const state of ['closed', 'merged'] as const) {
+    const { helm, store, pushed, github } = makeHelm();
+    const repo = mkTempDir('helm-repo-');
+    const spawned = await helm.spawn(spawnBody(repo));
+    assert.equal(spawned.ok, true);
+    if (!spawned.ok) continue;
+    await helm.settle(spawned.workerId);
+    store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+    github.setPrStatus(230, { state });
+    assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+
+    const refused = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.match(refused.reason, new RegExp(`#230.*${state}`));
+    assert.equal(pushed.length, 0);
+  }
+});
+
+test('pr.open uses the default branch, worker prBase, and explicit base in order of precedence', async () => {
+  const { helm, store, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const first = await helm.spawn(spawnBody(repo, { baseRef: 'release' }));
+  assert.equal(first.ok, true);
+  if (!first.ok) return;
+  await helm.settle(first.workerId);
+  assert.equal((await helm.gate({ workerId: first.workerId })).ok, true);
+  assert.equal((await helm.prOpen({ workerId: first.workerId, draft: true })).ok, true);
+
+  const second = await helm.spawn(spawnBody(repo, { baseRef: 'release-2' }));
+  assert.equal(second.ok, true);
+  if (!second.ok) return;
+  await helm.settle(second.workerId);
+  store.setMeta(second.workerId, { prBase: 'develop' });
+  assert.equal((await helm.gate({ workerId: second.workerId })).ok, true);
+  assert.equal((await helm.prOpen({ workerId: second.workerId, draft: true })).ok, true);
+
+  const third = await helm.spawn(spawnBody(repo, { baseRef: 'release-3' }));
+  assert.equal(third.ok, true);
+  if (!third.ok) return;
+  await helm.settle(third.workerId);
+  assert.equal((await helm.gate({ workerId: third.workerId })).ok, true);
+  assert.equal((await helm.prOpen({ workerId: third.workerId, base: 'hotfix', draft: true })).ok, true);
+  assert.deepEqual(github.opened.map((pr) => pr.base), ['main', 'develop', 'hotfix']);
+});
+
+test('merge.enqueue after an existing PR update uses the updated head', async () => {
+  const { helm, store, github } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
+  github.setPrStatus(230, { head: store.getWorker(spawned.workerId)?.head ?? 'unknown' });
+  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
+  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  github.setPrStatus(230, { head: opened.head });
+  assert.equal((await helm.queue.enqueue({ number: 230 })).ok, true);
+  await helm.queue.tick();
+  const queued = helm.queue.queue({ project: store.getWorker(spawned.workerId)?.repoSlug ?? '' });
+  assert.equal(queued.ok, true);
+  if (queued.ok) assert.doesNotMatch(queued.items[0]?.reason ?? '', /head changed/);
+});
+
 test('steer is refused while running and allowed once idle', async () => {
   const { runner, resolveNext } = createControllableRunner();
   const { helm } = makeHelm({ runner });
@@ -543,6 +698,17 @@ test('steer is refused while running and allowed once idle', async () => {
   assert.equal(afterIdle.ok, true);
   resolveNext({ result: { status: 'succeeded', summary: 'finished', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
   await helm.settle(spawned.workerId);
+});
+
+test('steer refuses a worker whose worktree was removed and explains how to recover', async () => {
+  const { helm, store } = makeHelm();
+  const repo = mkTempDir('helm-repo-');
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  store.appendEvent(spawned.workerId, 'worktree.removed');
+  assert.deepEqual(await helm.steer({ workerId: spawned.workerId, message: 'continue' }), { ok: false, reason: 'worktree removed; respawn' });
 });
 
 test('two concurrent steer() calls on an idle worker: exactly one succeeds (F2)', async () => {
@@ -698,81 +864,6 @@ test('markInterruptedOnStart flips running workers to interrupted', async () => 
   const ids = helm.markInterruptedOnStart();
   assert.deepEqual(ids, [spawned.workerId]);
   assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
-});
-
-test('workerDetail returns the overview row plus result, diff stat, gates, pr and events for a spawned worker', async () => {
-  const { helm } = makeHelm();
-  const repo = mkTempDir('helm-repo-');
-  const spawned = await helm.spawn(spawnBody(repo));
-  assert.equal(spawned.ok, true);
-  if (!spawned.ok) return;
-  await helm.settle(spawned.workerId);
-  assert.equal((await helm.gate({ workerId: spawned.workerId })).ok, true);
-  const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
-  assert.equal(opened.ok, true);
-  if (!opened.ok) return;
-
-  const detail = await helm.workerDetail(spawned.workerId);
-  assert.equal(detail.ok, true);
-  if (!detail.ok) return;
-  assert.equal(detail.worker.workerId, spawned.workerId);
-  assert.equal(detail.worker.state, 'succeeded');
-  assert.equal(detail.worker.resultStatus, 'succeeded');
-  assert.equal(detail.result?.status, 'succeeded');
-  assert.equal(detail.rawResultText, null);
-  assert.equal(detail.diffStat, '1 file changed');
-  assert.equal(detail.gates.length, 1);
-  assert.equal(detail.gates[0]?.passed, true);
-  assert.equal(detail.pr?.number, opened.number);
-  const kinds = detail.events.map((e) => e.kind);
-  assert.equal(kinds[0], 'spawned');
-  assert.ok(kinds.includes('gate') && kinds.includes('pr'), `events should include gate and pr: ${kinds.join(',')}`);
-  for (let i = 1; i < detail.events.length; i += 1) assert.ok((detail.events[i]?.seq ?? 0) > (detail.events[i - 1]?.seq ?? 0), 'events ascend by seq');
-
-  // The overview row and the detail row are built by the same helper, so they agree field for field.
-  const overview = await helm.overview();
-  assert.equal(overview.ok, true);
-  if (!overview.ok) return;
-  const { elapsedMs: _a, ...fromOverview } = overview.workers.find((w) => w.workerId === spawned.workerId) ?? ({} as never);
-  const { elapsedMs: _b, ...fromDetail } = detail.worker;
-  assert.deepEqual(fromDetail, fromOverview);
-});
-
-test('workerDetail refuses an unknown worker', async () => {
-  const { helm } = makeHelm();
-  const detail = await helm.workerDetail('w-nope');
-  assert.deepEqual(detail, { ok: false, reason: 'worker not found' });
-});
-
-test('recentEvents pages across all workers by seq', async () => {
-  const { helm } = makeHelm();
-  const repo = mkTempDir('helm-repo-');
-  const first = await helm.spawn(spawnBody(repo));
-  const second = await helm.spawn(spawnBody(repo));
-  assert.equal(first.ok && second.ok, true);
-  if (!first.ok || !second.ok) return;
-  await helm.settle(first.workerId);
-  await helm.settle(second.workerId);
-
-  const page1 = await helm.recentEvents(0, 3);
-  assert.equal(page1.ok, true);
-  if (!page1.ok) return;
-  assert.equal(page1.events.length, 3);
-  assert.deepEqual(page1.events.map((e) => e.seq), [1, 2, 3]);
-
-  const last = page1.events.at(-1)?.seq ?? 0;
-  const page2 = await helm.recentEvents(last);
-  assert.equal(page2.ok, true);
-  if (!page2.ok) return;
-  assert.ok(page2.events.length > 0);
-  assert.ok(page2.events.every((e) => e.seq > last), 'only events after the cursor');
-  const workerIds = new Set(page2.events.map((e) => e.workerId));
-  assert.ok(workerIds.has(first.workerId) && workerIds.has(second.workerId), 'spans both workers');
-
-  const tail = page2.events.at(-1)?.seq ?? 0;
-  const empty = await helm.recentEvents(tail);
-  assert.equal(empty.ok, true);
-  if (empty.ok) assert.deepEqual(empty.events, []);
 });
 
 test('overview includes a cumulative spendSeries', async () => {
@@ -1099,8 +1190,8 @@ test('drain tracks a gate after the builder settled and counts accepted requests
 test('drain waits for the review callback even after the reviewer state is succeeded', async () => {
   const entered = deferred(), comment = deferred();
   const gh = createFakeGitHub().github;
-  const { helm, store } = makeHelm({ github: { ...gh, comment: async (...args) => {
-    entered.release(); await comment.promise; return gh.comment(...args);
+  const { helm, store } = makeHelm({ github: { ...gh, postComment: async (...args) => {
+    entered.release(); await comment.promise; return gh.postComment(...args);
   } } });
   const build = await helm.spawn(spawnBody(mkTempDir('helm-drain-')));
   assert.ok(build.ok);

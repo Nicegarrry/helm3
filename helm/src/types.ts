@@ -2,8 +2,18 @@
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 
+function omitEmptyStrings(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(omitEmptyStrings);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).flatMap(([key, entry]) => {
+      if (typeof entry === 'string' && entry.trim() === '') return [];
+      return [[key, omitEmptyStrings(entry)]];
+    }));
+  }
+  return value;
+}
 
-export const workerResultSchema = z.object({
+export const workerResultSchema = z.preprocess(omitEmptyStrings, z.object({
   status: z.enum(['succeeded', 'failed', 'partial', 'question']),
   summary: z.string().min(1).max(4000),
   changedFiles: z.array(z.string().min(1)).max(500).default([]),
@@ -16,7 +26,7 @@ export const workerResultSchema = z.object({
   if (result.status === 'question' && !result.question) {
     ctx.addIssue({ code: 'custom', path: ['question'], message: 'question is required when status is question' });
   }
-});
+}));
 export type WorkerResult = z.infer<typeof workerResultSchema>;
 
 export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded', 'failed', 'stopped', 'interrupted', 'unknown'] as const;
@@ -90,15 +100,17 @@ export type GateRow = Readonly<{
   checks: ReadonlyArray<{ name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number }>;
   at: string;
 }>;
-
+export type BaselineRow = Readonly<{ id: string; repoSlug: string; issue: number; validatorId: string; baseRef: string; baseSha: string; testCommit: string; command: string; files: readonly string[]; red: number; outputPath: string; at: string }>;
 export type PrRow = Readonly<{
+  repoSlug: string;
   number: number;
   workerId: string;
   url: string;
   head: string;
   createdAt: string;
 }>;
-
+export type PrInput = Omit<PrRow, 'repoSlug'> & { repoSlug?: string };
+export type PrResolution = Readonly<{ pr?: PrRow; reason?: string }>;
 export type SpendRow = Readonly<{
   workerId: string;
   model: string;
@@ -109,14 +121,11 @@ export type SpendRow = Readonly<{
   costUsd: number | null;  // null when the model has no known price
   at: string;
 }>;
-
 export type SpendSummary = Readonly<{
   spendUsd: number;
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   unknownCostEvents: number;
 }>;
-
-
 export interface Store {
   sql: DatabaseSync;
   insertWorker(row: WorkerRow): void;
@@ -134,9 +143,11 @@ export interface Store {
   setCursor(name: string, seq: number): void;
   insertGate(row: GateRow): void;
   listGates(workerId: string): GateRow[];
-  insertPr(row: PrRow): void;
+  insertPr(row: PrInput): void;
+  updatePr(row: PrRow): void;
   getPrByWorker(workerId: string): PrRow | undefined;
-  getPrByNumber(number: number): PrRow | undefined;
+  getPrByNumber(repoSlug: string, number: number): PrRow | undefined;
+  resolvePrByNumber(number: number, project?: string): PrResolution;
   addSpend(row: SpendRow): void;
   spendFor(workerId: string): SpendSummary;
   spendTotal(): SpendSummary;
@@ -157,10 +168,18 @@ export interface Workspace {
   /** `git worktree add -b <branch> <path> <baseSha>` under root. */
   create(repo: string, root: string, branch: string, baseSha: string): Promise<WorktreeInfo>;
   remove(repo: string, path: string): Promise<void>;
+  prune?(repo: string): Promise<void>;
+  deleteBranch?(repo: string, branch: string): Promise<void>;
+  isTrackedClean?(path: string): Promise<boolean>;
+  /** Whether an origin ref other than `excludeBranch` contains `head`. */
+  contains?(repo: string, head: string, excludeBranch?: string): Promise<boolean>;
+  /** Whether any origin remote ref contains `head`, including the worker branch. */
+  reachableFromOrigin?(repo: string, head: string): Promise<boolean>;
   head(path: string): Promise<string>;
   isClean(path: string): Promise<boolean>;
   diffStat(path: string, baseSha: string): Promise<string>;
   /** Stage everything and commit; returns new head. No-op (returns head) if nothing to commit. */
+  patchId(repo: string, baseSha: string, head: string): Promise<string>;
   commitAll(path: string, message: string): Promise<string>;
   push(path: string, branch: string): Promise<void>;
   /** Clone `owner/name` into `dest`, preferring `gh repo clone` (uses gh auth) and falling back to https. */
@@ -194,10 +213,15 @@ export type PrStatus = Readonly<{
 
 export interface GitHub {
   openPr(input: { cwd: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
+  findPr?(repoSlug: string, head: string): Promise<{ number: number; url: string } | undefined>;
+  updatePr?(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
-  comment(repoSlug: string, number: number, body: string): Promise<void>;
+  comment(repoSlug: string, id: number): Promise<GitHubComment>;
+  postComment(repoSlug: string, number: number, body: string): Promise<void>;
   merge(repoSlug: string, number: number, expectedHead: string): Promise<void>;
 }
+
+export type GitHubComment = Readonly<{ body: string; issueNumber?: number; issueUrl?: string; pullRequestUrl?: string }>;
 
 
 export type WorkerRunInput = Readonly<{
@@ -267,20 +291,27 @@ export const spawnInput = z.object({
   model: z.string().min(1).optional(),
   difficulty: z.enum(['super-easy', 'easy', 'normal']).optional(),
   baseRef: z.string().min(1).optional(),
+  baselineId: z.string().min(1).optional(),
   role: z.enum(WORKER_ROLES).default('builder'),
   contextPaths: z.array(z.string().min(1)).max(64).default([]),
   allowWorkflows: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200).optional(),
+  skills: z.array(z.string().min(1)).optional(),
 }).strict();
 export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(20) }).strict();
 export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();
 export const steerInput = z.object({ workerId: z.string().min(1), message: z.string().min(1).max(20000) }).strict();
+export const retryInput = z.object({ workerId: z.string().min(1), kind: z.enum(['gate', 'acceptance', 'claims', 'review', 'tests_edited', 'conflict']).optional() }).strict();
 export const stopInput = z.object({ workerId: z.string().min(1) }).strict();
 export const budgetOpenInput = z.object({
-  project: z.string().min(1), label: z.string().min(1), capUsd: z.number().positive(), codexTokens: z.number().int().positive().optional(),
+  project: z.string().min(1), label: z.string().min(1), capUsd: z.number().positive(), codexTokens: z.number().int().positive().optional(), tapId: z.string().regex(/^t-[0-9a-f]+$/).optional(),
 }).strict();
 export const budgetCloseInput = z.object({ project: z.string().min(1) }).strict();
 export const budgetStatusInput = z.object({ project: z.string().min(1).optional() }).strict();
+export const envelopeGetInput = z.object({ project: z.string().min(1) }).strict();
+export const envelopeCheckInput = z.object({ project: z.string().min(1), actions: z.array(z.string().min(1).max(2000)).min(1).max(13), kind: z.string().min(1).optional(), baseRef: z.string().min(1).optional(), workerId: z.string().min(1).optional() }).strict();
+export const tapRequestInput = z.object({ project: z.string().min(1), kind: z.string().min(1), action: z.string().min(1).max(4000) }).strict();
+export const tapConfirmInput = z.object({ id: z.string().regex(/^t-[0-9a-f]+$/), code: z.string().regex(/^\d{6}$/) }).strict();
 export const inboxListInput = z.object({ project: z.string().min(1).optional(), state: z.enum(INBOX_STATES).default('open') }).strict();
 export const inboxReplyInput = z.object({ id: z.string().regex(/^q-[0-9a-f]+$/), answer: z.string().min(1).max(20000), by: z.string().min(1).max(200).default('supervisor') }).strict();
 export const waitInput = z.object({
@@ -290,10 +321,15 @@ export const waitInput = z.object({
   timeoutMs: z.number().int().min(1000).max(1_500_000).default(600_000),
 }).strict();
 export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
-export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
-export const prStatusInput = z.object({ number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
-export const reviewInput = z.object({ workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
-export const prMergeInput = z.object({ number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+export const baselineInput = z.object({ workerId: z.string().min(1) }).strict();
+export const claimsCheckInput = z.object({ workerId: z.string().min(1) }).strict();
+export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true), base: z.string().min(1).optional() }).strict();
+export const prStatusInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
+export const reviewInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
+export const prMergeInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+export const reviewRecordInput = z.object({
+  project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), head: z.string().regex(/^[0-9a-f]{40}$/), commentUrl: z.string().url(), reviewer: z.string().min(1), verdict: z.enum(['approve', 'request_changes']),
+}).strict();
 export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
 export const supervisorRegisterInput = z.object({ project: z.string().min(1), repo: z.string().min(1), host: z.enum(['herdr', 'tmux']), label: z.string().min(1) }).strict();
@@ -303,8 +339,16 @@ export const supervisorRotateInput = z.object({ project: z.string().min(1), focu
 export const notifyNickInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
+export { memoryWriteInput, memoryLogInput, memoryListInput } from './memory.js';
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'pr.open', 'pr.status', 'review.request', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
+export const mergeEnqueueInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive() }).strict();
+export const mergeQueueInput = z.object({ project: z.string().min(1) }).strict();
+export const mergeDequeueInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive() }).strict();
+export const deployRunInput = z.object({ project: z.string().min(1), target: z.string().min(1), sha: z.string().min(1).optional(), tapId: z.string().optional() }).strict();
+export const deployStatusInput = z.object({ project: z.string().min(1).optional(), id: z.string().min(1).optional() }).strict();
+export const deployRollbackInput = z.object({ id: z.string().min(1), tapId: z.string().optional() }).strict();
+
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback'] as const;
 export type ToolName = string;
 
 

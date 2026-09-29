@@ -14,6 +14,10 @@ import {
   steerInput,
   stopInput,
   waitInput,
+  supervisorRegisterInput,
+  supervisorListInput,
+  wakeListInput,
+  supervisorRotateInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -48,6 +52,10 @@ const TOOLS: readonly ToolDef[] = [
   def('review.request', 'Review an open PR. Omit model for Gemini Flash, or Codex Terra when the builder is Gemini, preserving family independence. Posts findings as a PR comment.', reviewInput, (h, i) => h.reviewRequest(i)),
   def('run.status', 'Get overall spend, the spend cap, and how many worker slots are active out of the configured maximum.', emptyInput, (h) => h.runStatus()),
   def('pr.merge', 'Merge a pull request, but only if it is open, mergeable, at the exact expected head commit, and all checks passed.', prMergeInput, (h, i) => h.prMerge(i)),
+  def('supervisor.register', 'Register or update the owner supervisor for a project.', supervisorRegisterInput, (h, i) => h.supervisorRegister(i)),
+  def('supervisor.list', 'List registered project supervisors.', supervisorListInput, (h) => h.supervisorList()),
+  def('wake.list', 'List unacknowledged supervisor wakes for a project, optionally acknowledging them.', wakeListInput, (h, i) => h.wakeList(i)),
+  def('supervisor.rotate', 'Queue a compact command and the supervisor startup wake.', supervisorRotateInput, (h, i) => h.supervisorRotate(i)),
 ];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

@@ -50,7 +50,7 @@ function mergeHelm(store: ReturnType<typeof openStore>, claims: ReturnType<typeo
     config: { home: '/tmp/claims-home', spendCapUsd: 0, maxWorkers: 1, gateTimeoutMs: 1_000 }, store,
     workspace: {} as never, gates: {} as never, runner: {} as never,
     github: { prStatus: async () => ({ number: 2, state: 'open', head, mergeable: true, draft: false, checks: [], reviews: [], url: 'https://example.test/2' }), merge: async () => {}, openPr: async () => ({ number: 2, url: 'https://example.test/2' }), comment: async () => {} } as never,
-    prompts: { builder: () => '', reviewer: () => '' }, settings: settings(), claims,
+    prompts: { builder: () => '', reviewer: () => '', validator: () => 'validate' }, settings: settings(), claims,
   });
 }
 

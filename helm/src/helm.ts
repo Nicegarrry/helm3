@@ -273,9 +273,7 @@ export class Helm {
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
-    const budget = this.ensureProjectBudget(repoSlug);
-    const currentBudget = budgetStatus(this.store, budget);
-    must(!currentBudget.exhausted, `budget exhausted (${budget.label} $${currentBudget.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`);
+    const admittedBudget = this.assertBudget(repoSlug);
     const baseRef = input.baseRef ?? (await this.workspace.defaultBranch(repo));
     const baseSha = await this.workspace.resolveSha(repo, baseRef);
     const workerId = genId('w');
@@ -292,7 +290,7 @@ export class Helm {
     };
     try {
       this.store.insertWorker(row);
-      attachWorker(this.store, workerId, budget.id);
+      attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
@@ -358,19 +356,9 @@ export class Helm {
     must(STEERABLE_STATES.has(row.state), `worker is ${row.state}, not steerable`);
     must(!this.running.has(input.workerId), 'worker already has a turn in flight');
     must(!this.spendCapExceeded(), 'spend cap reached');
-    let budget = budgetForWorker(this.store, input.workerId);
-    // Workers persisted before A9 have no attribution row. Bind them to the current
-    // project budget before allowing another turn, so the migration cannot bypass caps.
-    if (!budget) {
-      budget = this.ensureProjectBudget(row.repoSlug);
-      attachWorker(this.store, input.workerId, budget.id);
-    }
-    const currentBudget = budgetStatus(this.store, budget);
-    must(!currentBudget.exhausted, `budget exhausted (${budget.label} $${currentBudget.spentUsd.toFixed(2)}/$${currentBudget.capUsd.toFixed(2)})`);
+    this.assertBudget(row.repoSlug, input.workerId);
     const priorTurns = this.store.listEvents(input.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
-    // The in-memory Helm test store has no SQLite implementation; the real Store.sql seam
-    // is present for daemon runs and for the durable inbox path.
-    if (typeof (this.store.sql as unknown as { exec?: unknown }).exec === 'function') supersedeOpenInbox(this.store.sql, input.workerId);
+    supersedeOpenInbox(this.store.sql, input.workerId);
     this.startRun(input.workerId, input.message);
     return { ok: true, turn: priorTurns + 1, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
   }
@@ -387,13 +375,7 @@ export class Helm {
       must(worker.state === 'waiting', `worker is ${worker.state}, not waiting`);
       must(!this.running.has(worker.workerId), 'worker already has a turn in flight');
       must(!this.spendCapExceeded(), 'spend cap reached');
-      let budget = budgetForWorker(this.store, worker.workerId);
-      if (!budget) {
-        budget = this.ensureProjectBudget(worker.repoSlug);
-        attachWorker(this.store, worker.workerId, budget.id);
-      }
-      const currentBudget = budgetStatus(this.store, budget);
-      must(!currentBudget.exhausted, `budget exhausted (${budget.label} $${currentBudget.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`);
+      this.assertBudget(worker.repoSlug, worker.workerId);
       const answeredAt = this.nowIso();
       must(answerInbox(this.store.sql, item.id, input.answer, input.by, answeredAt), 'inbox item is no longer open');
       const priorTurns = this.store.listEvents(worker.workerId, { limit: 1_000_000 }).filter((e) => e.kind === 'result').length;
@@ -675,6 +657,15 @@ export class Helm {
       capCodexTokens: this.settings.budgets.defaultCodexTokens,
       openedAt: now,
     });
+  }
+
+  private assertBudget(project: string, workerId?: string): BudgetStatus {
+    let budget = workerId ? budgetForWorker(this.store, workerId) : openBudgetFor(this.store, project);
+    if (!budget) budget = this.ensureProjectBudget(project);
+    if (workerId) attachWorker(this.store, workerId, budget.id);
+    const current = budgetStatus(this.store, budget);
+    must(!current.exhausted, `budget exhausted (${budget.label} $${current.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`);
+    return current;
   }
 
   /** Absolute local paths are used as-is; `owner/name` is cloned once under $HELM_HOME/repos and fetched on later use. */

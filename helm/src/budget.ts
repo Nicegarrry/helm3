@@ -23,24 +23,7 @@ export type BudgetStatus = BudgetRow & Readonly<{
   warning: boolean;
 }>;
 
-type MemoryState = { budgets: BudgetRow[]; workerBudget: Map<string, string> };
-const memory = new WeakMap<object, MemoryState>();
-
-function memoryState(store: Store): MemoryState {
-  let state = memory.get(store.sql as unknown as object);
-  if (!state) {
-    state = { budgets: [], workerBudget: new Map() };
-    memory.set(store.sql as unknown as object, state);
-  }
-  return state;
-}
-
-function hasSql(store: Store): boolean {
-  return typeof (store.sql as unknown as { exec?: unknown }).exec === 'function';
-}
-
 export function ensureBudgetTables(store: Store): void {
-  if (!hasSql(store)) return;
   store.sql.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,
@@ -80,13 +63,6 @@ export function openBudget(store: Store, input: { project: string; label: string
     id: id(), project: input.project, label: input.label, capUsd: input.capUsd,
     capCodexTokens: input.capCodexTokens ?? null, openedAt: input.openedAt, closedAt: null,
   };
-  if (!hasSql(store)) {
-    const state = memoryState(store);
-    const now = input.openedAt;
-    state.budgets = state.budgets.map((row) => row.project === input.project && row.closedAt === null ? { ...row, closedAt: now } : row);
-    state.budgets.push(budget);
-    return budget;
-  }
   store.sql.exec('BEGIN IMMEDIATE');
   try {
     store.sql.prepare('UPDATE budgets SET closedAt = ? WHERE project = ? AND closedAt IS NULL').run(input.openedAt, input.project);
@@ -104,57 +80,28 @@ export function closeBudget(store: Store, project: string, closedAt: string): Bu
   ensureBudgetTables(store);
   const current = openBudgetFor(store, project);
   if (!current) return undefined;
-  if (!hasSql(store)) {
-    const state = memoryState(store);
-    const closed = { ...current, closedAt };
-    state.budgets = state.budgets.map((row) => row.id === current.id ? closed : row);
-    return closed;
-  }
   store.sql.prepare('UPDATE budgets SET closedAt = ? WHERE id = ?').run(closedAt, current.id);
   return { ...current, closedAt };
 }
 
 export function openBudgetFor(store: Store, project: string): BudgetRow | undefined {
   ensureBudgetTables(store);
-  if (!hasSql(store)) return memoryState(store).budgets.find((row) => row.project === project && row.closedAt === null);
   const row = store.sql.prepare('SELECT * FROM budgets WHERE project = ? AND closedAt IS NULL ORDER BY openedAt DESC LIMIT 1').get(project) as Record<string, unknown> | undefined;
   return row ? toBudget(row) : undefined;
 }
 
 export function budgetForWorker(store: Store, workerId: string): BudgetRow | undefined {
   ensureBudgetTables(store);
-  if (!hasSql(store)) {
-    const budgetId = memoryState(store).workerBudget.get(workerId);
-    return budgetId ? budgetById(store, budgetId) : undefined;
-  }
   const row = store.sql.prepare('SELECT b.* FROM worker_budget wb JOIN budgets b ON b.id = wb.budgetId WHERE wb.workerId = ?').get(workerId) as Record<string, unknown> | undefined;
   return row ? toBudget(row) : undefined;
 }
 
 export function attachWorker(store: Store, workerId: string, budgetId: string): void {
   ensureBudgetTables(store);
-  if (!hasSql(store)) {
-    memoryState(store).workerBudget.set(workerId, budgetId);
-    return;
-  }
   store.sql.prepare('INSERT INTO worker_budget (workerId, budgetId) VALUES (?, ?) ON CONFLICT(workerId) DO UPDATE SET budgetId = excluded.budgetId').run(workerId, budgetId);
 }
 
-function budgetById(store: Store, budgetId: string): BudgetRow | undefined {
-  if (!hasSql(store)) return memoryState(store).budgets.find((row) => row.id === budgetId);
-  const row = store.sql.prepare('SELECT * FROM budgets WHERE id = ?').get(budgetId) as Record<string, unknown> | undefined;
-  return row ? toBudget(row) : undefined;
-}
-
 function budgetSpend(store: Store, budget: BudgetRow): { spentUsd: number; spentCodexTokens: number } {
-  if (!hasSql(store)) {
-    const workers = [...memoryState(store).workerBudget.entries()].filter(([, id]) => id === budget.id).map(([workerId]) => workerId);
-    const summaries = workers.map((workerId) => store.spendFor(workerId));
-    return {
-      spentUsd: summaries.reduce((total, spend) => total + spend.spendUsd, 0),
-      spentCodexTokens: summaries.reduce((total, spend) => total + spend.tokens.input + spend.tokens.output, 0),
-    };
-  }
   const row = store.sql.prepare(`
     SELECT COALESCE(SUM(CASE WHEN s.costUsd IS NULL THEN 0 ELSE s.costUsd END), 0) AS spentUsd,
            COALESCE(SUM(CASE WHEN s.model LIKE 'codex/%' THEN s.inputTokens + s.outputTokens ELSE 0 END), 0) AS spentCodexTokens
@@ -164,7 +111,6 @@ function budgetSpend(store: Store, budget: BudgetRow): { spentUsd: number; spent
 }
 
 function budgetWorkers(store: Store, budgetId: string): string[] {
-  if (!hasSql(store)) return [...memoryState(store).workerBudget.entries()].filter(([, id]) => id === budgetId).map(([workerId]) => workerId);
   return (store.sql.prepare('SELECT workerId FROM worker_budget WHERE budgetId = ? ORDER BY workerId').all(budgetId) as Array<{ workerId: string }>).map((row) => row.workerId);
 }
 
@@ -180,17 +126,12 @@ export function budgetStatus(store: Store, budget: BudgetRow): BudgetStatus {
 
 export function listBudgetStatuses(store: Store, project?: string): BudgetStatus[] {
   ensureBudgetTables(store);
-  const budgets = hasSql(store)
-    ? (store.sql.prepare(`SELECT * FROM budgets ${project ? 'WHERE project = ?' : ''} ORDER BY openedAt ASC`).all(...(project ? [project] : [])) as Record<string, unknown>[]).map(toBudget)
-    : memoryState(store).budgets.filter((row) => !project || row.project === project);
+  const budgets = (store.sql.prepare(`SELECT * FROM budgets ${project ? 'WHERE project = ?' : ''} ORDER BY openedAt ASC`).all(...(project ? [project] : [])) as Record<string, unknown>[]).map(toBudget);
   return budgets.map((budget) => budgetStatus(store, budget));
 }
 
-export function budgetExhausted(store: Store, budget: BudgetRow): boolean { return budgetStatus(store, budget).exhausted; }
-
 export function budgetWarningEmitted(store: Store, budgetId: string): boolean {
   ensureBudgetTables(store);
-  if (!hasSql(store)) return store.listAllEvents({ limit: 1_000_000 }).some((event) => event.kind === 'spend.warning' && event.data.budgetId === budgetId);
   const row = store.sql.prepare(`SELECT 1 AS found FROM events WHERE kind = 'spend.warning' AND data LIKE ? LIMIT 1`).get(`%"budgetId":"${budgetId}"%`) as { found: number } | undefined;
   return row !== undefined;
 }

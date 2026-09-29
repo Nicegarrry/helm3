@@ -290,11 +290,13 @@ export const steerInput = z.object({ workerId: z.string().min(1), message: z.str
 export const retryInput = z.object({ workerId: z.string().min(1), kind: z.enum(['gate', 'acceptance', 'claims', 'review', 'tests_edited', 'conflict']).optional() }).strict();
 export const stopInput = z.object({ workerId: z.string().min(1) }).strict();
 export const budgetOpenInput = z.object({
-  project: z.string().min(1), label: z.string().min(1), capUsd: z.number().positive(), codexTokens: z.number().int().positive().optional(),
+  project: z.string().min(1), label: z.string().min(1), capUsd: z.number().positive(), codexTokens: z.number().int().positive().optional(), tapId: z.string().regex(/^t-[0-9a-f]+$/).optional(),
 }).strict();
 export const budgetCloseInput = z.object({ project: z.string().min(1) }).strict();
 export const budgetStatusInput = z.object({ project: z.string().min(1).optional() }).strict();
 export const envelopeGetInput = z.object({ project: z.string().min(1) }).strict();
+export const tapRequestInput = z.object({ project: z.string().min(1), kind: z.string().min(1), action: z.string().min(1).max(4000) }).strict();
+export const tapConfirmInput = z.object({ id: z.string().regex(/^t-[0-9a-f]+$/), code: z.string().regex(/^\d{6}$/) }).strict();
 export const inboxListInput = z.object({ project: z.string().min(1).optional(), state: z.enum(INBOX_STATES).default('open') }).strict();
 export const inboxReplyInput = z.object({ id: z.string().regex(/^q-[0-9a-f]+$/), answer: z.string().min(1).max(20000), by: z.string().min(1).max(200).default('supervisor') }).strict();
 export const waitInput = z.object({
@@ -328,7 +330,7 @@ export const mergeEnqueueInput = z.object({ number: z.number().int().positive() 
 export const mergeQueueInput = z.object({ project: z.string().min(1) }).strict();
 export const mergeDequeueInput = z.object({ number: z.number().int().positive() }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list'] as const;
 export type ToolName = string;
 
 

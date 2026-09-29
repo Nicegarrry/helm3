@@ -33,6 +33,8 @@ import {
   budgetStatusInput,
   baselineInput,
   envelopeGetInput,
+  tapRequestInput,
+  tapConfirmInput,
   gateInput,
   inspectInput,
   listInput,
@@ -58,7 +60,7 @@ import { loadRepoConfig } from './repoconfig.js';
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, type Settings } from './settings.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { envelopeBudgetGuard, envelopePath, readEnvelope, type EnvelopeView } from './envelope.js';
+import { confirmTap, consumeTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTapsOnStartup, readEnvelope, requestTap, type EnvelopeView, type TapMemory } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -89,6 +91,8 @@ export type BudgetOpenInput = z.infer<typeof budgetOpenInput>;
 export type BudgetCloseInput = z.infer<typeof budgetCloseInput>;
 export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
 export type EnvelopeGetInput = z.infer<typeof envelopeGetInput>;
+export type TapRequestInput = z.infer<typeof tapRequestInput>;
+export type TapConfirmInput = z.infer<typeof tapConfirmInput>;
 export type InboxListInput = z.infer<typeof inboxListInput>;
 export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
 export type MergeEnqueueInput = z.infer<typeof mergeEnqueueInput>;
@@ -130,6 +134,8 @@ export type HelmDeps = Readonly<{
   claims?: ClaimsService;
   retry?: RetryService;
   jev?: Jev;
+  randomInt?: (min: number, max: number) => number;
+  tapPepper?: Buffer;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -244,6 +250,9 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
+  private readonly tapRandomInt?: (min: number, max: number) => number;
+  private readonly tapPepper: Buffer;
+  private readonly taps = new Map<string, TapMemory>();
   private readonly guards = new Map<string, ToolGuard[]>();
   private readonly modelChoosers: ModelChooser[] = [];
   readonly supervisor?: SupervisorService;
@@ -271,6 +280,8 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
+    this.tapRandomInt = deps.randomInt;
+    this.tapPepper = deps.tapPepper ?? randomBytes(32);
     ensureBudgetTables(this.store);
     ensureBaselineTable(this.store);
     this.supervisor = deps.supervisor;
@@ -303,7 +314,10 @@ export class Helm {
     });
     if (this.review) this.guard('pr.merge', (input) => this.review!.guard(input));
     this.jevChecker = deps.jevChecker;
-    this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput));
+    ensureTapTable(this.store);
+    expireTapsOnStartup(this.store);
+    this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput, (project, kind, expectedActionHash, tapId) =>
+      tapId ? consumeTap(this.store, this.taps, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required'));
     this.claims = deps.claims;
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
     this.retry = deps.retry;
@@ -772,6 +786,24 @@ export class Helm {
     return { ok: true, ...readEnvelope(this.config.home, input.project) };
   }
 
+  async tapRequest(input: TapRequestInput): Promise<ToolOutcome<{ id: string; expiresAt: string }>> {
+    return runGuard(async () => {
+      const result = await requestTap(this.store, input, {
+        ttlMin: this.settings.factory.tapTtlMin,
+        now: () => this.nowDate(),
+        randomInt: this.tapRandomInt,
+        taps: this.taps,
+        pepper: this.tapPepper,
+        post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: 'no tap channel configured' }),
+      });
+      return result;
+    });
+  }
+
+  async tapConfirm(input: TapConfirmInput): Promise<ToolOutcome<{ granted: true }>> {
+    return runGuard(async () => confirmTap(this.store, this.taps, input, this.tapPepper, this.nowDate()));
+  }
+
   async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
     return runGuard(async () => {
       const row = requireValue(closeBudget(this.store, input.project, this.nowIso()), `no open budget for ${input.project}`);
@@ -839,6 +871,8 @@ export class Helm {
   private nowIso(): string {
     return (this.now ? this.now() : new Date()).toISOString();
   }
+
+  private nowDate(): Date { return this.now ? this.now() : new Date(); }
 
   private spendCapExceeded(): boolean {
     return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;

@@ -67,6 +67,8 @@ import type { ClaimsService } from './claims.js';
 import { createMemory, type MemoryService } from './memory.js';
 import { createQueue, type QueueService } from './queue.js';
 import type { RetryService } from './retry.js';
+import { createSelector, type Selection } from './select.js';
+import type { Jev } from './jev.js';
 
 const exec = promisify(execFile);
 
@@ -98,6 +100,7 @@ export type PromptInput = Readonly<{
   objective: string;
   acceptance: string | null;
   contextPaths: readonly string[];
+  guidance?: string;
 }>;
 
 export type HelmPrompts = Readonly<{
@@ -126,6 +129,7 @@ export type HelmDeps = Readonly<{
   jevChecker?: JevCheckService;
   claims?: ClaimsService;
   retry?: RetryService;
+  jev?: Jev;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -250,6 +254,7 @@ export class Helm {
   private readonly retry?: RetryService;
   private readonly memory: MemoryService;
   readonly queue: QueueService;
+  private readonly selector: ReturnType<typeof createSelector>;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -307,6 +312,7 @@ export class Helm {
       store: this.store, workspace: this.workspace, github: this.github, settings: this.settings,
       gate: (input) => this.gate(input), prMerge: (input) => this.prMerge(input),
     });
+    this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
   }
 
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
@@ -386,7 +392,9 @@ export class Helm {
       const chosen = await this.chosenModel(input);
       const reason = await this.refusal('worker.spawn', chosen);
       if (reason) return refuse(reason);
-      return this.withLock(() => this.spawnLocked(chosen));
+      let selection: Selection;
+      try { selection = await this.selector.select(chosen); } catch (error) { return refuse(errMessage(error)); }
+      return this.withLock(() => this.spawnLocked(chosen, undefined, selection));
     });
   }
 
@@ -394,6 +402,7 @@ export class Helm {
   private async spawnLocked(
     input: SpawnInput,
     onDone?: OnDone,
+    selection: Selection = { guidance: '', skills: [] },
   ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
@@ -428,18 +437,22 @@ export class Helm {
         ...(input.issue !== undefined ? { issue: input.issue } : {}),
         ...(baseline ? { issue: baseline.issue, baselineId: baseline.id, prBase: baseline.baseRef } : {}),
       });
+      this.store.setMeta(workerId, { skills: selection.skills });
       attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
     }
     this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
-    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
+    if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
+    if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
+    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
     this.startRun(workerId, message, onDone);
-    return { ok: true, workerId, branch, worktree, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
+    const warnings = [selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
+    return { ok: true, workerId, branch, worktree, ...(warnings.length ? { warning: warnings.join('; ') } : {}) };
   }
 
   async inspect(input: InspectInput): Promise<ToolOutcome<{

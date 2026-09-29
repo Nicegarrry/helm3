@@ -63,7 +63,7 @@ const settingsSchema = z.object({
     skillDirs: z.array(z.string()).default(['~/code/skills']),
     skillAllow: z.array(z.string()).default([]),
     autoAt: z.number().default(0.7),
-    lessons: z.enum(['off', 'shadow', 'block']).default('shadow'),
+    lessons: z.enum(['off', 'shadow', 'on']).default('shadow'),
   }).default(SELECT_DEFAULTS),
   routing: z.object({
     table: z.record(z.string(), z.string()).default(ROUTING_DEFAULTS.table),

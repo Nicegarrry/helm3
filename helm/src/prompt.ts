@@ -5,6 +5,7 @@ export type PromptInput = Readonly<{
   objective: string;
   acceptance: string | null;
   contextPaths: readonly string[];
+  guidance?: string;
 }>;
 
 /** Appended to every turn so the model ends with a machine-parseable result. */
@@ -38,8 +39,9 @@ function contextSection(contextPaths: readonly string[]): string {
 /** Prompt for a builder worker: make the change, then report a WorkerResult. */
 export function builderPrompt(input: PromptInput): string {
   const acceptance = input.acceptance ? `\n\nAcceptance criteria:\n${input.acceptance}` : '';
+  const guidance = input.guidance ? `\n\nGuidance selected for this task\n\n${input.guidance}` : '';
   return [
-    `You are a coding agent working in a git worktree. Objective:\n${input.objective}${acceptance}${contextSection(input.contextPaths)}`,
+    `You are a coding agent working in a git worktree. Objective:\n${input.objective}${acceptance}${contextSection(input.contextPaths)}${guidance}`,
     '',
     'For succeeded or partial work, include claims when useful: each claim must be atomic and directly checkable from the committed diff. Keep claims concrete (names, values, files, counts); leave process facts such as tests or commits to commandsRun and the gate.',
     '',

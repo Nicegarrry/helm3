@@ -282,6 +282,7 @@ export const spawnInput = z.object({
   contextPaths: z.array(z.string().min(1)).max(64).default([]),
   allowWorkflows: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200).optional(),
+  skills: z.array(z.string().min(1)).optional(),
 }).strict();
 export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(20) }).strict();
 export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();

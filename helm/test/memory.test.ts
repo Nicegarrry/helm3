@@ -47,6 +47,12 @@ test('memory.write refuses CG truth divider lines and list filters type case-ins
   }
 });
 
+test('memory.write slugifies the repo segment and refuses invalid types', async () => {
+  const { memory, store } = setup(); const result = await memory.write({ ...writeInput(), project: 'Nicegarrry/VG' }); assert.equal(result.ok && result.path, 'projects/vg/lesson/a-useful-lesson.md');
+  const outbox = store.sql.prepare('SELECT args FROM memory_outbox').get() as { args: string }; assert.equal((JSON.parse(outbox.args) as { scope: { name: string } }).scope.name, 'vg');
+  const invalid = await memory.write({ ...writeInput(), type: 'Lesson_v1.2' }); assert.deepEqual(invalid, { ok: false, reason: 'type must be lowercase letters, numbers and hyphens' });
+});
+
 test('memory.write uses the CG slug and preserves an existing timeline', async () => {
   const { home, memory } = setup(); const input = { ...writeInput(), title: 'Café résumé Design notes' };
   const first = await memory.write(input); assert.equal(first.ok, true);
@@ -63,4 +69,6 @@ test('memory.log refuses traversal paths and leaves outside files unchanged', as
   const { writeFileSync } = await import('node:fs'); writeFileSync(victim, 'safe');
   const result = await memory.log({ path: '../victim.txt', entry: 'overwrite' });
   assert.equal(result.ok, false); assert.equal(readFileSync(victim, 'utf8'), 'safe');
+  assert.equal((await memory.log({ path: 'projects/VG/lesson/page.md', entry: 'overwrite' })).ok, false);
+  assert.equal((await memory.log({ path: 'projects/vg/Lesson_v1.2/page.md', entry: 'overwrite' })).ok, false);
 });

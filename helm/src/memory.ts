@@ -14,10 +14,11 @@ export type MemoryWriteInput = z.infer<typeof memoryWriteInput>;
 export type MemoryLogInput = z.infer<typeof memoryLogInput>;
 export type MemoryListInput = z.infer<typeof memoryListInput>;
 
-const SEGMENT = /^[a-z0-9._-]+$/i;
-function segment(value: string, label: string): string { if (!SEGMENT.test(value) || value === '.' || value === '..') throw new Error(`${label} must be a safe path segment`); return value; }
-function repoName(project: string): string { const parts = project.split('/'); if (parts.some((part) => !part || !SEGMENT.test(part) || part === '.' || part === '..')) throw new Error('project must contain safe path segments'); return segment(parts.at(-1)!, 'project'); }
-function slug(title: string): string { const value = title.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80).replace(/-+$/g, ''); return segment(value, 'title'); }
+const SEGMENT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+function segment(value: string, label: string): string { if (!SEGMENT.test(value) || value === '.' || value === '..') throw new Error(label === 'type' ? 'type must be lowercase letters, numbers and hyphens' : `${label} must be a safe path segment`); return value; }
+function cgSlug(value: string): string { return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80).replace(/-+$/g, ''); }
+function repoName(project: string): string { const value = cgSlug(project.split('/').at(-1) ?? project); if (!value) throw new Error('project must produce a safe path segment'); return segment(value, 'project'); }
+function slug(title: string): string { const value = cgSlug(title); if (!value) throw new Error('title must produce a non-empty slug'); return segment(value, 'title'); }
 function pagePath(input: MemoryWriteInput): string { const base = input.scope === 'team' ? join('team', segment(input.type, 'type')) : join('projects', repoName(input.project ?? ''), segment(input.type, 'type')); return join(base, `${slug(input.title)}.md`); }
 function yaml(value: unknown): string { return JSON.stringify(value); }
 function render(input: MemoryWriteInput, timeline = ''): string { return ['---', `type: ${yaml(input.type)}`, `title: ${yaml(input.title)}`, `summary: ${yaml(input.summary)}`, `tags: ${yaml(input.tags ?? [])}`, `refs: ${yaml(input.refs ?? [])}`, 'status: "active"', '---', input.truth, '---', timeline].join('\n'); }

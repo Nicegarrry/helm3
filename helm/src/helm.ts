@@ -61,6 +61,8 @@ import type { ReviewRecordInput, ReviewService } from './review.js';
 import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
 import { createMemory, type MemoryService } from './memory.js';
+import { createSelector, type Selection } from './select.js';
+import type { Jev } from './jev.js';
 
 const exec = promisify(execFile);
 
@@ -115,6 +117,7 @@ export type HelmDeps = Readonly<{
   review?: ReviewService;
   jevChecker?: JevCheckService;
   claims?: ClaimsService;
+  jev?: Jev;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -237,6 +240,7 @@ export class Helm {
   readonly jevChecker?: JevCheckService;
   readonly claims?: ClaimsService;
   private readonly memory: MemoryService;
+  private readonly selector: ReturnType<typeof createSelector>;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -264,6 +268,7 @@ export class Helm {
     this.claims = deps.claims;
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
     this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
+    this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
   }
 
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
@@ -335,7 +340,9 @@ export class Helm {
       const chosen = await this.chosenModel(input);
       const reason = await this.refusal('worker.spawn', chosen);
       if (reason) return refuse(reason);
-      return this.withLock(() => this.spawnLocked(chosen));
+      let selection: Selection;
+      try { selection = await this.selector.select(chosen); } catch (error) { return refuse(errMessage(error)); }
+      return this.withLock(() => this.spawnLocked(chosen, undefined, selection));
     });
   }
 
@@ -343,6 +350,7 @@ export class Helm {
   private async spawnLocked(
     input: SpawnInput,
     onDone?: OnDone,
+    selection: Selection = { guidance: '', skills: [] },
   ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
@@ -372,18 +380,22 @@ export class Helm {
     try {
       this.store.insertWorker(row);
       if (input.issue !== undefined) this.store.setMeta(workerId, { issue: input.issue });
+      this.store.setMeta(workerId, { skills: selection.skills });
       attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
     }
     this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
-    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths };
+    if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
+    if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
+    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? (this.prompts.validator?.(promptInput) ?? validatorPrompt(promptInput))
         : this.prompts.builder(promptInput);
     this.startRun(workerId, message, onDone);
-    return { ok: true, workerId, branch, worktree, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
+    const warnings = [selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
+    return { ok: true, workerId, branch, worktree, ...(warnings.length ? { warning: warnings.join('; ') } : {}) };
   }
 
   async inspect(input: InspectInput): Promise<ToolOutcome<{

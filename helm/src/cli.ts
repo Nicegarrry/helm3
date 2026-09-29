@@ -495,6 +495,7 @@ async function cmdServe(args: string[]): Promise<void> {
     discord,
     review: createReview({ store, github, workspace, jev, settings }),
     jevChecker: createJevCheck({ jev, store }),
+    jev,
     claims: createClaims({ jev, store, settings, workspace }),
   });
   helm.markInterruptedOnStart();

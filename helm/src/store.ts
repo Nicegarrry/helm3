@@ -2,7 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { EventRow, GateRow, PrInput, PrRow, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
+import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
@@ -246,6 +246,7 @@ export function openStore(path: string): Store {
   const insertPrStmt = db.prepare('INSERT INTO prs (repoSlug, number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
   const getPrByWorkerStmt = db.prepare('SELECT * FROM prs WHERE workerId = ? ORDER BY number DESC LIMIT 1');
   const getPrByNumberStmt = db.prepare('SELECT * FROM prs WHERE repoSlug = ? AND number = ?');
+  const resolvePrByNumberStmt = db.prepare('SELECT * FROM prs WHERE number = ? ORDER BY repoSlug ASC');
   const addSpendStmt = db.prepare(
     'INSERT INTO spend (workerId, model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   );
@@ -367,6 +368,14 @@ export function openStore(path: string): Store {
       return row ? toPrRow(row) : undefined;
     },
 
+    resolvePrByNumber(number: number, project?: string): PrResolution {
+      if (project) return { pr: this.getPrByNumber(project, number) };
+      const rows = (resolvePrByNumberStmt.all(number) as Record<string, unknown>[]).map(toPrRow);
+      if (rows.length === 1) return { pr: rows[0] };
+      if (rows.length > 1) return { reason: `PR #${number} is ambiguous across repos: ${rows.map((row) => row.repoSlug).join(', ')}; pass project` };
+      return {};
+    },
+
     addSpend(row: SpendRow): void {
       addSpendStmt.run(row.workerId, row.model, row.inputTokens, row.outputTokens, row.cacheReadTokens, row.cacheWriteTokens, row.costUsd, row.at);
     },
@@ -402,9 +411,4 @@ export function openStore(path: string): Store {
       db.close();
     },
   };
-}
-
-export function singleRepoSlug(store: Pick<Store, 'listWorkers'>): string | undefined {
-  const repos = [...new Set(store.listWorkers().map((worker) => worker.repoSlug))];
-  return repos.length === 1 ? repos[0] : undefined;
 }

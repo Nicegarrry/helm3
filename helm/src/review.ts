@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { singleRepoSlug } from './store.js';
 import type { GitHub, GitHubComment, Store, ToolOutcome, Workspace } from './types.js';
 import { reviewRecordInput } from './types.js';
 import type { Settings } from './settings.js';
@@ -108,10 +107,9 @@ export function createReview({ store, github, workspace, jev, settings, now = ()
     return workspace.patchId(repo, base, head);
   }
   async function record(input: ReviewRecordInput): Promise<ToolOutcome<{ review: ReviewRow }>> {
-    const repoSlug = input.repoSlug ?? singleRepoSlug(store);
-    if (!repoSlug) return refusal('repoSlug is required when multiple repositories are present');
-    const pr = store.getPrByNumber(repoSlug, input.number);
-    if (!pr) return refusal('pr not found');
+    const resolved = store.resolvePrByNumber(input.number, input.project ?? input.repoSlug);
+    if (!resolved.pr) return refusal(resolved.reason ?? 'pr not found');
+    const pr = resolved.pr;
     const worker = store.getWorker(pr.workerId);
     if (!worker) return refusal('pr worker not found');
     const status = await github.prStatus(worker.repoSlug, input.number);
@@ -137,14 +135,15 @@ export function createReview({ store, github, workspace, jev, settings, now = ()
     return { ok: true, review: saved };
   }
   async function guard(input: unknown): Promise<string | null> {
-    const value = input as { number?: number; expectedHead?: string };
+    const value = input as { project?: string; repoSlug?: string; number?: number; expectedHead?: string };
     const number = value.number;
     const expectedHead = value.expectedHead ?? '';
     if (!number) return null;
-    const repoSlug = (input as { repoSlug?: string }).repoSlug ?? singleRepoSlug(store);
-    const pr = repoSlug ? store.getPrByNumber(repoSlug, number) : undefined;
-    const worker = pr ? store.getWorker(pr.workerId) : undefined;
-    if (!pr || !worker) return `no approving review at ${expectedHead}`;
+    const resolved = store.resolvePrByNumber(number, value.project ?? value.repoSlug);
+    if (!resolved.pr) return resolved.reason ?? `no approving review at ${expectedHead}`;
+    const pr = resolved.pr;
+    const worker = store.getWorker(pr.workerId);
+    if (!worker) return `no approving review at ${expectedHead}`;
     const status = await github.prStatus(worker.repoSlug, number);
     const currentPatch = await patchId(worker.repo, patchBase(store, worker.repoSlug, number, worker.baseSha), status.head).catch(() => undefined);
     const candidates = (list.all(worker.repoSlug, number) as Record<string, unknown>[]).map(row).filter((review) => review.head === status.head || (currentPatch !== undefined && review.patchId === currentPatch));

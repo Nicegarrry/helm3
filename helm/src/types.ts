@@ -110,6 +110,7 @@ export type PrRow = Readonly<{
   createdAt: string;
 }>;
 export type PrInput = Omit<PrRow, 'repoSlug'> & { repoSlug?: string };
+export type PrResolution = Readonly<{ pr?: PrRow; reason?: string }>;
 export type SpendRow = Readonly<{
   workerId: string;
   model: string;
@@ -145,6 +146,7 @@ export interface Store {
   insertPr(row: PrInput): void;
   getPrByWorker(workerId: string): PrRow | undefined;
   getPrByNumber(repoSlug: string, number: number): PrRow | undefined;
+  resolvePrByNumber(number: number, project?: string): PrResolution;
   addSpend(row: SpendRow): void;
   spendFor(workerId: string): SpendSummary;
   spendTotal(): SpendSummary;
@@ -311,11 +313,11 @@ export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array
 export const baselineInput = z.object({ workerId: z.string().min(1) }).strict();
 export const claimsCheckInput = z.object({ workerId: z.string().min(1) }).strict();
 export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true) }).strict();
-export const prStatusInput = z.object({ repoSlug: z.string().min(1).optional(), number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
-export const reviewInput = z.object({ repoSlug: z.string().min(1).optional(), workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
-export const prMergeInput = z.object({ repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
+export const prStatusInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
+export const reviewInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
+export const prMergeInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
 export const reviewRecordInput = z.object({
-  repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), head: z.string().regex(/^[0-9a-f]{40}$/), commentUrl: z.string().url(), reviewer: z.string().min(1), verdict: z.enum(['approve', 'request_changes']),
+  project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), head: z.string().regex(/^[0-9a-f]{40}$/), commentUrl: z.string().url(), reviewer: z.string().min(1), verdict: z.enum(['approve', 'request_changes']),
 }).strict();
 export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
@@ -328,9 +330,9 @@ export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verd
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
 export { memoryWriteInput, memoryLogInput, memoryListInput } from './memory.js';
 
-export const mergeEnqueueInput = z.object({ repoSlug: z.string().min(1).optional(), number: z.number().int().positive() }).strict();
+export const mergeEnqueueInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive() }).strict();
 export const mergeQueueInput = z.object({ project: z.string().min(1) }).strict();
-export const mergeDequeueInput = z.object({ repoSlug: z.string().min(1).optional(), number: z.number().int().positive() }).strict();
+export const mergeDequeueInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive() }).strict();
 
 export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export'] as const;
 export type ToolName = string;

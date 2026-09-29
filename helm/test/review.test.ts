@@ -50,10 +50,41 @@ test('review.record and pr.merge stay scoped to the requested repository when nu
     d.store.insertWorker(other);
     d.store.insertPr({ repoSlug: other.repoSlug, number: 1, workerId: other.workerId, url: 'https://github.com/owner/other/pull/1', head: head1, createdAt: other.createdAt });
 
-    const recorded = await d.review.record({ repoSlug: 'owner/other', number: 1, head: head1, commentUrl: 'https://github.com/owner/other/pull/1#issuecomment-20', reviewer: 'claude-sonnet', verdict: 'approve' });
+    const recorded = await d.review.record({ project: 'owner/other', number: 1, head: head1, commentUrl: 'https://github.com/owner/other/pull/1#issuecomment-20', reviewer: 'claude-sonnet', verdict: 'approve' });
     assert.equal(recorded.ok, true);
     if (recorded.ok) assert.equal(recorded.review.repoSlug, 'owner/other');
-    assert.deepEqual(await d.helm.prMerge({ repoSlug: 'owner/other', number: 1, expectedHead: head1 }), { ok: true, merged: true });
+    assert.deepEqual(await d.helm.prMerge({ project: 'owner/other', number: 1, expectedHead: head1 }), { ok: true, merged: true });
+  } finally { d.store.close(); }
+});
+
+test('number-only PR calls resolve from PR rows even when workers span four repositories', async () => {
+  const d = setup();
+  try {
+    const source = d.store.getWorker('w-review')!;
+    for (const [index, repoSlug] of ['owner/two', 'owner/three', 'owner/four'].entries()) {
+      d.store.insertWorker({ ...source, workerId: `w-${index + 2}`, repoSlug, branch: `helm/${repoSlug.replace('/', '-')}`, worktree: `/${repoSlug.replace('/', '-')}` });
+    }
+    const status = await d.helm.prStatus({ number: 1 });
+    assert.equal(status.ok, true);
+    if (status.ok) assert.equal(status.url, 'owner/repo');
+    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-21', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: true, merged: true });
+  } finally { d.store.close(); }
+});
+
+test('number-only PR calls refuse an ambiguous number and project selects the requested row', async () => {
+  const d = setup();
+  try {
+    const source = d.store.getWorker('w-review')!;
+    const other = { ...source, workerId: 'w-other', repoSlug: 'owner/other', branch: 'helm/other', worktree: '/other' };
+    d.store.insertWorker(other);
+    d.store.insertPr({ repoSlug: other.repoSlug, number: 1, workerId: other.workerId, url: 'https://github.com/owner/other/pull/1', head: head1, createdAt: other.createdAt });
+    const ambiguous = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-22', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.deepEqual(ambiguous, { ok: false, reason: 'PR #1 is ambiguous across repos: owner/other, owner/repo; pass project' });
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: 'PR #1 is ambiguous across repos: owner/other, owner/repo; pass project' });
+    const merge = await d.helm.prMerge({ project: 'owner/other', number: 1, expectedHead: head1 });
+    assert.deepEqual(merge, { ok: false, reason: `no approving review at ${head1}` });
   } finally { d.store.close(); }
 });
 

@@ -64,6 +64,19 @@ test('two PRs on one repository are processed in order, one per tick', async () 
   } finally { d.store.close(); }
 });
 
+test('queue number-only calls refuse ambiguity and project selects the requested repository', async () => {
+  const d = setup();
+  try {
+    const source = d.store.getWorker('w-1')!;
+    const other = { ...source, workerId: 'w-other', repoSlug: 'owner/other', branch: 'helm/other', worktree: '/other' };
+    d.store.insertWorker(other);
+    d.store.insertPr({ repoSlug: other.repoSlug, number: 1, workerId: other.workerId, url: 'https://example.invalid/owner/other/1', head: h1, createdAt: other.createdAt });
+    assert.deepEqual(await d.queue.enqueue({ number: 1 }), { ok: false, reason: 'PR #1 is ambiguous across repos: owner/other, owner/repo; pass project' });
+    assert.equal((await d.queue.enqueue({ project: 'owner/repo', number: 1 })).ok, true);
+    assert.deepEqual(d.queue.dequeue({ project: 'owner/repo', number: 1 }), { ok: true, dequeued: true });
+  } finally { d.store.close(); }
+});
+
 test('a base move with an unchanged patch id carries approval forward', async () => {
   const d = setup({ mergeHead: h3, patchIds: { [`base:${h1}`]: 'p', [`base-2:${h3}`]: 'p' } });
   try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'merged'); assert.ok(d.calls.some((call) => call.file === 'git' && call.args[0] === 'merge')); }

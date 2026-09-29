@@ -265,6 +265,8 @@ test('PRs with the same number coexist when their repositories differ', () => {
 
     assert.equal(store.getPrByNumber('owner/a', 230)?.workerId, 'w-a');
     assert.equal(store.getPrByNumber('owner/b', 230)?.workerId, 'w-b');
+    assert.deepEqual(store.resolvePrByNumber(230), { reason: 'PR #230 is ambiguous across repos: owner/a, owner/b; pass project' });
+    assert.equal(store.resolvePrByNumber(230, 'owner/a').pr?.workerId, 'w-a');
     assert.equal((store.sql.prepare('SELECT COUNT(*) AS count FROM prs').get() as { count: number }).count, 2);
   } finally {
     store.close();

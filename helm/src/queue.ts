@@ -3,7 +3,6 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
-import { singleRepoSlug } from './store.js';
 import type { GitHub, Store, ToolOutcome, Workspace, WorkerRow } from './types.js';
 import type { Settings } from './settings.js';
 import { registerWakeKind } from './supervise.js';
@@ -17,9 +16,9 @@ type QueueError = Error & { conflict?: boolean; transient?: boolean; stdout?: st
 type QueueMeta = { baseSha: string; pendingBaseSha: string | null; priorPatchId: string | null; transientErrors: number; conflictRetries: number; conflictFiles: string[] };
 type ConflictRetry = (input: { workerId: string; kind: 'conflict' }) => Promise<ToolOutcome<{ turn: number; message: string }>>;
 export type QueueService = Readonly<{
-  enqueue(input: { repoSlug?: string; number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>>;
+  enqueue(input: { project?: string; repoSlug?: string; number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>>;
   queue(input: { project: string }): ToolOutcome<{ items: MergeQueueRow[] }>;
-  dequeue(input: { repoSlug?: string; number: number }): ToolOutcome<{ dequeued: true }>;
+  dequeue(input: { project?: string; repoSlug?: string; number: number }): ToolOutcome<{ dequeued: true }>;
   tick(): Promise<void>;
 }>;
 export type QueueOptions = Readonly<{ store: Store; workspace: Workspace; github: GitHub; settings: Settings; gate: GateCall; prMerge: MergeCall; retry?: ConflictRetry; exec?: QueueExec; now?: () => Date }>;
@@ -134,9 +133,10 @@ export function createQueue(options: QueueOptions): QueueService {
     return true;
   };
 
-  async function enqueue(input: { repoSlug?: string; number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>> {
-    const repoSlug = input.repoSlug ?? singleRepoSlug(store);
-    if (!repoSlug) return { ok: false, reason: 'repoSlug is required when multiple repositories are present' };
+  async function enqueue(input: { project?: string; repoSlug?: string; number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>> {
+    const resolved = store.resolvePrByNumber(input.number, input.project ?? input.repoSlug);
+    if (!resolved.pr) return { ok: false, reason: resolved.reason ?? 'pr not found' };
+    const repoSlug = resolved.pr.repoSlug;
     const old = byNumber.get(repoSlug, input.number) as Record<string, unknown> | undefined;
     if (old) {
       const row = asRow(old);
@@ -151,8 +151,7 @@ export function createQueue(options: QueueOptions): QueueService {
       }
       return { ok: true, item: row };
     }
-    const pr = store.getPrByNumber(repoSlug, input.number);
-    if (!pr) return { ok: false, reason: 'pr not found' };
+    const pr = resolved.pr;
     const worker = store.getWorker(pr.workerId);
     if (!worker) return { ok: false, reason: 'pr worker not found' };
     const at = iso(); const id = `mq-${randomUUID()}`;
@@ -165,9 +164,10 @@ export function createQueue(options: QueueOptions): QueueService {
     return { ok: true, items: (list.all(input.project) as Record<string, unknown>[]).map(asRow) };
   }
 
-  function dequeue(input: { repoSlug?: string; number: number }): ToolOutcome<{ dequeued: true }> {
-    const repoSlug = input.repoSlug ?? singleRepoSlug(store);
-    if (!repoSlug) return { ok: false, reason: 'repoSlug is required when multiple repositories are present' };
+  function dequeue(input: { project?: string; repoSlug?: string; number: number }): ToolOutcome<{ dequeued: true }> {
+    const resolved = store.resolvePrByNumber(input.number, input.project ?? input.repoSlug);
+    if (!resolved.pr) return { ok: false, reason: resolved.reason ?? 'queue item not found' };
+    const repoSlug = resolved.pr.repoSlug;
     const found = byNumber.get(repoSlug, input.number) as Record<string, unknown> | undefined;
     if (!found) return { ok: false, reason: 'queue item not found' };
     const row = asRow(found);

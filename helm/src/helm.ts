@@ -60,6 +60,7 @@ import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
 import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
+import { createMemory, type MemoryService } from './memory.js';
 
 const exec = promisify(execFile);
 
@@ -235,6 +236,7 @@ export class Helm {
   private readonly review?: ReviewService;
   readonly jevChecker?: JevCheckService;
   readonly claims?: ClaimsService;
+  private readonly memory: MemoryService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -261,7 +263,12 @@ export class Helm {
     this.guard('budget.open', (input) => envelopeBudgetGuard(this.config.home, input as BudgetOpenInput));
     this.claims = deps.claims;
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
+    this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
   }
+
+  async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
+  async memoryLog(input: import('./memory.js').MemoryLogInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.log(input); }
+  async memoryList(input: import('./memory.js').MemoryListInput): Promise<ToolOutcome<{ memories: Array<{ path: string; title: string; summary: string }> }>> { return this.memory.list(input); }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }

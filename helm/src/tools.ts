@@ -30,6 +30,9 @@ import {
   notifyNickInput,
   jevCheckInput,
   jevLabelInput,
+  memoryWriteInput,
+  memoryLogInput,
+  memoryListInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -80,6 +83,9 @@ const TOOLS: readonly ToolDef[] = [
   def('supervisor.rotate', 'Queue a compact command and the supervisor startup wake.', supervisorRotateInput, (h, i) => h.supervisorRotate(i)),
   def('jev.check', 'Run a bounded Jev judgement preset and record the call.', jevCheckInput, (h, i) => h.jevCheck(i)),
   def('jev.label', 'Label a recorded Jev call for calibration.', jevLabelInput, (h, i) => h.jevLabel(i)),
+  def('memory.write', 'Write a local Common Ground memory page and queue its CG write.', memoryWriteInput, (h, i) => h.memoryWrite(i)),
+  def('memory.log', 'Prepend a dated entry to a local memory page and queue its CG log.', memoryLogInput, (h, i) => h.memoryLog(i)),
+  def('memory.list', 'List local memory pages, optionally filtered by project and type.', memoryListInput, (h, i) => h.memoryList(i)),
 ];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

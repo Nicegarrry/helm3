@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { actionHash, ensureTapTable, reserveTap, type TapMemory } from '../src/envelope.js';
+import { checkEnvelope, envelopePath } from '../src/envelope.js';
 import { createDeploy, ensureDeployTable, type DeployExec } from '../src/deploy.js';
+import { runTestFlight } from '../src/testflight.js';
+import type { Jev } from '../src/jev.js';
 import type { RepoConfig } from '../src/repoconfig.js';
 import { openStore } from '../src/store.js';
 import type { Workspace } from '../src/types.js';
@@ -28,6 +31,12 @@ function repoWithConfig(configTarget: DeployTarget = target): { repo: string; sh
 
 function workspace(sha: string): Workspace {
   return { async resolveSha() { return sha; }, async defaultBranch() { return 'main'; }, async create() { return { path: '', branch: '', baseSha: sha }; }, async remove() {}, async head() { return sha; }, async isClean() { return true; }, async diffStat() { return ''; }, async patchId() { return ''; }, async commitAll() { return sha; }, async push() {}, async clone() {}, async fetch() {} };
+}
+
+function commitConfig(repo: string, target: DeployTarget): string {
+  writeFileSync(join(repo, 'helm.json'), JSON.stringify({ gates: [], deploy: { targets: [target] } }));
+  execFileSync('git', ['add', 'helm.json'], { cwd: repo }); execFileSync('git', ['commit', '-qm', 'config update'], { cwd: repo });
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
 }
 
 function deployDeps(repo: string, sha: string, exec: DeployExec, decision: 'allow' | 'tap' = 'allow', env: NodeJS.ProcessEnv = { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token }) {
@@ -99,7 +108,7 @@ test('git mode uses the successful deployment status environment URL', async () 
 
 test('TestFlight records the fastlane build number and keeps credentials out of argv', async () => {
   const config = { name: 'beta', kind: 'testflight' as const, env: { APP_STORE_CONNECT_API_KEY_PATH: 'ASC_SECRET', MATCH_PASSWORD: 'MATCH_SECRET' }, lane: 'internal', smoke: {}, rollback: 'none' as const }; const { repo, sha } = repoWithConfig(config); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = [];
-  const d = deployDeps(repo, sha, async (file, args, options) => { calls.push({ file, args, options }); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'bundle') return { stdout: 'Successfully uploaded build 42\n', code: 0 }; return { stdout: '', code: 0 }; }, 'allow', { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' });
+  const d = deployDeps(repo, sha, async (file, args, options) => { calls.push({ file, args, options }); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'bundle') return { stdout: 'HELM_BUILD_NUMBER=42\n', code: 0 }; return { stdout: '', code: 0 }; }, 'allow', { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' });
   try { const result = await d.service.run({ project: 'owner/repo', target: 'beta' }); assert.equal(result.ok, true); assert.equal(result.deploy.deploymentId, '42'); assert.deepEqual(calls.find((call) => call.file === 'bundle')?.args, ['exec', 'fastlane', 'internal']); const fastlane = calls.find((call) => call.file === 'bundle')!; assert.equal(fastlane.options.env?.APP_STORE_CONNECT_API_KEY_PATH, '/tmp/key.json'); assert.equal(fastlane.options.env?.MATCH_PASSWORD, 'match-password'); assert.ok(fastlane.args.every((arg) => !arg.includes('password') && !arg.includes('key.json'))); const event = d.store.listEvents('project:owner/repo').find((entry) => entry.kind === 'deploy'); assert.equal(event?.data.deploymentId, '42'); }
   finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
 });
@@ -116,4 +125,39 @@ test('external TestFlight distribution requires the testflight.external tap', as
   const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-testflight-tap-')); const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { envelopeKind = kind; return { ok: true, decisions: [{ decision: 'tap' }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: async (file, args) => file === 'git' && args[0] === 'rev-parse' ? { stdout: `${sha}\n`, code: 0 } : { stdout: '', code: 0 }, env: { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' } });
   try { const result = await service.run({ project: 'owner/repo', target: 'external' }); assert.equal(result.ok, false); assert.match(result.reason, /tap required for testflight\.external/); assert.equal(envelopeKind, 'testflight.external'); }
   finally { store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('deploy envelope keeps target modes while adding the real external tap check', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'helm-envelope-real-')); const path = envelopePath(root, 'owner/repo'); mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, JSON.stringify({ rules: [], budget: { maxSprintUsd: 1, maxSprintCodexTokens: 1 }, deploy: { prod: 'tap', preview: 'auto', blocked: 'never' }, tapOnly: [] }));
+  const jev: Jev = { shadow: false, async ask(_purpose, input) { return { ok: true, answers: Object.fromEntries(Object.keys(input.questions).map((key) => [key, { noul: false }])) }; } };
+  try { const one = async (kind: string) => (await checkEnvelope(root, { project: 'owner/repo', actions: ['deploy it'], kind }, { jev, envelopeTapAt: 0.5, defaultBranch: 'main' }))[0]!; assert.equal((await one('deploy.blocked')).decision, 'never'); assert.equal((await one('deploy.preview')).decision, 'allow'); assert.equal((await one('deploy.prod')).decision, 'tap'); }
+  finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('TestFlight lane and external policy come from base config, and no prior deploy fails closed', async () => {
+  const base = { name: 'beta', kind: 'testflight' as const, lane: 'base-lane', external: false, env: { APP_STORE_CONNECT_API_KEY_PATH: 'ASC_SECRET', MATCH_PASSWORD: 'MATCH_SECRET' }, smoke: {}, rollback: 'none' as const }; const deployed = { ...base, lane: 'sha-lane', external: true }; const fixture = repoWithConfig(base); execFileSync('git', ['checkout', '-qb', 'deploy-sha'], { cwd: fixture.repo }); const sha = commitConfig(fixture.repo, deployed); const kinds: string[] = []; let lane = '';
+  const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-testflight-base-')); const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo: fixture.repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { kinds.push(kind); return { ok: true, decisions: [{ decision: 'allow' }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: async (file, args, options) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'bundle') { lane = args.at(-1) ?? ''; return { stdout: 'HELM_BUILD_NUMBER=7', code: 0 }; } return { stdout: '', code: 0 }; }, env: { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' } });
+  try { const result = await service.run({ project: 'owner/repo', target: 'beta' }); assert.equal(result.ok, true); assert.equal(lane, 'base-lane'); assert.deepEqual(kinds, ['deploy.beta', 'testflight.external']); }
+  finally { store.close(); rmSync(fixture.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('TestFlight toolchain changes since the last deploy require the external tap', async () => {
+  const base = { name: 'beta', kind: 'testflight' as const, lane: 'base-lane', external: false, env: { APP_STORE_CONNECT_API_KEY_PATH: 'ASC_SECRET', MATCH_PASSWORD: 'MATCH_SECRET' }, smoke: {}, rollback: 'none' as const }; const fixture = repoWithConfig(base); execFileSync('git', ['checkout', '-qb', 'deploy-sha'], { cwd: fixture.repo }); const sha = commitConfig(fixture.repo, { ...base, lane: 'new-lane' }); const kinds: string[] = []; const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-testflight-diff-')); const actionSha = fixture.sha;
+  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo: fixture.repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { kinds.push(kind); return { ok: true, decisions: [{ decision: kind === 'testflight.external' ? 'tap' : 'allow' }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'git' && args[0] === 'diff') return { stdout: 'fastlane/Fastfile\n', code: 0 }; return { stdout: '', code: 0 }; }, env: { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' } });
+  store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('old', 'owner/repo', 'beta', 'testflight', 'beta', actionSha, 'succeeded', null, '6', null, '{}', null, '2026-09-29T00:00:00.000Z');
+  try { const result = await service.run({ project: 'owner/repo', target: 'beta' }); assert.equal(result.ok, false); assert.match(result.reason, /tap required for testflight\.external/); assert.deepEqual(kinds, ['deploy.beta', 'testflight.external']); }
+  finally { store.close(); rmSync(fixture.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('missing base TestFlight config fails closed to the external tap', async () => {
+  const base = { name: 'other', kind: 'testflight' as const, lane: 'base-lane', external: false, env: { APP_STORE_CONNECT_API_KEY_PATH: 'ASC_SECRET', MATCH_PASSWORD: 'MATCH_SECRET' }, smoke: {}, rollback: 'none' as const }; const deployed = { ...base, name: 'beta' }; const fixture = repoWithConfig(base); execFileSync('git', ['checkout', '-qb', 'deploy-sha'], { cwd: fixture.repo }); const sha = commitConfig(fixture.repo, deployed); const kinds: string[] = []; const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-testflight-base-missing-')); const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo: fixture.repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { kinds.push(kind); return { ok: true, decisions: [{ decision: kind === 'testflight.external' ? 'tap' : 'allow' }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: async (file, args) => file === 'git' && args[0] === 'rev-parse' ? { stdout: `${sha}\n`, code: 0 } : { stdout: '', code: 0 }, env: { ASC_SECRET: '/tmp/key.json', MATCH_SECRET: 'match-password' } });
+  store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('old', 'owner/repo', 'beta', 'testflight', 'beta', fixture.sha, 'succeeded', null, '6', null, '{}', null, '2026-09-29T00:00:00.000Z');
+  try { const result = await service.run({ project: 'owner/repo', target: 'beta' }); assert.equal(result.ok, false); assert.match(result.reason, /tap required for testflight\.external/); assert.deepEqual(kinds, ['deploy.beta', 'testflight.external']); }
+  finally { store.close(); rmSync(fixture.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('TestFlight accepts only explicit build markers and applies timeoutMin', async () => {
+  const logs = ['Building MyApp for iOS 18.0 (build 42)', 'increment_build_number: 2026-09-30 12:34:56 +0000'];
+  for (const log of logs) { const result = await runTestFlight({}, '/deploy', async () => ({ stdout: log, code: 0 }), {}, String); assert.equal(result.deploymentId, null); }
+  let timeout = 0; const result = await runTestFlight({ lane: 'beta', timeoutMin: 2 }, '/deploy', async (_file, args, options) => { timeout = options.timeout ?? 0; assert.deepEqual(args, ['exec', 'fastlane', 'beta']); return { stdout: 'HELM_BUILD_NUMBER=42', code: 0 }; }, {}, String); assert.equal(result.deploymentId, '42'); assert.equal(timeout, 120_000);
 });

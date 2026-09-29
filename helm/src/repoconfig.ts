@@ -17,6 +17,7 @@ export const repoConfigSchema = z.object({
     mode: z.enum(['cli', 'git']).optional(),
     lane: z.string().min(1).optional(),
     external: z.boolean().optional(),
+    timeoutMin: z.number().positive().optional(),
     smoke: z.object({
       commands: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).optional(),
       http: z.array(z.object({ path: z.string().min(1), status: z.number().int(), contains: z.string().optional() })).optional(),

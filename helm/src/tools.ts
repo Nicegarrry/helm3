@@ -43,7 +43,6 @@ import {
   deployRunInput,
   deployStatusInput,
   deployRollbackInput,
-  TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
 } from './types.js';
@@ -135,5 +134,3 @@ export function createToolRegistry(helm: Helm): {
     },
   };
 }
-
-export { TOOL_NAMES };

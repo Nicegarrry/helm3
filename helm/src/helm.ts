@@ -76,49 +76,17 @@ import { createScorecard, type ScorecardExportInput, type ScorecardService } fro
 import type { RetryService } from './retry.js';
 import { createSelector, type Selection } from './select.js';
 import type { Jev } from './jev.js';
+import type { PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
-import { createDeploy, type DeployExec, type DeployInput, type DeployRollbackInput, type DeployStatusInput, type DeployService } from './deploy.js';
+import { createDeploy, type DeployExec, type DeployService } from './deploy.js';
 
 const exec = promisify(execFile);
 
 export type SpawnInput = z.infer<typeof spawnInput>;
-export type InspectInput = z.infer<typeof inspectInput>;
-export type ListInput = z.infer<typeof listInput>;
-export type SteerInput = z.infer<typeof steerInput>;
-export type RetryInput = z.infer<typeof retryInput>;
-export type StopInput = z.infer<typeof stopInput>;
-export type GateInput = z.infer<typeof gateInput>;
-export type BaselineInput = z.infer<typeof baselineInput>;
-export type PrOpenInput = z.infer<typeof prOpenInput>;
-export type PrStatusInput = z.infer<typeof prStatusInput>;
-export type ReviewInput = z.infer<typeof reviewInput>;
-export type PrMergeInput = z.infer<typeof prMergeInput>;
-export type WaitInput = z.infer<typeof waitInput>;
-export type BudgetOpenInput = z.infer<typeof budgetOpenInput>;
-export type BudgetCloseInput = z.infer<typeof budgetCloseInput>;
-export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
-export type EnvelopeGetInput = z.infer<typeof envelopeGetInput>;
-export type EnvelopeCheckInput = z.infer<typeof envelopeCheckInput>;
-export type TapRequestInput = z.infer<typeof tapRequestInput>;
-export type TapConfirmInput = z.infer<typeof tapConfirmInput>;
-export type InboxListInput = z.infer<typeof inboxListInput>;
-export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
-export type MergeEnqueueInput = z.infer<typeof mergeEnqueueInput>;
-export type MergeQueueInput = z.infer<typeof mergeQueueInput>;
-export type MergeDequeueInput = z.infer<typeof mergeDequeueInput>;
-export type DeployRunInput = z.infer<typeof deployRunInput>;
-export type DeployStatusToolInput = z.infer<typeof deployStatusInput>;
-export type DeployRollbackToolInput = z.infer<typeof deployRollbackInput>;
+export type { PromptInput } from './prompt.js';
 
 /** What a builder/reviewer prompt is built from. Owned here since types.ts does not define it. */
-export type PromptInput = Readonly<{
-  objective: string;
-  acceptance: string | null;
-  contextPaths: readonly string[];
-  guidance?: string;
-}>;
-
 export type HelmPrompts = Readonly<{
   builder(input: PromptInput): string;
   reviewer(input: PromptInput): string;
@@ -200,33 +168,6 @@ function parseOwnerRepo(url: string): string | null {
   if (!match) return null;
   return `${match[1]}/${match[2]}`;
 }
-
-export type OverviewWorker = {
-  workerId: string; state: WorkerState; role: WorkerRow['role']; model: string; repoSlug: string; branch: string; head: string | null;
-  objective: string; createdAt: string; updatedAt: string; elapsedMs: number; spendUsd: number; tokens: number; unknownCostEvents: number;
-  /** The dashboard summarises `data` client-side (ui.ts `summarize`), the one place that text is shaped. */
-  lastEvent: { kind: string; at: string; data: Record<string, unknown> } | null; resultStatus: WorkerResult['status'] | null;
-};
-export type OverviewModel = { model: string; workers: number; active: number; spendUsd: number; tokens: number };
-export type SpendPoint = { at: string; spendUsd: number };
-export type Overview = {
-  daemon: ReturnType<Lifecycle['status']>;
-  observedAt: string;
-  run: { spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number };
-  workers: OverviewWorker[]; models: OverviewModel[];
-  /** Cumulative spend over time (last SPEND_SERIES_POINTS spend rows, ascending by `at`; unknown cost counts as 0). */
-  spendSeries: SpendPoint[];
-};
-/** One worker's drill-down: the overview row plus everything the page shows on its detail panel. */
-export type WorkerDetail = {
-  worker: OverviewWorker;
-  result: WorkerResult | null;
-  rawResultText: string | null;
-  diffStat: string;
-  gates: GateRow[];
-  pr: PrRow | null;
-  events: EventRow[];
-};
 
 const SPEND_SERIES_POINTS = 300;
 const DETAIL_EVENT_TAIL = 200;
@@ -310,7 +251,7 @@ export class Helm {
     this.discord = deps.discord;
     this.review = deps.review;
     this.guard('pr.open', async (raw) => {
-      const input = raw as PrOpenInput;
+      const input = raw as z.infer<typeof prOpenInput>;
       const worker = this.store.getWorker(input.workerId);
       const meta = worker ? this.store.getMeta(worker.workerId) : undefined;
       if (!worker || !meta?.baselineId) return null;
@@ -339,7 +280,7 @@ export class Helm {
     ensureTapTable(this.store);
     expireTapsOnStartup(this.store);
     this.guard('budget.open', (input) => {
-      const request = input as BudgetOpenInput;
+      const request = input as z.infer<typeof budgetOpenInput>;
       const result = envelopeBudgetGuard(this.config.home, request, (project, kind, expectedActionHash, tapId) =>
         tapId ? reserveTap(this.store, this.taps, project, kind, expectedActionHash, tapId, this.nowDate()) : 'tap required',
         (reservation) => this.tapReservations.set(request, reservation));
@@ -374,9 +315,9 @@ export class Helm {
   async memoryLog(input: import('./memory.js').MemoryLogInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.log(input); }
   async memoryList(input: import('./memory.js').MemoryListInput): Promise<ToolOutcome<{ memories: Array<{ path: string; title: string; summary: string }> }>> { return this.memory.list(input); }
   async scorecardExport(input: ScorecardExportInput) { return this.scorecard.export(input); }
-  async deployRun(input: DeployRunInput) { return this.deploy.run(input); }
-  async deployStatus(input: DeployStatusToolInput) { return this.deploy.status(input); }
-  async deployRollback(input: DeployRollbackToolInput) { return this.deploy.rollback(input); }
+  async deployRun(input: z.infer<typeof deployRunInput>) { return this.deploy.run(input); }
+  async deployStatus(input: z.infer<typeof deployStatusInput>) { return this.deploy.status(input); }
+  async deployRollback(input: z.infer<typeof deployRollbackInput>) { return this.deploy.rollback(input); }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }
@@ -384,11 +325,11 @@ export class Helm {
     if (!this.claims) return { ok: false, reason: 'claims service unavailable' };
     return runGuard(() => this.claims!.check(input));
   }
-  async mergeEnqueue(input: MergeEnqueueInput) { return this.queue.enqueue(input); }
-  async mergeQueue(input: MergeQueueInput) { return this.queue.queue(input); }
-  async mergeDequeue(input: MergeDequeueInput) { return this.queue.dequeue(input); }
+  async mergeEnqueue(input: z.infer<typeof mergeEnqueueInput>) { return this.queue.enqueue(input); }
+  async mergeQueue(input: z.infer<typeof mergeQueueInput>) { return this.queue.queue(input); }
+  async mergeDequeue(input: z.infer<typeof mergeDequeueInput>) { return this.queue.dequeue(input); }
 
-  async retryWorker(input: RetryInput): Promise<ToolOutcome<{ turn: number; kind: import('./retry.js').RetryKind; message: string }>> {
+  async retryWorker(input: z.infer<typeof retryInput>): Promise<ToolOutcome<{ turn: number; kind: import('./retry.js').RetryKind; message: string }>> {
     if (!this.retry) return refuse('retry service is not configured');
     return runGuard(() => this.withLock(() => this.retry!.retry(input, (workerId, message) => this.steerLocked({ workerId, message }))));
   }
@@ -411,6 +352,24 @@ export class Helm {
       if (reason) return reason;
     }
     return null;
+  }
+
+  private prByNumber(number: number, project?: string): PrRow {
+    const resolution = this.store.resolvePrByNumber(number, project);
+    return requireValue(resolution.pr, resolution.reason ?? 'pr not found');
+  }
+
+  private prStatusTarget(input: z.infer<typeof prStatusInput>): { repoSlug: string; number: number } {
+    const repoSlug = input.project ?? input.repoSlug;
+    if (input.number !== undefined) {
+      const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
+      if (worker) return { repoSlug: worker.repoSlug, number: input.number };
+      const pr = this.prByNumber(input.number, repoSlug);
+      return { repoSlug: requireValue(this.store.getWorker(pr.workerId), 'pr worker not found').repoSlug, number: input.number };
+    }
+    const workerId = requireValue(input.workerId, 'number or workerId required');
+    const pr = requireValue(this.store.getPrByWorker(workerId), 'no pr for worker');
+    return { number: pr.number, repoSlug: requireValue(this.store.getWorker(workerId), 'worker not found').repoSlug };
   }
 
   private async chosenModel(input: SpawnInput): Promise<{ input: SpawnInput; choice?: ModelChoice }> {
@@ -519,11 +478,7 @@ export class Helm {
     return { ok: true, workerId, branch, worktree, ...(warnings.length ? { warning: warnings.join('; ') } : {}) };
   }
 
-  async inspect(input: InspectInput): Promise<ToolOutcome<{
-    state: WorkerState; model: string; branch: string; head: string | null; spendUsd: number;
-    tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
-    diffStat: string; result: WorkerResult | null; events: ReturnType<Store['listEvents']>;
-  }>> {
+  async inspect(input: z.infer<typeof inspectInput>) {
     return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       const spend = this.store.spendFor(input.workerId);
@@ -538,9 +493,7 @@ export class Helm {
     });
   }
 
-  async list(input: ListInput): Promise<ToolOutcome<{
-    workers: Array<{ workerId: string; state: WorkerState; role: WorkerRow['role']; model: string; branch: string; head: string | null; createdAt: string }>;
-  }>> {
+  async list(input: z.infer<typeof listInput>) {
     return runGuard(async () => {
       const rows = this.store.listWorkers({ repo: input.repo, state: input.state });
       const workers = rows.map((r) => ({ workerId: r.workerId, state: r.state, role: r.role, model: r.model, branch: r.branch, head: r.head, createdAt: r.createdAt }));
@@ -564,11 +517,11 @@ export class Helm {
     return this.supervisor ? this.supervisor.rotate(input) : { ok: false, reason: 'supervisor service unavailable' };
   }
 
-  async steer(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
+  async steer(input: z.infer<typeof steerInput>): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
     return runGuard(() => this.withLock(() => this.steerLocked(input)));
   }
 
-  private async steerLocked(input: SteerInput): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
+  private async steerLocked(input: z.infer<typeof steerInput>): Promise<ToolOutcome<{ turn: number; warning?: string }>> {
     const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
     must(STEERABLE_STATES.has(row.state), `worker is ${row.state}, not steerable`);
     must(!this.running.has(input.workerId), 'worker already has a turn in flight');
@@ -580,11 +533,11 @@ export class Helm {
     return { ok: true, turn: priorTurns + 1, ...(this.aboveSoftCap() ? { warning: `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` } : {}) };
   }
 
-  async inboxList(input: InboxListInput): Promise<ToolOutcome<{ inbox: ReturnType<typeof listInbox> }>> {
+  async inboxList(input: z.infer<typeof inboxListInput>): Promise<ToolOutcome<{ inbox: ReturnType<typeof listInbox> }>> {
     return runGuard(async () => ({ ok: true, inbox: listInbox(this.store.sql, { project: input.project, state: input.state ?? 'open' }) }));
   }
 
-  async inboxReply(input: InboxReplyInput): Promise<ToolOutcome<{ id: string; workerId: string; turn: number; state: 'answered'; warning?: string }>> {
+  async inboxReply(input: z.infer<typeof inboxReplyInput>): Promise<ToolOutcome<{ id: string; workerId: string; turn: number; state: 'answered'; warning?: string }>> {
     return runGuard(() => this.withLock(async () => {
       const item = requireValue(getInbox(this.store.sql, input.id), 'inbox item not found');
       must(item.state === 'open', `inbox item is ${item.state}, not open`);
@@ -601,7 +554,7 @@ export class Helm {
     }));
   }
 
-  async stop(input: StopInput): Promise<ToolOutcome<{ state: WorkerState }>> {
+  async stop(input: z.infer<typeof stopInput>): Promise<ToolOutcome<{ state: WorkerState }>> {
     return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(row.state === 'running', `worker is not running (state: ${row.state})`);
@@ -620,7 +573,7 @@ export class Helm {
     });
   }
 
-  async gate(input: GateInput): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> {
+  async gate(input: z.infer<typeof gateInput>): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> {
     return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
@@ -642,14 +595,14 @@ export class Helm {
     });
   }
 
-  async baseline(input: BaselineInput): Promise<ToolOutcome<BaselineRow>> {
+  async baseline(input: z.infer<typeof baselineInput>): Promise<ToolOutcome<BaselineRow>> {
     return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, now: this.nowIso() });
     });
   }
 
-  async prOpen(input: PrOpenInput): Promise<ToolOutcome<{ number: number; url: string; head: string; updated?: true }>> {
+  async prOpen(input: z.infer<typeof prOpenInput>): Promise<ToolOutcome<{ number: number; url: string; head: string; updated?: true }>> {
     return runGuard(async () => {
       const reason = await this.refusal('pr.open', input);
       if (reason) {
@@ -693,42 +646,22 @@ export class Helm {
     });
   }
 
-  async prStatus(input: PrStatusInput): Promise<ToolOutcome<PrStatus>> {
+  async prStatus(input: z.infer<typeof prStatusInput>): Promise<ToolOutcome<PrStatus>> {
     return runGuard(async () => {
-      let repoSlug = input.project ?? input.repoSlug;
-      let number = input.number;
-      if (number !== undefined) {
-        const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
-        if (worker) {
-          repoSlug = worker.repoSlug;
-        } else {
-          const resolved = this.store.resolvePrByNumber(number, repoSlug);
-          if (!resolved.pr) return refuse(resolved.reason ?? 'pr not found');
-          const pr = resolved.pr;
-          repoSlug = requireValue(this.store.getWorker(pr.workerId), 'pr worker not found').repoSlug;
-        }
-      } else {
-        const workerId = requireValue(input.workerId, 'number or workerId required');
-        const pr = requireValue(this.store.getPrByWorker(workerId), 'no pr for worker');
-        number = pr.number;
-        repoSlug = requireValue(this.store.getWorker(workerId), 'worker not found').repoSlug;
-      }
-      repoSlug = requireValue(repoSlug, 'repoSlug required');
+      const { repoSlug, number } = this.prStatusTarget(input);
       const status = await this.github.prStatus(repoSlug, number);
       return { ok: true, ...status };
     });
   }
 
-  async reviewRequest(input: ReviewInput): Promise<ToolOutcome<{ reviewWorkerId: string }>> {
+  async reviewRequest(input: z.infer<typeof reviewInput>): Promise<ToolOutcome<{ reviewWorkerId: string }>> {
     return runGuard(async () => {
       if (!input.model) return refuse('record Claude reviews with review.record');
       const workerRepo = input.workerId ? this.store.getWorker(input.workerId)?.repoSlug : undefined;
       const project = input.project ?? input.repoSlug ?? workerRepo;
-      const resolution = input.number !== undefined ? this.store.resolvePrByNumber(input.number, project) : undefined;
-      if (resolution && !resolution.pr) return refuse(resolution.reason ?? 'pr not found');
-      const byNumber = resolution?.pr;
-      const byWorker = input.number === undefined && input.workerId ? this.store.getPrByWorker(input.workerId) : undefined;
-      const pr = requireValue(byNumber ?? byWorker, 'pr not found');
+      const pr = input.number !== undefined
+        ? this.prByNumber(input.number, project)
+        : requireValue(input.workerId ? this.store.getPrByWorker(input.workerId) : undefined, 'pr not found');
       const sourceWorker = requireValue(this.store.getWorker(pr.workerId), 'source worker not found');
       const model = input.model;
       must(model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
@@ -756,20 +689,20 @@ export class Helm {
     return this.review.record(input);
   }
 
-  async overview(): Promise<ToolOutcome<Overview>> {
+  async overview() {
     return runGuard(async () => {
       const status = await this.runStatus();
       if (!status.ok) throw new Error(status.reason);
       const now = this.nowIso();
-      const workers: OverviewWorker[] = this.store.listWorkers().map((r) => this.overviewWorker(r, now));
-      const byModel = new Map<string, OverviewModel>();
+      const workers = this.store.listWorkers().map((r) => this.overviewWorker(r, now));
+      const byModel = new Map<string, { model: string; workers: number; active: number; spendUsd: number; tokens: number }>();
       for (const w of workers) {
         const m = byModel.get(w.model) ?? { model: w.model, workers: 0, active: 0, spendUsd: 0, tokens: 0 };
         m.workers += 1; if (ACTIVE_STATES.has(w.state)) m.active += 1; m.spendUsd += w.spendUsd; m.tokens += w.tokens;
         byModel.set(w.model, m);
       }
       let running = 0;
-      const spendSeries: SpendPoint[] = this.store.spendSeries(SPEND_SERIES_POINTS).map((p) => {
+      const spendSeries = this.store.spendSeries(SPEND_SERIES_POINTS).map((p) => {
         running += p.costUsd ?? 0;
         return { at: p.at, spendUsd: running };
       });
@@ -779,7 +712,7 @@ export class Helm {
   }
 
   /** One worker's drill-down for the dashboard: overview row, result, diff stat, gates, PR and the last events. */
-  async workerDetail(workerId: string): Promise<ToolOutcome<WorkerDetail>> {
+  async workerDetail(workerId: string) {
     return runGuard(async () => {
       const row = requireValue(this.store.getWorker(workerId), 'worker not found');
       let diffStat = '';
@@ -808,7 +741,7 @@ export class Helm {
   }
 
   /** The per-worker row shared by overview() and workerDetail(), so both views agree on every field. */
-  private overviewWorker(r: WorkerRow, now: string): OverviewWorker {
+  private overviewWorker(r: WorkerRow, now: string) {
     const spend = this.store.spendFor(r.workerId);
     const last = this.store.listEvents(r.workerId, { limit: 1_000_000 }).at(-1);
     const end = ACTIVE_STATES.has(r.state) ? now : r.updatedAt;
@@ -843,7 +776,7 @@ export class Helm {
     });
   }
 
-  async budgetOpen(input: BudgetOpenInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
+  async budgetOpen(input: z.infer<typeof budgetOpenInput>): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
     return runGuard(async () => {
       const reason = await this.refusal('budget.open', input);
       const reservation = this.tapReservations.get(input);
@@ -869,12 +802,12 @@ export class Helm {
 
   async tapTick(): Promise<void> { expireTaps(this.store, this.taps, this.nowDate()); }
 
-  async envelopeGet(input: EnvelopeGetInput): Promise<ToolOutcome<EnvelopeView>> {
+  async envelopeGet(input: z.infer<typeof envelopeGetInput>): Promise<ToolOutcome<EnvelopeView>> {
     envelopePath(this.config.home, input.project);
     return { ok: true, ...readEnvelope(this.config.home, input.project) };
   }
 
-  async envelopeCheck(input: EnvelopeCheckInput): Promise<ToolOutcome<{ decisions: EnvelopeDecision[] }>> {
+  async envelopeCheck(input: z.infer<typeof envelopeCheckInput>): Promise<ToolOutcome<{ decisions: EnvelopeDecision[] }>> {
     const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
     const sameProjectWorker = worker?.repoSlug === input.project ? worker : undefined;
     let repo = sameProjectWorker?.repo;
@@ -897,7 +830,7 @@ export class Helm {
     }) };
   }
 
-  async tapRequest(input: TapRequestInput): Promise<ToolOutcome<{ id: string; expiresAt: string }>> {
+  async tapRequest(input: z.infer<typeof tapRequestInput>): Promise<ToolOutcome<{ id: string; expiresAt: string }>> {
     return runGuard(async () => {
       const result = await requestTap(this.store, input, {
         ttlMin: this.settings.factory.tapTtlMin,
@@ -911,11 +844,11 @@ export class Helm {
     });
   }
 
-  async tapConfirm(input: TapConfirmInput): Promise<ToolOutcome<{ granted: true }>> {
+  async tapConfirm(input: z.infer<typeof tapConfirmInput>): Promise<ToolOutcome<{ granted: true }>> {
     return runGuard(async () => confirmTap(this.store, this.taps, input, this.tapPepper, this.nowDate()));
   }
 
-  async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
+  async budgetClose(input: z.infer<typeof budgetCloseInput>): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
     return runGuard(async () => {
       const row = requireValue(closeBudget(this.store, input.project, this.nowIso()), `no open budget for ${input.project}`);
       this.store.appendEvent(`project:${input.project}`, 'budget.closed', { project: input.project, budgetId: row.id, label: row.label, closedAt: row.closedAt });
@@ -923,15 +856,12 @@ export class Helm {
     });
   }
 
-  async budgetStatus(input: BudgetStatusInput): Promise<ToolOutcome<{ budgets: BudgetStatus[] }>> {
+  async budgetStatus(input: z.infer<typeof budgetStatusInput>): Promise<ToolOutcome<{ budgets: BudgetStatus[] }>> {
     return runGuard(async () => ({ ok: true, budgets: listBudgetStatuses(this.store, input.project) }));
   }
 
   /** Wait for a settled worker or timeout; periodically re-read the store, without client polling. */
-  async wait(input: WaitInput): Promise<ToolOutcome<{
-    settled: Array<{ workerId: string; state: WorkerState; head: string | null; result: WorkerRow['result'] }>;
-    pending: string[]; timedOut: boolean; waitedMs: number;
-  }>> {
+  async wait(input: z.infer<typeof waitInput>) {
     return runGuard(async () => {
       const started = Date.now();
       for (;;) {
@@ -952,13 +882,11 @@ export class Helm {
     });
   }
 
-  async prMerge(input: PrMergeInput): Promise<ToolOutcome<{ merged: true }>> {
+  async prMerge(input: z.infer<typeof prMergeInput>): Promise<ToolOutcome<{ merged: true }>> {
     return runGuard(async () => {
       const reason = await this.refusal('pr.merge', input);
       if (reason) return refuse(reason);
-      const resolution = this.store.resolvePrByNumber(input.number, input.project ?? input.repoSlug);
-      if (!resolution.pr) return refuse(resolution.reason ?? 'pr not found');
-      const pr = resolution.pr;
+      const pr = this.prByNumber(input.number, input.project ?? input.repoSlug);
       const worker = requireValue(this.store.getWorker(pr.workerId), 'pr worker not found');
       const status = await this.github.prStatus(worker.repoSlug, input.number);
       must(status.state === 'open', `pr is ${status.state}, not open`);

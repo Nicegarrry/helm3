@@ -4,7 +4,7 @@ import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } f
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import type { EventRow, HelmConfig, Store, WorkerRow } from './types.js';
+import type { EventRow, HelmConfig, InboxState, Store, WorkerRow } from './types.js';
 import { ensureHome, loadConfig } from './config.js';
 import { openStore } from './store.js';
 import { gitWorkspace } from './workspace.js';
@@ -16,6 +16,7 @@ import { builderPrompt, reviewerPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
 import { startTicker } from './daemon.js';
+import { listInbox } from './inbox.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -29,6 +30,8 @@ function usage(): void {
   inspect <id> [--tail n] [--json]
   wait <id>... [--timeout ms] [--json]
   steer <id> "<message>" [--json]
+  inbox [--project slug] [--state open|answered|superseded] [--json]
+  reply <question-id> "<answer>" [--json]
   stop <id> [--json]
   gate <id> [--json]
   pr <id> [--title t] [--body b] [--draft] [--json]
@@ -193,6 +196,17 @@ const cmdWait = (args: string[]) =>
 const cmdSteer = (args: string[]) =>
   simpleCmd('worker.steer', args, (p) => (p[0] && p.length > 1 ? { workerId: p[0], message: p.slice(1).join(' ') } : undefined));
 
+const cmdInbox = (args: string[]) =>
+  readCmd(args, (_p, v, store) => {
+    const rows = listInbox(store.sql, { project: v.project as string | undefined, state: (v.state as InboxState | undefined) ?? 'open' });
+    if (v.json) { console.log(JSON.stringify(rows, null, 2)); return; }
+    console.log('id\tproject\tworker\tquestion');
+    for (const row of rows) console.log(`${row.id}\t${row.project}\t${row.workerId}\t${row.question}`);
+  }, { project: { type: 'string' }, state: { type: 'string' } });
+
+const cmdReply = (args: string[]) =>
+  simpleCmd('inbox.reply', args, (p) => (p[0] && p.length > 1 ? { id: p[0], answer: p.slice(1).join(' ') } : undefined));
+
 const cmdStop = (args: string[]) => simpleCmd('worker.stop', args, (p) => (p[0] ? { workerId: p[0] } : undefined));
 
 const cmdGate = (args: string[]) => simpleCmd('gate.run', args, (p) => (p[0] ? { workerId: p[0] } : undefined));
@@ -301,7 +315,7 @@ const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) 
 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
-  spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
+  spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, inbox: cmdInbox, reply: cmdReply, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
 };
 

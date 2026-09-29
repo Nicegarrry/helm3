@@ -62,6 +62,7 @@ function usage(): void {
   supervisor start <owner/name> --repo <abs path> [--host herdr|tmux] [--label <text>]
   supervisor list [--json]
   wake <project> "<text>" [--json]
+  scorecard <project> [--budget <id>] [--since <iso>] [--json]
   jev check --preset <issue|dedupe|verdict|raw> --file <json|md> [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
   shutdown`);
@@ -502,7 +503,7 @@ async function cmdServe(args: string[]): Promise<void> {
   });
   helm.markInterruptedOnStart();
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home })]);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
@@ -556,12 +557,13 @@ async function cmdShutdown(): Promise<void> {
   printOutcome(await postTool('daemon.control', { action: 'shutdown' }), false);
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
+const cmdScorecard = (args: string[]) => simpleCmd('scorecard.export', args, (p, v) => (p[0] ? { project: p[0], ...(v.budget ? { budgetId: v.budget } : {}), ...(v.since ? { since: v.since } : {}) } : undefined), { budget: { type: 'string' }, since: { type: 'string' } });
 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev,
+  inbox: cmdInbox, reply: cmdReply, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard,
 };
 
 async function main(): Promise<void> {

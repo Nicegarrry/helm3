@@ -41,6 +41,7 @@ import {
   type ToolName,
   type ToolOutcome,
 } from './types.js';
+import { scorecardExportInput } from './scorecard.js';
 import { READ_TOOLS } from './lifecycle.js';
 import type { Helm } from './helm.js';
 
@@ -91,6 +92,7 @@ const TOOLS: readonly ToolDef[] = [
   def('memory.write', 'Write a local Common Ground memory page and queue its CG write.', memoryWriteInput, (h, i) => h.memoryWrite(i)),
   def('memory.log', 'Prepend a dated entry to a local memory page and queue its CG log.', memoryLogInput, (h, i) => h.memoryLog(i)),
   def('memory.list', 'List local memory pages, optionally filtered by project and type.', memoryListInput, (h, i) => h.memoryList(i)),
+  def('scorecard.export', 'Export the mechanical project scorecard for a sprint or since timestamp.', scorecardExportInput, (h, i) => h.scorecardExport(i)),
   def('merge.enqueue', 'Add a pull request to its repository merge queue.', mergeEnqueueInput, (h, i) => h.mergeEnqueue(i)),
   def('merge.queue', 'List the pull requests queued for a project.', mergeQueueInput, (h, i) => h.mergeQueue(i)),
   def('merge.dequeue', 'Remove a queued pull request before processing starts.', mergeDequeueInput, (h, i) => h.mergeDequeue(i)),

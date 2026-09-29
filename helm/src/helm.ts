@@ -66,6 +66,7 @@ import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
 import { createMemory, type MemoryService } from './memory.js';
 import { createQueue, type QueueService } from './queue.js';
+import { createScorecard, type ScorecardExportInput, type ScorecardService } from './scorecard.js';
 import type { RetryService } from './retry.js';
 import { createSelector, type Selection } from './select.js';
 import type { Jev } from './jev.js';
@@ -255,6 +256,7 @@ export class Helm {
   private readonly memory: MemoryService;
   readonly queue: QueueService;
   private readonly selector: ReturnType<typeof createSelector>;
+  readonly scorecard: ScorecardService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -308,6 +310,7 @@ export class Helm {
     if (this.claims) this.guard('pr.merge', (input) => this.claims!.guard(input));
     this.retry = deps.retry;
     this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
+    this.scorecard = createScorecard({ store: this.store, memory: this.memory, now: () => this.now ? new Date(this.now()) : new Date() });
     this.queue = createQueue({
       store: this.store, workspace: this.workspace, github: this.github, settings: this.settings,
       gate: (input) => this.gate(input), prMerge: (input) => this.prMerge(input),
@@ -318,6 +321,7 @@ export class Helm {
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
   async memoryLog(input: import('./memory.js').MemoryLogInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.log(input); }
   async memoryList(input: import('./memory.js').MemoryListInput): Promise<ToolOutcome<{ memories: Array<{ path: string; title: string; summary: string }> }>> { return this.memory.list(input); }
+  async scorecardExport(input: ScorecardExportInput) { return this.scorecard.export(input); }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }
@@ -775,6 +779,7 @@ export class Helm {
   async budgetClose(input: BudgetCloseInput): Promise<ToolOutcome<{ budget: BudgetStatus }>> {
     return runGuard(async () => {
       const row = requireValue(closeBudget(this.store, input.project, this.nowIso()), `no open budget for ${input.project}`);
+      this.store.appendEvent(`project:${input.project}`, 'budget.closed', { project: input.project, budgetId: row.id, label: row.label, closedAt: row.closedAt });
       return { ok: true, budget: budgetStatus(this.store, row) };
     });
   }

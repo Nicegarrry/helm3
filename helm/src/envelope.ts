@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { z } from 'zod';
@@ -18,7 +18,8 @@ export type EnvelopeView = Readonly<{ rules: string[]; summary: string; hash: st
 export const defaultEnvelope = (): Envelope => ({ rules: [DEFAULT_RULES], budget: { maxSprintUsd: 25, maxSprintCodexTokens: 20_000_000 }, deploy: { ...DEFAULT_DEPLOY }, tapOnly: [...DEFAULT_TAP_ONLY] });
 export const BUDGET_TAP_ACTION = 'budget.open';
 export type TapPostResult = { ok: true } | { ok: false; reason: string };
-export type TapMemory = { project: string; kind: string; actionHash: string; codeMac: string; attempts: number; expiresAt: string; state: 'pending' | 'granted' | 'reserved' };
+export type TapReservation = Readonly<{ tapId: string; token: string }>;
+export type TapMemory = { project: string; kind: string; actionHash: string; codeMac: string; attempts: number; expiresAt: string; state: 'pending' | 'granted' | 'reserved'; reservationToken?: string };
 
 export function actionHash(action: string): string { return digest(action); }
 export function budgetTapAction(input: { project: string; label: string; capUsd: number; codexTokens: number }): string {
@@ -99,7 +100,7 @@ export function confirmTap(store: Store, taps: Map<string, TapMemory>, input: { 
   return { ok: true, granted: true };
 }
 
-export function reserveTap(store: Store, taps: Map<string, TapMemory>, project: string, kind: string, expectedActionHash: string, tapId?: string, now = new Date()): string | null {
+export function reserveTap(store: Store, taps: Map<string, TapMemory>, project: string, kind: string, expectedActionHash: string, tapId?: string, now = new Date()): TapReservation | string {
   ensureTapTable(store);
   const selected = tapId
     ? [tapId, taps.get(tapId)] as const
@@ -115,27 +116,35 @@ export function reserveTap(store: Store, taps: Map<string, TapMemory>, project: 
     return 'tap expired';
   }
   tap.state = 'reserved';
-  return null;
+  const token = randomUUID();
+  tap.reservationToken = token;
+  return { tapId: id, token };
 }
 
-export function commitTap(store: Store, taps: Map<string, TapMemory>, tapId: string, now = new Date()): void {
+export function tapReservationOwned(taps: Map<string, TapMemory>, reservation: TapReservation): boolean {
+  const tap = taps.get(reservation.tapId);
+  return tap?.state === 'reserved' && tap.reservationToken === reservation.token;
+}
+
+export function commitTap(store: Store, taps: Map<string, TapMemory>, tapId: string, token: string, now = new Date()): void {
   const tap = taps.get(tapId);
-  if (!tap || tap.state !== 'reserved') throw new Error('tap reservation is no longer active');
+  if (!tap || tap.state !== 'reserved' || tap.reservationToken !== token) throw new Error('tap reservation is no longer active');
   taps.delete(tapId);
   store.sql.prepare("UPDATE taps SET state = 'used', usedAt = ? WHERE id = ?").run(now.toISOString(), tapId);
 }
 
-export function rollbackTap(taps: Map<string, TapMemory>, tapId: string): void {
+export function rollbackTap(taps: Map<string, TapMemory>, tapId: string, token: string): void {
   const tap = taps.get(tapId);
-  if (tap?.state === 'reserved') tap.state = 'granted';
+  if (tap?.state === 'reserved' && tap.reservationToken === token) {
+    tap.state = 'granted';
+    delete tap.reservationToken;
+  }
 }
 
 export function consumeTap(store: Store, taps: Map<string, TapMemory>, project: string, kind: string, expectedActionHash: string, tapId?: string, now = new Date()): string | null {
   const reason = reserveTap(store, taps, project, kind, expectedActionHash, tapId, now);
-  if (reason) return reason;
-  const id = tapId ?? [...taps.entries()].find(([, tap]) => tap.project === project && tap.kind === kind && tap.actionHash === expectedActionHash && tap.state === 'reserved')?.[0];
-  if (!id) return 'unknown or expired tap (daemon restarted?)';
-  commitTap(store, taps, id, now);
+  if (typeof reason === 'string') return reason;
+  commitTap(store, taps, reason.tapId, reason.token, now);
   return null;
 }
 
@@ -174,7 +183,7 @@ function envelopeValue(home: string, project: string, log: (line: string) => voi
   return defaultEnvelope();
 }
 
-export function envelopeBudgetGuard(home: string, input: { project: string; label?: string; capUsd: number; codexTokens?: number; tapId?: string }, consumeTap: ((project: string, kind: string, expectedActionHash: string, tapId?: string) => string | null | boolean) | (() => boolean) = () => false): string | null {
+export function envelopeBudgetGuard(home: string, input: { project: string; label?: string; capUsd: number; codexTokens?: number; tapId?: string }, consumeTap: ((project: string, kind: string, expectedActionHash: string, tapId?: string) => string | null | boolean | TapReservation) | (() => boolean) = () => false, onReserve?: (reservation: TapReservation) => void): string | null {
   const value = envelopeValue(home, input.project);
   if (input.codexTokens === undefined) return `codexTokens required; max ${value.budget.maxSprintCodexTokens}`;
   const limitReason = input.capUsd > value.budget.maxSprintUsd
@@ -185,6 +194,7 @@ export function envelopeBudgetGuard(home: string, input: { project: string; labe
   if (input.tapId) {
     const result = consumeTap(input.project, BUDGET_TAP_ACTION, actionHash(budgetTapAction({ project: input.project, label: input.label ?? '', capUsd: input.capUsd, codexTokens: input.codexTokens })), input.tapId);
     if (result === null || result === true) return null;
+    if (typeof result === 'object') { onReserve?.(result); return null; }
     return typeof result === 'string' ? result : limitReason;
   }
   return limitReason;

@@ -225,6 +225,7 @@ test('concurrent guarded actions reserve a tap so only one succeeds', async () =
   const home = mkdtempSync(join(tmpdir(), 'helm-tap-concurrent-'));
   const discord: DiscordService = { consume: async () => {}, tick: async () => {}, notifyNick: async () => ({ ok: true, sent: true }), postTap: d.post };
   const helm = new Helm({ config: { home, spendCapUsd: 0, maxWorkers: 2, gateTimeoutMs: 1000 }, store: d.store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never, prompts: { builder: () => '', reviewer: () => '', validator: () => 'validate' }, settings: loadSettings('/missing-tap-settings'), discord, randomInt: () => Number(CODE), tapPepper: PEPPER });
+  helm.guard('budget.open', async () => { await new Promise<void>((resolve) => setImmediate(resolve)); return null; });
   const tools = createToolRegistry(helm);
   try {
     const budget = { project, label: 'concurrent', capUsd: 30, codexTokens: 20_000_001 };
@@ -236,6 +237,8 @@ test('concurrent guarded actions reserve a tap so only one succeeds', async () =
     const results = await Promise.all([tools.call('budget.open', { ...budget, tapId: tap.id }), tools.call('budget.open', { ...budget, tapId: tap.id })]);
     assert.equal(results.filter((result) => result.ok).length, 1);
     assert.equal(results.filter((result) => !result.ok).length, 1);
+    assert.equal((d.store.sql.prepare('SELECT COUNT(*) AS count FROM budgets').get() as { count: number }).count, 1);
+    assert.equal((d.store.sql.prepare('SELECT state FROM taps WHERE id = ?').get(tap.id) as { state: string }).state, 'used');
   } finally { d.store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 

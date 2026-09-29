@@ -56,3 +56,5 @@ export function createMemory(options: { store: Store; home: string; settings?: P
   };
   return { write, log, list };
 }
+
+export { createMemorySync } from './memory-sync.js';

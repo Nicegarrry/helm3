@@ -40,6 +40,9 @@ import {
   mergeEnqueueInput,
   mergeQueueInput,
   mergeDequeueInput,
+  deployRunInput,
+  deployStatusInput,
+  deployRollbackInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -102,6 +105,9 @@ const TOOLS: readonly ToolDef[] = [
   def('merge.enqueue', 'Add a pull request to its repository merge queue.', mergeEnqueueInput, (h, i) => h.mergeEnqueue(i)),
   def('merge.queue', 'List the pull requests queued for a project.', mergeQueueInput, (h, i) => h.mergeQueue(i)),
   def('merge.dequeue', 'Remove a queued pull request before processing starts.', mergeDequeueInput, (h, i) => h.mergeDequeue(i)),
+  def('deploy.run', 'Deploy a SHA to a configured repository target, then run its smoke contract.', deployRunInput, (h, i) => h.deployRun(i)),
+  def('deploy.status', 'List recorded deployments for a project or deployment id.', deployStatusInput, (h, i) => h.deployStatus(i)),
+  def('deploy.rollback', 'Roll back a recorded production deployment to its previous provider deployment.', deployRollbackInput, (h, i) => h.deployRollback(i)),
 ];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

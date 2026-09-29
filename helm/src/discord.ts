@@ -44,6 +44,9 @@ function milestone(event: EventRow): string | null {
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
   if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;
+  if (event.kind === 'deploy') return `Deployed: ${text(event.data.target, 'target')}${event.data.url ? ` ${text(event.data.url, '')}` : ''}`;
+  if (event.kind === 'deploy.rolledback') return `Deploy rolled back: ${text(event.data.target, 'target')}`;
+  if (event.kind === 'deploy.failed') return `Deploy failed: ${text(event.data.target, 'target')}`;
   return null;
 }
 

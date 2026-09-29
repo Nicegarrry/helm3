@@ -53,6 +53,9 @@ import {
   mergeEnqueueInput,
   mergeQueueInput,
   mergeDequeueInput,
+  deployRunInput,
+  deployStatusInput,
+  deployRollbackInput,
 } from './types.js';
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
 import { createBaseline, ensureBaselineTable, getBaseline } from './baseline.js';
@@ -75,6 +78,8 @@ import type { RetryService } from './retry.js';
 import { createSelector, type Selection } from './select.js';
 import type { Jev } from './jev.js';
 import { registerRouting } from './route.js';
+import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
+import { createDeploy, type DeployExec, type DeployInput, type DeployRollbackInput, type DeployStatusInput, type DeployService } from './deploy.js';
 
 const exec = promisify(execFile);
 
@@ -103,6 +108,9 @@ export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
 export type MergeEnqueueInput = z.infer<typeof mergeEnqueueInput>;
 export type MergeQueueInput = z.infer<typeof mergeQueueInput>;
 export type MergeDequeueInput = z.infer<typeof mergeDequeueInput>;
+export type DeployRunInput = z.infer<typeof deployRunInput>;
+export type DeployStatusToolInput = z.infer<typeof deployStatusInput>;
+export type DeployRollbackToolInput = z.infer<typeof deployRollbackInput>;
 
 /** What a builder/reviewer prompt is built from. Owned here since types.ts does not define it. */
 export type PromptInput = Readonly<{
@@ -141,6 +149,10 @@ export type HelmDeps = Readonly<{
   jev?: Jev;
   randomInt?: (min: number, max: number) => number;
   tapPepper?: Buffer;
+  deployExec?: DeployExec;
+  deployFetch?: typeof globalThis.fetch;
+  deploySleep?: (ms: number) => Promise<void>;
+  deployEnv?: NodeJS.ProcessEnv;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -273,6 +285,7 @@ export class Helm {
   readonly queue: QueueService;
   private readonly selector: ReturnType<typeof createSelector>;
   readonly scorecard: ScorecardService;
+  readonly deploy: DeployService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -338,6 +351,17 @@ export class Helm {
     this.retry = deps.retry;
     this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
     this.scorecard = createScorecard({ store: this.store, memory: this.memory, now: () => this.now ? new Date(this.now()) : new Date() });
+    this.deploy = createDeploy({
+      store: this.store, home: this.config.home, workspace: this.workspace,
+      resolveRepo: async (project) => { const repo = requireValue(await this.resolveRepo(project), `project not found: ${project}`); return { repo, slug: await this.repoSlugFor(repo) }; },
+      envelope: (input) => this.envelopeCheck(input),
+      reserveTap: (project, kind, action, tapId) => reserveDeployTap(this.store, this.taps, project, kind, actionHash(action), tapId, this.nowDate()),
+      commitTap: (reservation) => commitDeployTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()),
+      rollbackTap: (reservation) => rollbackDeployTap(this.taps, reservation.tapId, reservation.token),
+      exec: deps.deployExec, fetch: deps.deployFetch, sleep: deps.deploySleep, env: deps.deployEnv,
+      smokeEnvAllowlist: this.settings.deploy?.smokeEnv ?? [],
+      now: () => this.nowDate(),
+    });
     this.queue = createQueue({
       store: this.store, workspace: this.workspace, github: this.github, settings: this.settings,
       gate: (input) => this.gate(input), prMerge: (input) => this.prMerge(input),
@@ -351,6 +375,9 @@ export class Helm {
   async memoryLog(input: import('./memory.js').MemoryLogInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.log(input); }
   async memoryList(input: import('./memory.js').MemoryListInput): Promise<ToolOutcome<{ memories: Array<{ path: string; title: string; summary: string }> }>> { return this.memory.list(input); }
   async scorecardExport(input: ScorecardExportInput) { return this.scorecard.export(input); }
+  async deployRun(input: DeployRunInput) { return this.deploy.run(input); }
+  async deployStatus(input: DeployStatusToolInput) { return this.deploy.status(input); }
+  async deployRollback(input: DeployRollbackToolInput) { return this.deploy.rollback(input); }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }

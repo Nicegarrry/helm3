@@ -24,6 +24,7 @@ test('loadSettings returns the v4 defaults when helm.json is missing', () => {
       select: { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' },
       routing: { table: { trivial: 'codex/gpt-5.6-luna:medium', small: 'codex/gpt-5.6-luna:medium', medium: 'codex/gpt-5.6-luna:medium', large: 'codex/gpt-5.6-luna:high' }, allowed: ['codex/gpt-5.6-luna:medium', 'codex/gpt-5.6-luna:high'], minClean: 0.5, minN: 8 },
       discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
+      deploy: { smokeEnv: [] },
     });
   } finally {
     rmSync(home, { recursive: true, force: true });

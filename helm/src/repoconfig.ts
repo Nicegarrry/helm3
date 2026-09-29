@@ -10,7 +10,17 @@ const exec = promisify(execFile);
 export const repoConfigSchema = z.object({
   gates: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).default([]),
   acceptance: z.object({ testGlobs: z.array(z.string().min(1)), command: z.string().min(1).optional() }).optional(),
-  deploy: z.object({ targets: z.array(z.string().min(1)) }).optional(),
+  deploy: z.object({ targets: z.array(z.object({
+    name: z.string().min(1),
+    kind: z.enum(['vercel', 'convex', 'testflight']),
+    env: z.union([z.string().min(1), z.record(z.string(), z.string().min(1))]),
+    mode: z.enum(['cli', 'git']).optional(),
+    smoke: z.object({
+      commands: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).optional(),
+      http: z.array(z.object({ path: z.string().min(1), status: z.number().int(), contains: z.string().optional() })).optional(),
+    }),
+    rollback: z.enum(['auto', 'manual', 'none']),
+  }).strict()) }).optional(),
 }).strict();
 
 export type RepoConfig = z.infer<typeof repoConfigSchema>;

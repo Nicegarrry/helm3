@@ -65,6 +65,9 @@ function usage(): void {
   supervisor list [--json]
   wake <project> "<text>" [--json]
   scorecard <project> [--budget <id>] [--since <iso>] [--json]
+  deploy run <project> <target> [--sha <sha>] [--tap-id <id>] [--json]
+  deploy status [project] [--id <id>] [--json]
+  deploy rollback <id> [--tap-id <id>] [--json]
   jev check --preset <issue|dedupe|verdict|raw> --file <json|md> [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
   shutdown`);
@@ -568,12 +571,19 @@ async function cmdShutdown(): Promise<void> {
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
 const cmdScorecard = (args: string[]) => simpleCmd('scorecard.export', args, (p, v) => (p[0] ? { project: p[0], ...(v.budget ? { budgetId: v.budget } : {}), ...(v.since ? { since: v.since } : {}) } : undefined), { budget: { type: 'string' }, since: { type: 'string' } });
+const cmdDeploy = async (args: string[]): Promise<void> => {
+  const [verb, ...rest] = args;
+  if (verb === 'run') { await simpleCmd('deploy.run', rest, (p, v) => p[0] && p[1] ? { project: p[0], target: p[1], ...(v.sha ? { sha: v.sha } : {}), ...(v['tap-id'] ? { tapId: v['tap-id'] } : {}) } : undefined, { sha: { type: 'string' }, 'tap-id': { type: 'string' } }); return; }
+  if (verb === 'status') { await simpleCmd('deploy.status', rest, (p, v) => ({ ...(p[0] ? { project: p[0] } : {}), ...(v.id ? { id: v.id } : {}) }), { id: { type: 'string' } }); return; }
+  if (verb === 'rollback') { await simpleCmd('deploy.rollback', rest, (p, v) => p[0] ? { id: p[0], ...(v['tap-id'] ? { tapId: v['tap-id'] } : {}) } : undefined, { 'tap-id': { type: 'string' } }); return; }
+  usage(); process.exitCode = 2;
+};
 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard,
+  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, deploy: cmdDeploy,
 };
 
 async function main(): Promise<void> {

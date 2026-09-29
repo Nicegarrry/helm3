@@ -94,6 +94,17 @@ test('push hard rule parses shell refspecs and protects the configured base bran
     assert.deepEqual(feature, { action: 'git push origin feature/c3', decision: 'allow', source: 'jev', pTap: 0 });
     const ambiguous = await one('git push origin "$TARGET"', fakeJev(0), root, undefined, 'main');
     assert.deepEqual(ambiguous, { action: 'git push origin "$TARGET"', decision: 'tap', source: 'hard', pTap: null });
+    for (const action of [
+      'git push origin feature; git push origin main',
+      'git push origin feature && git push origin main',
+      'git push origin feature || git push origin main',
+      'git push origin feature\ngit push origin main',
+      '$(git push origin main)',
+      "sh -c 'git push origin main'",
+      'git push origin $BRANCH',
+    ]) {
+      assert.deepEqual(await one(action, fakeJev(0), root, undefined, 'release'), { action, decision: 'tap', source: 'hard', pTap: null });
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

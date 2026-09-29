@@ -171,6 +171,106 @@ function shellTokens(command: string): string[] | undefined {
   return tokens;
 }
 
+function matchingParen(command: string, open: number): number | undefined {
+  let depth = 0;
+  let quote: "'" | '"' | undefined;
+  let backtick = false;
+  let escaped = false;
+  for (let index = open; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (backtick) { if (char === '`') backtick = false; continue; }
+    if (quote) {
+      if (char === quote) quote = undefined;
+      else if (quote === '"' && char === '`') backtick = true;
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === '`') { backtick = true; continue; }
+    if (char === '(') depth += 1;
+    if (char === ')' && --depth === 0) return index;
+  }
+  return undefined;
+}
+
+function matchingBacktick(command: string, open: number): number | undefined {
+  let escaped = false;
+  for (let index = open + 1; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (char === '`') return index;
+  }
+  return undefined;
+}
+
+function shellSegments(command: string): string[] | undefined {
+  const segments: string[] = [];
+  let current = '';
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  const flush = () => { if (current.trim()) segments.push(current.trim()); current = ''; };
+  const nested = (inner: string): boolean => {
+    const found = shellSegments(inner);
+    if (!found) return false;
+    flush();
+    segments.push(...found);
+    return true;
+  };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (escaped) { current += char; escaped = false; continue; }
+    if (char === '\\') { current += char; escaped = true; continue; }
+    if (quote) {
+      if (char === quote) { current += char; quote = undefined; continue; }
+      if (quote === '"' && char === '$' && command[index + 1] === '(') {
+        const close = matchingParen(command, index + 1);
+        if (close === undefined || !nested(command.slice(index + 2, close))) return undefined;
+        index = close;
+        continue;
+      }
+      if (quote === '"' && char === '`') {
+        const close = matchingBacktick(command, index);
+        if (close === undefined || !nested(command.slice(index + 1, close))) return undefined;
+        index = close;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') { current += char; quote = char; continue; }
+    if (char === '$') {
+      if (command[index + 1] !== '(') return undefined;
+      const close = matchingParen(command, index + 1);
+      if (close === undefined || !nested(command.slice(index + 2, close))) return undefined;
+      index = close;
+      continue;
+    }
+    if (char === '(') {
+      const close = matchingParen(command, index);
+      if (close === undefined || !nested(command.slice(index + 1, close))) return undefined;
+      index = close;
+      continue;
+    }
+    if (char === '`') {
+      const close = matchingBacktick(command, index);
+      if (close === undefined || !nested(command.slice(index + 1, close))) return undefined;
+      index = close;
+      continue;
+    }
+    if (char === ';' || char === '|' || char === '&' || char === '\n' || char === '\r') {
+      flush();
+      if ((char === '|' || char === '&') && command[index + 1] === char) index += 1;
+      continue;
+    }
+    current += char;
+  }
+  if (quote || escaped) return undefined;
+  flush();
+  return segments;
+}
+
 function pushDestination(token: string): string | undefined {
   let ref = token.replace(/^\+/, '');
   const colon = ref.indexOf(':');
@@ -199,9 +299,11 @@ function hardRule(action: string, kind = '', baseRef?: string): boolean {
   const protectedBranches = new Set(['main', 'master']);
   const configuredBase = baseRef ? branchName(baseRef) : undefined;
   if (configuredBase) protectedBranches.add(configuredBase);
+  if (/\b(?:eval|xargs)\b|\b(?:sh|bash|zsh|dash|ksh)\s+-c(?:\s|$)/i.test(text)) return true;
   if (/\b(?:git\s+)?push\b|\bforce-push\b/i.test(text)) {
     const command = /\b(?:git\s+)?push\b|\bforce-push\b/i.test(action) ? action : `git push ${action}`;
-    if (pushToProtectedBranch(command, protectedBranches)) return true;
+    const segments = shellSegments(command);
+    if (!segments || segments.some((segment) => pushToProtectedBranch(segment, protectedBranches))) return true;
   }
   if (/--admin\b/i.test(text)) return true;
   const secret = /(?:\.env(?:\.[\w-]+)?\b|secrets?\b|tokens?\b|(?:api|private)[ _-]?keys?\b|credentials?\b)/i.test(text);

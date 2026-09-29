@@ -28,6 +28,9 @@ import {
   notifyNickInput,
   jevCheckInput,
   jevLabelInput,
+  mergeEnqueueInput,
+  mergeQueueInput,
+  mergeDequeueInput,
   TOOL_NAMES,
   type ToolName,
   type ToolOutcome,
@@ -76,6 +79,9 @@ const TOOLS: readonly ToolDef[] = [
   def('supervisor.rotate', 'Queue a compact command and the supervisor startup wake.', supervisorRotateInput, (h, i) => h.supervisorRotate(i)),
   def('jev.check', 'Run a bounded Jev judgement preset and record the call.', jevCheckInput, (h, i) => h.jevCheck(i)),
   def('jev.label', 'Label a recorded Jev call for calibration.', jevLabelInput, (h, i) => h.jevLabel(i)),
+  def('merge.enqueue', 'Add a pull request to its repository merge queue.', mergeEnqueueInput, (h, i) => h.mergeEnqueue(i)),
+  def('merge.queue', 'List the pull requests queued for a project.', mergeQueueInput, (h, i) => h.mergeQueue(i)),
+  def('merge.dequeue', 'Remove a queued pull request before processing starts.', mergeDequeueInput, (h, i) => h.mergeDequeue(i)),
 ];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

@@ -317,8 +317,11 @@ export const supervisorRotateInput = z.object({ project: z.string().min(1), focu
 export const notifyNickInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
+export const mergeEnqueueInput = z.object({ number: z.number().int().positive() }).strict();
+export const mergeQueueInput = z.object({ project: z.string().min(1) }).strict();
+export const mergeDequeueInput = z.object({ number: z.number().int().positive() }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.stop', 'gate.run', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue'] as const;
 export type ToolName = string;
 
 

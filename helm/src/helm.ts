@@ -45,6 +45,9 @@ import {
   stopInput,
   inboxListInput,
   inboxReplyInput,
+  mergeEnqueueInput,
+  mergeQueueInput,
+  mergeDequeueInput,
 } from './types.js';
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
 import { createBaseline, ensureBaselineTable } from './baseline.js';
@@ -57,6 +60,7 @@ import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService,
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
 import type { JevCheckService } from './jevcheck.js';
+import { createQueue, type QueueService } from './queue.js';
 
 const exec = promisify(execFile);
 
@@ -77,6 +81,9 @@ export type BudgetCloseInput = z.infer<typeof budgetCloseInput>;
 export type BudgetStatusInput = z.infer<typeof budgetStatusInput>;
 export type InboxListInput = z.infer<typeof inboxListInput>;
 export type InboxReplyInput = z.infer<typeof inboxReplyInput>;
+export type MergeEnqueueInput = z.infer<typeof mergeEnqueueInput>;
+export type MergeQueueInput = z.infer<typeof mergeQueueInput>;
+export type MergeDequeueInput = z.infer<typeof mergeDequeueInput>;
 
 /** What a builder/reviewer prompt is built from. Owned here since types.ts does not define it. */
 export type PromptInput = Readonly<{
@@ -229,6 +236,7 @@ export class Helm {
   readonly discord?: DiscordService;
   private readonly review?: ReviewService;
   readonly jevChecker?: JevCheckService;
+  readonly queue: QueueService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
 
@@ -252,10 +260,17 @@ export class Helm {
     this.review = deps.review;
     if (this.review) this.guard('pr.merge', (input) => this.review!.guard(input));
     this.jevChecker = deps.jevChecker;
+    this.queue = createQueue({
+      store: this.store, workspace: this.workspace, github: this.github, settings: this.settings,
+      gate: (input) => this.gate(input), prMerge: (input) => this.prMerge(input),
+    });
   }
 
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }
+  async mergeEnqueue(input: MergeEnqueueInput) { return this.queue.enqueue(input); }
+  async mergeQueue(input: MergeQueueInput) { return this.queue.queue(input); }
+  async mergeDequeue(input: MergeDequeueInput) { return this.queue.dequeue(input); }
 
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {
@@ -472,7 +487,12 @@ export class Helm {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
-      const checks = input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha));
+      let checks = input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha));
+      const baselineId = this.store.getMeta(input.workerId)?.baselineId;
+      if (baselineId && !checks.some((check) => check.name === 'acceptance')) {
+        const baseline = this.store.sql.prepare('SELECT command FROM baselines WHERE id = ?').get(baselineId) as { command?: string } | undefined;
+        if (baseline?.command) checks = [...checks, { name: 'acceptance', command: baseline.command }];
+      }
       const gateId = genId('g');
       const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
       const outcome = await this.gates.run(row.worktree, checks, logDir, { timeoutMs: this.config.gateTimeoutMs });

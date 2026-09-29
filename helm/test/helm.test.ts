@@ -193,6 +193,7 @@ function createControllableRunner() {
 const FAKE_PROMPTS: HelmPrompts = {
   builder: (i) => `BUILD: ${i.objective}`,
   reviewer: (i) => `REVIEW: ${i.objective}`,
+  validator: (i) => `VALIDATE: ${i.objective}`,
 };
 
 const cleanupDirs: string[] = [];

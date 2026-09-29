@@ -12,7 +12,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { gateRunner } from '../src/gate.ts';
 import { Helm } from '../src/helm.ts';
-import { builderPrompt, reviewerPrompt } from '../src/prompt.ts';
+import { builderPrompt, reviewerPrompt, validatorPrompt } from '../src/prompt.ts';
 import { serve } from '../src/server.ts';
 import { openStore } from '../src/store.ts';
 import type { GitHub, HelmConfig, PrStatus } from '../src/types.ts';
@@ -68,7 +68,7 @@ test('e2e: spawn -> faux Pi writes a file -> commit -> gate -> pr.open -> daemon
   const config: HelmConfig = { home, spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 60_000 };
   const store = openStore(join(home, 'helm.sqlite'));
   const ghCalls: string[] = [];
-  const helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub(ghCalls), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt } });
+  const helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub(ghCalls), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt } });
   const daemon = await serve({ helm, port: 0 });
   try {
     const spawned = await helm.spawn({ repo, objective: 'Create hello.txt containing a greeting.', model: 'e2e-faux/offline', role: 'builder', contextPaths: [], allowWorkflows: false });
@@ -139,7 +139,7 @@ test('e2e: daemon restart marks a running worker interrupted; steer resumes it',
   try {
     // First daemon life: the worker is left in 'running' by writing the row directly, as a crash would.
     faux.setResponses([ai.fauxAssistantMessage(JSON.stringify({ status: 'partial', summary: 'started', changedFiles: [], commandsRun: [] }))]);
-    let helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub([]), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt } });
+    let helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub([]), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt } });
     const spawned = await helm.spawn({ repo, objective: 'Start something.', model: 'e2e-faux2/offline', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
@@ -150,7 +150,7 @@ test('e2e: daemon restart marks a running worker interrupted; steer resumes it',
 
     // Second daemon life.
     store = openStore(dbPath);
-    helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub([]), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt } });
+    helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub([]), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt } });
     assert.deepEqual(helm.markInterruptedOnStart(), [spawned.workerId]);
     assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
     assert.ok(store.getWorker(spawned.workerId)?.sessionFile, 'session file recorded for resume');

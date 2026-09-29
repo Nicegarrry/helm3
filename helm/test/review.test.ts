@@ -32,7 +32,7 @@ function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchI
   const config: HelmConfig = { home: '/tmp/helm-review', spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 1000 };
   const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
   const runner: WorkerRunner = { async run() { return { result: null, rawText: '', sessionFile: null }; } };
-  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => '', reviewer: () => '' }, review });
+  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, review });
   return { store, helm, review, github, setHead: (head: string) => { currentHead = head; }, merged: () => merges };
 }
 

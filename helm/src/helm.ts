@@ -650,7 +650,7 @@ export class Helm {
           must(this.github.updatePr, 'GitHub update is unavailable');
           await this.github.updatePr(row.repoSlug, existing.number, { ...(input.title !== undefined ? { title: input.title } : {}), ...(input.body !== undefined ? { body: input.body } : {}) });
         }
-        const updatedPr: PrRow = { number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso() };
+        const updatedPr: PrRow = { repoSlug: row.repoSlug, number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso() };
         if (savedPr) this.store.updatePr(updatedPr); else this.store.insertPr(updatedPr);
         this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true });
         return { ok: true, number: existing.number, url: existing.url, head, updated: true };
@@ -660,7 +660,7 @@ export class Helm {
       const body = `${input.body ?? `${row.result?.summary ?? ''}\n\nGate: passed at ${head}`}\n\n${baseline ? `red at ${baseline.baseSha}, green at ${head}` : ''}`;
       const base = input.base ?? meta?.prBase ?? await this.workspace.defaultBranch(row.repo);
       const opened = await this.github.openPr({ cwd: row.worktree, base, head: row.branch, title, body, draft: input.draft });
-      const prRow: PrRow = { number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso() };
+      const prRow: PrRow = { repoSlug: row.repoSlug, number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso() };
       this.store.insertPr(prRow);
       this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url });
       return { ok: true, number: opened.number, url: opened.url, head };
@@ -669,14 +669,16 @@ export class Helm {
 
   async prStatus(input: PrStatusInput): Promise<ToolOutcome<PrStatus>> {
     return runGuard(async () => {
-      let repoSlug: string;
+      let repoSlug = input.project ?? input.repoSlug;
       let number = input.number;
       if (number !== undefined) {
         const worker = input.workerId ? this.store.getWorker(input.workerId) : undefined;
         if (worker) {
           repoSlug = worker.repoSlug;
         } else {
-          const pr = requireValue(this.store.getPrByNumber(number), 'pr not found');
+          const resolved = this.store.resolvePrByNumber(number, repoSlug);
+          if (!resolved.pr) return refuse(resolved.reason ?? 'pr not found');
+          const pr = resolved.pr;
           repoSlug = requireValue(this.store.getWorker(pr.workerId), 'pr worker not found').repoSlug;
         }
       } else {
@@ -685,6 +687,7 @@ export class Helm {
         number = pr.number;
         repoSlug = requireValue(this.store.getWorker(workerId), 'worker not found').repoSlug;
       }
+      repoSlug = requireValue(repoSlug, 'repoSlug required');
       const status = await this.github.prStatus(repoSlug, number);
       return { ok: true, ...status };
     });
@@ -693,7 +696,11 @@ export class Helm {
   async reviewRequest(input: ReviewInput): Promise<ToolOutcome<{ reviewWorkerId: string }>> {
     return runGuard(async () => {
       if (!input.model) return refuse('record Claude reviews with review.record');
-      const byNumber = input.number !== undefined ? this.store.getPrByNumber(input.number) : undefined;
+      const workerRepo = input.workerId ? this.store.getWorker(input.workerId)?.repoSlug : undefined;
+      const project = input.project ?? input.repoSlug ?? workerRepo;
+      const resolution = input.number !== undefined ? this.store.resolvePrByNumber(input.number, project) : undefined;
+      if (resolution && !resolution.pr) return refuse(resolution.reason ?? 'pr not found');
+      const byNumber = resolution?.pr;
       const byWorker = input.number === undefined && input.workerId ? this.store.getPrByWorker(input.workerId) : undefined;
       const pr = requireValue(byNumber ?? byWorker, 'pr not found');
       const sourceWorker = requireValue(this.store.getWorker(pr.workerId), 'source worker not found');
@@ -923,7 +930,9 @@ export class Helm {
     return runGuard(async () => {
       const reason = await this.refusal('pr.merge', input);
       if (reason) return refuse(reason);
-      const pr = requireValue(this.store.getPrByNumber(input.number), 'pr not found');
+      const resolution = this.store.resolvePrByNumber(input.number, input.project ?? input.repoSlug);
+      if (!resolution.pr) return refuse(resolution.reason ?? 'pr not found');
+      const pr = resolution.pr;
       const worker = requireValue(this.store.getWorker(pr.workerId), 'pr worker not found');
       const status = await this.github.prStatus(worker.repoSlug, input.number);
       must(status.state === 'open', `pr is ${status.state}, not open`);

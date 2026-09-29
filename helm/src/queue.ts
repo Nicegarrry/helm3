@@ -11,14 +11,14 @@ export type QueueState = 'queued' | 'updating' | 'gating' | 'checks' | 'review' 
 export type MergeQueueRow = Readonly<{ id: string; repoSlug: string; number: number; workerId: string; state: QueueState; head: string; reason: string | null; enqueuedAt: string; updatedAt: string }>;
 export type QueueExec = (file: string, args: string[], options: { cwd?: string }) => Promise<{ stdout: string; stderr?: string; code: number }>;
 type GateCall = (input: { workerId: string }) => Promise<ToolOutcome<{ head: string; passed: boolean }>>;
-type MergeCall = (input: { number: number; expectedHead: string }) => Promise<ToolOutcome<{ merged: true }>>;
+type MergeCall = (input: { repoSlug: string; number: number; expectedHead: string }) => Promise<ToolOutcome<{ merged: true }>>;
 type QueueError = Error & { conflict?: boolean; transient?: boolean; stdout?: string; stderr?: string; files?: string[]; baseSha?: string; currentHead?: string };
 type QueueMeta = { baseSha: string; pendingBaseSha: string | null; priorPatchId: string | null; transientErrors: number; conflictRetries: number; conflictFiles: string[] };
 type ConflictRetry = (input: { workerId: string; kind: 'conflict' }) => Promise<ToolOutcome<{ turn: number; message: string }>>;
 export type QueueService = Readonly<{
-  enqueue(input: { number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>>;
+  enqueue(input: { project?: string; repoSlug?: string; number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>>;
   queue(input: { project: string }): ToolOutcome<{ items: MergeQueueRow[] }>;
-  dequeue(input: { number: number }): ToolOutcome<{ dequeued: true }>;
+  dequeue(input: { project?: string; repoSlug?: string; number: number }): ToolOutcome<{ dequeued: true }>;
   tick(): Promise<void>;
 }>;
 export type QueueOptions = Readonly<{ store: Store; workspace: Workspace; github: GitHub; settings: Settings; gate: GateCall; prMerge: MergeCall; retry?: ConflictRetry; exec?: QueueExec; now?: () => Date }>;
@@ -53,13 +53,53 @@ export function createQueue(options: QueueOptions): QueueService {
   const { store, workspace, github, settings, gate, prMerge, retry } = options;
   const exec = options.exec ?? defaultExec;
   const now = options.now ?? (() => new Date());
-  store.sql.exec(`CREATE TABLE IF NOT EXISTS merge_queue (id TEXT PRIMARY KEY, repoSlug TEXT NOT NULL, number INTEGER NOT NULL UNIQUE, workerId TEXT NOT NULL, state TEXT NOT NULL, head TEXT NOT NULL, reason TEXT, enqueuedAt TEXT NOT NULL, updatedAt TEXT NOT NULL); CREATE INDEX IF NOT EXISTS merge_queue_project ON merge_queue(repoSlug, state, enqueuedAt); CREATE TABLE IF NOT EXISTS merge_queue_meta (id TEXT PRIMARY KEY, baseSha TEXT NOT NULL, pendingBaseSha TEXT, priorPatchId TEXT, transientErrors INTEGER NOT NULL DEFAULT 0, conflictRetries INTEGER NOT NULL DEFAULT 0, conflictFiles TEXT NOT NULL DEFAULT '[]')`);
+  const queueTable = store.sql.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'merge_queue'").get();
+  if (!queueTable) {
+    store.sql.exec('CREATE TABLE merge_queue (id TEXT PRIMARY KEY, repoSlug TEXT NOT NULL, number INTEGER NOT NULL, workerId TEXT NOT NULL, state TEXT NOT NULL, head TEXT NOT NULL, reason TEXT, enqueuedAt TEXT NOT NULL, updatedAt TEXT NOT NULL, UNIQUE(repoSlug, number))');
+  } else {
+    const columns = store.sql.prepare('PRAGMA table_info(merge_queue)').all() as Array<{ name: string }>;
+    const indexes = store.sql.prepare('PRAGMA index_list(merge_queue)').all() as Array<{ name: string; unique: number }>;
+    const compositeUnique = indexes.some((index) => {
+      if (!index.unique) return false;
+      const identifier = `"${index.name.replaceAll('"', '""')}"`;
+      const indexColumns = store.sql.prepare(`PRAGMA index_info(${identifier})`).all() as Array<{ name: string }>;
+      return indexColumns.map((column) => column.name).join(',') === 'repoSlug,number';
+    });
+    if (!columns.some((column) => column.name === 'repoSlug') || !compositeUnique) {
+      store.sql.exec('BEGIN IMMEDIATE');
+      try {
+        store.sql.exec(`
+          DROP TABLE IF EXISTS merge_queue_v2;
+          CREATE TABLE merge_queue_v2 (
+            id TEXT PRIMARY KEY, repoSlug TEXT NOT NULL, number INTEGER NOT NULL, workerId TEXT NOT NULL,
+            state TEXT NOT NULL, head TEXT NOT NULL, reason TEXT, enqueuedAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
+            UNIQUE(repoSlug, number)
+          );
+        `);
+        const rows = store.sql.prepare('SELECT * FROM merge_queue').all() as Array<Record<string, unknown>>;
+        const workers = store.sql.prepare('SELECT workerId, repoSlug FROM workers').all() as Array<{ workerId: string; repoSlug: string }>;
+        const prs = store.sql.prepare('SELECT repoSlug, number, workerId FROM prs').all() as Array<{ repoSlug: string; number: number; workerId: string }>;
+        const insert = store.sql.prepare('INSERT INTO merge_queue_v2 (id, repoSlug, number, workerId, state, head, reason, enqueuedAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        for (const row of rows) {
+          const workerRepo = workers.find((worker) => worker.workerId === String(row.workerId))?.repoSlug;
+          const prRepo = prs.find((pr) => pr.workerId === String(row.workerId) && pr.number === Number(row.number))?.repoSlug;
+          const repoSlug = String(row.repoSlug ?? workerRepo ?? prRepo ?? `unknown/queue-${String(row.id)}`);
+          insert.run(String(row.id), repoSlug, Number(row.number), String(row.workerId), String(row.state), String(row.head), row.reason === null ? null : String(row.reason), String(row.enqueuedAt), String(row.updatedAt));
+        }
+        store.sql.exec('DROP TABLE merge_queue; ALTER TABLE merge_queue_v2 RENAME TO merge_queue; COMMIT');
+      } catch (error) {
+        try { store.sql.exec('ROLLBACK'); } catch { /* preserve the migration error */ }
+        throw error;
+      }
+    }
+  }
+  store.sql.exec('CREATE INDEX IF NOT EXISTS merge_queue_project ON merge_queue(repoSlug, state, enqueuedAt); CREATE TABLE IF NOT EXISTS merge_queue_meta (id TEXT PRIMARY KEY, baseSha TEXT NOT NULL, pendingBaseSha TEXT, priorPatchId TEXT, transientErrors INTEGER NOT NULL DEFAULT 0, conflictRetries INTEGER NOT NULL DEFAULT 0, conflictFiles TEXT NOT NULL DEFAULT \'[]\')');
   try { store.sql.exec('ALTER TABLE merge_queue_meta ADD COLUMN transientErrors INTEGER NOT NULL DEFAULT 0'); } catch { /* existing v4 databases already have it */ }
   try { store.sql.exec('ALTER TABLE merge_queue_meta ADD COLUMN conflictRetries INTEGER NOT NULL DEFAULT 0'); } catch { /* existing v4 databases already have it */ }
   try { store.sql.exec('ALTER TABLE merge_queue_meta ADD COLUMN pendingBaseSha TEXT'); } catch { /* existing v4 databases already have it */ }
   try { store.sql.exec("ALTER TABLE merge_queue_meta ADD COLUMN conflictFiles TEXT NOT NULL DEFAULT '[]'"); } catch { /* existing v4 databases already have it */ }
   const read = store.sql.prepare('SELECT * FROM merge_queue WHERE id = ?');
-  const byNumber = store.sql.prepare('SELECT * FROM merge_queue WHERE number = ?');
+  const byNumber = store.sql.prepare('SELECT * FROM merge_queue WHERE repoSlug = ? AND number = ?');
   const active = store.sql.prepare("SELECT * FROM merge_queue WHERE state NOT IN ('merged', 'failed', 'conflict') ORDER BY enqueuedAt ASC, id ASC");
   const list = store.sql.prepare('SELECT * FROM merge_queue WHERE repoSlug = ? ORDER BY enqueuedAt ASC, id ASC');
   const insert = store.sql.prepare('INSERT INTO merge_queue (id, repoSlug, number, workerId, state, head, reason, enqueuedAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)');
@@ -93,13 +133,16 @@ export function createQueue(options: QueueOptions): QueueService {
     return true;
   };
 
-  async function enqueue(input: { number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>> {
-    const old = byNumber.get(input.number) as Record<string, unknown> | undefined;
+  async function enqueue(input: { project?: string; repoSlug?: string; number: number }): Promise<ToolOutcome<{ item: MergeQueueRow }>> {
+    const resolved = store.resolvePrByNumber(input.number, input.project ?? input.repoSlug);
+    if (!resolved.pr) return { ok: false, reason: resolved.reason ?? 'pr not found' };
+    const repoSlug = resolved.pr.repoSlug;
+    const old = byNumber.get(repoSlug, input.number) as Record<string, unknown> | undefined;
     if (old) {
       const row = asRow(old);
       if (row.state === 'merged') return { ok: false, reason: 'already merged' };
       if (row.state === 'failed' || row.state === 'conflict') {
-        const pr = store.getPrByNumber(input.number);
+        const pr = store.getPrByNumber(repoSlug, input.number);
         const worker = pr && store.getWorker(pr.workerId);
         if (!pr || !worker) return { ok: false, reason: 'pr worker not found' };
         requeue.run('queued', pr.head, iso(), iso(), row.id);
@@ -108,12 +151,11 @@ export function createQueue(options: QueueOptions): QueueService {
       }
       return { ok: true, item: row };
     }
-    const pr = store.getPrByNumber(input.number);
-    if (!pr) return { ok: false, reason: 'pr not found' };
+    const pr = resolved.pr;
     const worker = store.getWorker(pr.workerId);
     if (!worker) return { ok: false, reason: 'pr worker not found' };
     const at = iso(); const id = `mq-${randomUUID()}`;
-    insert.run(id, worker.repoSlug, input.number, worker.workerId, 'queued', pr.head, at, at);
+    insert.run(id, repoSlug, input.number, worker.workerId, 'queued', pr.head, at, at);
     metaWrite.run(id, worker.baseSha, null, null, 0, 0, '[]');
     return { ok: true, item: item(id)! };
   }
@@ -122,8 +164,11 @@ export function createQueue(options: QueueOptions): QueueService {
     return { ok: true, items: (list.all(input.project) as Record<string, unknown>[]).map(asRow) };
   }
 
-  function dequeue(input: { number: number }): ToolOutcome<{ dequeued: true }> {
-    const found = byNumber.get(input.number) as Record<string, unknown> | undefined;
+  function dequeue(input: { project?: string; repoSlug?: string; number: number }): ToolOutcome<{ dequeued: true }> {
+    const resolved = store.resolvePrByNumber(input.number, input.project ?? input.repoSlug);
+    if (!resolved.pr) return { ok: false, reason: resolved.reason ?? 'queue item not found' };
+    const repoSlug = resolved.pr.repoSlug;
+    const found = byNumber.get(repoSlug, input.number) as Record<string, unknown> | undefined;
     if (!found) return { ok: false, reason: 'queue item not found' };
     const row = asRow(found);
     if (row.state === 'merged') return { ok: false, reason: 'already merged' };
@@ -231,7 +276,7 @@ export function createQueue(options: QueueOptions): QueueService {
       }
     }
     const ready = row.state === 'review' ? row : setState(row, 'ready');
-    const merged = await prMerge({ number: ready.number, expectedHead: ready.head });
+    const merged = await prMerge({ repoSlug: ready.repoSlug, number: ready.number, expectedHead: ready.head });
     if (merged.ok) { const saved = setState(ready, 'merged'); event(saved, 'queue.merged'); return true; }
     if (/no approving review/i.test(merged.reason)) { if (row.state !== 'review') review(ready, merged.reason); return row.state !== 'review'; }
     fail(ready, merged.reason);

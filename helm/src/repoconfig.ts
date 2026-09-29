@@ -21,7 +21,10 @@ export const repoConfigSchema = z.object({
     timeoutMin: z.number().positive().optional(),
     smoke: z.object({
       commands: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).optional(),
-      http: z.array(z.object({ path: z.string().min(1), status: z.number().int(), contains: z.string().optional() })).optional(),
+      http: z.array(z.object({
+        path: z.string().min(1).refine((path) => path.startsWith('/') && !path.includes('//') && !path.includes('..') && !path.includes('\\') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(path), { message: 'HTTP smoke path must be a relative path starting with /' }),
+        status: z.number().int(), contains: z.string().optional(),
+      })).optional(),
     }),
     migrationGlobs: z.array(z.string().min(1)).optional(),
     rollback: z.enum(['auto', 'manual', 'none']),

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import { checkEnvelope, envelopePath } from '../src/envelope.js';
 import { createDeploy, ensureDeployTable, type DeployExec } from '../src/deploy.js';
 import { runTestFlight } from '../src/testflight.js';
 import type { Jev } from '../src/jev.js';
+import { loadRepoConfig } from '../src/repoconfig.js';
 import type { RepoConfig } from '../src/repoconfig.js';
 import { openStore } from '../src/store.js';
 import type { Workspace } from '../src/types.js';
@@ -26,6 +27,7 @@ function repoWithConfig(configTarget: DeployTarget = target): { repo: string; sh
   execFileSync('git', ['add', 'helm.json'], { cwd: repo });
   execFileSync('git', ['commit', '-qm', 'config'], { cwd: repo });
   const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
+  execFileSync('git', ['update-ref', 'refs/remotes/origin/main', sha], { cwd: repo });
   return { repo, sha };
 }
 
@@ -95,8 +97,8 @@ test('smoke failure rolls back the previous provider deployment and redacts secr
 
 test('non-base production SHA is refused before the adapter runs', async () => {
   const { repo, sha } = repoWithConfig(); const calls: string[] = [];
-  const d = deployDeps(repo, sha, async (file, args) => { calls.push(file); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; return { stdout: '', code: file === 'git' ? 1 : 0 }; });
-  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod', sha }); assert.equal(result.ok, false); assert.match(result.reason, /not on base branch/); assert.deepEqual(calls, ['git', 'git']); }
+  const d = deployDeps(repo, sha, async (file, args) => { calls.push(file); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'git' && args[0] === 'fetch') return { stdout: '', code: 0 }; return { stdout: '', code: file === 'git' ? 1 : 0 }; });
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod', sha }); assert.equal(result.ok, false); assert.match(result.reason, /not on base branch/); assert.deepEqual(calls, ['git', 'git', 'git']); }
   finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
 });
 
@@ -107,23 +109,59 @@ test('deployment configuration comes from the requested SHA, not the dirty workt
   finally { d.store.close(); rmSync(first.repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
 });
 
-test('a granted tap is reserved, committed once, and required for the adapter kind', async () => {
+test('a granted tap is reserved, committed once, and bound to the envelope kind', async () => {
   const { repo, sha } = repoWithConfig(); const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-deploy-tap-')); const taps = new Map<string, TapMemory>(); ensureTapTable(store); const id = 't-deploy'; const action = `deploy.run:owner/repo:prod:${sha}`; let resolved = 0; const actions: string[] = [];
-  taps.set(id, { project: 'owner/repo', kind: 'vercel', actionHash: actionHash(action), codeMac: '', attempts: 0, expiresAt: '2099-01-01T00:00:00.000Z', state: 'granted' }); store.sql.prepare('INSERT INTO taps (id, project, kind, action, actionHash, codeHash, state, attempts, requestedAt, expiresAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, 'owner/repo', 'vercel', action, actionHash(action), '', 'granted', 0, '2026-09-30T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
+  taps.set(id, { project: 'owner/repo', kind: 'deploy.prod', actionHash: actionHash(action), codeMac: '', attempts: 0, expiresAt: '2099-01-01T00:00:00.000Z', state: 'granted' }); store.sql.prepare('INSERT INTO taps (id, project, kind, action, actionHash, codeHash, state, attempts, requestedAt, expiresAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, 'owner/repo', 'deploy.prod', action, actionHash(action), '', 'granted', 0, '2026-09-30T00:00:00.000Z', '2099-01-01T00:00:00.000Z');
   const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async ({ actions: currentActions }) => { actions.push(...currentActions); return { ok: true, decisions: [{ decision: 'tap' }] }; }, reserveTap: (project, kind, currentAction, tapId) => reserveTap(store, taps, project, kind, actionHash(currentAction), tapId), commitTap: (reservation) => { store.sql.prepare("UPDATE taps SET state='used' WHERE id=?").run(reservation.tapId); taps.delete(reservation.tapId); }, rollbackTap() {}, exec: async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') { resolved += 1; return { stdout: `${sha}\n`, code: 0 }; } return file === 'vercel' && args[0] === 'deploy' ? { stdout: 'https://tap.example.invalid\n', code: 0 } : { stdout: '', code: 0 }; }, env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token } });
-  try { const refused = await service.run({ project: 'owner/repo', target: 'prod', sha: 'main' }); assert.equal(refused.ok, false); assert.match(refused.reason, /vercel/); const success = await service.run({ project: 'owner/repo', target: 'prod', sha: 'main', tapId: id }); assert.equal(success.ok, true); assert.equal(resolved, 2); assert.deepEqual(actions, [action, action]); assert.equal((store.sql.prepare('SELECT state FROM taps WHERE id=?').get(id) as { state: string }).state, 'used'); }
+  try { const refused = await service.run({ project: 'owner/repo', target: 'prod', sha: 'main' }); assert.equal(refused.ok, false); assert.match(refused.reason, /deploy\.prod/); const success = await service.run({ project: 'owner/repo', target: 'prod', sha: 'main', tapId: id }); assert.equal(success.ok, true); assert.equal(resolved, 2); assert.deepEqual(actions, [action, action]); assert.equal((store.sql.prepare('SELECT state FROM taps WHERE id=?').get(id) as { state: string }).state, 'used'); }
   finally { store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
 });
 
 test('smoke runs in the deploy worktree with no credentials and refuses sh -c', async () => {
   const config = { ...target, smoke: { commands: [{ name: 'env', command: 'printenv HELM_DEPLOY_URL' }] } }; const { repo, sha } = repoWithConfig(config); let smokeOptions: { cwd?: string; env?: NodeJS.ProcessEnv } | undefined;
   const d = deployDeps(repo, sha, async (file, args, options) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'printenv') { smokeOptions = options; return { stdout: token, code: 0 }; } if (file === 'vercel') return { stdout: 'https://smoke.example.invalid\n', code: 0 }; return { stdout: '', code: 0 }; });
-  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, true); assert.ok(smokeOptions?.cwd?.includes('/deploys/owner__repo/')); assert.deepEqual(Object.keys(smokeOptions?.env ?? {}).sort(), ['HELM_DEPLOY_URL', 'HOME', 'PATH']); assert.equal(JSON.stringify(smokeOptions?.env).includes(token), false); }
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, true); assert.ok(smokeOptions?.cwd?.includes('/deploys/owner__repo/')); assert.deepEqual(Object.keys(smokeOptions?.env ?? {}).sort(), ['HELM_DEPLOY_URL', 'HOME', 'PATH']); assert.equal(JSON.stringify(smokeOptions?.env).includes(token), false); assert.ok(smokeOptions?.env?.HOME); assert.equal(existsSync(smokeOptions!.env!.HOME!), false); }
   finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
 
   const shellConfig = { ...target, smoke: { commands: [{ name: 'shell', command: 'sh -c echo' }] } }; const shellRepo = repoWithConfig(shellConfig); const shell = deployDeps(shellRepo.repo, shellRepo.sha, async (file, args) => file === 'git' && args[0] === 'rev-parse' ? { stdout: `${shellRepo.sha}\n`, code: 0 } : file === 'vercel' ? { stdout: 'https://shell.example.invalid\n', code: 0 } : { stdout: '', code: 0 });
   try { const result = await shell.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, false); assert.match(result.reason, /shell/); }
   finally { shell.store.close(); rmSync(shellRepo.repo, { recursive: true, force: true }); rmSync(shell.home, { recursive: true, force: true }); }
+});
+
+test('a preview on a non-base SHA uses the base branch smoke config', async () => {
+  const base = { ...target, name: 'preview', env: 'preview', smoke: { commands: [{ name: 'base', command: 'base-smoke' }], http: [{ path: '/health', status: 200 }] } }; const fixture = repoWithConfig(base); execFileSync('git', ['checkout', '-qb', 'deploy-sha'], { cwd: fixture.repo }); const sha = commitConfig(fixture.repo, { ...base, smoke: { commands: [{ name: 'sha', command: 'sha-smoke' }], http: [{ path: '/sha', status: 200 }] } }); const commands: string[] = []; const paths: string[] = []; const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-deploy-base-smoke-'));
+  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo: fixture.repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision: 'allow' }] }), reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'git' && args[0] === 'merge-base') return { stdout: '', code: 1 }; if (file === 'git' && args[0] === 'worktree' && args[1] === 'add') { mkdirSync(args[3]!, { recursive: true }); return { stdout: '', code: 0 }; } if (file === 'git' && args[0] === 'worktree' && args[1] === 'remove') return { stdout: '', code: 0 }; if (file === 'vercel') return { stdout: 'https://preview.example.invalid\n', code: 0 }; if (file === 'base-smoke' || file === 'sha-smoke') { commands.push(file); return { stdout: '', code: 0 }; } return { stdout: '', code: 0 }; }, fetch: async (url) => { paths.push(new URL(String(url)).pathname); return new Response('ok', { status: 200 }); }, env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token } });
+  try { const result = await service.run({ project: 'owner/repo', target: 'preview', sha }); assert.equal(result.ok, true); assert.deepEqual(commands, ['base-smoke']); assert.deepEqual(paths, ['/health']); }
+  finally { store.close(); rmSync(fixture.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a failed base fetch refuses with a stale base ref', async () => {
+  const fixture = repoWithConfig({ ...target, smoke: {} }); const calls: string[][] = []; const d = deployDeps(fixture.repo, fixture.sha, async (file, args) => { calls.push([file, ...args]); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${fixture.sha}\n`, code: 0 }; if (file === 'git' && args[0] === 'fetch') return { stdout: '', stderr: 'network unavailable', code: 1 }; return { stdout: '', code: 0 }; });
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, false); assert.equal(result.reason, 'base ref stale'); assert.ok(calls.some((call) => call.join(' ') === 'git fetch origin main')); }
+  finally { d.store.close(); rmSync(fixture.repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('tap commit failure leaves the healthy deploy succeeded and emits an error', async () => {
+  const config = { ...target, smoke: {} }; const { repo, sha } = repoWithConfig(config); const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-tap-commit-')); let rolledBack = false; const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision: 'tap' }] }), reserveTap: () => ({ tapId: 'tap-1', token: 'reservation' }), commitTap: () => { throw new Error('tap store unavailable'); }, rollbackTap: () => { rolledBack = true; }, exec: async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'vercel') return { stdout: 'https://tap-commit.example.invalid\n', code: 0 }; return { stdout: '', code: 0 }; }, env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token } });
+  try { const result = await service.run({ project: 'owner/repo', target: 'prod', tapId: 'tap-1' }); assert.equal(result.ok, true); assert.match(result.warning ?? '', /tap commit failed/); assert.equal(rolledBack, false); assert.equal((store.sql.prepare("SELECT state FROM deploys WHERE state != 'succeeded'").get() as unknown), undefined); assert.equal(store.listEvents('project:owner/repo').some((event) => event.kind === 'error' && event.data.operation === 'tap commit'), true); }
+  finally { store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('rollback refuses deployments that are not succeeded or live', async () => {
+  const { repo, sha } = repoWithConfig({ ...target, smoke: {} }); const d = deployDeps(repo, sha, async (file) => file === 'git' ? { stdout: `${sha}\n`, code: 0 } : { stdout: '', code: 0 }); d.store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('failed', 'owner/repo', 'prod', 'vercel', 'prod', sha, 'failed', null, 'current', 'previous', '{}', null, '2026-09-30T00:00:00.000Z');
+  try { const result = await d.service.rollback({ id: 'failed' }); assert.equal(result.ok, false); assert.equal(result.reason, 'deployment is not in a succeeded or live state'); }
+  finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('concurrent deploy and rollback operations for a target are refused', async () => {
+  const { repo, sha } = repoWithConfig({ ...target, smoke: {} }); const home = mkdtempSync(join(tmpdir(), 'helm-deploy-lock-')); const store = openStore(':memory:'); let release!: () => void; const blocked = new Promise<void>((resolve) => { release = resolve; }); let started!: () => void; const startedPromise = new Promise<void>((resolve) => { started = resolve; }); const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision: 'allow' }] }), reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'vercel' && args[0] === 'deploy') { started(); await blocked; return { stdout: 'https://locked.example.invalid\n', code: 0 }; } return { stdout: '', code: 0 }; }, env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token } });
+  store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('old', 'owner/repo', 'prod', 'vercel', 'prod', sha, 'succeeded', 'https://old.example.invalid', 'current', 'previous', '{}', null, '2026-09-29T00:00:00.000Z');
+  try { const first = service.run({ project: 'owner/repo', target: 'prod' }); await startedPromise; const second = await service.rollback({ id: 'old' }); assert.equal(second.ok, false); assert.equal(second.reason, 'deploy in progress'); release(); assert.equal((await first).ok, true); }
+  finally { store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('invalid HTTP smoke paths are rejected while loading helm.json', async () => {
+  for (const path of ['health', '//evil', '/..%2Fsecret', '/\\evil.example', 'https://evil.example.invalid']) { const fixture = repoWithConfig({ ...target, smoke: { http: [{ path, status: 200 }] } }); try { await assert.rejects(() => loadRepoConfig(fixture.repo, fixture.sha, false), /HTTP smoke path/); } finally { rmSync(fixture.repo, { recursive: true, force: true }); } }
 });
 
 test('adapter failure keeps the original reason and does not roll back', async () => {

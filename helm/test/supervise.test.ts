@@ -141,8 +141,13 @@ test('tmux host uses a fake exec and sends literal text followed by Enter', asyn
   assert.equal(await host.status(pane), 'idle');
   assert.equal(await host.promptEmpty(pane), true);
   await host.send(pane, '/compact focus');
-  assert.deepEqual(calls.at(-2), ['tmux', 'send-keys', '-t', '%1', '-l', '/compact focus']);
-  assert.deepEqual(calls.at(-1), ['tmux', 'send-keys', '-t', '%1', 'Enter']);
+  assert.deepEqual(calls.at(-2), ['tmux', 'send-keys', '-t', '%1', '-l', '--', '/compact focus']);
+  assert.deepEqual(calls.at(-1), ['tmux', 'send-keys', '-t', '%1', '--', 'Enter']);
+  await host.send(pane, '-literal');
+  assert.deepEqual(calls.at(-2), ['tmux', 'send-keys', '-t', '%1', '-l', '--', '-literal']);
+  assert.deepEqual(calls.at(-1), ['tmux', 'send-keys', '-t', '%1', '--', 'Enter']);
+  await host.create('-label', '-cwd', '-command');
+  assert.deepEqual(calls.at(-1), ['tmux', 'new-session', '-d', '-s', 'helm-label', '-c', '-cwd', '--', '-command']);
 });
 
 test('herdr host passes --ansi when reading the visible prompt and accepts done as idle', async () => {
@@ -160,4 +165,20 @@ test('herdr host passes --ansi when reading the visible prompt and accepts done 
   assert.equal(await host.status(pane), 'idle');
   assert.equal(await host.promptEmpty(pane), true);
   assert.ok(calls.some((args) => args.includes('--ansi')));
+});
+
+test('herdr host refuses dash-prefixed positional values before executing', async () => {
+  const calls: string[][] = [];
+  const fakeExec = async (_command: string, args: readonly string[]) => {
+    calls.push([...args]);
+    if (args[0] === 'workspace') return { stdout: JSON.stringify({ root_pane: { pane_id: 'p-1' }, workspace_id: 'ws-1' }) };
+    return { stdout: '' };
+  };
+  const host = herdrHost(fakeExec);
+  const pane: Pane = { id: 'p-1', host: 'herdr' };
+  await assert.rejects(host.send(pane, '-line'), /herdr line must not start with/);
+  await assert.rejects(host.resolve('-label'), /herdr label must not start with/);
+  await assert.rejects(host.create('label', '-cwd', 'command'), /herdr cwd must not start with/);
+  await assert.rejects(host.create('-label', 'cwd', 'command'), /herdr label must not start with/);
+  assert.deepEqual(calls, []);
 });

@@ -39,7 +39,7 @@ export function createRetry({ store, settings, github, workspace }: { store: Sto
     }
     if (kind === 'review') {
       let row: { commentUrl?: string; at?: string; verdict?: string } | undefined;
-      try { row = store.sql.prepare("SELECT r.commentUrl, r.at, r.verdict FROM reviews r JOIN prs p ON p.number = r.number WHERE p.workerId = ? AND r.head = ? ORDER BY r.at DESC LIMIT 1").get(workerId, head) as typeof row; } catch { return undefined; }
+      try { row = store.sql.prepare("SELECT r.commentUrl, r.at, r.verdict FROM reviews r JOIN prs p ON p.repoSlug = r.repoSlug AND p.number = r.number WHERE p.workerId = ? AND r.head = ? ORDER BY r.at DESC LIMIT 1").get(workerId, head) as typeof row; } catch { return undefined; }
       if (!row?.commentUrl || !['changes', 'disputed'].includes(row.verdict ?? '')) return undefined;
       return { at: row.at ?? '', evidence: '' + row.commentUrl };
     }

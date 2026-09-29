@@ -2,7 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { EventRow, GateRow, PrRow, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
+import type { EventRow, GateRow, PrInput, PrRow, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
@@ -59,12 +59,56 @@ function toGateRow(row: Record<string, unknown>): GateRow {
 
 function toPrRow(row: Record<string, unknown>): PrRow {
   return {
+    repoSlug: row.repoSlug as string,
     number: row.number as number,
     workerId: row.workerId as string,
     url: row.url as string,
     head: row.head as string,
     createdAt: row.createdAt as string,
   };
+}
+
+function repoSlugFromPrUrl(url: string): string | undefined {
+  return url.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+(?:[/?#]|$)/i)?.[1];
+}
+
+function migratePrs(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(prs)').all() as Array<{ name: string; pk: number }>;
+  if (columns.length === 0) return;
+  const repoColumn = columns.find((column) => column.name === 'repoSlug');
+  const numberColumn = columns.find((column) => column.name === 'number');
+  const isComposite = repoColumn?.pk === 1 && numberColumn?.pk === 2;
+  if (isComposite) return;
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec(`
+      DROP TABLE IF EXISTS prs_v2;
+      CREATE TABLE prs_v2 (
+        repoSlug TEXT NOT NULL,
+        number INTEGER NOT NULL,
+        workerId TEXT NOT NULL,
+        url TEXT NOT NULL,
+        head TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        PRIMARY KEY (repoSlug, number)
+      );
+    `);
+    const rows = db.prepare('SELECT number, workerId, url, head, createdAt FROM prs').all() as Array<Record<string, unknown>>;
+    const insert = db.prepare('INSERT INTO prs_v2 (repoSlug, number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
+    const workerRepo = db.prepare('SELECT repoSlug FROM workers WHERE workerId = ?');
+    for (const row of rows) {
+      const fromUrl = repoSlugFromPrUrl(String(row.url));
+      const fromWorker = workerRepo.get(String(row.workerId)) as { repoSlug?: string } | undefined;
+      const repoSlug = fromUrl ?? fromWorker?.repoSlug ?? `unknown/${String(row.workerId)}`;
+      insert.run(repoSlug, Number(row.number), String(row.workerId), String(row.url), String(row.head), String(row.createdAt));
+    }
+    db.exec('DROP TABLE prs; ALTER TABLE prs_v2 RENAME TO prs;');
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* preserve the migration error */ }
+    throw error;
+  }
 }
 
 function toWorkerMeta(row: Record<string, unknown>): WorkerMeta {
@@ -146,11 +190,13 @@ export function openStore(path: string): Store {
     );
     CREATE INDEX IF NOT EXISTS gates_worker ON gates(workerId);
     CREATE TABLE IF NOT EXISTS prs (
-      number INTEGER PRIMARY KEY,
+      repoSlug TEXT NOT NULL,
+      number INTEGER NOT NULL,
       workerId TEXT NOT NULL,
       url TEXT NOT NULL,
       head TEXT NOT NULL,
-      createdAt TEXT NOT NULL
+      createdAt TEXT NOT NULL,
+      PRIMARY KEY (repoSlug, number)
     );
     CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);
     CREATE TABLE IF NOT EXISTS spend (
@@ -175,6 +221,8 @@ export function openStore(path: string): Store {
       skills TEXT NOT NULL DEFAULT '[]'
     );
   `);
+  migratePrs(db);
+  db.exec('CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);');
 
   const insertWorkerStmt = db.prepare(
     `INSERT INTO workers (${WORKER_COLUMNS.join(', ')}) VALUES (${WORKER_COLUMNS.map(() => '?').join(', ')})`,
@@ -195,9 +243,9 @@ export function openStore(path: string): Store {
   const setCursorStmt = db.prepare('INSERT INTO cursors (name, seq) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET seq = excluded.seq');
   const insertGateStmt = db.prepare('INSERT INTO gates (gateId, workerId, head, passed, checks, at) VALUES (?, ?, ?, ?, ?, ?)');
   const listGatesStmt = db.prepare('SELECT * FROM gates WHERE workerId = ? ORDER BY at ASC');
-  const insertPrStmt = db.prepare('INSERT INTO prs (number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?)');
+  const insertPrStmt = db.prepare('INSERT INTO prs (repoSlug, number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
   const getPrByWorkerStmt = db.prepare('SELECT * FROM prs WHERE workerId = ? ORDER BY number DESC LIMIT 1');
-  const getPrByNumberStmt = db.prepare('SELECT * FROM prs WHERE number = ?');
+  const getPrByNumberStmt = db.prepare('SELECT * FROM prs WHERE repoSlug = ? AND number = ?');
   const addSpendStmt = db.prepare(
     'INSERT INTO spend (workerId, model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   );
@@ -303,8 +351,10 @@ export function openStore(path: string): Store {
       return rows.map(toGateRow);
     },
 
-    insertPr(row: PrRow): void {
-      insertPrStmt.run(row.number, row.workerId, row.url, row.head, row.createdAt);
+    insertPr(row: PrInput): void {
+      const worker = db.prepare('SELECT repoSlug FROM workers WHERE workerId = ?').get(row.workerId) as { repoSlug?: string } | undefined;
+      const repoSlug = row.repoSlug ?? repoSlugFromPrUrl(row.url) ?? worker?.repoSlug ?? `unknown/${row.workerId}`;
+      insertPrStmt.run(repoSlug, row.number, row.workerId, row.url, row.head, row.createdAt);
     },
 
     getPrByWorker(workerId: string): PrRow | undefined {
@@ -312,8 +362,8 @@ export function openStore(path: string): Store {
       return row ? toPrRow(row) : undefined;
     },
 
-    getPrByNumber(number: number): PrRow | undefined {
-      const row = getPrByNumberStmt.get(number) as Record<string, unknown> | undefined;
+    getPrByNumber(repoSlug: string, number: number): PrRow | undefined {
+      const row = getPrByNumberStmt.get(repoSlug, number) as Record<string, unknown> | undefined;
       return row ? toPrRow(row) : undefined;
     },
 
@@ -352,4 +402,9 @@ export function openStore(path: string): Store {
       db.close();
     },
   };
+}
+
+export function singleRepoSlug(store: Pick<Store, 'listWorkers'>): string | undefined {
+  const repos = [...new Set(store.listWorkers().map((worker) => worker.repoSlug))];
+  return repos.length === 1 ? repos[0] : undefined;
 }

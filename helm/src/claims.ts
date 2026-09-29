@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { singleRepoSlug } from './store.js';
 import type { Jev, JevAnswer, JevQuestion } from './jev.js';
 import type { Settings } from './settings.js';
 import type { Store, ToolOutcome, Workspace } from './types.js';
@@ -136,8 +137,9 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
   }
   async function guard(input: unknown): Promise<string | null> {
     if (settings.factory.claims !== 'block') return null;
-    const value = input as { number?: number; expectedHead?: string };
-    const pr = typeof value.number === 'number' ? store.getPrByNumber(value.number) : undefined;
+    const value = input as { repoSlug?: string; number?: number; expectedHead?: string };
+    const repoSlug = value.repoSlug ?? singleRepoSlug(store);
+    const pr = typeof value.number === 'number' && repoSlug ? store.getPrByNumber(repoSlug, value.number) : undefined;
     if (!pr) return 'claims check requires a pull request worker';
     if (!store.getWorker(pr.workerId) || !value.expectedHead) return 'claims check requires a worker and head';
     const row = store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ? AND head = ? AND passed IS NOT NULL ORDER BY at DESC, rowid DESC LIMIT 1').get(pr.workerId, value.expectedHead) as { passed?: number } | undefined;

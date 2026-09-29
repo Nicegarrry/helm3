@@ -74,8 +74,10 @@ function openReadStore() {
   return { config, store: openStore(join(config.home, 'helm.sqlite')) };
 }
 
-function prIdent(ref: string): { number: number } | { workerId: string } {
+function prIdent(ref: string): { repoSlug?: string; number: number } | { workerId: string } {
   const stripped = ref.startsWith('#') ? ref.slice(1) : ref;
+  const scoped = stripped.match(/^([^#]+)#(\d+)$/);
+  if (scoped) return { repoSlug: scoped[1], number: Number(scoped[2]) };
   return /^\d+$/.test(stripped) ? { number: Number(stripped) } : { workerId: ref };
 }
 
@@ -245,7 +247,10 @@ const cmdReview = (args: string[]) =>
   simpleCmd('review.request', args, (p, v) => (p[0] ? { ...prIdent(p[0]), model: v.model } : undefined), { model: { type: 'string' } });
 
 const cmdMerge = (args: string[]) =>
-  simpleCmd('pr.merge', args, (p, v) => (p[0] && v.head ? { number: Number(p[0].replace('#', '')), expectedHead: v.head } : undefined),
+  simpleCmd('pr.merge', args, (p, v) => {
+    const ident = p[0] ? prIdent(p[0]) : undefined;
+    return ident && 'number' in ident && v.head ? { ...ident, expectedHead: v.head } : undefined;
+  },
     { head: { type: 'string' } });
 
 const cmdStatus = (args: string[]) =>

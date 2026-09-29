@@ -42,6 +42,21 @@ test('pr.merge refuses without an approving review at the expected head', async 
   finally { d.store.close(); }
 });
 
+test('review.record and pr.merge stay scoped to the requested repository when numbers collide', async () => {
+  const d = setup();
+  try {
+    const source = d.store.getWorker('w-review')!;
+    const other = { ...source, workerId: 'w-other', repoSlug: 'owner/other', branch: 'helm/other', worktree: '/other' };
+    d.store.insertWorker(other);
+    d.store.insertPr({ repoSlug: other.repoSlug, number: 1, workerId: other.workerId, url: 'https://github.com/owner/other/pull/1', head: head1, createdAt: other.createdAt });
+
+    const recorded = await d.review.record({ repoSlug: 'owner/other', number: 1, head: head1, commentUrl: 'https://github.com/owner/other/pull/1#issuecomment-20', reviewer: 'claude-sonnet', verdict: 'approve' });
+    assert.equal(recorded.ok, true);
+    if (recorded.ok) assert.equal(recorded.review.repoSlug, 'owner/other');
+    assert.deepEqual(await d.helm.prMerge({ repoSlug: 'owner/other', number: 1, expectedHead: head1 }), { ok: true, merged: true });
+  } finally { d.store.close(); }
+});
+
 test('a Jev disagreement records disputed and emits a supervisor wake', async () => {
   const d = setup({ body: 'APPROVE blockers are items 1 and 2', jev: { shadow: false, async ask() { return { ok: true as const, answers: { approve: { noul: 0.11 } } }; } } });
   const supervisor = createSupervisor({ store: d.store, settings: loadSettings('/missing-review-settings'), hosts: { herdr: {} as never, tmux: {} as never } });

@@ -37,14 +37,15 @@ function deployDeps(repo: string, sha: string, exec: DeployExec, decision: 'allo
 }
 
 test('smoke failure rolls back the previous provider deployment and redacts secrets', async () => {
-  const { repo, sha } = repoWithConfig(); const calls: Array<{ file: string; args: string[] }> = [];
-  const exec: DeployExec = async (file, args) => { calls.push({ file, args }); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'vercel' && args[0] === 'deploy') return { stdout: 'https://new.example.invalid\n', code: 0 }; if (file === 'false') return { stdout: token, stderr: token, code: 1 }; return { stdout: '', code: 0 }; };
+  const { repo, sha } = repoWithConfig(); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = [];
+  const exec: DeployExec = async (file, args, options) => { calls.push({ file, args, options }); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'vercel' && args[0] === 'deploy') return { stdout: 'https://new.example.invalid\n', code: 0 }; if (file === 'false') return { stdout: token, stderr: token, code: 1 }; return { stdout: '', code: 0 }; };
   const d = deployDeps(repo, sha, exec); ensureDeployTable(d.store);
   d.store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('old', 'owner/repo', 'prod', 'vercel', 'prod', sha, 'succeeded', 'https://old.example.invalid', 'previous-provider-id', null, '{}', null, '2026-09-29T00:00:00.000Z');
   try {
     const result = await d.service.run({ project: 'owner/repo', target: 'prod' });
     assert.equal(result.ok, false); assert.doesNotMatch(JSON.stringify(result), new RegExp(token));
     assert.deepEqual(calls.find((call) => call.file === 'vercel' && call.args[0] === 'rollback')?.args.slice(0, 2), ['rollback', 'previous-provider-id']);
+    const vercelCalls = calls.filter((call) => call.file === 'vercel'); assert.ok(vercelCalls.length > 0); assert.ok(vercelCalls.every((call) => !call.args.includes(token) && call.options.env?.VERCEL_TOKEN === token));
     assert.equal((d.store.sql.prepare('SELECT state FROM deploys WHERE id != ? ORDER BY at DESC LIMIT 1').get('old') as { state: string }).state, 'rolledback');
     assert.ok(d.store.listEvents('project:owner/repo').some((event) => event.kind === 'deploy.rolledback'));
   } finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }

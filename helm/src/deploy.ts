@@ -87,9 +87,9 @@ export function createDeploy(options: Options) {
       }
       throw new Error('timed out waiting for GitHub deployment');
     }
-    const args = ['deploy']; if (!preview(target)) args.push('--prod'); args.push('--yes', '--token', secretEnv(target).values.VERCEL_TOKEN!); const result = await run('vercel', args, target, worktree); const url = result.text.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? null; return { url, deploymentId: url };
+    const args = ['deploy']; if (!preview(target)) args.push('--prod'); args.push('--yes'); const result = await run('vercel', args, target, worktree); const url = result.text.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? null; return { url, deploymentId: url };
   };
-  const rollbackAdapter = async (target: Target, previous: string, cwd?: string) => { if (target.kind !== 'vercel' || (target.mode ?? 'cli') !== 'cli' || preview(target)) throw new Error('Vercel rollback is only available for a production CLI deployment'); await run('vercel', ['rollback', previous, '--token', secretEnv(target).values.VERCEL_TOKEN!], target, cwd); };
+  const rollbackAdapter = async (target: Target, previous: string, cwd?: string) => { if (target.kind !== 'vercel' || (target.mode ?? 'cli') !== 'cli' || preview(target)) throw new Error('Vercel rollback is only available for a production CLI deployment'); await run('vercel', ['rollback', previous], target, cwd); };
   const smoke = async (target: Target, url: string | null, cwd: string): Promise<Record<string, unknown>> => {
     const credentials = secretEnv(target); const result: { commands: unknown[]; http: unknown[] } = { commands: [], http: [] }; const secrets = credentials.redact; const source = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) }; const baseEnv: NodeJS.ProcessEnv = { PATH: source.PATH ?? '', HOME: source.HOME ?? homedir(), HELM_DEPLOY_URL: url ?? '' };
     for (const name of options.smokeEnvAllowlist ?? []) if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && source[name] !== undefined) baseEnv[name] = source[name];

@@ -27,6 +27,7 @@ export type ScorecardService = Readonly<{
 type Row = Record<string, unknown>;
 type MutableScorecard = { -readonly [K in keyof ScorecardJson]: ScorecardJson[K] };
 type Worker = { workerId: string; issue: number | null; role: string; model: string; band: string; state: string; createdAt: string };
+type OutcomeKind = 'clean' | 'rework' | 'failed';
 const n = (value: unknown): number => Number(value ?? 0);
 const rate = (yes: number, total: number): number => total ? Math.round((yes / total) * 10000) / 10000 : 0;
 const round = (value: number): number => Math.round(value * 100) / 100;
@@ -44,6 +45,31 @@ function between(column: string, from?: string, to?: string): { sql: string; arg
   if (from) { clauses.push(`${column} >= ?`); args.push(from); }
   if (to) { clauses.push(`${column} <= ?`); args.push(to); }
   return { sql: clauses.length ? ` AND ${clauses.join(' AND ')}` : '', args };
+}
+
+function classifyOutcome(input: { later: boolean; state: string; failedGate: boolean; requestChanges: boolean; turns: number }): OutcomeKind {
+  if (input.later || ['failed', 'stopped', 'unknown'].includes(input.state)) return 'failed';
+  if (input.failedGate || input.requestChanges || input.turns > 1) return 'rework';
+  return 'clean';
+}
+
+export function cleanRateForRouting(store: Store, model: string, band: string, now = new Date(), project?: string): { clean: number; n: number } {
+  const since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const projectSql = project ? ' AND w.repoSlug=?' : '';
+  const workers = store.sql.prepare(`SELECT w.workerId,w.state,w.createdAt,wm.issue FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.role='builder' AND wm.issue IS NOT NULL AND w.model=? AND wm.band=? AND w.createdAt>=?${projectSql}`).all(model, band, since, ...(project ? [project] : [])) as Row[];
+  const projectWorkers = store.sql.prepare(`SELECT w.workerId,w.createdAt,wm.issue FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.role='builder' AND wm.issue IS NOT NULL${projectSql}`).all(...(project ? [project] : [])) as Row[];
+  const reviews = hasTable(store, 'reviews') && hasTable(store, 'prs') ? store.sql.prepare("SELECT p.workerId,r.verdict FROM reviews r JOIN prs p ON p.number=r.number").all() as Row[] : [];
+  let clean = 0;
+  for (const worker of workers) {
+    const workerId = String(worker.workerId);
+    const issue = worker.issue === null || worker.issue === undefined ? undefined : n(worker.issue);
+    const later = issue !== undefined && projectWorkers.some((row) => n(row.issue) === issue && String(row.createdAt) > String(worker.createdAt));
+    const turns = n((store.sql.prepare("SELECT COUNT(*) AS count FROM events WHERE workerId=? AND kind='turn.start'").get(workerId) as Row | undefined)?.count);
+    const failedGate = Boolean(store.sql.prepare('SELECT 1 FROM gates WHERE workerId=? AND passed=0 LIMIT 1').get(workerId));
+    const requestChanges = reviews.some((row) => String(row.workerId) === workerId && (row.verdict === 'changes' || row.verdict === 'disputed'));
+    if (classifyOutcome({ later, state: String(worker.state), failedGate, requestChanges, turns }) === 'clean') clean += 1;
+  }
+  return { clean, n: workers.length };
 }
 
 function markdown(json: ScorecardJson): string {
@@ -102,7 +128,7 @@ export function createScorecard(options: { store: Store; memory: MemoryService; 
       const spend = store.sql.prepare(`SELECT COALESCE(SUM(CASE WHEN model LIKE 'codex/%' THEN inputTokens+outputTokens ELSE 0 END),0) AS tokens,COALESCE(SUM(CASE WHEN costUsd IS NULL THEN 0 ELSE costUsd END),0) AS usd FROM spend WHERE workerId IN (${inList})${between('at', from, to).sql}`).get(...args, ...between('at', from, to).args) as Row; json.codexTokens = n(spend.tokens); json.usd = n(spend.usd);
       const jev = hasTable(store, 'jev_calls'); const jevCols = jev ? columns(store, 'jev_calls') : new Set<string>(); const jevCost = jevCols.has('costUsd') ? ',SUM(costUsd) AS cost' : jevCols.has('cost') ? ',SUM(cost) AS cost' : ',NULL AS cost'; const jevRows = jev ? store.sql.prepare(`SELECT COUNT(*) AS count${jevCost} FROM jev_calls j WHERE (j.workerId IN (${inList}) OR (j.project = ? AND j.workerId IS NULL))${between('j.at', from, to).sql}`).get(...args, input.project, ...between('j.at', from, to).args) as Row : {}; json.jevCalls = n(jevRows.count); json.jevCost = jevRows.cost === null || jevRows.cost === undefined ? null : n(jevRows.cost);
       const outcomeMap = new Map<string, { model: string; band: string; clean: number; rework: number; failed: number }>(); const projectWorkers = (store.sql.prepare("SELECT w.workerId,w.createdAt,wm.issue FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.repoSlug=? AND w.role='builder'").all(input.project) as Row[]);
-      for (const worker of builders) { const later = projectWorkers.some((row) => n(row.issue) === worker.issue && String(row.createdAt) > worker.createdAt); const workerEvents = events.filter((event) => String(event.workerId) === worker.workerId); const turnCount = workerEvents.filter((event) => event.kind === 'turn.start').length; const failedGate = firstGateRows.some((row) => String(row.workerId) === worker.workerId && !Boolean(row.passed)); const requestChanges = reviews.some((row) => String(row.workerId) === worker.workerId && (row.verdict === 'changes' || row.verdict === 'disputed')); const failed = later || ['failed', 'stopped', 'unknown'].includes(worker.state); const rework = !failed && (failedGate || requestChanges || turnCount > 1); const key = `${worker.model}\u0000${worker.band}`; const value = outcomeMap.get(key) ?? { model: worker.model, band: worker.band, clean: 0, rework: 0, failed: 0 }; if (failed) value.failed++; else if (rework) value.rework++; else value.clean++; outcomeMap.set(key, value); }
+      for (const worker of builders) { const later = projectWorkers.some((row) => n(row.issue) === worker.issue && String(row.createdAt) > worker.createdAt); const workerEvents = events.filter((event) => String(event.workerId) === worker.workerId); const turns = workerEvents.filter((event) => event.kind === 'turn.start').length; const failedGate = firstGateRows.some((row) => String(row.workerId) === worker.workerId && !Boolean(row.passed)); const requestChanges = reviews.some((row) => String(row.workerId) === worker.workerId && (row.verdict === 'changes' || row.verdict === 'disputed')); const kind = classifyOutcome({ later, state: worker.state, failedGate, requestChanges, turns }); const key = `${worker.model}\u0000${worker.band}`; const value = outcomeMap.get(key) ?? { model: worker.model, band: worker.band, clean: 0, rework: 0, failed: 0 }; value[kind]++; outcomeMap.set(key, value); }
       json.outcomes = [...outcomeMap.values()].sort((a, b) => a.model.localeCompare(b.model) || a.band.localeCompare(b.band));
     }
     const projectWindow = between('at', from, to); if (hasTable(store, 'deploys')) { const rows = store.sql.prepare(`SELECT state FROM deploys WHERE project=?${projectWindow.sql}`).all(input.project, ...projectWindow.args) as Row[]; json.deploys = rows.length; json.rollbacks = rows.filter((row) => String(row.state).toLowerCase() === 'rolledback' || String(row.state).toLowerCase() === 'rollback').length; } if (hasTable(store, 'taps')) json.taps = (store.sql.prepare(`SELECT COUNT(*) AS count FROM taps WHERE project=?${between('requestedAt', from, to).sql}`).get(input.project, ...between('requestedAt', from, to).args) as Row).count as number;

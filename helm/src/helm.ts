@@ -72,6 +72,7 @@ import { createScorecard, type ScorecardExportInput, type ScorecardService } fro
 import type { RetryService } from './retry.js';
 import { createSelector, type Selection } from './select.js';
 import type { Jev } from './jev.js';
+import { registerRouting } from './route.js';
 
 const exec = promisify(execFile);
 
@@ -230,7 +231,8 @@ export function modelFamily(model: string): string {
 const TASK_MODELS = { normal: 'codex/gpt-5.6-luna:high', easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'codex/gpt-5.6-luna:medium' } as const;
 
 export type ToolGuard = (input: unknown) => string | null | Promise<string | null>;
-export type ModelChooser = (input: SpawnInput) => string | null | undefined | Promise<string | null | undefined>;
+export type ModelChoice = Readonly<{ model: string; band?: string; complexity?: number; warning?: string }>;
+export type ModelChooser = (input: SpawnInput) => string | ModelChoice | null | undefined | Promise<string | ModelChoice | null | undefined>;
 
 export class Helm {
   readonly lifecycle: Lifecycle;
@@ -337,6 +339,7 @@ export class Helm {
       retry: this.retry ? (input) => this.retry!.retry(input, (workerId, message) => this.steer({ workerId, message })) : undefined,
     });
     this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
+    registerRouting({ chooseModel: (chooser) => this.chooseModel(chooser), settings: this.settings, store: this.store, jev: deps.jev, now: () => this.now ? new Date(this.now()) : new Date(), resolveProject: async (repo) => isAbsolute(repo) ? this.repoSlugFor(repo) : undefined });
   }
 
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
@@ -379,14 +382,17 @@ export class Helm {
     return null;
   }
 
-  private async chosenModel(input: SpawnInput): Promise<SpawnInput> {
-    if (input.model || input.difficulty) return input;
+  private async chosenModel(input: SpawnInput): Promise<{ input: SpawnInput; choice?: ModelChoice }> {
+    if (input.model || input.difficulty) return { input };
     let chosen = input;
+    let choice: ModelChoice | undefined;
     for (const fn of this.modelChoosers) {
-      const model = await fn(chosen);
-      if (model) chosen = { ...chosen, model };
+      const selected = await fn(chosen);
+      if (!selected) continue;
+      if (typeof selected === 'string') chosen = { ...chosen, model: selected };
+      else { chosen = { ...chosen, model: selected.model }; choice = { ...choice, ...selected }; }
     }
-    return chosen;
+    return { input: chosen, choice };
   }
 
   /** Runs `fn` exclusively with respect to every other call queued through this lock. */
@@ -415,11 +421,11 @@ export class Helm {
   async spawn(input: SpawnInput): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string }>> {
     return runGuard(async () => {
       const chosen = await this.chosenModel(input);
-      const reason = await this.refusal('worker.spawn', chosen);
+      const reason = await this.refusal('worker.spawn', chosen.input);
       if (reason) return refuse(reason);
       let selection: Selection;
-      try { selection = await this.selector.select(chosen); } catch (error) { return refuse(errMessage(error)); }
-      return this.withLock(() => this.spawnLocked(chosen, undefined, selection));
+      try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
+      return this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
     });
   }
 
@@ -428,7 +434,8 @@ export class Helm {
     input: SpawnInput,
     onDone?: OnDone,
     selection: Selection = { guidance: '', skills: [] },
-  ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string }>> {
+    choice?: ModelChoice,
+  ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
       if (existing) return { ok: true, workerId: existing.workerId, branch: existing.branch, worktree: existing.worktree };
@@ -462,6 +469,7 @@ export class Helm {
         ...(input.issue !== undefined ? { issue: input.issue } : {}),
         ...(baseline ? { issue: baseline.issue, baselineId: baseline.id, prBase: baseline.baseRef } : {}),
       });
+      if (choice?.band !== undefined || choice?.complexity !== undefined) this.store.setMeta(workerId, { band: choice.band ?? null, complexity: choice.complexity ?? null });
       this.store.setMeta(workerId, { skills: selection.skills });
       attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
@@ -476,7 +484,7 @@ export class Helm {
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
     this.startRun(workerId, message, onDone);
-    const warnings = [selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
+    const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
     return { ok: true, workerId, branch, worktree, ...(warnings.length ? { warning: warnings.join('; ') } : {}) };
   }
 

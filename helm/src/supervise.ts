@@ -72,8 +72,16 @@ function eventWake(event: EventRow, project: string, now: string): Omit<WakeRow,
   return wakeKinds.get(event.kind)?.(event, project, now) ?? null;
 }
 
+function watchAlertSummary(event: EventRow): string {
+  if (event.data.rule !== 'procs.low') return String(event.data.detail ?? event.data.summary ?? event.data.rule ?? 'watch alert');
+  const detail = event.data.detail;
+  const top = detail && typeof detail === 'object' && !Array.isArray(detail) ? (detail as { topProcesses?: unknown }).topProcesses : undefined;
+  const names = Array.isArray(top) ? top.map((item) => item && typeof item === 'object' ? `${String((item as { name?: unknown }).name ?? 'unknown')} (${String((item as { count?: unknown }).count ?? 0)})` : '').filter(Boolean).slice(0, 3).join(', ') : '';
+  return `process headroom low${names ? `: ${names}` : ''}`;
+}
+
 registerWakeKind('ask', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'ask', workerId: event.workerId, summary: String(event.data.question ?? event.data.summary ?? 'worker asked a question'), command: false, createdAt: now }));
-registerWakeKind('watch.alert', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'watch.alert', workerId: event.workerId, summary: String(event.data.detail ?? event.data.summary ?? event.data.rule ?? 'watch alert'), command: false, createdAt: now }));
+registerWakeKind('watch.alert', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'watch.alert', workerId: event.workerId, summary: watchAlertSummary(event), command: false, createdAt: now }));
 registerWakeKind('routing.stale', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'routing.stale', workerId: event.workerId, summary: 'routing catalog is stale; call routing.check', command: false, createdAt: now }));
 registerWakeKind('state', (event, project, now) => {
   const target = String(event.data.to ?? '');

@@ -1,10 +1,11 @@
 /** The `helm` command line. */
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import type { EventRow, HelmConfig, InboxState, Store, WorkerRow } from './types.js';
 import { createEffectiveSpendReader, ensureHome, loadConfig } from './config.js';
 import { openStore } from './store.js';
@@ -35,9 +36,21 @@ import { createEnvelopeTicker } from './envelope.js';
 import { createMemorySync } from './memory-sync.js';
 import { createHygiene } from './hygiene.js';
 import { createPrTicker } from './pr-watch.js';
+import type { CapacityExec } from './capacity/sampler.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
+
+const runCapacityExec = promisify(execFile);
+const capacityExec: CapacityExec = async (file, args, options) => {
+  try {
+    const result = await runCapacityExec(file, args, { timeout: options.timeoutMs, maxBuffer: 2 * 1024 * 1024 });
+    return { stdout: result.stdout, stderr: result.stderr, code: 0 };
+  } catch (error) {
+    const value = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number };
+    return { stdout: String(value.stdout ?? ''), stderr: String(value.stderr ?? value.message ?? ''), code: typeof value.code === 'number' ? value.code : 1 };
+  }
+};
 
 function usage(): void {
   console.error(`usage: helm <command> [options]
@@ -517,7 +530,13 @@ async function cmdServe(args: string[]): Promise<void> {
   const helm = new Helm({
     config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules, allowUnsandboxed: settings.gates?.allowUnsandboxed === true }), github,
     claudeLaneRegistered: claudeAvailable(),
-    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner(), claude: claudeAvailable() ? claudeWorkerRunner() : undefined }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
+    runner: laneRunner({
+      pi: piWorkerRunner(),
+      codex: codexWorkerRunner(),
+      claude: claudeAvailable() ? claudeWorkerRunner() : undefined,
+    }),
+    prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
+    capacityExec,
     spendStartup: true,
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
@@ -536,14 +555,16 @@ async function cmdServe(args: string[]): Promise<void> {
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), helm.routingTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
+  const stopCapacity = startTicker(1000, [helm.capacityTick.bind(helm)]);
   const stopDiscord = startTicker(1000, [discord.tick]);
   const stopPrWatch = startTicker(5 * 60_000, [createPrTicker({ store, github })]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopPrWatch(); stopMemory(); stopHygiene(); };
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); stopDiscord(); stopPrWatch(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();
+    await helm.close();
     await handle.close();
     store.close();
     releaseOwner();

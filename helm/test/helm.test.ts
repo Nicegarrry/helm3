@@ -363,6 +363,35 @@ test('gate node_modules cleanup failures are hygiene warnings', async () => {
   assert.equal(store.listEvents(spawned.workerId).some((event) => event.kind === 'error' && event.data.message === 'permission denied'), false);
 });
 
+test('an infrastructure gate failure is retried once instead of steering the worker', async () => {
+  let attempts = 0;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, logDir) {
+      attempts += 1;
+      const outputPath = join(logDir, 'test.log');
+      mkdirSync(logDir, { recursive: true });
+      if (attempts === 1) {
+        writeFileSync(outputPath, 'spawnSync git EAGAIN: resource temporarily unavailable');
+        return { passed: false, checks: [{ name: 'test', command: 'npm test', exitCode: 1, outputPath, durationMs: 1 }] };
+      }
+      writeFileSync(outputPath, 'all clear');
+      return { passed: true, checks: [{ name: 'test', command: 'npm test', exitCode: 0, outputPath, durationMs: 1 }] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-infra-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.passed, true);
+  assert.equal(attempts, 2);
+  assert.equal(store.listEvents(spawned.workerId).filter((event) => event.kind === 'gate.infra').length, 1);
+  assert.equal(store.listGates(spawned.workerId).at(-1)?.passed, true);
+});
+
 test('gate sandbox fallback is recorded as an event for Discord milestones', async () => {
   const gates: GateRunner = {
     async run(_cwd, _checks, _logDir, options) {
@@ -428,15 +457,15 @@ test('spawn is idempotent via idempotencyKey', async () => {
   if (first.ok && second.ok) assert.equal(second.workerId, first.workerId);
 });
 
-test('spawn refuses once active workers reach maxWorkers', async () => {
+test('spawn queues once active workers reach maxWorkers', async () => {
   const { runner } = createControllableRunner();
   const { helm } = makeHelm({ config: { maxWorkers: 1 }, runner });
   const repo = mkTempDir('helm-repo-');
   const first = await helm.spawn(spawnBody(repo));
   assert.equal(first.ok, true);
   const second = await helm.spawn(spawnBody(repo));
-  assert.equal(second.ok, false);
-  if (!second.ok) assert.match(second.reason, /max workers/);
+  assert.equal(second.ok, true);
+  if (second.ok) assert.equal(second.queued, true);
 });
 
 test('spawn refuses when free disk is below half the hygiene threshold', async () => {
@@ -454,7 +483,8 @@ test('two concurrent spawns respect maxWorkers via the admission mutex (F6)', as
     helm.spawn(spawnBody(repo)),
   ]);
   const oks = [first, second].filter((o) => o.ok);
-  assert.equal(oks.length, 1, 'exactly one concurrent spawn should be admitted under maxWorkers=1');
+  assert.equal(oks.length, 2, 'both concurrent spawns are accepted, with one queued under maxWorkers=1');
+  assert.equal([first, second].filter((o) => o.ok && o.queued).length, 1);
 });
 
 test('two concurrent spawns with the same idempotencyKey share one workerId and one worktree create (F6)', async () => {
@@ -1362,4 +1392,19 @@ test('drain waits for the review callback even after the reviewer state is succe
   await helm.settle(review.reviewWorkerId);
   assert.equal(helm.lifecycle.status().phase, 'ready');
   assert.ok(store.listEvents(review.reviewWorkerId).some((e) => e.kind === 'review.posted'));
+});
+
+test('constructing and closing Helm leaves no capacity timer or child process resource', { timeout: 0 }, async () => {
+  const before = process.getActiveResourcesInfo();
+  const { helm } = makeHelm();
+  await helm.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const remaining = before.slice();
+  const extra = process.getActiveResourcesInfo().filter((resource) => {
+    const index = remaining.indexOf(resource);
+    if (index < 0) return true;
+    remaining.splice(index, 1);
+    return false;
+  });
+  assert.deepEqual(extra.filter((resource) => resource === 'Timeout' || resource === 'ChildProcess'), [], `new active resources: ${extra.join(', ')}`);
 });

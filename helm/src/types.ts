@@ -31,6 +31,8 @@ export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded
 export type WorkerState = (typeof WORKER_STATES)[number];
 export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
+export const LOAD_CLASSES = ['light', 'medium', 'heavy'] as const;
+export type LoadClass = (typeof LOAD_CLASSES)[number];
 export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
 export type InboxState = (typeof INBOX_STATES)[number];
 export type InboxRow = Readonly<{
@@ -203,7 +205,7 @@ export type GateCheck = Readonly<{ name: string; command: string }>;
 
 export interface GateRunner {
   /** Run each check in `cwd` sequentially; capture output to files under `logDir`. */
-  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
+  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
   /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
   defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }
@@ -267,6 +269,8 @@ export type WorkerHooks = Readonly<{
   onUsage(usage: Omit<SpendRow, 'workerId' | 'at'>): void;
   /** The Pi session file, reported as soon as it is opened rather than when the turn returns. */
   onSession(sessionFile: string): void;
+  /** The process tree root for the current turn, for capacity/RSS accounting. */
+  onPid?(pid: number): void;
   /** Return false to stop the turn (spend cap hit or stop requested). Checked at tool-call boundaries. */
   shouldContinue(): boolean;
 }>;
@@ -308,6 +312,7 @@ export const spawnInput = z.object({
   allowWorkflows: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200).optional(),
   skills: z.array(z.string().min(1)).optional(),
+  loadClass: z.enum(LOAD_CLASSES).optional(),
   lanes: z.array(z.enum(['codex', 'pi', 'claude'])).max(3).optional(),
 }).strict();
 export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(20) }).strict();

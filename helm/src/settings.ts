@@ -9,6 +9,17 @@ const WATCH_DEFAULTS = { tickSec: 60, silenceMin: 15, sameRefusal: 5, attentionE
 const BUDGET_DEFAULTS = { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 };
 const FACTORY_DEFAULTS = { claims: 'block' as const, claimsAt: 0.7, verdictAt: 0.5, retryMax: 2, envelopeTapAt: 0.5, tapTtlMin: 60 };
 const QUEUE_DEFAULTS = { tickSec: 30, checksTimeoutMin: 30 };
+const CAPACITY_DEFAULTS = {
+  sampleSec: 5,
+  reserveGb: 2,
+  gbPerUnit: 1,
+  units: { light: 1, medium: 2, heavy: 4 },
+  pressureWarnPenalty: 1,
+  pressureCriticalPenalty: 2,
+  simulatorPenalty: 1,
+  processHeadroomMinPct: 0.15,
+  waitMilestoneMin: 10,
+};
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
 const ROUTING_TIERS_DEFAULTS: Record<string, string[]> = {
   1: ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium', 'codex/gpt-5.6-luna:medium'],
@@ -66,6 +77,21 @@ const settingsSchema = z.object({
     tickSec: z.number().default(30),
     checksTimeoutMin: z.number().default(30),
   }).default(QUEUE_DEFAULTS),
+  capacity: z.object({
+    sampleSec: z.number().positive().default(5),
+    reserveGb: z.number().nonnegative().default(4),
+    gbPerUnit: z.number().positive().default(2),
+    units: z.object({
+      light: z.number().positive().default(1),
+      medium: z.number().positive().default(2),
+      heavy: z.number().positive().default(4),
+    }).default(CAPACITY_DEFAULTS.units),
+    pressureWarnPenalty: z.number().nonnegative().default(1),
+    pressureCriticalPenalty: z.number().nonnegative().default(2),
+    simulatorPenalty: z.number().nonnegative().default(1),
+    processHeadroomMinPct: z.number().min(0).max(1).default(0.15),
+    waitMilestoneMin: z.number().positive().default(10),
+  }).default(CAPACITY_DEFAULTS),
   memory: z.object({
     dir: z.string().optional(),
     cg: z.object({ url: z.string(), keyEnv: z.string(), enabled: z.boolean().default(false) }).optional(),
@@ -105,8 +131,9 @@ const settingsSchema = z.object({
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
-export type Settings = Omit<ParsedSettings, 'deploy' | 'routing' | 'gates'> & {
+export type Settings = Omit<ParsedSettings, 'deploy' | 'capacity' | 'routing' | 'gates'> & {
   deploy?: ParsedSettings['deploy'];
+  capacity?: ParsedSettings['capacity'];
   gates?: ParsedSettings['gates'];
   routing: Omit<ParsedSettings['routing'], 'policy' | 'checkDays'> & {
     policy?: { lanes?: ('codex' | 'pi' | 'claude')[]; subscriptionOnly?: boolean };
@@ -114,7 +141,14 @@ export type Settings = Omit<ParsedSettings, 'deploy' | 'routing' | 'gates'> & {
   };
 };
 
-const DEFAULT_SETTINGS = settingsSchema.parse({});
+function normalizeSettings(value: ParsedSettings | Settings, capacity?: ParsedSettings['capacity']): Settings {
+  // Keep the newly added section available by property access without changing
+  // the legacy enumerable shape consumed by older callers and snapshots.
+  Object.defineProperty(value, 'capacity', { value: capacity ?? value.capacity, enumerable: false, configurable: true });
+  return value as Settings;
+}
+
+const DEFAULT_SETTINGS = normalizeSettings(settingsSchema.parse({}));
 /** A routing block without `allowed` allows every configured tier candidate. */
 function withRoutingDefaults(settings: Settings, raw: unknown): Settings {
   const routingRaw = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).routing : undefined;
@@ -128,7 +162,7 @@ function fileSignature(path: string): string { try { const stat = statSync(path)
 export type SettingsFile = Readonly<{ signature: string; settings?: Settings; error?: string }>;
 export function readSettingsFile(home: string): SettingsFile {
   const path = join(home, 'helm.json');
-  try { const raw: unknown = JSON.parse(readFileSync(path, 'utf8')); const parsed = settingsSchema.safeParse(raw); return parsed.success ? { signature: fileSignature(path), settings: withRoutingDefaults(parsed.data, raw) } : { signature: fileSignature(path), error: 'schema validation failed' }; }
+  try { const raw: unknown = JSON.parse(readFileSync(path, 'utf8')); const parsed = settingsSchema.safeParse(raw); if (!parsed.success) return { signature: fileSignature(path), error: 'schema validation failed' }; const settings = withRoutingDefaults(parsed.data as Settings, raw); return { signature: fileSignature(path), settings: normalizeSettings(settings, parsed.data.capacity) }; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { signature: 'missing', settings: DEFAULT_SETTINGS } : { signature: fileSignature(path), error: 'invalid JSON' }; }
 }
 export type SpendSettingsUpdate = Readonly<{ capUsd?: number; warnUsd?: number; maxWorkers?: number }>;

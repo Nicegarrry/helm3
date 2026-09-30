@@ -129,7 +129,7 @@ async function refuseEscapingSymlinks(worktree: string, logDir: string): Promise
   return { reason, result: { name: 'gate.refused', command: 'symlink preflight', exitCode: 1, outputPath, durationMs: 0 } };
 }
 
-async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; onUnsandboxed?: (reason: string) => void }): Promise<CheckResult> {
+async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<CheckResult> {
   const start = Date.now();
   const outputPath = join(logDir, `${outputSlug}.log`);
   let sandbox: Awaited<ReturnType<typeof prepareGateSandbox>> | Awaited<ReturnType<typeof prepareUnsandboxedGate>> | undefined;
@@ -160,9 +160,10 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
       const executable = child.executable ?? '/bin/sh';
       const command = child.executable ? withGateCache(check.command, child.tempDir) : check.command;
       const args = child.executable ? ['-f', child.profilePath!, '/bin/sh', '-c', command] : ['-c', command];
-      execFile(executable, args, { cwd, env: child.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const childProcess = execFile(executable, args, { cwd, env: child.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
         resolve({ error: error as ExecFileError | null, stdout, stderr });
       });
+      if (childProcess.pid) options.onPid?.(childProcess.pid);
     });
 
   try {
@@ -185,7 +186,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
 
 export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const results: CheckResult[] = [];
@@ -206,6 +207,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
             allowUnsandboxed: options.allowUnsandboxed === true,
             operatorHome: options.operatorHome,
             onUnsandboxed: opts?.onUnsandboxed,
+            onPid: opts?.onPid,
           });
           results.push(result);
         }

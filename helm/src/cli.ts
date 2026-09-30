@@ -35,6 +35,7 @@ import { createRetry } from './retry.js';
 import { createEnvelopeTicker } from './envelope.js';
 import { createMemorySync } from './memory-sync.js';
 import { createHygiene } from './hygiene.js';
+import { portfolio, formatPortfolio, createReportTicker } from './portfolio.js';
 import { createPrTicker } from './pr-watch.js';
 import type { CapacityExec } from './capacity/sampler.js';
 import { resolveToolProfile, type ToolProfile } from './tools.js';
@@ -70,6 +71,7 @@ function usage(): void {
   pr-status <id|#n> [--json]
   review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
+  portfolio [--json] [--since <iso>]
   status [--json]
   cap --usd N [--warn N] [--workers N] [--tap <id>] [--json]
   budget open <project> <label> <capUsd> [--codex-tokens n]
@@ -561,7 +563,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopCapacity = startTicker(1000, [helm.capacityTick.bind(helm)]);
-  const stopDiscord = startTicker(1000, [discord.tick]);
+  const stopDiscord = startTicker(1000, [discord.tick, createReportTicker({ store, home: config.home })]);
   const stopPrWatch = startTicker(5 * 60_000, [createPrTicker({ store, github })]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
@@ -616,6 +618,12 @@ async function cmdShutdown(): Promise<void> {
   printOutcome(await postTool('daemon.control', { action: 'shutdown' }), false);
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
+async function cmdPortfolio(args: string[]): Promise<void> {
+  const { values } = parseArgs({ args, options: { json: { type: 'boolean' }, since: { type: 'string' } } });
+  const { config, store } = openReadStore();
+  try { const report = await portfolio(store, loadSettings(config.home), values.since); console.log(values.json ? JSON.stringify(report, null, 2) : formatPortfolio(report)); }
+  finally { store.close(); }
+}
 const cmdScorecard = (args: string[]) => simpleCmd('scorecard.export', args, (p, v) => (p[0] ? { project: p[0], ...(v.budget ? { budgetId: v.budget } : {}), ...(v.since ? { since: v.since } : {}) } : undefined), { budget: { type: 'string' }, since: { type: 'string' } });
 const cmdRouting = async (args: string[]): Promise<void> => {
   const [verb, ...rest] = args;
@@ -634,7 +642,7 @@ const cmdDeploy = async (args: string[]): Promise<void> => {
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, routing: cmdRouting, deploy: cmdDeploy,
+  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, portfolio: cmdPortfolio, routing: cmdRouting, deploy: cmdDeploy,
 };
 
 async function main(): Promise<void> {

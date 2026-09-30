@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createServer, type Server } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { delimiter, join } from 'node:path';
@@ -35,10 +36,27 @@ test('generated profile denies credentials and writes outside the worktree', () 
   assert.match(profile, new RegExp(`\\(allow file-write\\* \\(subpath "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
   assert.match(profile, new RegExp(`\\(deny file-write\\* \\(subpath "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}/\\.git"\\)\\)`));
   assert.match(profile, /\(deny network\*\)/);
-  assert.doesNotMatch(profile, /allow network/);
+  for (const path of [tempDir, cwd]) {
+    assert.match(profile, new RegExp(`\\(allow network\\* \\(local unix-socket \\(subpath "${path.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}"\\)\\)\\)`));
+    assert.match(profile, new RegExp(`\\(allow network\\* \\(remote unix-socket \\(subpath "${path.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}"\\)\\)\\)`));
+  }
+  assert.match(profile, /\(allow network\* \(local ip "localhost:\*"\)\)/);
+  assert.match(profile, /\(allow network\* \(remote ip "localhost:\*"\)\)/);
   const tempRead = profile.indexOf(`(allow file-read* (subpath "${tempDir}"))`);
   const homeDeny = profile.indexOf(`(deny file-read* (subpath "${home}"))`);
   assert.ok(tempRead >= 0 && homeDeny >= 0 && homeDeny < tempRead, 'HOME deny must precede disposable temp HOME re-allow');
+});
+
+test('install profiles retain unrestricted network access', () => {
+  const profile = buildSandboxProfile({
+    cwd: '/Users/tester/.helm/worktrees/project/w-123',
+    tempDir: '/private/tmp/helm-gate-123',
+    operatorHomes: ['/Users/tester'],
+    allowNetwork: true,
+  });
+
+  assert.match(profile, /^\(allow network\*\)$/m);
+  assert.doesNotMatch(profile, /\(allow network\* \(/);
 });
 
 test('operatorHome adds a fixture to the real operator HOME deny list', () => {
@@ -174,6 +192,67 @@ test('real macOS smoke applies the profile to cat, curl, and an in-worktree node
     assert.equal(result.checks[2]?.exitCode, 0);
     assert.equal(readFileSync(output, 'utf8'), 'ok');
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('real macOS offline sandbox permits scoped IPC and loopback only', macOnly, async () => {
+  const root = fixture('helm-gate-socket-');
+  const worktree = join(root, 'worktree');
+  const outsideSocket = join(root, 'outside.sock');
+  const logDir = join(root, 'logs');
+  mkdirSync(worktree, { recursive: true });
+
+  const outsideServer = await new Promise<Server>((resolve, reject) => {
+    const server = createServer((socket) => socket.end('outside'));
+    server.once('error', reject);
+    server.listen(outsideSocket, () => resolve(server));
+  });
+
+  const unixScript = [
+    "const net = require('node:net');",
+    "const socketPath = require('node:path').join(process.env.TMPDIR, 'inside.sock');",
+    "const server = net.createServer((socket) => socket.end('ok'));",
+    "server.on('error', (error) => { console.error(error); process.exit(1); });",
+    "server.listen(socketPath, () => {",
+    "  const client = net.createConnection(socketPath); let data = '';",
+    "  client.on('data', (chunk) => { data += chunk; });",
+    "  client.on('error', (error) => { console.error(error); process.exit(1); });",
+    "  client.on('end', () => { server.close(() => process.exit(data === 'ok' ? 0 : 1)); });",
+    "});",
+  ].join(' ');
+  const loopbackScript = [
+    "const net = require('node:net');",
+    "const server = net.createServer((socket) => socket.end('ok'));",
+    "server.on('error', (error) => { console.error(error); process.exit(1); });",
+    "server.listen(0, '127.0.0.1', () => {",
+    "  const port = server.address().port; const client = net.createConnection({ host: '127.0.0.1', port }); let data = '';",
+    "  client.on('data', (chunk) => { data += chunk; });",
+    "  client.on('error', (error) => { console.error(error); process.exit(1); });",
+    "  client.on('end', () => { server.close(() => process.exit(data === 'ok' ? 0 : 1)); });",
+    "});",
+  ].join(' ');
+  const blockedUnixScript = [
+    `const client = require('node:net').createConnection(${JSON.stringify(outsideSocket)});`,
+    "client.on('connect', () => process.exit(1));",
+    "client.on('error', () => process.exit(0));",
+    "client.setTimeout(1000, () => process.exit(0));",
+  ].join(' ');
+
+  try {
+    const result = await gateRunner().run(worktree, [
+      { name: 'temp-unix', command: `node -e ${JSON.stringify(unixScript)}` },
+      { name: 'loopback', command: `node -e ${JSON.stringify(loopbackScript)}` },
+      { name: 'external-network', command: 'curl --max-time 2 --silent --show-error https://example.com >/dev/null' },
+      { name: 'outside-unix', command: `node -e ${JSON.stringify(blockedUnixScript)}` },
+    ], logDir, { timeoutMs: 10_000 });
+    assert.equal(result.passed, false);
+    assert.equal(result.checks[0]?.exitCode, 0, readFileSync(result.checks[0]!.outputPath, 'utf8'));
+    assert.equal(result.checks[1]?.exitCode, 0, readFileSync(result.checks[1]!.outputPath, 'utf8'));
+    assert.notEqual(result.checks[2]?.exitCode, 0, readFileSync(result.checks[2]!.outputPath, 'utf8'));
+    assert.equal(result.checks[3]?.exitCode, 0, readFileSync(result.checks[3]!.outputPath, 'utf8'));
+  } finally {
+    await new Promise<void>((resolve) => outsideServer.close(() => resolve()));
     rmSync(root, { recursive: true, force: true });
   }
 });

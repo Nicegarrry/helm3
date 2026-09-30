@@ -131,6 +131,15 @@ export function buildSandboxProfile(options: {
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
   ];
 
+  if (!options.allowNetwork) {
+    for (const path of [tempDir, cwd]) {
+      lines.push(`(allow network* (local unix-socket ${subpath(path)}))`);
+      lines.push(`(allow network* (remote unix-socket ${subpath(path)}))`);
+    }
+    lines.push('(allow network* (local ip "localhost:*"))');
+    lines.push('(allow network* (remote ip "localhost:*"))');
+  }
+
   for (const home of homes) {
     // The operator HOME is deny-by-default. Later rules re-open only the
     // worktree, git metadata, toolchain, git config, and cache paths needed by

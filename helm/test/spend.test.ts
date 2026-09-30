@@ -55,6 +55,17 @@ test('spend settings hot reload after helm.json edit without restarting Helm', a
     const result = await helm.runStatus();
     assert.equal(result.ok && result.spendCapUsd, 2);
     assert.equal(result.ok && result.spendSources.capUsd, 'settings');
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.changed' && !event.data.ignored).length, 1);
+    writeFileSync(join(root, 'helm.json'), JSON.stringify({ spend: { capUsd: 9 } }));
+    const ignored = await helm.runStatus();
+    assert.equal(ignored.ok && ignored.spendCapUsd, 2);
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.changed' && event.data.ignored).length, 1);
+    writeFileSync(join(root, 'helm.json'), '{ invalid');
+    const invalid = await helm.runStatus();
+    assert.equal(invalid.ok && invalid.spendCapUsd, 2);
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.warning').length, 1);
+    await helm.runStatus();
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.warning').length, 1);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -89,6 +100,25 @@ test('raising cap without a spend.cap tap is refused; a granted tap is consumed 
     assert.deepEqual(await tools.call('spend.set', { capUsd: 8, tapId: tap.id }), { ok: true, spend: { capUsd: 8 } });
     const reused = await tools.call('spend.set', { capUsd: 9, tapId: tap.id });
     assert.equal(reused.ok, false);
+    assert.equal((store.sql.prepare('SELECT state FROM taps WHERE id = ?').get(tap.id) as { state: string }).state, 'used');
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('raising cap to no cap requires and consumes a spend.cap tap', async () => {
+  const root = home();
+  const { helm, store } = makeHelm(root);
+  try {
+    const tools = createToolRegistry(helm);
+    const refused = await tools.call('spend.set', { capUsd: 0 });
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.match(refused.reason, /spend\.cap/);
+    const action = spendCapAction({ capUsd: 0 });
+    const requested = await tools.call('tap.request', { project: SPEND_CAP_TAP_PROJECT, kind: SPEND_CAP_TAP_KIND, action });
+    assert.equal(requested.ok, true);
+    if (!requested.ok) return;
+    const tap = requested as { ok: true; id: string };
+    assert.deepEqual(await tools.call('tap.confirm', { id: tap.id, code: CODE }), { ok: true, granted: true });
+    assert.deepEqual(await tools.call('spend.set', { capUsd: 0, tapId: tap.id }), { ok: true, spend: { capUsd: 0 } });
     assert.equal((store.sql.prepare('SELECT state FROM taps WHERE id = ?').get(tap.id) as { state: string }).state, 'used');
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

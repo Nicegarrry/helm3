@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { EventRow, HelmConfig, InboxState, Store, WorkerRow } from './types.js';
-import { effectiveSpend, ensureHome, loadConfig } from './config.js';
+import { createEffectiveSpendReader, ensureHome, loadConfig } from './config.js';
 import { openStore } from './store.js';
 import { listBudgetStatuses } from './budget.js';
 import { gitWorkspace } from './workspace.js';
@@ -263,7 +263,7 @@ const cmdStatus = (args: string[]) =>
   readCmd(args, (_p, v, store, config) => {
     const total = store.spendTotal();
     const activeWorkers = store.listWorkers().filter((w) => w.state === 'queued' || w.state === 'running').length;
-    const spend = effectiveSpend(config, loadSettings(config.home));
+    const spend = createEffectiveSpendReader(config, store, loadSettings(config.home))();
     const payload = { spendUsd: total.spendUsd, spendCapUsd: spend.capUsd, spendWarnUsd: spend.warnUsd, activeWorkers, maxWorkers: spend.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(store), spendSources: spend.sources, spendCapSource: spend.sources.capUsd, spendWarnSource: spend.sources.warnUsd, maxWorkersSource: spend.sources.maxWorkers, ...(spend.warning ? { warning: spend.warning } : {}) };
     if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
     console.log(`spend:    $${payload.spendUsd.toFixed(4)}${payload.spendCapUsd > 0 ? ` / $${payload.spendCapUsd.toFixed(2)} cap` : ' (no cap)'}`);

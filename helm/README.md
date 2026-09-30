@@ -238,8 +238,10 @@ Spend is summed from Pi usage events times the model's catalogue price. Per-proj
 are created automatically at the configured default when a project first spawns a worker;
 `budget.open` starts a new sprint and closes the old one. `$HELM_HOME/helm.json` is the live global
 spend configuration: its optional `spend` object accepts `capUsd`, `warnUsd`, and `maxWorkers`.
-Helm re-reads these values when the file changes, so edits do not require a daemon restart. The
-environment variables below are fallbacks only, including values set in a project's `.mcp.json`.
+Helm re-reads these values when the file changes, so lowering a limit does not require a daemon
+restart. The authoritative limits are bootstrapped into the store; direct file edits can only lower
+the current effective values, while raises (including removing a cap) are ignored. The environment
+variables below are fallbacks only, including values set in a project's `.mcp.json`.
 Use `helm cap --usd N [--warn N] [--workers N] [--tap <id>]` to update the file while preserving
 other settings. Lowering values is immediate; raising `capUsd` or `maxWorkers` requires a one-time
 `spend.cap` tap for the exact requested action. `HELM_SPEND_CAP_USD` is a lifetime global backstop:

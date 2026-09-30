@@ -121,6 +121,10 @@ export type SpendSummary = Readonly<{
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   unknownCostEvents: number;
 }>;
+export const SPEND_LIMIT_NAMES = ['capUsd', 'warnUsd', 'maxWorkers'] as const;
+export type SpendLimitName = (typeof SPEND_LIMIT_NAMES)[number];
+export type SpendLimitSource = 'settings' | 'env' | 'default' | 'spend.set';
+export type SpendLimitRow = Readonly<{ name: SpendLimitName; value: number; source: SpendLimitSource; at: string; tapId: string | null }>;
 export interface Store {
   sql: DatabaseSync;
   insertWorker(row: WorkerRow): void;
@@ -148,6 +152,8 @@ export interface Store {
   spendTotal(): SpendSummary;
   /** The last `limit` spend rows (by insertion order), returned ascending by `at`. Feeds the cumulative spend chart. */
   spendSeries(limit: number): Array<{ at: string; costUsd: number | null }>;
+  getSpendLimits(): SpendLimitRow[];
+  setSpendLimits(rows: readonly SpendLimitRow[]): void;
   /** Mark every `running` worker as `interrupted`. Called once on daemon start. Returns affected ids. */
   markInterrupted(): string[];
   close(): void;
@@ -340,7 +346,7 @@ export const deployRunInput = z.object({ project: z.string().min(1), target: z.s
 export const deployStatusInput = z.object({ project: z.string().min(1).optional(), id: z.string().min(1).optional() }).strict();
 export const deployRollbackInput = z.object({ id: z.string().min(1), tapId: z.string().optional() }).strict();
 export const spendSetInput = z.object({
-  capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().positive().optional(),
+  capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().nonnegative().optional(),
   tapId: z.string().regex(/^t-[0-9a-f]+$/).optional(),
 }).strict();
 export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'spend.set', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback'] as const;

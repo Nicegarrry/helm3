@@ -62,8 +62,8 @@ import { createBaseline, ensureBaselineTable, getBaseline } from './baseline.js'
 import { loadRepoConfig } from './repoconfig.js';
 
 import { Lifecycle } from './lifecycle.js';
-import { createSettingsReader, loadSettings, updateSpendSettings, type Settings } from './settings.js';
-import { effectiveSpend, type EffectiveSpend } from './config.js';
+import { loadSettings, updateSpendSettings, type Settings } from './settings.js';
+import { createEffectiveSpendReader, spendLimitRaises, type EffectiveSpend } from './config.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
@@ -208,7 +208,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
-  private readonly spendSettings: () => Settings;
+  private spendSettings: () => EffectiveSpend;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
   private readonly jev?: Jev;
   private readonly tapRandomInt?: (min: number, max: number) => number;
@@ -246,7 +246,7 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
-    this.spendSettings = createSettingsReader(deps.config.home, this.settings);
+    this.spendSettings = createEffectiveSpendReader(deps.config, this.store, this.settings, () => this.nowDate());
     this.statfs = deps.statfs;
     this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;
@@ -329,7 +329,7 @@ export class Helm {
       const current = this.effectiveSpend();
       const nextCapUsd = input.capUsd ?? current.capUsd;
       const nextMaxWorkers = input.maxWorkers ?? current.maxWorkers;
-      const raising = nextCapUsd > current.capUsd || nextMaxWorkers > current.maxWorkers;
+      const raising = spendLimitRaises(nextCapUsd, current.capUsd) || spendLimitRaises(nextMaxWorkers, current.maxWorkers);
       const action = spendCapAction(input);
       let reservation: TapReservation | undefined;
       if (raising) {
@@ -338,7 +338,10 @@ export class Helm {
         if (typeof reserved === 'string') return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${reserved}`);
         reservation = reserved;
       }
-      try { const updated = updateSpendSettings(this.config.home, { capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }); if (reservation) commitTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()); return { ok: true, spend: updated.spend }; }
+      const at = this.nowIso();
+      const changed = (['capUsd', 'warnUsd', 'maxWorkers'] as const).filter((name) => input[name] !== undefined && input[name] !== current[name]);
+      const limits = this.store.getSpendLimits().map((row) => changed.includes(row.name) ? { ...row, value: input[row.name]!, source: 'spend.set' as const, at, tapId: reservation?.tapId ?? null } : row);
+      try { const updated = updateSpendSettings(this.config.home, { capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }); this.store.setSpendLimits(limits); if (changed.length > 0) this.store.appendEvent('project:global', 'spend.changed', { project: 'global', source: 'spend.set', ...(reservation?.tapId ? { tapId: reservation.tapId } : {}), ...Object.fromEntries(changed.map((name) => [name, input[name]])) }); if (reservation) commitTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()); this.spendSettings = createEffectiveSpendReader(this.config, this.store, this.settings, () => this.nowDate()); return { ok: true, spend: updated.spend }; }
       catch (error) { if (reservation) rollbackTap(this.taps, reservation.tapId, reservation.token); throw error; }
     }));
   }
@@ -474,7 +477,7 @@ export class Helm {
     const model = input.model ?? TASK_MODELS[input.difficulty ?? 'normal'];
     const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
     const spend = this.effectiveSpend();
-    must(active < spend.maxWorkers, `max workers reached (${spend.maxWorkers})`);
+    must(spend.maxWorkers === 0 || active < spend.maxWorkers, `max workers reached (${spend.maxWorkers})`);
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
@@ -956,7 +959,7 @@ export class Helm {
     return spend.capUsd > 0 && this.store.spendTotal().spendUsd >= spend.capUsd;
   }
 
-  private effectiveSpend(): EffectiveSpend { return effectiveSpend(this.config, this.spendSettings()); }
+  private effectiveSpend(): EffectiveSpend { return this.spendSettings(); }
 
   private ensureProjectBudget(project: string) {
     const existing = openBudgetFor(this.store, project);

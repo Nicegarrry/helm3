@@ -2,7 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
+import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendLimitRow, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
@@ -220,6 +220,7 @@ export function openStore(path: string): Store {
       complexity REAL,
       skills TEXT NOT NULL DEFAULT '[]'
     );
+    CREATE TABLE IF NOT EXISTS spend_limits (name TEXT PRIMARY KEY, value REAL NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL, tapId TEXT);
   `);
   migratePrs(db);
   db.exec('CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);');
@@ -255,7 +256,8 @@ export function openStore(path: string): Store {
   const spendTotalStmt = db.prepare('SELECT inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd FROM spend');
   const spendSeriesStmt = db.prepare('SELECT at, costUsd FROM spend ORDER BY at DESC, id DESC LIMIT ?');
   const runningWorkersStmt = db.prepare("SELECT workerId FROM workers WHERE state = 'running'");
-
+  const getSpendLimitsStmt = db.prepare('SELECT name, value, source, at, tapId FROM spend_limits ORDER BY name');
+  const setSpendLimitStmt = db.prepare('INSERT INTO spend_limits (name, value, source, at, tapId) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, source = excluded.source, at = excluded.at, tapId = excluded.tapId');
   return {
     sql: db,
     insertWorker(row: WorkerRow): void {
@@ -400,7 +402,8 @@ export function openStore(path: string): Store {
       const rows = spendSeriesStmt.all(Math.max(limit, 0)) as { at: string; costUsd: number | null }[];
       return rows.reverse();
     },
-
+    getSpendLimits(): SpendLimitRow[] { const rows = getSpendLimitsStmt.all() as Array<Record<string, unknown>>; return rows.map((row) => ({ name: String(row.name) as SpendLimitRow['name'], value: Number(row.value), source: String(row.source) as SpendLimitRow['source'], at: String(row.at), tapId: (row.tapId as string | null) ?? null })); },
+    setSpendLimits(rows: readonly SpendLimitRow[]): void { for (const row of rows) setSpendLimitStmt.run(row.name, row.value, row.source, row.at, row.tapId); },
     markInterrupted(): string[] {
       const rows = runningWorkersStmt.all() as { workerId: string }[];
       const ids = rows.map((row) => row.workerId);

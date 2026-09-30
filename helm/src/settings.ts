@@ -1,5 +1,5 @@
 /** Daemon-level v4 settings and env-file loading. */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -45,6 +45,7 @@ const settingsSchema = z.object({
     defaultCapUsd: z.number().default(25),
     defaultCodexTokens: z.number().int().default(20_000_000),
   }).default(BUDGET_DEFAULTS),
+  spend: z.object({ capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().nonnegative().optional() }).default({}),
   factory: z.object({
     claims: z.enum(['off', 'shadow', 'block']).default('block'),
     claimsAt: z.number().default(0.7),
@@ -77,6 +78,7 @@ const settingsSchema = z.object({
     projects: z.record(z.string(), z.object({ webhookEnv: z.string() })).default({}),
     digestSec: z.number().default(60),
     maxPerHour: z.number().default(20),
+    globalWebhookEnv: z.string().optional(),
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
@@ -90,27 +92,29 @@ const settingsSchema = z.object({
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
 export type Settings = Omit<ParsedSettings, 'deploy'> & { deploy?: ParsedSettings['deploy'] };
-
 const DEFAULT_SETTINGS = settingsSchema.parse({});
-
-export function loadSettings(home: string): Settings {
+export function loadSettings(home: string): Settings { const result = readSettingsFile(home); if (result.error) console.error(`invalid ${join(home, 'helm.json')}; using defaults`); return result.settings ?? DEFAULT_SETTINGS; }
+function fileSignature(path: string): string { try { const stat = statSync(path); return `${stat.mtimeMs}:${stat.size}:${stat.ino}`; } catch (err) { return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unavailable'; } }
+export type SettingsFile = Readonly<{ signature: string; settings?: Settings; error?: string }>;
+export function readSettingsFile(home: string): SettingsFile {
   const path = join(home, 'helm.json');
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_SETTINGS;
-    console.error(`invalid ${path}; using defaults`);
-    return DEFAULT_SETTINGS;
-  }
-  const parsed = settingsSchema.safeParse(raw);
-  if (!parsed.success) {
-    console.error(`invalid ${path}; using defaults`);
-    return DEFAULT_SETTINGS;
-  }
-  return parsed.data;
+  try { const parsed = settingsSchema.safeParse(JSON.parse(readFileSync(path, 'utf8'))); return parsed.success ? { signature: fileSignature(path), settings: parsed.data } : { signature: fileSignature(path), error: 'schema validation failed' }; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { signature: 'missing', settings: DEFAULT_SETTINGS } : { signature: fileSignature(path), error: 'invalid JSON' }; }
 }
-
+export type SpendSettingsUpdate = Readonly<{ capUsd?: number; warnUsd?: number; maxWorkers?: number }>;
+/** Merge spend settings into helm.json and replace it with a same-directory atomic rename. */
+export function updateSpendSettings(home: string, update: SpendSettingsUpdate): Settings {
+  mkdirSync(home, { recursive: true }); const path = join(home, 'helm.json'); let raw: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`invalid ${path}; expected an object`);
+    raw = { ...(parsed as Record<string, unknown>) };
+  } catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+  const spend = raw.spend && typeof raw.spend === 'object' && !Array.isArray(raw.spend) ? { ...(raw.spend as Record<string, unknown>) } : {}; for (const [key, value] of Object.entries(update)) if (value !== undefined) spend[key] = value; raw.spend = spend; const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try { writeFileSync(temporary, `${JSON.stringify(raw, null, 2)}\n`, 'utf8'); renameSync(temporary, path); }
+  catch (err) { try { unlinkSync(temporary); } catch { /* best effort */ } throw err; }
+  return loadSettings(home);
+}
 export function loadEnvFile(path: string): Record<string, string> {
   try {
     const values: Record<string, string> = {};

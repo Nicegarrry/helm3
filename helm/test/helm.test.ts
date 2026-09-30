@@ -276,6 +276,48 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   assert.equal(row?.result?.status, 'succeeded');
 });
 
+test('dispatched issue-title lookup runs after spawn admission and falls back on failure', async () => {
+  let resolveTitle!: (title: string) => void;
+  const lookup = new Promise<string>((resolve) => { resolveTitle = resolve; });
+  const seed = makeHelm();
+  const first = makeHelm({ github: { ...seed.github.github, issueTitle: async () => lookup } });
+  const repo = mkTempDir('helm-dispatched-title-');
+  const started = Date.now();
+  const outcome = await first.helm.spawn(spawnBody(repo, { issue: 42, objective: 'first objective line\nmore detail' }));
+  assert.ok(outcome.ok);
+  assert.ok(Date.now() - started < 500, 'spawn should not wait for issue title lookup');
+  if (!outcome.ok) return;
+  resolveTitle('Issue title');
+  await new Promise((resolve) => setImmediate(resolve));
+  const dispatched = first.store.listEvents(outcome.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched');
+  assert.equal(dispatched?.data.issue, 42);
+  assert.equal(dispatched?.data.title, 'Issue title');
+  assert.equal(dispatched?.data.model, 'acme/model-1');
+
+  const second = makeHelm({ github: { ...seed.github.github, issueTitle: async () => { throw new Error('unavailable'); } } });
+  const fallback = await second.helm.spawn(spawnBody(mkTempDir('helm-dispatched-fallback-'), { issue: 43, objective: 'fallback title\nother detail' }));
+  assert.ok(fallback.ok);
+  if (fallback.ok) {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(second.store.listEvents(fallback.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched')?.data.title, 'fallback title');
+  }
+});
+
+test('dispatch milestone rejection becomes a warning event instead of an unhandled rejection', async () => {
+  const { helm, store } = makeHelm();
+  const appendEvent = store.appendEvent.bind(store);
+  store.appendEvent = (workerId, kind, data, at) => {
+    if (kind === 'dispatched') throw new Error('milestone write failed');
+    return appendEvent(workerId, kind, data, at);
+  };
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-dispatched-warning-'), { issue: 44 }));
+  assert.ok(outcome.ok);
+  if (!outcome.ok) return;
+  await new Promise((resolve) => setImmediate(resolve));
+  const warning = store.listEvents(outcome.workerId).find((event) => event.kind === 'dispatched.warning');
+  assert.equal(warning?.data.message, 'dispatch milestone failed: milestone write failed');
+});
+
 test('a settled worker turn removes node_modules from every top-level package', async () => {
   const runner = createFakeRunner(async (input) => {
     mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });
@@ -297,6 +339,28 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'helm', 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
+});
+
+test('gate node_modules cleanup failures are hygiene warnings', async () => {
+  let cleanupError: ((message: string) => void) | undefined;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      cleanupError = options?.onNodeModulesError;
+      cleanupError?.('permission denied');
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-cleanup-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  assert.ok(cleanupError);
+  assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'hygiene.warning' && event.data.message === 'permission denied'));
+  assert.equal(store.listEvents(spawned.workerId).some((event) => event.kind === 'error' && event.data.message === 'permission denied'), false);
 });
 
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
@@ -905,6 +969,19 @@ test('markInterruptedOnStart flips running workers to interrupted', async () => 
   const ids = await helm.markInterruptedOnStart();
   assert.deepEqual(ids, [spawned.workerId]);
   assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
+});
+
+test('startup deploy recovery does not wait for a remote checkout', async () => {
+  const { helm, store, workspace } = makeHelm();
+  workspace.clone = async () => await new Promise<void>(() => {});
+  store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, bootId, reason, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run('d-startup', 'owner/missing', 'prod', 'vercel', '{}', 'a'.repeat(40), 'deploying', 'boot-previous', null, null, null, null, '{}', null, new Date().toISOString());
+  const result = await Promise.race([
+    helm.markInterruptedOnStart('boot-previous'),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('startup recovery blocked')), 250)),
+  ]);
+  assert.deepEqual(result, []);
+  assert.equal((store.sql.prepare('SELECT state FROM deploys WHERE id = ?').get('d-startup') as { state: string }).state, 'deploying');
 });
 
 test('overview includes a cumulative spendSeries', async () => {

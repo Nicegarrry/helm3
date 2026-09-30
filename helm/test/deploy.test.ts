@@ -57,6 +57,31 @@ test('daemon startup preserves current and handover-predecessor deploys until ti
   } finally { store.close(); }
 });
 
+test('daemon startup falls back to the 60-minute timeout when target lookup fails', async () => {
+  const store = openStore(':memory:');
+  const now = new Date('2026-09-30T00:00:00.000Z');
+  try {
+    ensureDeployTable(store);
+    const insert = store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, bootId, reason, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    const add = (id: string, at: string) => insert.run(id, 'owner/repo', 'prod', 'vercel', '{}', 'a'.repeat(40), 'deploying', 'boot-previous', null, null, null, null, '{}', null, at);
+    add('within-default', '2026-09-29T23:01:00.000Z');
+    add('past-default', '2026-09-29T22:59:00.000Z');
+    assert.equal(await markDeploysInterrupted(store, { predecessorBootId: 'boot-previous', now, timeoutFor: async () => { throw new Error('git show timed out'); } }), 1);
+    const states = (store.sql.prepare('SELECT id, state FROM deploys ORDER BY id').all() as Array<{ id: string; state: string }>).map((row) => ({ id: row.id, state: row.state }));
+    assert.deepEqual(states, [{ id: 'past-default', state: 'failed' }, { id: 'within-default', state: 'deploying' }]);
+  } finally { store.close(); }
+});
+
+test('loadRepoConfig passes a bounded timeout to git config lookup', async () => {
+  const calls: Array<{ file: string; args: readonly string[]; timeout?: number }> = [];
+  const config = await loadRepoConfig('/repo', 'a'.repeat(40), false, {
+    timeout: 5_000,
+    exec: async (file, args, options) => { calls.push({ file, args, timeout: options.timeout }); return { stdout: '{"gates":[]}' }; },
+  });
+  assert.deepEqual(config, { gates: [] });
+  assert.deepEqual(calls, [{ file: 'git', args: ['show', `${'a'.repeat(40)}:helm.json`], timeout: 5_000 }]);
+});
+
 function repoWithConfig(configTarget: DeployTarget = target): { repo: string; sha: string } {
   const repo = mkdtempSync(join(tmpdir(), 'helm-deploy-repo-'));
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });

@@ -254,15 +254,38 @@ replayed automatically.
 
 Spend is summed from Pi usage events times the model's catalogue price. Per-project sprint budgets
 are created automatically at the configured default when a project first spawns a worker;
-`budget.open` starts a new sprint and closes the old one. `HELM_SPEND_CAP_USD` is only a lifetime
-global backstop: it refuses new spawns and stops running workers at the next tool call once reached.
+`budget.open` starts a new sprint and closes the old one. `$HELM_HOME/helm.json` is the live global
+spend configuration: its optional `spend` object accepts `capUsd`, `warnUsd`, and `maxWorkers`.
+Helm re-reads these values when the file changes, so lowering a limit does not require a daemon
+restart. The authoritative limits are bootstrapped into the store; direct file edits can only lower
+the current effective values, while raises (including removing a cap) are ignored. The environment
+variables below are fallbacks only, including values set in a project's `.mcp.json`.
+Use `helm cap --usd N [--warn N] [--workers N] [--tap <id>]` to update the file while preserving
+other settings. Lowering values is immediate; raising `capUsd` or `maxWorkers` requires a one-time
+`spend.cap` tap for the exact requested action. `HELM_SPEND_CAP_USD` is a lifetime global backstop:
+it refuses new spawns and stops running workers at the next tool call once reached.
 A value of `0` or an unset variable means no global cap. A soft cap,
 `HELM_SPEND_WARN_USD` (default 80% of the hard cap), never blocks: crossing it records a
 `spend.warning` event, sets `aboveSoftCap` in `run.status`, adds a `warning` field to spawn
 and steer results so the orchestrator sees it. Models
 with no price are counted as tokens and reported as unknown-cost events, never blocked.
 
+Spend limits are detected-not-prevented against a same-user forge of `helm.sqlite`: a user who can
+rewrite the database can also forge the limit state, with the same trust boundary as `envelope.json`.
+The daemon's startup Discord line always reports the effective spend limits so such a forge is visible
+to Nick.
+
 ## Configuration
+
+The live spend settings can be placed alongside the other daemon settings in `$HELM_HOME/helm.json`:
+
+```json
+{ "spend": { "capUsd": 10, "warnUsd": 8, "maxWorkers": 5 } }
+```
+
+`helm.json` wins over environment values; `.mcp.json` environment caps are fallbacks only. Raising a
+hard cap or worker limit through `helm cap` needs a granted `spend.cap` tap; the refusal names that
+kind so the supervisor can call `tap.request` with the exact action returned by the refusal.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

@@ -58,9 +58,11 @@ export async function markDeploysInterrupted(store: Store, options: { currentBoo
   const stale: typeof rows = [];
   for (const row of rows) {
     if (!liveBoots.has(row.bootId ?? '')) { stale.push(row); continue; }
-    const limit = row.bootId === options.predecessorBootId
-      ? (await options.timeoutFor?.({ project: row.project, target: row.target, sha: row.sha }) ?? 60) * 60_000
-      : timeoutMs;
+    let targetTimeout: number | undefined;
+    if (row.bootId === options.predecessorBootId) {
+      try { targetTimeout = await options.timeoutFor?.({ project: row.project, target: row.target, sha: row.sha }); } catch { targetTimeout = undefined; }
+    }
+    const limit = row.bootId === options.predecessorBootId ? (targetTimeout ?? 60) * 60_000 : timeoutMs;
     if (now - Date.parse(row.at) > limit) stale.push(row);
   }
   const update = store.sql.prepare("UPDATE deploys SET state = 'failed', reason = ? WHERE id = ? AND state = 'deploying'");

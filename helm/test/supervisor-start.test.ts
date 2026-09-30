@@ -14,6 +14,7 @@ const settings: Settings = {
   watch: { tickSec: 60, silenceMin: 15, sameRefusal: 5, attentionEverySec: 180, cooldownMin: 15 },
   supervisor: {},
   budgets: { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 },
+  spend: {},
   discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
   factory: { claims: 'block', claimsAt: 0.7, verdictAt: 0.5, retryMax: 2, envelopeTapAt: 0.5, tapTtlMin: 60 },
   queue: { tickSec: 30, checksTimeoutMin: 30 }, memory: {}, select: { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' },

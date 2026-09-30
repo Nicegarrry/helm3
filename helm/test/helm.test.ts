@@ -299,6 +299,28 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
 });
 
+test('gate node_modules cleanup failures are hygiene warnings', async () => {
+  let cleanupError: ((message: string) => void) | undefined;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      cleanupError = options?.onNodeModulesError;
+      cleanupError?.('permission denied');
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-cleanup-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  assert.ok(cleanupError);
+  assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'hygiene.warning' && event.data.message === 'permission denied'));
+  assert.equal(store.listEvents(spawned.workerId).some((event) => event.kind === 'error' && event.data.message === 'permission denied'), false);
+});
+
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
   const { helm, store, cloned, fetched, config } = makeHelm();
   const first = await helm.spawn(spawnBody('acme/widgets'));
@@ -905,6 +927,19 @@ test('markInterruptedOnStart flips running workers to interrupted', async () => 
   const ids = await helm.markInterruptedOnStart();
   assert.deepEqual(ids, [spawned.workerId]);
   assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
+});
+
+test('startup deploy recovery does not wait for a remote checkout', async () => {
+  const { helm, store, workspace } = makeHelm();
+  workspace.clone = async () => await new Promise<void>(() => {});
+  store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, bootId, reason, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run('d-startup', 'owner/missing', 'prod', 'vercel', '{}', 'a'.repeat(40), 'deploying', 'boot-previous', null, null, null, null, '{}', null, new Date().toISOString());
+  const result = await Promise.race([
+    helm.markInterruptedOnStart('boot-previous'),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('startup recovery blocked')), 250)),
+  ]);
+  assert.deepEqual(result, []);
+  assert.equal((store.sql.prepare('SELECT state FROM deploys WHERE id = ?').get('d-startup') as { state: string }).state, 'deploying');
 });
 
 test('overview includes a cumulative spendSeries', async () => {

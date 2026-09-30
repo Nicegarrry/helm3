@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 
 const exec = promisify(execFile);
+type ConfigExec = (file: string, args: readonly string[], options: { cwd?: string; timeout?: number }) => Promise<{ stdout: string }>;
 
 export const repoConfigSchema = z.object({
   gates: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).default([]),
@@ -33,11 +34,11 @@ export const repoConfigSchema = z.object({
 
 export type RepoConfig = z.infer<typeof repoConfigSchema>;
 
-export async function loadRepoConfig(repo: string, sha?: string, fallbackToWorktree = true): Promise<RepoConfig> {
+export async function loadRepoConfig(repo: string, sha?: string, fallbackToWorktree = true, options: { timeout?: number; exec?: ConfigExec } = {}): Promise<RepoConfig> {
   let raw: string;
   if (sha) {
     try {
-      ({ stdout: raw } = await exec('git', ['show', `${sha}:helm.json`], { cwd: repo }));
+      ({ stdout: raw } = await (options.exec ?? exec)('git', ['show', `${sha}:helm.json`], { cwd: repo, timeout: options.timeout }));
     } catch {
       if (!fallbackToWorktree) throw new Error(`helm.json not found at ${sha}`);
       raw = await readFile(join(repo, 'helm.json'), 'utf8');

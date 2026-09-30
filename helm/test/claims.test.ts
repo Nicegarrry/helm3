@@ -92,6 +92,8 @@ test('line-count and line-cap claims answered says_nothing are process claims', 
     'helm/src totals 10,845 lines per a Grep line count',
     'Source count is 10,912 lines.',
     'npm run line-cap reported 10845 lines against a cap of 11000.',
+    '10921 lines in src (cap 11000)',
+    'npm run line-cap reported 10921 lines in src (cap 11000).',
   ];
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: [...lineCounts, 'src/a.ts adds A'] });
   try {
@@ -107,6 +109,8 @@ test('ordinary code claims are not treated as line-count process claims', async 
     'helm/src contains the claims module',
     'the diff contains 12 lines.',
     'this change adds 40 lines to server.ts',
+    '10921 lines in the diff (cap 11000)',
+    'the diff shows 12 lines in src/claims.ts',
   ];
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: codeClaims });
   try {

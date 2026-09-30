@@ -29,7 +29,9 @@ const processClaim = /^(?:(?:all\s+\d+\s+)?(?:tests?|test suite|type-?check|lint
 // The subject is restricted to a src path, "source count"/"source total" or "line-cap", so diff-verifiable counts such as
 // "the diff contains 12 lines." stay checkable.
 const lineCountClaim = /^(?:(?:[a-z0-9_.-]+\/)?src(?:\/[a-z0-9_.-]+)*|source[ \t]+(?:count|total)s?|(?:npm|pnpm|yarn|bun)[ \t]+run[ \t]+line-cap|line-cap)[ \t]+(?:contain(?:s|ed)?|total(?:s|ed)?|count(?:s|ed)?|report(?:s|ed)?|is|are|was|were)[ \t]+[\d,]+[ \t]*lines?\b(?:[ \t]+(?:per|against|from|via|in|of|according[ \t]+to)[^.!?]{0,60})?[ \t]*[.!?]?$/i;
-function isProcessClaim(claim: string): boolean { return processClaim.test(claim) || lineCountClaim.test(claim); }
+// Count-first form: `npm run line-cap` prints "<count> lines in src (cap <n>)", quoted bare or after a command mention.
+const lineCapOutput = /^(?:(?:(?:npm|pnpm|yarn|bun)[ \t]+run[ \t]+)?line-cap[ \t]*(?:(?:print(?:s|ed)?|report(?:s|ed)?|output(?:s|ed)?|show(?:s|ed)?|say(?:s)?|count(?:s|ed)?|is|was|gives?)[ \t]*)?[ \t]*[:=-]?[ \t]*)?[\d,]+[ \t]*lines?[ \t]+in[ \t]+(?:[a-z0-9_.-]+\/)*src(?:\/[a-z0-9_.-]+)*[ \t]*\(cap[ \t]+[\d,.]+\)[ \t]*[.!?]?$/i;
+function isProcessClaim(claim: string): boolean { return processClaim.test(claim) || lineCountClaim.test(claim) || lineCapOutput.test(claim); }
 
 export type ClaimsCheckInput = Readonly<{ workerId: string }>;
 export type ClaimsService = Readonly<{

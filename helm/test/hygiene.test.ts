@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createHygiene } from '../src/hygiene.js';
+import { cleanupNodeModules, createHygiene } from '../src/hygiene.js';
 import { ensureDeployTable } from '../src/deploy.js';
 import { loadSettings, type Settings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
@@ -104,6 +104,8 @@ test('GC keeps a TTL-eligible worker with unpushed commits and records the reaso
     await service.gc();
     assert.deepEqual(removed, []);
     assert.equal(store.listEvents(row.workerId).some((event) => event.kind === 'worktree.kept' && event.data.reason === 'unpushed commits'), true);
+    await service.gc();
+    assert.equal(store.listEvents(row.workerId).filter((event) => event.kind === 'worktree.kept').length, 1);
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -177,4 +179,20 @@ test('GC removes old terminal deploys, keeps recent or long-running deploy workt
     assert.equal(existsSync(recentPath), true);
     assert.equal(existsSync(runningPath), true);
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('node_modules cleanup refuses symlink targets outside the worker worktree', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-hygiene-symlink-'));
+  const worktree = join(home, 'worktrees', 'owner__repo', 'w-link');
+  const outside = mkdtempSync(join(tmpdir(), 'helm-hygiene-outside-'));
+  const errors: string[] = [];
+  try {
+    mkdirSync(worktree, { recursive: true });
+    mkdirSync(join(outside, 'node_modules'), { recursive: true });
+    writeFileSync(join(outside, 'node_modules', 'sentinel'), 'keep');
+    symlinkSync(join(outside, 'node_modules'), join(worktree, 'node_modules'), 'dir');
+    await cleanupNodeModules(worktree, false, { allowedRoot: worktree, onError: (message) => errors.push(message) });
+    assert.equal(existsSync(join(outside, 'node_modules', 'sentinel')), true);
+    assert.match(errors[0] ?? '', /outside worktree/);
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
 });

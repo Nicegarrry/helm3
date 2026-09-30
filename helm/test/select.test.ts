@@ -41,7 +41,7 @@ test('0.72 inlines the skill body under the guidance heading and records worker_
 
 test('0.65 records select.suggested only and inlines nothing', async () => {
   const f = spawnFixture({ skill_or_none: { choice: 'allowed', confidence: 0.65, probabilities: {} }, lesson_or_none: { choice: 'none', confidence: 0.65, probabilities: {} } });
-  try { const result = await f.helm.spawn({ repo: f.repo, objective: 'task', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false }); assert.equal(result.ok, true); if (!result.ok) return; const events = f.store.listEvents(result.workerId).filter((event) => event.kind.startsWith('select')); assert.deepEqual(events.map((event) => event.kind), ['select.suggested']); assert.equal(f.messages[0], 'plain'); } finally { f.store.close(); }
+  try { const result = await f.helm.spawn({ repo: f.repo, objective: 'task', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false }); assert.equal(result.ok, true); if (!result.ok) return; const events = f.store.listEvents(result.workerId).filter((event) => event.kind.startsWith('select')); assert.deepEqual(events.map((event) => event.kind), ['select.suggested']); assert.equal(f.messages[0], 'plain'); await f.helm.settle(result.workerId); } finally { f.store.close(); }
 });
 
 test("choice 'none' inlines nothing", async () => {
@@ -82,12 +82,12 @@ test('lessons in shadow mode are suggested but never inlined', async () => {
 test('no key lets spawn succeed with no guidance and a warning', async () => {
   const f = fixture({}); const noKey: Jev = { shadow: true, async ask() { return { ok: false, reason: 'no key' }; } };
   const spawned = spawnFixture({}, noKey);
-  try { const result = await spawned.helm.spawn({ repo: spawned.repo, objective: 'task', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false }); assert.equal(result.ok, true); assert.match(result.ok ? result.warning! : '', /no key/); assert.equal(spawned.messages[0], 'plain'); } finally { f.store.close(); spawned.store.close(); }
+  try { const result = await spawned.helm.spawn({ repo: spawned.repo, objective: 'task', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false }); assert.equal(result.ok, true); assert.match(result.ok ? result.warning! : '', /no key/); assert.equal(spawned.messages[0], 'plain'); if (result.ok) await spawned.helm.settle(result.workerId); } finally { f.store.close(); spawned.store.close(); }
 });
 
 test('slow Jev selection does not hold the spawn lock', async () => {
   let release!: () => void; let called!: () => void; const selected = new Promise<void>((resolve) => { called = resolve; }); const gate = new Promise<void>((resolve) => { release = resolve; });
   const f = fixture({}); const slow: Jev = { shadow: true, async ask() { called(); await gate; return { ok: true, answers: { skill_or_none: { choice: 'none', confidence: 0.9, probabilities: {} }, lesson_or_none: { choice: 'none', confidence: 0.9, probabilities: {} } } }; } };
   const spawned = spawnFixture({}, slow);
-  try { const first = spawned.helm.spawn({ repo: spawned.repo, objective: 'slow', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false }); await selected; const second = await spawned.helm.spawn({ repo: spawned.repo, objective: 'fast', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false, skills: ['none'] }); assert.equal(second.ok, true); release(); assert.equal((await first).ok, true); } finally { release(); spawned.store.close(); }
+  try { const first = spawned.helm.spawn({ repo: spawned.repo, objective: 'slow', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false }); await selected; const second = await spawned.helm.spawn({ repo: spawned.repo, objective: 'fast', model: 'acme/model', role: 'builder', contextPaths: [], allowWorkflows: false, skills: ['none'] }); assert.equal(second.ok, true); release(); const firstResult = await first; assert.equal(firstResult.ok, true); if (firstResult.ok) await spawned.helm.settle(firstResult.workerId); if (second.ok) await spawned.helm.settle(second.workerId); } finally { release(); spawned.store.close(); }
 });

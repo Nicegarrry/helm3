@@ -1,5 +1,7 @@
 /** Drives `helm serve --stdio` as a child process through the real MCP client. */
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,8 +31,8 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
   return check();
 }
 
-function daemonOf(home: string): { port: number; pid: number } {
-  return JSON.parse(readFileSync(join(home, 'serve.json'), 'utf8')) as { port: number; pid: number };
+function daemonOf(home: string): { port: number; pid: number; token: string } {
+  return JSON.parse(readFileSync(join(home, 'serve.json'), 'utf8')) as { port: number; pid: number; token: string };
 }
 
 async function stopDaemon(home: string): Promise<void> {
@@ -58,6 +60,16 @@ test('mcp stdio: a real client lists core tools and calls them through helm serv
     // The front-end started a daemon, which records itself in serve.json.
     const daemon = daemonOf(home);
     assert.notEqual(daemon.pid, transport.pid, 'the daemon is a separate process from the stdio front-end');
+    assert.match(daemon.token, /^[a-f0-9]{64}$/);
+    const { stdout, stderr } = await promisify(execFile)(process.execPath,
+      ['--import', 'tsx', 'src/cli.ts', 'daemon', '--action', 'status', '--json'],
+      { env: { ...process.env, HELM_HOME: home }, timeout: 15000 });
+    assert.equal(JSON.parse(stdout).ok, true, 'CLI reaches the real authenticated daemon');
+    assert.ok(!`${stdout}${stderr}`.includes(daemon.token));
+    await stopDaemon(home);
+    for (const file of ['daemon.log', 'helm.sqlite']) {
+      assert.ok(!readFileSync(join(home, file)).includes(Buffer.from(daemon.token)), `${file} must not contain the token`);
+    }
   } finally {
     await client.close();
     await stopDaemon(home);

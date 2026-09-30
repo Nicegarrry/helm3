@@ -23,7 +23,7 @@ test('CLI forwards optional models, task tiers, and PR base', async (t) => {
   t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
-  await writeFile(join(home, 'serve.json'), JSON.stringify({ port: address.port, pid: process.pid }));
+  await writeFile(join(home, 'serve.json'), JSON.stringify({ port: address.port, pid: process.pid, token: 'a'.repeat(64) }));
   const cli = async (...args: string[]) => promisify(execFile)(process.execPath,
     ['--import', 'tsx', 'src/cli.ts', ...args], { env: { ...process.env, HELM_HOME: home }, timeout: 15000 });
   await cli('spawn', '--repo', '/repo', '--objective', 'task');

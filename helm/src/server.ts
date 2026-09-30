@@ -1,6 +1,7 @@
 /** `helm serve`: exposes the tool registry over MCP (stdio and Streamable HTTP) plus a small loopback HTTP API the CLI uses. */
 import { createServer, type IncomingMessage, type ServerResponse, request as httpRequest } from 'node:http';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -9,6 +10,7 @@ import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { compactInputSchema, compactInputValidator, createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
 import { VERSION } from './lifecycle.js';
 import type { Helm } from './helm.js';
+import { daemonAuthorization } from '../bin/daemon-auth.mjs';
 
 export type ServeOptions = Readonly<{ helm: Helm; port?: number }>;
 /** `closed` resolves when the peer goes away (stdio only), so the process can exit with it. */
@@ -22,12 +24,12 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
 }
 
 /** Stdio proxy: owns no workers or store; forwards calls without replay. See docs/runtime-notes.md. */
-export async function serveStdioProxy(port: number, tools?: ToolProfile): Promise<ServeHandle> {
+export async function serveStdioProxy(port: number, tools?: ToolProfile, home?: string): Promise<ServeHandle> {
   const profile = tools ?? resolveToolProfile(process.env.HELM_TOOLS);
   const local = createToolRegistry(undefined as unknown as Helm, profile, true); // schemas only; `call` forwards here
   const registry: Registry = {
     list: () => local.list(),
-    call: (name, input) => callDaemon(port, name, input, true, profile) as ReturnType<Registry['call']>,
+    call: (name, input) => callDaemon(port, name, input, true, profile, home) as ReturnType<Registry['call']>,
   };
   const mcp = buildMcpServer(registry);
   const transport = new StdioServerTransport();
@@ -39,9 +41,12 @@ export async function serveStdioProxy(port: number, tools?: ToolProfile): Promis
   return { port, closed, async close() { await mcp.close(); } };
 }
 
-export function callDaemon(port: number, name: string, input: unknown, fromMcp = false, tools?: ToolProfile): Promise<unknown> {
+export function callDaemon(port: number, name: string, input: unknown, fromMcp = false, tools?: ToolProfile, home?: string): Promise<unknown> {
+  let authorization: string;
+  try { authorization = daemonAuthorization(home); }
+  catch { return Promise.resolve({ ok: false, reason: 'daemon authentication unavailable' }); }
   return new Promise((resolve) => {
-      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json', ...(fromMcp ? { 'x-helm-mcp': '1', 'x-helm-tools': tools ?? 'core' } : {}) } }, (res) => {
+      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { authorization, 'content-type': 'application/json', ...(fromMcp ? { 'x-helm-mcp': '1', 'x-helm-tools': tools ?? 'core' } : {}) } }, (res) => {
         let body = '';
         res.setEncoding('utf8');
         res.on('error', (err) => resolve({ ok: false, reason: `daemon response interrupted: ${err.message}; mutation outcome may be unknown, inspect before retrying` }));
@@ -71,9 +76,10 @@ async function serveHttp(helm: Helm, internalRegistry: Registry, requestedPort: 
   const home = helm.config.home;
   mkdirSync(home, { recursive: true });
   let port = requestedPort;
+  const token = randomBytes(32).toString('hex');
 
   const httpServer = createServer((req, res) => {
-    void handleHttpRequest(req, res, helm, internalRegistry, () => port);
+    void handleHttpRequest(req, res, helm, internalRegistry, () => port, token);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -84,7 +90,15 @@ async function serveHttp(helm: Helm, internalRegistry: Registry, requestedPort: 
   port = typeof address === 'object' && address ? address.port : requestedPort;
 
   const serveJsonPath = join(home, 'serve.json');
-  writeFileSync(serveJsonPath, JSON.stringify({ port, pid: process.pid }));
+  const temp = `${serveJsonPath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, JSON.stringify({ port, pid: process.pid, token }), { mode: 0o600, flag: 'wx' });
+    renameSync(temp, serveJsonPath);
+  } catch (err) {
+    httpServer.close();
+    rmSync(temp, { force: true });
+    throw err;
+  }
 
   return {
     port,
@@ -102,11 +116,18 @@ async function serveHttp(helm: Helm, internalRegistry: Registry, requestedPort: 
   };
 }
 
-async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm: Helm, internalRegistry: Registry, getPort: () => number): Promise<void> {
+async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm: Helm, internalRegistry: Registry, getPort: () => number, token: string): Promise<void> {
   try {
     const host = req.headers.host ?? '';
     if (host !== `127.0.0.1:${getPort()}` || (req.headers.origin && req.headers.origin !== `http://${host}`)) {
       res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden: bad host');
+      return;
+    }
+    const authorization = req.headers.authorization;
+    const supplied = Buffer.from(typeof authorization === 'string' && authorization.startsWith('Bearer ') ? authorization.slice(7) : '');
+    const expected = Buffer.from(token);
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+      res.writeHead(401).end();
       return;
     }
     const url = new URL(req.url ?? '/', `http://${host}`);

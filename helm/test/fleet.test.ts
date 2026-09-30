@@ -20,10 +20,10 @@ test('fleet CLI accepts --home as a source and reports unavailable without auth 
 
 test('source state is fail-closed, loopback-only, and preserves no fake empty fleet', async (t) => {
   assert.equal(stateUrl(4747), 'http://127.0.0.1:4747/api/state');
-  for (const bad of ['{}', '{"port":0}', '{"port":65536}', 'not-json']) assert.throws(() => parseServeJson(bad));
+  for (const bad of ['{}', JSON.stringify({ port: 0, token: 'a'.repeat(64) }), JSON.stringify({ port: 65536, token: 'a'.repeat(64) }), 'not-json']) assert.throws(() => parseServeJson(bad));
   for (const bad of [{}, { ok: true, run: {}, workers: 'bad', models: [] }, { ok: true, run: {}, workers: [], models: [], observedAt: 'nope' }]) assert.throws(() => snapshotFromState(bad));
   const home = await mkdtemp(join(tmpdir(), 'helm-fleet-source-')); t.after(() => rm(home, { recursive: true, force: true }));
-  await writeFile(join(home, 'serve.json'), '{"port":4750}');
+  await writeFile(join(home, 'serve.json'), JSON.stringify({ port: 4750, token: 'a'.repeat(64) }));
   await assert.rejects(() => fetchState(home, async () => new Response(JSON.stringify({}), { status: 200 })), /invalid/);
 });
 
@@ -90,7 +90,7 @@ test('all unavailable sources skip owner API/auth and lock records diagnosable o
 test('two-source sync publishes a partial merged record when one source is unavailable', async (t) => {
   const one = await mkdtemp(join(tmpdir(), 'helm-fleet-one-')); const two = await mkdtemp(join(tmpdir(), 'helm-fleet-two-'));
   t.after(() => Promise.all([rm(one, { recursive: true, force: true }), rm(two, { recursive: true, force: true })]));
-  await Promise.all([writeFile(join(one, 'serve.json'), '{"port":4101}'), writeFile(join(two, 'serve.json'), '{"port":4102}')]);
+  await Promise.all([writeFile(join(one, 'serve.json'), JSON.stringify({ port: 4101, token: 'a'.repeat(64) })), writeFile(join(two, 'serve.json'), JSON.stringify({ port: 4102, token: 'a'.repeat(64) }))]);
   const calls: string[] = [];
   const request = async (url: RequestInfo | URL, init?: RequestInit) => {
     const value = String(url); calls.push(value);
@@ -148,7 +148,7 @@ test('empty successful-looking state and malformed owner listing fail closed', a
 test('continuous publisher survives an owner API failure and releases its lock on stop', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'helm-fleet-retry-'));
   t.after(() => rm(home, { recursive: true, force: true }));
-  await writeFile(join(home, 'serve.json'), '{"port":4101}');
+  await writeFile(join(home, 'serve.json'), JSON.stringify({ port: 4101, token: 'a'.repeat(64) }));
   const messages: string[] = [];
   await runPublisher({ sources: [source('one', home)], slug: 'test', auth: 'synthetic',
     request: async (url) => String(url).startsWith('http://127.0.0.1:')

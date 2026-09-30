@@ -37,6 +37,10 @@ the full harness catalog on every session.
    and cap, give it its own `HELM_HOME` in `env`.
 
    For Codex or anything that speaks Streamable HTTP, point it at `http://127.0.0.1:<port>/mcp`
+   with `Authorization: Bearer <token>` on every request. The daemon generates a new
+   random token at startup and stores it with port/pid in `$HELM_HOME/serve.json`, created
+   with mode `0600`. CLI, stdio, upgrade and fleet clients read it at each call; keep this
+   file private and never copy the token into worker environments or logs.
    (the port is in `$HELM_HOME/serve.json`; start the daemon by hand with
    `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http --port 4747` if nothing has yet).
 

@@ -303,3 +303,28 @@ test('real macOS offline sandbox permits scoped IPC and loopback only', macOnly,
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('daemon metadata denial follows all read exceptions, including custom HELM_HOME', () => {
+  const daemonHome = '/private/tmp/custom-helm';
+  const profile = buildSandboxProfile({ cwd: daemonHome, tempDir: '/private/tmp/gate', operatorHomes: [], daemonHomes: [daemonHome], toolchainPaths: [daemonHome], npmCachePaths: [daemonHome], allowNetwork: true });
+  const deny = `(deny file-read* (literal "${daemonHome}/serve.json"))`;
+  assert.ok(profile.includes(deny));
+  assert.ok(profile.indexOf(deny) > profile.lastIndexOf('(allow file-read*'));
+  assert.equal(minimalGateEnv('/private/tmp/home', '/private/tmp/gate').HELM_HOME, undefined);
+  assert.equal(minimalGateEnv('/private/tmp/home', '/private/tmp/gate').HELM_TOKEN, undefined);
+});
+
+test('native gate cannot read daemon metadata even through a symlink in its worktree', macOnly, async () => {
+  const root = realpathSync(fixture('helm-auth-sandbox-'));
+  const home = join(root, 'daemon');
+  const cwd = join(root, 'worktree');
+  mkdirSync(home); mkdirSync(cwd);
+  writeFileSync(join(home, 'serve.json'), '{"token":"synthetic-secret"}', { mode: 0o600 });
+  symlinkSync(join(home, 'serve.json'), join(cwd, 'metadata'));
+  const profile = buildSandboxProfile({ cwd, tempDir: root, operatorHomes: [], daemonHomes: [home], allowNetwork: true });
+  try {
+    for (const path of [join(home, 'serve.json'), join(cwd, 'metadata')]) {
+      assert.throws(() => execFileSync('/usr/bin/sandbox-exec', ['-p', profile, '/bin/cat', path], { stdio: 'pipe' }));
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

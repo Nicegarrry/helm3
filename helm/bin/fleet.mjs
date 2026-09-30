@@ -1,3 +1,4 @@
+import { daemonAuthorization } from './daemon-auth.mjs';
 /** Read-only mobile fleet snapshot publisher. It never opens SQLite or controls Helm. */
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
@@ -175,7 +176,7 @@ export function stateUrl(port) {
 export async function fetchState(home, request = fetch) {
   const servePath = join(home, 'serve.json');
   if (!existsSync(servePath)) throw new Error('Helm daemon is not advertising serve.json');
-  const response = await request(stateUrl(parseServeJson(readFileSync(servePath, 'utf8'))), { redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), headers: { accept: 'application/json' } });
+  const response = await request(stateUrl(parseServeJson(readFileSync(servePath, 'utf8'))), { redirect: 'error', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), headers: { authorization: daemonAuthorization(home), accept: 'application/json' } });
   if (!response.ok) throw new Error(`Helm /api/state returned HTTP ${response.status}`);
   const state = await response.json();
   validateState(state);

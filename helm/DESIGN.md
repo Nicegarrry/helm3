@@ -40,6 +40,15 @@ Codex-side warning that is not a failure), `gate` ({gateId,passed}), `pr` ({numb
 `stop.requested`, `pr.merged`, `inbox.triage`. `sessionFile` is a Pi session path on the Pi lane and `codex-thread:<uuid>`
 on the Codex lane; only the runner that wrote it reads it.
 
+The loopback HTTP boundary retains its Host/origin check and requires
+`Authorization: Bearer <token>` on every route, including MCP and status. Each daemon
+start creates a random token in `$HELM_HOME/serve.json` with port/pid and mode `0600`;
+comparison uses `timingSafeEqual`, and authentication failures return an empty 401.
+In-repo clients read the file at call time; external HTTP MCP clients must refresh it on
+connect/reconnect, or use the stdio proxy. Tokens stay out of logs, events and worker env.
+The gate sandbox denies reading daemon metadata, but Codex workers can still read it;
+see README.md for network limits and the permission-profile follow-up.
+
 Tool outcomes never throw across the MCP or HTTP boundary: `{ ok: true, ... }` or
 `{ ok: false, reason }`.
 

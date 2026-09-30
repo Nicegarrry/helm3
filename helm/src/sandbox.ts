@@ -89,7 +89,7 @@ async function canonicalPath(path: string): Promise<string> {
 }
 
 /** The deny list shared by every worker-facing macOS sandbox. */
-export function credentialPaths(home: string): readonly string[] {
+export function credentialPaths(home: string, helmHome = join(home, '.helm')): readonly string[] {
   return [
     join(home, '.config'),
     join(home, '.ssh'),
@@ -111,7 +111,7 @@ export function credentialPaths(home: string): readonly string[] {
     join(home, 'Library', 'Keychains'),
     join(home, 'Library', 'Application Support'),
     join(home, '.helm'),
-    join(process.env.HELM_HOME || join(home, '.helm'), 'serve.json'),
+    join(helmHome, 'serve.json'),
   ];
 }
 
@@ -175,6 +175,9 @@ export function buildSandboxProfile(options: {
   }
 
   for (const home of homes) {
+    // The operator HOME is deny-by-default. Later rules re-open only the
+    // worktree, git metadata, toolchain, git config, and cache paths needed by
+    // a gate; system paths remain readable through the root read grant above.
     lines.push(`(deny file-read* ${subpath(home)})`);
     for (const path of credentialPaths(home)) {
       if (path.endsWith(join('', '.yarnrc'))) {
@@ -188,7 +191,9 @@ export function buildSandboxProfile(options: {
     lines.push(`(allow file-read* ${subpath(join(home, '.config', 'git'))})`);
   }
 
-  // Re-open traversal metadata without granting contents.
+  // Denying file-read* also blocks lstat/realpath traversal. Re-open metadata
+  // only for protected homes and every directory needed to reach a read-only
+  // exception; contents remain governed by the rules above and below.
   for (const path of metadataPaths) lines.push(`(allow file-read-metadata ${literal(path)})`);
 
   // A worktree can live below ~/.helm, and its .git file can point at a real git dir.
@@ -279,7 +284,9 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
   try {
     const home = join(tempDir, 'home');
     await mkdir(home, { recursive: true });
-    // Seatbelt matches canonical /private/var paths, not /var aliases.
+    // macOS exposes temporary paths through /var, while Seatbelt matches the
+    // canonical /private/var paths. Generate rules for the paths the kernel
+    // evaluates, or temporary worktrees and credential fixtures bypass them.
     const [profileCwd, profileTempDir, profileHome, ...profileOperatorHomes] = await Promise.all([
       canonicalPath(options.cwd),
       canonicalPath(tempDir),

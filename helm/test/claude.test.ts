@@ -163,6 +163,8 @@ test('run: stream-json result, session id, subscription usage and sanitized envi
   const [call] = await f.calls();
   assert.equal(await realpath(call!.cwd), await realpath(f.worktree));
   assert.ok(call!.stdin.startsWith('Add the flag\n\n') && call!.stdin.endsWith(RESULT_INSTRUCTION));
+  const settings = JSON.parse(call!.args[call!.args.indexOf('--settings') + 1]!);
+  assert.ok(settings.sandbox.filesystem.denyRead.includes('/secret/helm/serve.json'));
   assert.equal(call!.env.HELM_HOME, undefined);
   assert.equal(call!.env.HELM_SPEND_CAP_USD, undefined);
   assert.equal(call!.env.CG_API_KEY, undefined);
@@ -241,4 +243,9 @@ test('available: explicit Claude binaries are discoverable', async () => {
   const f = await fixture('ok');
   assert.equal(available({ bin: f.bin }), true);
   assert.equal(available({ bin: join(f.root, 'missing-claude') }), false);
+});
+
+test('Claude settings deny the explicitly supplied daemon metadata path', () => {
+  const settings = JSON.parse(claudeSandboxSettings('/wt', '/tmp/worker', { gitDir: '/git', commonDir: '/git' }, false, '/custom/helm'));
+  assert.ok(settings.sandbox.filesystem.denyRead.includes('/custom/helm/serve.json'));
 });

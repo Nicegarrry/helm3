@@ -1,4 +1,3 @@
-import { daemonAuthorization } from '../bin/daemon-auth.mjs';
 /**
  * Provider-free end-to-end smoke: real SQLite store, real git worktree, real gate
  * runner, real Pi session on the faux provider, real HTTP daemon. Only GitHub is
@@ -10,6 +9,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { daemonAuthorization } from '../bin/daemon-auth.mjs';
 import { promisify } from 'node:util';
 import { gateRunner } from '../src/gate.ts';
 import { Helm } from '../src/helm.ts';

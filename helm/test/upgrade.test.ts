@@ -1,4 +1,4 @@
-import { daemonAuthorization } from '../bin/daemon-auth.mjs';
+/** Real daemon handover and recovery checks for the standalone upgrade helper. */
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
+import { daemonAuthorization } from '../bin/daemon-auth.mjs';
 import { control, digestRelease, stageRelease, launchUpgrade } from '../bin/update.mjs';
 import { openStore } from '../src/store.js';
 import { Lifecycle } from '../src/lifecycle.js';
@@ -259,4 +260,21 @@ test('release digest covers installed and linked dependencies', (t) => {
   assert.notEqual(digestRelease(root), before);
   symlinkSync(root, join(dependency, 'cycle'), 'dir');
   assert.throws(() => digestRelease(root), /symlink cycle/);
+});
+
+test('token-aware upgrade helper checks and resumes a token-requiring daemon', async (t) => {
+  const home = testHome(t);
+  const lifecycle = new Lifecycle(home, () => []);
+  lifecycle.drain();
+  const server = await serve({ helm: { config: { home }, lifecycle } as unknown as Helm });
+  t.after(() => server.close());
+  assert.match(read(join(home, 'serve.json')).token, /^[a-f0-9]{64}$/);
+  const unauthenticated = await fetch(`http://127.0.0.1:${server.port}/tools/daemon.control`, {
+    method: 'POST', body: JSON.stringify({ action: 'resume' }),
+  });
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(await unauthenticated.text(), '');
+  assert.equal((await control(server.port!, { action: 'status' }, home)).phase, 'ready');
+  assert.equal((await control(server.port!, { action: 'resume' }, home)).phase, 'accepting');
+  assert.equal((await control(server.port!, { action: 'status' }, home)).phase, 'accepting');
 });

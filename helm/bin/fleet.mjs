@@ -1,9 +1,9 @@
-import { daemonAuthorization } from './daemon-auth.mjs';
 /** Read-only mobile fleet snapshot publisher. It never opens SQLite or controls Helm. */
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { daemonAuthorization } from './daemon-auth.mjs';
 
 export const API_ORIGIN = 'https://here.now';
 export const SNAPSHOT_MAX_BYTES = 15000;

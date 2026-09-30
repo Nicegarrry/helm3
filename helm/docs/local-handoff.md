@@ -49,7 +49,9 @@ Do not proceed until `npm test` in `helm/` is green on this machine.
 
 1. Start the daemon in its own terminal and keep it running:
    `HELM_SPEND_CAP_USD=<cap> HELM_HOME=~/.helm ./helm/bin/helm.js serve --http --port 4747`
-   Open `http://127.0.0.1:4747/` in a browser and leave it open.
+   Use `helm ps` or `helm daemon --action status --json` to inspect it. A bare browser
+   request to `http://127.0.0.1:4747/` returns 401: every HTTP route requires
+   `Authorization: Bearer <token>` using the current token in `$HELM_HOME/serve.json`.
 2. Smoke on the free model with a synthetic task in a scratch repo you create locally
    (`git init` a temp dir with a README and a `helm.json` gate such as `test -f hello.txt`):
    `helm spawn --repo <scratch> --objective "Create hello.txt containing a greeting" --model <free>`
@@ -90,7 +92,10 @@ Add `helm/.mcp.example.json` to the target repo's `.mcp.json` with the real path
 target repo and give it one task in plain English, telling it to use only the `helm` tools to
 do the work. It should spawn, poll, gate, open the PR and request a review without you
 touching Helm. Paste the tool-call sequence into `helm/evidence/live.md`. If Codex is the
-orchestrator instead, point it at `http://127.0.0.1:4747/mcp`.
+orchestrator instead, prefer the same stdio setup. For HTTP, point it at
+`http://127.0.0.1:4747/mcp` and read the token from `$HELM_HOME/serve.json` at connect
+and reconnect time, sending `Authorization: Bearer <token>` on every request. The token
+rotates on every daemon restart; do not keep a fixed token in client configuration.
 
 ## 6. Merge
 

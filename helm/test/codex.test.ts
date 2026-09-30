@@ -90,7 +90,7 @@ test('codexArgs: builders get workspace-write with -C, reviewers read-only, resu
   assert.ok(build.includes('sandbox_mode="workspace-write"'));
   assert.ok(build.includes('model_reasoning_effort="xhigh"'));
   assert.deepEqual(build.slice(-3), ['-C', '/wt', '-']);
-  assert.ok(!build.includes('sandbox_workspace_write.network_access=true'), 'network is off unless asked for');
+  assert.ok(build.includes('sandbox_workspace_write.network_access=false'), 'network is explicitly off unless asked for');
   const review = codexArgs({ role: 'reviewer', worktree: '/wt' }, { model: 'gpt-5.6-terra' }, null, '/s/last.md', true);
   assert.ok(review.includes('sandbox_mode="read-only"'));
   assert.ok(!review.some((a) => a.startsWith('model_reasoning_effort')), 'no effort flag when none was named');
@@ -100,6 +100,7 @@ test('codexArgs: builders get workspace-write with -C, reviewers read-only, resu
   const resume = codexArgs({ role: 'builder', worktree: '/wt' }, { model: 'gpt-6-astra' }, 'abc-123', '/s/last.md', false);
   assert.deepEqual(resume.slice(0, 3), ['exec', 'resume', 'abc-123']);
   assert.ok(!resume.includes('-C'), 'exec resume does not take -C');
+  assert.ok(resume.includes('sandbox_workspace_write.network_access=false'), 'resume also pins network off');
   assert.ok(resume.includes('-m') && resume[resume.indexOf('-m') + 1] === 'gpt-6-astra', 'resume must name the model or Codex falls back to its config default');
 });
 

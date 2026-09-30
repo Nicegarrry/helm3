@@ -87,6 +87,7 @@ export function claudeSandboxSettings(
   temporaryDirectory: string,
   gitDirs: ClaudeGitDirs,
   reviewer = false,
+  helmHome = join(homedir(), '.helm'),
 ): string {
   return JSON.stringify({
     sandbox: {
@@ -99,7 +100,7 @@ export function claudeSandboxSettings(
         allowRead: [...new Set([worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
         allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
         denyWrite: [gitDirs.gitDir, gitDirs.commonDir, join(worktree, '.git')],
-        denyRead: credentialPaths(homedir()),
+        denyRead: credentialPaths(homedir(), helmHome),
       },
       network: {
         allowedDomains: [],
@@ -115,6 +116,7 @@ export function claudeArgs(
   sessionId: string | null,
   temporaryDirectory: string,
   gitDirs: ClaudeGitDirs,
+  helmHome = join(homedir(), '.helm'),
 ): string[] {
   const reviewer = input.role === 'reviewer';
   const allowedTools = reviewer ? 'Read,Glob,Grep,Bash' : 'Read,Edit,Write,Glob,Grep,Bash';
@@ -130,7 +132,7 @@ export function claudeArgs(
     '--restricted', '--safe-mode',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--setting-sources', '', '--permission-prompts', 'none',
-    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory, gitDirs, reviewer),
+    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory, gitDirs, reviewer, helmHome),
     '--permission-mode', reviewer ? 'plan' : 'acceptEdits',
     '--tools', allowedTools,
     ...disallowedTools.flatMap((tool) => ['--disallowedTools', tool]),
@@ -191,7 +193,7 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
 
       const turn = async (prompt: string): Promise<string> => {
         hooks.emit('turn.start', { message: prompt });
-        const child = spawn(bin, claudeArgs(input, spec, sessionId, temporaryDirectory, gitDirs), { cwd: input.worktree, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn(bin, claudeArgs(input, spec, sessionId, temporaryDirectory, gitDirs, sourceEnv.HELM_HOME || join(homedir(), '.helm')), { cwd: input.worktree, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
         let spawnError: Error | null = null;
         child.on('error', (err) => { spawnError = err; });
         child.stdin.on('error', () => undefined);

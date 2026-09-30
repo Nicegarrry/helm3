@@ -6,7 +6,7 @@ import { delimiter, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import test from 'node:test';
 import { gateRunner } from '../src/gate.js';
-import { buildSandboxProfile, minimalGateEnv, operatorHomePaths, resolveDarwinGitDir, sandboxExecutable, worktreeGitDirs } from '../src/sandbox.js';
+import { buildSandboxProfile, credentialPaths, minimalGateEnv, operatorHomePaths, resolveDarwinGitDir, sandboxExecutable, worktreeGitDirs } from '../src/sandbox.js';
 
 const sandboxUsable = process.platform === 'darwin' && Boolean(sandboxExecutable()) && (() => {
   try { execFileSync('/usr/bin/sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true']); return true; } catch { return false; }
@@ -327,4 +327,9 @@ test('native gate cannot read daemon metadata even through a symlink in its work
       assert.throws(() => execFileSync('/usr/bin/sandbox-exec', ['-p', profile, '/bin/cat', path], { stdio: 'pipe' }));
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('credentialPaths uses the supplied Helm home without consulting the process environment', () => {
+  assert.ok(credentialPaths('/Users/operator', '/private/tmp/isolated-helm').includes('/private/tmp/isolated-helm/serve.json'));
+  assert.ok(credentialPaths('/Users/operator').includes('/Users/operator/.helm/serve.json'));
 });

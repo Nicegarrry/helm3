@@ -6,7 +6,7 @@ import { delimiter, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import test from 'node:test';
 import { gateRunner } from '../src/gate.js';
-import { buildSandboxProfile, minimalGateEnv, operatorHomePaths, sandboxExecutable, worktreeGitDirs } from '../src/sandbox.js';
+import { buildSandboxProfile, minimalGateEnv, operatorHomePaths, resolveDarwinGitDir, sandboxExecutable, worktreeGitDirs } from '../src/sandbox.js';
 
 const sandboxUsable = process.platform === 'darwin' && Boolean(sandboxExecutable()) && (() => {
   try { execFileSync('/usr/bin/sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true']); return true; } catch { return false; }
@@ -23,8 +23,7 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const tempDir = '/private/tmp/helm-gate-123';
   const tempHome = join(tempDir, 'home');
   const daemonSocket = '/private/tmp/helm-daemon.sock';
-  const darwinTempDir = '/private/var/folders/vn/test/T';
-  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gateHome: tempHome, toolchainPaths: [join(home, '.nvm', 'versions', 'node', 'v22', 'bin')], npmCachePaths: [join(home, '.npm')], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', denyLocalSocketPaths: [daemonSocket], darwinTempDir, allowNetwork: false });
+  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gateHome: tempHome, toolchainPaths: [join(home, '.nvm', 'versions', 'node', 'v22', 'bin')], npmCachePaths: [join(home, '.npm')], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', denyLocalSocketPaths: [daemonSocket], allowNetwork: false });
 
   assert.match(profile, new RegExp(`\\(deny file-read\\* \\(subpath "${home.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.config"\)\)/);
@@ -39,8 +38,7 @@ test('generated profile denies credentials and writes outside the worktree', () 
   assert.match(profile, new RegExp(`\\(deny file-write\\* \\(subpath "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}/\\.git"\\)\\)`));
   assert.match(profile, /\(deny network\*\)/);
   assert.match(profile, /\(allow signal \(target same-sandbox\)\)/);
-  assert.ok(profile.includes(`(allow file-write* (regex "^${darwinTempDir}/xcrun_db-[^/]+$"))`));
-  assert.ok(profile.includes(`(allow file-write* (literal "${darwinTempDir}/xcrun_db"))`));
+  assert.doesNotMatch(profile, /xcrun_db/);
   for (const path of [tempDir, cwd]) {
     assert.match(profile, new RegExp(`\\(allow network\\* \\(local unix-socket \\(subpath "${path.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}"\\)\\)\\)`));
     assert.match(profile, new RegExp(`\\(allow network\\* \\(remote unix-socket \\(subpath "${path.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}"\\)\\)\\)`));
@@ -52,8 +50,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const tempRead = profile.indexOf(`(allow file-read* (subpath "${tempDir}"))`);
   const homeDeny = profile.indexOf(`(deny file-read* (subpath "${home}"))`);
   assert.ok(tempRead >= 0 && homeDeny >= 0 && homeDeny < tempRead, 'HOME deny must precede disposable temp HOME re-allow');
-  assert.deepEqual(minimalGateEnv('/private/tmp/helm-gate-123/home', tempDir), {
-    PATH: process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin',
+  assert.deepEqual(minimalGateEnv('/private/tmp/helm-gate-123/home', tempDir, '/Library/Developer/CommandLineTools/usr/bin'), {
+    PATH: ['/Library/Developer/CommandLineTools/usr/bin', process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin'].join(delimiter),
     HOME: '/private/tmp/helm-gate-123/home',
     LANG: process.env.LANG ?? 'C',
     TMPDIR: tempDir,
@@ -65,6 +63,17 @@ test('generated profile denies credentials and writes outside the worktree', () 
     GIT_CONFIG_KEY_1: 'maintenance.auto',
     GIT_CONFIG_VALUE_1: 'false',
   });
+});
+
+test('gate environments prefer the resolved real git directory', async () => {
+  const gitDir = await resolveDarwinGitDir();
+  const env = minimalGateEnv('/private/tmp/helm-gate-123/home', '/private/tmp/helm-gate-123', gitDir);
+  if (process.platform === 'darwin') {
+    assert.ok(gitDir);
+    assert.equal(env.PATH?.split(delimiter)[0], gitDir);
+  } else {
+    assert.equal(env.PATH, process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin');
+  }
 });
 
 test('install profiles retain unrestricted network access', () => {

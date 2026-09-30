@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 export type GateSandbox = Readonly<{
@@ -53,10 +53,20 @@ function validPorts(ports: readonly number[]): number[] {
   return [...new Set(ports.filter((port) => Number.isInteger(port) && port >= 1 && port <= 65_535))];
 }
 
-function darwinTempRoot(path: string): string {
-  const parts = resolve(path).split(sep);
-  const tempIndex = parts.lastIndexOf('T');
-  return tempIndex >= 0 ? parts.slice(0, tempIndex + 1).join(sep) || sep : resolve(path);
+let darwinGitDirPromise: Promise<string | undefined> | undefined;
+
+/** Resolve Apple's real git binary once per daemon process so gates avoid /usr/bin/git's xcrun shim. */
+export function resolveDarwinGitDir(): Promise<string | undefined> {
+  if (process.platform !== 'darwin') return Promise.resolve(undefined);
+  if (darwinGitDirPromise) return darwinGitDirPromise;
+  const resolved = exec('xcrun', ['--find', 'git'], { timeout: 10_000 })
+    .then(({ stdout }) => {
+      const path = stdout.trim();
+      return path ? dirname(path) : undefined;
+    })
+    .catch(() => undefined);
+  darwinGitDirPromise = resolved;
+  return resolved;
 }
 
 function ancestors(paths: readonly string[]): string[] {
@@ -115,13 +125,10 @@ export function buildSandboxProfile(options: {
   gitDirs?: readonly string[];
   denyLocalPorts?: readonly number[];
   denyLocalSocketPaths?: readonly string[];
-  darwinTempDir?: string;
   allowNetwork: boolean;
 }): string {
   const cwd = resolve(options.cwd);
   const tempDir = resolve(options.tempDir);
-  const darwinTempDir = resolve(options.darwinTempDir ?? darwinTempRoot(tempDir));
-  const darwinTempPattern = darwinTempDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const gitDirs = unique([options.gitDir ?? '', ...(options.gitDirs ?? [])].filter(Boolean));
   const readOnlyExceptions = unique([
     cwd,
@@ -150,8 +157,6 @@ export function buildSandboxProfile(options: {
     `(allow file-write* ${subpath(tempDir)})`,
     `(deny file-write* ${subpath(join(cwd, '.git'))})`,
     '(allow signal (target same-sandbox))',
-    `(allow file-write* ${regex(`^${darwinTempPattern}/xcrun_db-[^/]+$`)})`,
-    `(allow file-write* ${literal(join(darwinTempDir, 'xcrun_db'))})`,
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
   ];
 
@@ -209,9 +214,9 @@ export async function worktreeGitDirs(cwd: string): Promise<string[]> {
   }
 }
 
-export function minimalGateEnv(home: string, tempDir: string): NodeJS.ProcessEnv {
+export function minimalGateEnv(home: string, tempDir: string, gitDir?: string): NodeJS.ProcessEnv {
   return {
-    PATH: process.env.PATH ?? FALLBACK_PATH,
+    PATH: [gitDir, process.env.PATH ?? FALLBACK_PATH].filter(Boolean).join(delimiter),
     HOME: home,
     LANG: process.env.LANG ?? 'C',
     TMPDIR: tempDir,
@@ -291,12 +296,11 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
       gitDirs: await worktreeGitDirs(profileCwd),
       denyLocalPorts: options.denyLocalPorts,
       denyLocalSocketPaths: await Promise.all((options.denyLocalSocketPaths ?? []).map((path) => canonicalPath(path))),
-      darwinTempDir: darwinTempRoot(profileTempDir),
       allowNetwork: options.allowNetwork,
     });
     const profilePath = join(tempDir, 'profile.sb');
     await writeFile(profilePath, profile, 'utf8');
-    return { executable, env: minimalGateEnv(home, tempDir), home, tempDir, profilePath };
+    return { executable, env: minimalGateEnv(home, tempDir, await resolveDarwinGitDir()), home, tempDir, profilePath };
   } catch (error) {
     await disposeGateSandbox(tempDir);
     throw error;
@@ -307,7 +311,7 @@ export async function prepareUnsandboxedGate(): Promise<Omit<GateSandbox, 'execu
   const tempDir = await mkdtemp(join(tmpdir(), 'helm-gate-'));
   const home = join(tempDir, 'home');
   await mkdir(home, { recursive: true });
-  return { env: minimalGateEnv(home, tempDir), home, tempDir };
+  return { env: minimalGateEnv(home, tempDir, await resolveDarwinGitDir()), home, tempDir };
 }
 
 export async function disposeGateSandbox(tempDir: string): Promise<void> {

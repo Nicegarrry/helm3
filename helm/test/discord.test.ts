@@ -63,13 +63,32 @@ test('maps milestone events, batches them, and never leaks the webhook URL', asy
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.url, sentinel);
     const payload = JSON.parse(calls[0]!.body) as { content: string; username: string; allowed_mentions: { parse: string[] } };
-    assert.match(payload.content, /PR opened: #7/);
-    assert.match(payload.content, /Merged: #7/);
+    assert.match(payload.content, /#7/);
     assert.match(payload.content, /Needs Nick/);
     assert.equal(payload.username, 'Helm');
     assert.deepEqual(payload.allowed_mentions, { parse: [] });
     assert.equal(logs.some((line) => line.includes(sentinel)), false);
     assert.equal(JSON.stringify(store.listAllEvents()).includes(sentinel), false);
+  } finally { store.close(); }
+});
+
+test('formats dispatch, PR, merge, and deployment milestone lines', async () => {
+  const store = openStore(':memory:');
+  const bodies: string[] = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: { 'o/r': { webhookEnv: 'HELM_TEST_WEBHOOK' }, 'o/other': { webhookEnv: 'HELM_TEST_WEBHOOK_2' } }, digestSec: 60, maxPerHour: 20 } }, env: { HELM_TEST_WEBHOOK: 'https://discord.test/one', HELM_TEST_WEBHOOK_2: 'https://discord.test/two' }, now: () => clock,
+      fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('w-1', 'dispatched', { project: 'o/r', issue: 260, title: 'Discord milestones', model: 'codex/model', tier: 3 });
+    store.appendEvent('w-1', 'pr', { project: 'o/r', number: 12, title: 'PR title', url: 'https://github.test/12', updated: true });
+    store.appendEvent('w-1', 'pr.merged', { project: 'o/r', number: 12, title: 'PR title', base: 'main', url: 'https://github.test/12' });
+    store.appendEvent('project:o/r', 'deploy', { project: 'o/r', target: 'prod', env: 'production', sha: 'abcdef1', url: 'https://app.test', pr: 12, issue: 260 });
+    await discord.tick(); clock = new Date(clock.getTime() + 60_000); await discord.tick();
+    const content = bodies.map((body) => JSON.parse(body) as { content: string }).map((body) => body.content).join('\n');
+    assert.match(content, /Dispatched w-1 on #260 Discord milestones \(codex\/model, tier 3\)/);
+    assert.match(content, /PR updated: o\/r #12 PR title https:\/\/github\.test\/12/);
+    assert.match(content, /o\/r #12 PR title merged into main https:\/\/github\.test\/12/);
+    assert.match(content, /Deployed: prod production abcdef1 https:\/\/app\.test PR #12 issue #260/);
   } finally { store.close(); }
 });
 

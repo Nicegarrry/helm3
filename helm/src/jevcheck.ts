@@ -6,9 +6,12 @@ export type JevCheckInput = Readonly<{ preset: JevPreset; project?: string; inpu
 
 const testable = 'Does this ticket state a concrete, checkable definition of done (specific commands, tests, files or observable behaviour an automated gate or reviewer can verify)?';
 const tooBig = 'Is this ticket too big or too multi-part for one coding worker in one session, such that it should have been split into smaller tickets?';
-const complexity = ['trivial: a mechanical copy, one-line change or read-only check', 'small: one file or one focused function plus a test', 'medium: several files or one subsystem, needs design judgement', 'large: many files across subsystems, UI plus backend, or several loosely related items'];
+const complexity = { type: 'score', instructions: 'How much engineering capability does a coding agent need to complete this ticket correctly (reading, editing, testing), judged from its scope, risk and number of moving parts?', criteria: ['trivial: a mechanical copy, rename, one-line change, config or doc edit', 'small: one file or one focused function plus a test', 'medium: several files or one subsystem; needs design judgement', 'hard: cross-subsystem change, or concurrency, security or data-migration risk', 'challenging: novel architecture, ambiguous requirements, or deep debugging across many components'] } as const;
+const tierLabels = ['trivial', 'small', 'medium', 'hard', 'challenging'] as const;
+export type JevTier = 1 | 2 | 3 | 4 | 5;
+export type JevScoreTier = Readonly<{ score: number; tier: JevTier; label: (typeof tierLabels)[number] }>;
 
-export function issueQuestions(): Record<string, JevQuestion> { return { testable: { type: 'noul', instructions: testable, criteria: { true: 'done is objectively checkable', false: 'done is vague or left to judgement' } }, too_big: { type: 'noul', instructions: tooBig, criteria: { true: 'should be split', false: 'fits one worker' } }, complexity: { type: 'score', instructions: 'How much engineering work will a competent coding agent need to complete this ticket (reading, editing, testing), judged from its scope and number of moving parts?', criteria: complexity } }; }
+export function issueQuestions(): Record<string, JevQuestion> { return { testable: { type: 'noul', instructions: testable, criteria: { true: 'done is objectively checkable', false: 'done is vague or left to judgement' } }, too_big: { type: 'noul', instructions: tooBig, criteria: { true: 'should be split', false: 'fits one worker' } }, complexity }; }
 function numberOf(answer: JevAnswer | undefined, name: string): number | boolean | undefined {
   if (!answer) return undefined;
   if (typeof answer.noul === 'number' || typeof answer.noul === 'boolean') return answer.noul;
@@ -22,12 +25,17 @@ export function score(answer: JevAnswer | undefined): number | undefined {
   if (typeof answer?.score === 'number' && Number.isFinite(answer.score)) return answer.score;
   const probabilities = answer?.probabilities;
   if (!probabilities) return undefined;
-  const values = [0, 1, 2, 3].map((value) => probabilities[String(value)] ?? 0);
+  const values = [0, 1, 2, 3, 4].map((value) => probabilities[String(value)] ?? 0);
   return values.every((value) => Number.isFinite(value)) ? Math.round(values.reduce((total, value, valueIndex) => total + value * valueIndex, 0) * 10_000) / 10_000 : undefined;
 }
 function text(value: unknown, limit = 3000): string { return (typeof value === 'string' ? value : JSON.stringify(value) ?? '').slice(0, limit); }
 function relation(answer: JevAnswer | undefined): { different: number; related: number; same: number } { return { different: answer?.probabilities?.['0'] ?? 0, related: answer?.probabilities?.['1'] ?? 0, same: answer?.probabilities?.['2'] ?? 0 }; }
-export function band(score: unknown): string | undefined { if (typeof score !== 'number' || !Number.isFinite(score)) return undefined; return score < 0.75 ? 'trivial' : score < 1.5 ? 'small' : score < 2.25 ? 'medium' : 'large'; }
+export function scoreTier(answer: JevAnswer | undefined): JevScoreTier | undefined {
+  const value = score(answer);
+  if (value === undefined) return undefined;
+  const tier: JevTier = value < 0.8 ? 1 : value < 1.6 ? 2 : value < 2.4 ? 3 : value < 3.2 ? 4 : 5;
+  return { score: value, tier, label: tierLabels[tier - 1]! };
+}
 
 export type JevCheckService = Readonly<{ check(input: JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>>; label(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> }>;
 
@@ -37,8 +45,8 @@ export function createJevCheck({ jev, store }: { jev: Jev; store: Store }): JevC
     if (input.preset === 'issue') {
       const result = await ask('issue', input.project, input.input, issueQuestions());
       if (!result.ok) return result;
-      const scoreValue = score(result.answers.complexity);
-      return { ok: true, flags: { testable: flag(result.answers.testable, 'true', false), too_big: flag(result.answers.too_big, 'true', true) }, complexity: { score: scoreValue, band: band(scoreValue) }, answers: result.answers };
+      const scoreTierValue = scoreTier(result.answers.complexity);
+      return { ok: true, flags: { testable: flag(result.answers.testable, 'true', false), too_big: flag(result.answers.too_big, 'true', true) }, complexity: scoreTierValue ?? {}, answers: result.answers };
     }
     if (input.preset === 'verdict') {
       const result = await ask('verdict', input.project, { body: text(input.input, 6000) }, { verdict: { type: 'noul', instructions: 'Does this code review approve the change for merge (as opposed to requesting changes)?' } });

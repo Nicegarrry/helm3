@@ -81,22 +81,32 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
 Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Nothing throws across the
 boundary.
 
-## Model selection
+## Model routing
 
-Omit `model` to use the following policy on both CLI and MCP:
+When `model` and `difficulty` are omitted, Jev scores the ticket from 0 through 4 and
+maps the expected value to tier 1 through 5. Helm checks each tier's candidates in order,
+skipping models that are not allowed, unavailable, or below the scorecard clean-rate
+threshold. A higher tier is tried when the current tier has no usable candidate.
 
-| Task tier | Model | Runtime |
-| --- | --- | --- |
-| Normal (default) | `codex/gpt-5.6-terra:medium` | Codex CLI, ChatGPT subscription |
-| Easy | `codex/gpt-5.6-luna:medium` | Codex CLI, ChatGPT subscription |
-| Super easy | `opencode-go/qwen3.8-flash` | Pi |
-| Review of any of these | `google/gemini-3.8-flash` | Pi |
+| Tier | Ordered candidates (cheapest first) |
+| --- | --- |
+| 1 | `opencode-go/qwen3.8-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, `codex/gpt-5.6-luna:medium` |
+| 2 | `google/gemini-3.8-flash`, `codex/gpt-5.6-luna:high` |
+| 3 | `claude/sonnet:high`, `codex/gpt-5.6-terra:high` |
+| 4 | `codex/gpt-5.6-sol:medium`, `claude/opus:medium` |
+| 5 | `codex/gpt-5.6-astra:high`, `claude/opus:high`, `claude/fable:high` |
 
-Use `helm spawn --repo /path/to/repo --objective "…" --difficulty easy` or pass
-`difficulty: "easy"` to `worker.spawn`. The caller classifies the task; Helm does not
-infer difficulty from the objective. `super-easy` is for small, mechanical work.
-An explicit `--model` (MCP `model`) overrides the tier. Kimi K3 and Qwen 3.8 Max are
-never selected automatically, including on failures; explicit overrides remain available.
+The Qwen entry uses Helm's existing `opencode-go/qwen3.8-flash` Pi lane: the local Pi
+catalog does not expose the requested `openrouter/qwen/qwen3.8-flash` identifier. Gemini
+3.8 Flash is present in Pi's Google catalog. `claude/*` candidates remain unavailable
+until Helm has a Claude worker lane. The table, `allowed`, `minClean`, and `minN` are
+hot-reloaded from `$HELM_HOME/helm.json` for each automatic route.
+
+Retrospectives should review the 30-day model × tier scorecard, then edit the ordered
+`routing.tiers` lists or `routing.allowed` in `helm.json`. Keep the cheapest acceptable
+candidate first, and use a later candidate or higher tier when the clean rate is below
+`minClean` with at least `minN` observations. Explicit `model` and `difficulty` values
+still bypass Jev routing.
 
 `helm review <id>` / `review.request` also accepts an omitted model. Reviews default to
 Gemini Flash; if an explicitly selected builder is Gemini, the default reviewer is Codex

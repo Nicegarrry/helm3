@@ -10,9 +10,16 @@ const BUDGET_DEFAULTS = { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 };
 const FACTORY_DEFAULTS = { claims: 'block' as const, claimsAt: 0.7, verdictAt: 0.5, retryMax: 2, envelopeTapAt: 0.5, tapTtlMin: 60 };
 const QUEUE_DEFAULTS = { tickSec: 30, checksTimeoutMin: 30 };
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
+const ROUTING_TIERS_DEFAULTS: Record<string, string[]> = {
+  1: ['opencode-go/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-5.6-luna:medium'],
+  2: ['google/gemini-3.8-flash', 'codex/gpt-5.6-luna:high'],
+  3: ['claude/sonnet:high', 'codex/gpt-5.6-terra:high'],
+  4: ['codex/gpt-5.6-sol:medium', 'claude/opus:medium'],
+  5: ['codex/gpt-5.6-astra:high', 'claude/opus:high', 'claude/fable:high'],
+};
 const ROUTING_DEFAULTS = {
-  table: { trivial: 'codex/gpt-5.6-luna:medium', small: 'codex/gpt-5.6-luna:medium', medium: 'codex/gpt-5.6-luna:medium', large: 'codex/gpt-5.6-luna:high' },
-  allowed: ['codex/gpt-5.6-luna:medium', 'codex/gpt-5.6-luna:high'], minClean: 0.5, minN: 8,
+  tiers: ROUTING_TIERS_DEFAULTS,
+  allowed: Object.values(ROUTING_TIERS_DEFAULTS).flat(), minClean: 0.5, minN: 8,
 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
@@ -68,7 +75,7 @@ const settingsSchema = z.object({
     lessons: z.enum(['off', 'shadow', 'on']).default('shadow'),
   }).default(SELECT_DEFAULTS),
   routing: z.object({
-    table: z.record(z.string(), z.string()).default(ROUTING_DEFAULTS.table),
+    tiers: z.record(z.string(), z.array(z.string().min(1))).default(ROUTING_DEFAULTS.tiers),
     allowed: z.array(z.string()).default(ROUTING_DEFAULTS.allowed),
     minClean: z.number().default(0.5),
     minN: z.number().int().default(8),
@@ -107,6 +114,10 @@ export function loadSettings(home: string): Settings {
   if (!parsed.success) {
     console.error(`invalid ${path}; using defaults`);
     return DEFAULT_SETTINGS;
+  }
+  const routingRaw = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).routing : undefined;
+  if (routingRaw && typeof routingRaw === 'object' && !Array.isArray(routingRaw) && !Object.hasOwn(routingRaw, 'allowed')) {
+    return { ...parsed.data, routing: { ...parsed.data.routing, allowed: Object.values(parsed.data.routing.tiers).flat() } };
   }
   return parsed.data;
 }

@@ -108,8 +108,8 @@ test('loadRepoConfig at a sha ignores uncommitted worktree edits', async () => {
 test('worker_meta round-trips and projectOf maps project worker ids', () => {
   const store = openStore(':memory:');
   try {
-    store.setMeta('w-meta', { issue: 177, prBase: 'main', baselineId: 'b1', band: 'medium', complexity: 1.25, skills: ['testing'] });
-    assert.deepEqual(store.getMeta('w-meta'), { workerId: 'w-meta', issue: 177, prBase: 'main', baselineId: 'b1', band: 'medium', complexity: 1.25, skills: ['testing'] });
+    store.setMeta('w-meta', { issue: 177, prBase: 'main', baselineId: 'b1', tier: 3, score: 2.1, chosenModel: 'codex/gpt-5.6-terra:high', skippedCandidates: [{ model: 'claude/sonnet:high', reason: 'no worker lane for claude', tier: 3 }], skills: ['testing'] });
+    assert.deepEqual(store.getMeta('w-meta'), { workerId: 'w-meta', issue: 177, prBase: 'main', baselineId: 'b1', tier: 3, score: 2.1, chosenModel: 'codex/gpt-5.6-terra:high', skippedCandidates: [{ model: 'claude/sonnet:high', reason: 'no worker lane for claude', tier: 3 }], skills: ['testing'] });
     assert.equal(projectOf({ workerId: 'project:owner/name' }), 'owner/name');
   } finally { store.close(); }
 });

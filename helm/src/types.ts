@@ -79,8 +79,10 @@ export type WorkerMeta = Readonly<{
   issue: number | null;
   prBase: string | null;
   baselineId: string | null;
-  band: string | null;
-  complexity: number | null;
+  tier: number | null;
+  score: number | null;
+  chosenModel: string | null;
+  skippedCandidates: readonly Readonly<{ model: string; reason: string; tier: number }>[];
   skills: readonly string[];
 }>;
 

@@ -167,7 +167,7 @@ test('tap.request refuses without a configured tap channel', async () => {
   const d = setup();
   const discord = createDiscord({ store: d.store, settings: { discord: { projects: {}, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_MISSING_TAP' } }, env: {}, fetch: async () => new Response('{}') });
   const result = await requestTap(d.store, { project, kind: 'budget.open', action: BUDGET_TAP_ACTION }, { taps: d.taps, ttlMin: 60, now: () => d.clock, post: discord.postTap, pepper: PEPPER });
-  assert.deepEqual(result, { ok: false, reason: 'no tap channel configured' });
+  assert.deepEqual(result, { ok: false, reason: 'no tap channel: set discord.tapWebhookEnv in helm.json' });
   assert.equal((d.store.sql.prepare('SELECT COUNT(*) AS count FROM taps').get() as { count: number }).count, 0);
   d.store.close();
 });

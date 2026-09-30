@@ -18,6 +18,7 @@ export type EnvelopeView = Readonly<{ rules: string[]; summary: string; hash: st
 export type EnvelopeDecision = Readonly<{ action: string; decision: 'allow' | 'tap' | 'never'; source: 'hard' | 'envelope' | 'jev'; pTap: number | null }>;
 export const defaultEnvelope = (): Envelope => ({ rules: [DEFAULT_RULES], budget: { maxSprintUsd: 25, maxSprintCodexTokens: 20_000_000 }, deploy: { ...DEFAULT_DEPLOY }, tapOnly: [...DEFAULT_TAP_ONLY] });
 export const BUDGET_TAP_ACTION = 'budget.open';
+export const NO_TAP_CHANNEL = 'no tap channel: set discord.tapWebhookEnv in helm.json';
 export const SPEND_CAP_TAP_KIND = 'spend.cap';
 export const SPEND_CAP_TAP_PROJECT = 'global';
 export function spendCapAction(current: { capUsd: number; warnUsd: number; maxWorkers: number }, input: { capUsd?: number; warnUsd?: number; maxWorkers?: number }): string {
@@ -65,12 +66,12 @@ export async function requestTap(store: Store, input: { project: string; kind: s
     store.sql.prepare('INSERT INTO taps (id, project, kind, action, actionHash, codeHash, state, attempts, requestedAt, expiresAt) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)')
       .run(id, input.project, input.kind, input.action, actionHash(input.action), codeMac, 'pending', requestedAt.toISOString(), expiresAt);
     const posted = await options.post(message);
-    if (!posted.ok) throw new Error(posted.reason === 'no tap channel configured' || posted.reason === 'tap channel must differ from the milestone channel' ? posted.reason : 'tap channel post failed');
+    if (!posted.ok) throw new Error(posted.reason);
   } catch (error) {
     options.taps.delete(id);
     store.sql.prepare('DELETE FROM taps WHERE id = ?').run(id);
     const reason = error instanceof Error ? error.message : '';
-    return { ok: false, reason: reason === 'no tap channel configured' || reason === 'tap channel must differ from the milestone channel' ? reason : 'tap channel post failed' };
+    return { ok: false, reason: reason === NO_TAP_CHANNEL || reason === 'tap channel must differ from the milestone channel' ? reason : 'tap channel post failed' };
   }
   return { ok: true, id, expiresAt };
 }
@@ -394,7 +395,7 @@ export async function checkEnvelope(home: string, input: { project: string; acti
   const failClosed = (): EnvelopeDecision[] => decisions.map((decision, index) => decision ?? { action: input.actions[index]!, decision: 'tap', source: 'jev', pTap: null }) as EnvelopeDecision[];
   const questions: Record<string, JevQuestion> = Object.fromEntries(pending.map((index, n) => {
     const action = JSON.stringify(input.actions[index]);
-    return [`a${n}`, { type: 'noul', instructions: `Proposed supervisor action: ${action}\nDoes this action fall outside the autonomy envelope, so it needs a tap from Nick before it runs? If any rule would require a tap, or the action is irreversible and not clearly allowed, answer true.`, criteria: { true: 'tap required', false: 'clearly allowed by the envelope' } }];
+    return [`a${n}`, { type: 'noul', instructions: `Proposed supervisor action: ${action}\nDoes this action fall outside the autonomy envelope, so it needs a tap from the owner before it runs? If any rule would require a tap, or the action is irreversible and not clearly allowed, answer true.`, criteria: { true: 'tap required', false: 'clearly allowed by the envelope' } }];
   }));
   let answers: Record<string, { noul?: unknown }> | undefined;
   try {

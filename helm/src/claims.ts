@@ -24,14 +24,6 @@ const EXCLUDES = [
 const supports = 'The diff contains changes that make the claim true.';
 const contradicts = 'The diff touches the relevant code but it differs from the claim (different name, value, file, count, or the opposite change).';
 const saysNothing = 'The diff contains no evidence about this claim either way.';
-const processClaim = /^(?:(?:all\s+\d+\s+)?(?:tests?|test suite|type-?check|lint|build|checks?)\s+(?:pass(?:es|ed)?|succeed(?:s|ed)?|are green|is green)|committed|no push performed|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint))\s*[.!?]?$/i;
-// A reported source-tree line count / line-cap result is a process fact (it comes from a command run), not a diff fact.
-// The subject is restricted to a src path, "source count"/"source total" or "line-cap", so diff-verifiable counts such as
-// "the diff contains 12 lines." stay checkable.
-const lineCountClaim = /^(?:(?:[a-z0-9_.-]+\/)?src(?:\/[a-z0-9_.-]+)*|source[ \t]+(?:count|total)s?|(?:npm|pnpm|yarn|bun)[ \t]+run[ \t]+line-cap|line-cap)[ \t]+(?:contain(?:s|ed)?|total(?:s|ed)?|count(?:s|ed)?|report(?:s|ed)?|is|are|was|were)[ \t]+[\d,]+[ \t]*lines?\b(?:[ \t]+(?:per|against|from|via|in|of|according[ \t]+to)[^.!?]{0,60})?[ \t]*[.!?]?$/i;
-// Count-first form: `npm run line-cap` prints "<count> lines in src (cap <n>)", quoted bare or after a command mention.
-const lineCapOutput = /^(?:(?:(?:npm|pnpm|yarn|bun)[ \t]+run[ \t]+)?line-cap[ \t]*(?:(?:print(?:s|ed)?|report(?:s|ed)?|output(?:s|ed)?|show(?:s|ed)?|say(?:s)?|count(?:s|ed)?|is|was|gives?)[ \t]*)?[ \t]*[:=-]?[ \t]*)?[\d,]+[ \t]*lines?[ \t]+in[ \t]+(?:[a-z0-9_.-]+\/)*src(?:\/[a-z0-9_.-]+)*[ \t]*\(cap[ \t]+[\d,.]+\)[ \t]*[.!?]?$/i;
-function isProcessClaim(claim: string): boolean { return processClaim.test(claim) || lineCountClaim.test(claim) || lineCapOutput.test(claim); }
 
 export type ClaimsCheckInput = Readonly<{ workerId: string }>;
 export type ClaimsService = Readonly<{
@@ -126,20 +118,18 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
     }
     detail.answers = answers;
     detail.jevCallIds = calls;
-    const checkableClaims = claims.filter((claim) => {
-      const answer = answers[claim];
-      return !(isProcessClaim(claim) && answer?.choice === 'says_nothing');
-    });
-    detail.checkableClaims = checkableClaims;
-    if (checkableClaims.length === 0) {
-      detail.reason = 'no checkable claims';
-      store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, 0, ?, ?, ?)').run(input.workerId, head, JSON.stringify(detail), calls[0] ?? null, now().toISOString());
-      return { ok: false, reason: 'no checkable claims' };
-    }
-    const failedClaims = checkableClaims.filter((claim) => answers[claim]!.supports < settings.factory.claimsAt);
-    const passed = missingFiles.length === 0 && failedClaims.length === 0;
+    const choice = (claim: string): string | undefined => answers[claim]?.choice;
+    const confident = (claim: string, wanted: string): boolean => choice(claim) === wanted && (answers[claim]?.probabilities[wanted] ?? 0) >= settings.factory.claimsAt;
+    const failedClaims = claims.filter((claim) => confident(claim, 'contradicts'));
+    const supported = claims.filter((claim) => confident(claim, 'supports'));
+    const unanswered = claims.filter((claim) => !['supports', 'contradicts', 'says_nothing'].includes(choice(claim) ?? ''));
     detail.failedClaims = failedClaims;
+    detail.unverifiedClaims = claims.filter((claim) => !failedClaims.includes(claim) && !supported.includes(claim) && !unanswered.includes(claim));
+    const reason = unanswered.length ? `missing Jev answer for: ${unanswered.join('; ')}` : (supported.length === 0 && failedClaims.length === 0 ? 'no supported claims' : undefined);
+    if (reason) detail.reason = reason;
+    const passed = supported.length > 0 && unanswered.length === 0 && missingFiles.length === 0 && failedClaims.length === 0;
     store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, ?, ?, ?, ?)').run(input.workerId, head, passed ? 1 : 0, JSON.stringify(detail), calls[0] ?? null, now().toISOString());
+    if (reason) return { ok: false, reason };
     return { ok: true, passed, head, ...(failedClaims.length ? { failedClaims } : {}), ...(missingFiles.length ? { missingFiles } : {}), ...(settings.factory.claims === 'shadow' ? { warning: 'claims checks are shadow-only' } : {}) };
   }
   async function guard(input: unknown): Promise<string | null> {

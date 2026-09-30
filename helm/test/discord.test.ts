@@ -64,7 +64,7 @@ test('maps milestone events, batches them, and never leaks the webhook URL', asy
     assert.equal(calls[0]?.url, sentinel);
     const payload = JSON.parse(calls[0]!.body) as { content: string; username: string; allowed_mentions: { parse: string[] } };
     assert.match(payload.content, /#7/);
-    assert.match(payload.content, /Needs Nick/);
+    assert.match(payload.content, /Needs owner/);
     assert.match(payload.content, /Waiting for capacity: gate heavy, 2 min/);
     assert.match(payload.content, /helm\.json invalid; keeping last good limits/);
     assert.match(payload.content, /Spend changed: file/);

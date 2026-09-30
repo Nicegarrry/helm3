@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { RepoConfig } from './repoconfig.js';
@@ -81,8 +81,17 @@ export function createDeploy(options: Options) {
   const daemonEnv = () => ({ ...process.env, ...(options.env ?? {}) });
   const sourceEnv = () => ({ ...loadEnvFile(options.envFile ?? join(homedir(), '.config', 'helm', 'env')), ...process.env, ...(options.env ?? {}) });
   const secretEnv = (target: Target, required = true, missingMessage?: string) => { const source = sourceEnv(); const values: Record<string, string> = {}; const missing: string[] = []; for (const [key, name] of Object.entries(envNames(target))) { const value = source[name]; if (!value) missing.push(name); else values[key] = value; } if (required && missing.length) throw new Error(missingMessage ? `${missingMessage} (${missing.join(', ')})` : `missing credential ${missing[0]}`); return { values, redact: redactor(Object.values(values)) }; };
+  const vercelProjectEnv = (repo: string, target: Target): Record<string, string> => {
+    const names = envNames(target); const source = sourceEnv(); const orgName = names.VERCEL_ORG_ID; const projectName = names.VERCEL_PROJECT_ID; const configuredOrg = orgName ? source[orgName] : undefined; const configuredProject = projectName ? source[projectName] : undefined;
+    if (configuredOrg && configuredProject) return { VERCEL_ORG_ID: configuredOrg, VERCEL_PROJECT_ID: configuredProject };
+    try {
+      const linked = JSON.parse(readFileSync(join(repo, '.vercel', 'project.json'), 'utf8')) as { orgId?: unknown; projectId?: unknown };
+      if (typeof linked.orgId === 'string' && linked.orgId && typeof linked.projectId === 'string' && linked.projectId) return { VERCEL_ORG_ID: linked.orgId, VERCEL_PROJECT_ID: linked.projectId };
+    } catch { /* an absent or invalid link is handled by the refusal below */ }
+    throw new Error(`vercel target ${target.name} is not linked: set org/project ids or run \`vercel link\` in ${repo}`);
+  };
   const operatorEnv = (source: NodeJS.ProcessEnv, credentials: Record<string, string>): NodeJS.ProcessEnv => ({ PATH: source.PATH ?? '', HOME: source.HOME ?? homedir(), LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8', TMPDIR: source.TMPDIR ?? tmpdir(), ...credentials });
-  const run = async (file: string, args: string[], target: Target, useOperatorLogin: boolean, cwd?: string) => { const credentials = secretEnv(target, !useOperatorLogin, 'branch preview deploys require scoped credentials'); const source = sourceEnv(); const minimalEnv = { PATH: source.PATH ?? '', ...credentials.values }; const result = useOperatorLogin ? await exec(file, args, { cwd, env: operatorEnv(source, credentials.values), timeout: 300_000 }) : await withTempHome(minimalEnv, (tempEnv) => exec(file, args, { cwd, env: tempEnv, timeout: 300_000 })); if ((result.code ?? 0) !== 0) throw new Error(credentials.redact(result.stderr || result.stdout || `${file} failed`)); return { text: credentials.redact(result.stdout), credentials }; };
+  const run = async (file: string, args: string[], target: Target, useOperatorLogin: boolean, cwd?: string, extraCredentials: Record<string, string> = {}) => { const credentials = secretEnv(target, !useOperatorLogin, 'branch preview deploys require scoped credentials'); const values = { ...credentials.values, ...extraCredentials }; const redact = redactor(Object.values(values)); const source = sourceEnv(); const minimalEnv = { PATH: source.PATH ?? '', ...values }; const result = useOperatorLogin ? await exec(file, args, { cwd, env: operatorEnv(source, values), timeout: 300_000 }) : await withTempHome(minimalEnv, (tempEnv) => exec(file, args, { cwd, env: tempEnv, timeout: 300_000 })); if ((result.code ?? 0) !== 0) throw new Error(redact(result.stderr || result.stdout || `${file} failed`)); return { text: redact(result.stdout), credentials: { values, redact } }; };
   const runDaemon = async (file: string, args: string[], cwd?: string) => { const result = await exec(file, args, { cwd, env: daemonEnv(), timeout: 300_000 }); if ((result.code ?? 0) !== 0) throw new Error(result.stderr || result.stdout || `${file} failed`); return { text: result.stdout }; };
   const git = (args: string[], cwd: string) => exec('git', args, { cwd, env: daemonEnv() });
   const defaultMigrationGlobs = ['convex/schema.ts', 'convex/migrations/**'];
@@ -137,11 +146,11 @@ export function createDeploy(options: Options) {
       }
       throw new Error('timed out waiting for GitHub deployment');
     }
-    const args = ['deploy']; if (!preview(target)) args.push('--prod'); args.push('--yes'); const result = await run('vercel', args, target, useOperatorLogin, worktree); const url = result.text.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? null; return { url, deploymentId: url };
+    const args = ['deploy']; if (!preview(target)) args.push('--prod'); args.push('--yes'); const result = await run('vercel', args, target, useOperatorLogin, worktree, useOperatorLogin ? vercelProjectEnv(repo, target) : {}); const url = result.text.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? null; return { url, deploymentId: url };
   };
   const rollbackAdapter = async (repo: string, slug: string, target: Target, previousSha: string, cwd?: string, useOperatorLogin = false) => {
     if (target.kind === 'convex') { const rollbackWorktree = `${cwd ?? options.home}-rollback`; const added = await git(['worktree', 'add', '--detach', rollbackWorktree, previousSha], repo); if ((added.code ?? 0) !== 0) throw new Error('could not create rollback worktree'); try { await adapter(repo, slug, target, previousSha, rollbackWorktree, useOperatorLogin); } finally { try { await git(['worktree', 'remove', '--force', rollbackWorktree], repo); } catch { /* cleanup is best effort */ } } return; }
-    if (target.kind !== 'vercel' || (target.mode ?? 'cli') !== 'cli' || preview(target)) throw new Error('Vercel rollback is only available for a production CLI deployment'); await run('vercel', ['rollback', previousSha], target, useOperatorLogin, cwd);
+    if (target.kind !== 'vercel' || (target.mode ?? 'cli') !== 'cli' || preview(target)) throw new Error('Vercel rollback is only available for a production CLI deployment'); await run('vercel', ['rollback', previousSha], target, useOperatorLogin, cwd, useOperatorLogin ? vercelProjectEnv(repo, target) : {});
   };
   const smoke = async (target: Target, url: string | null, cwd: string, useOperatorLogin: boolean): Promise<Record<string, unknown>> => {
     const credentials = secretEnv(target, !useOperatorLogin, 'branch preview deploys require scoped credentials'); const result: { commands: unknown[]; http: unknown[] } = { commands: [], http: [] }; const secrets = credentials.redact; const source = sourceEnv(); const baseEnv: NodeJS.ProcessEnv = { PATH: source.PATH ?? '', HELM_DEPLOY_URL: url ?? '' };

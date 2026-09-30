@@ -97,10 +97,17 @@ test('smoke failure rolls back the previous provider deployment and redacts secr
   } finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
 });
 
-test('base Vercel deploy uses the operator login when scoped credentials are absent', async () => {
-  const config = { ...target, env: { VERCEL_TOKEN: 'VERCEL_TOKEN', VERCEL_ORG_ID: 'VERCEL_ORG_ID', VERCEL_PROJECT_ID: 'VERCEL_PROJECT_ID' }, smoke: {} }; const { repo, sha } = repoWithConfig(config); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = [];
+test('base Vercel deploy uses linked checkout ids when the token is absent', async () => {
+  const config = { ...target, env: { VERCEL_TOKEN: 'VERCEL_TOKEN', VERCEL_ORG_ID: 'VERCEL_ORG_ID', VERCEL_PROJECT_ID: 'VERCEL_PROJECT_ID' }, smoke: {} }; const { repo, sha } = repoWithConfig(config); mkdirSync(join(repo, '.vercel')); writeFileSync(join(repo, '.vercel', 'project.json'), JSON.stringify({ orgId: 'checkout-org', projectId: 'checkout-project' })); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = [];
   const d = deployDeps(repo, sha, async (file, args, options) => { calls.push({ file, args, options }); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'vercel') return { stdout: 'https://operator-login.example.invalid\n', code: 0 }; return { stdout: '', code: 0 }; }, 'allow', {});
-  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, true); const vercel = calls.find((call) => call.file === 'vercel')!; assert.deepEqual(vercel.args, ['deploy', '--prod', '--yes']); assert.equal(vercel.options.env?.HOME, process.env.HOME ?? homedir()); assert.equal(vercel.options.env?.VERCEL_TOKEN, undefined); assert.equal(vercel.options.env?.VERCEL_ORG_ID, undefined); assert.equal(vercel.options.env?.VERCEL_PROJECT_ID, undefined); assert.equal(Object.keys(vercel.options.env ?? {}).sort().join(','), 'HOME,LANG,LC_ALL,PATH,TMPDIR'); }
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, true); const vercel = calls.find((call) => call.file === 'vercel')!; assert.deepEqual(vercel.args, ['deploy', '--prod', '--yes']); assert.equal(vercel.options.env?.HOME, process.env.HOME ?? homedir()); assert.equal(vercel.options.env?.VERCEL_TOKEN, undefined); assert.equal(vercel.options.env?.VERCEL_ORG_ID, 'checkout-org'); assert.equal(vercel.options.env?.VERCEL_PROJECT_ID, 'checkout-project'); assert.equal(Object.keys(vercel.options.env ?? {}).sort().join(','), 'HOME,LANG,LC_ALL,PATH,TMPDIR,VERCEL_ORG_ID,VERCEL_PROJECT_ID'); }
+  finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('base Vercel deploy refuses an unlinked checkout before the provider CLI runs', async () => {
+  const config = { ...target, env: { VERCEL_TOKEN: 'VERCEL_TOKEN', VERCEL_ORG_ID: 'VERCEL_ORG_ID', VERCEL_PROJECT_ID: 'VERCEL_PROJECT_ID' }, smoke: {} }; const { repo, sha } = repoWithConfig(config); const calls: string[] = [];
+  const d = deployDeps(repo, sha, async (file, args) => { calls.push(file); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; return { stdout: '', code: 0 }; }, 'allow', {});
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, false); assert.equal(result.reason, `vercel target prod is not linked: set org/project ids or run \`vercel link\` in ${repo}`); assert.equal(calls.includes('vercel'), false); }
   finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
 });
 

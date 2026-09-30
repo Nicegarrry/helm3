@@ -44,7 +44,7 @@ lines of TypeScript.
 
 ## Deploys
 
-Reviewed base-branch deploys let the Vercel and Convex CLIs use the operator's existing login from the real `HOME`; configured provider credentials are optional there. Branch-preview deploys keep a temporary `HOME` and require their scoped credentials. Installs and smoke commands always keep a temporary `HOME`, while TestFlight remains base-branch-only and uses the real `HOME`.
+Reviewed base-branch deploys let the Vercel and Convex CLIs use the operator's existing login from the real `HOME`; tokens are optional there. Vercel production deploys still require org and project IDs from target configuration or the resolved checkout's `.vercel/project.json`. Branch-preview deploys keep a temporary `HOME` and require their scoped credentials. Installs and smoke commands always keep a temporary `HOME`, while TestFlight remains base-branch-only and uses the real `HOME`.
 
 4. Run one task by hand to see the loop:
 

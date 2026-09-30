@@ -544,7 +544,7 @@ export class Helm {
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
-    const loadClass = await askLoadClass({ jev: this.jev, repo, role: input.role, explicit: input.loadClass, alreadyAsked: choice?.loadClassAsked === true, state: { objective: input.objective, acceptance: input.acceptance ?? null } });
+    const loadClass = await askLoadClass({ jev: this.jev, repo, role: input.role, explicit: input.loadClass, alreadyAsked: choice?.loadClassAsked === true || input.model !== undefined, state: { objective: input.objective, acceptance: input.acceptance ?? null } });
     const admittedBudget = this.assertBudget(repoSlug);
     const baseline = input.baselineId ? requireValue(getBaseline(this.store, input.baselineId), `baseline not found: ${input.baselineId}`) : undefined;
     if (baseline && baseline.repoSlug !== repoSlug) return refuse(`baseline belongs to ${baseline.repoSlug}, not ${repoSlug}`);

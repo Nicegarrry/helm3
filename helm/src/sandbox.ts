@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export type GateSandbox = Readonly<{
   executable: string;
@@ -17,6 +17,8 @@ export type GateSandboxOptions = Readonly<{
   allowNetwork: boolean;
   operatorHome?: string;
 }>;
+
+export type InstallManager = 'npm' | 'pnpm' | 'yarn';
 
 const FALLBACK_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 const GIT_DIR_PREFIX = /^gitdir:\s*(.+)$/;
@@ -76,6 +78,9 @@ export function buildSandboxProfile(options: {
   cwd: string;
   tempDir: string;
   operatorHomes: readonly string[];
+  gateHome?: string;
+  toolchainPaths?: readonly string[];
+  npmCachePaths?: readonly string[];
   gitDir?: string;
   gitDirs?: readonly string[];
   allowNetwork: boolean;
@@ -83,7 +88,14 @@ export function buildSandboxProfile(options: {
   const cwd = resolve(options.cwd);
   const tempDir = resolve(options.tempDir);
   const gitDirs = unique([options.gitDir ?? '', ...(options.gitDirs ?? [])].filter(Boolean));
-  const readOnlyExceptions = unique([cwd, ...gitDirs, tempDir]);
+  const readOnlyExceptions = unique([
+    cwd,
+    ...gitDirs,
+    tempDir,
+    ...(options.gateHome ? [options.gateHome] : []),
+    ...(options.toolchainPaths ?? []),
+    ...(options.npmCachePaths ?? []),
+  ]);
   const homes = unique(options.operatorHomes);
   const lines = [
     '(version 1)',
@@ -98,12 +110,11 @@ export function buildSandboxProfile(options: {
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
   ];
 
-  // The temporary HOME lives below tempDir. Grant tempDir before adding the
-  // credential denies so the latter remains the last matching read rule for
-  // the generated HOME's credential paths.
-  lines.push(`(allow file-read* ${subpath(tempDir)})`);
-
   for (const home of homes) {
+    // The operator HOME is deny-by-default. Later rules re-open only the
+    // worktree, git metadata, toolchain, git config, and cache paths needed by
+    // a gate; system paths remain readable through the root read grant above.
+    lines.push(`(deny file-read* ${subpath(home)})`);
     for (const path of credentialPaths(home)) {
       if (path.endsWith(join('', '.yarnrc'))) {
         lines.push(`(deny file-read* ${literal(path)})`);
@@ -118,7 +129,7 @@ export function buildSandboxProfile(options: {
 
   // A worktree can live below ~/.helm, and its .git file can point at a real git dir.
   // These are read-only exceptions; the write rules above still exclude .git.
-  for (const path of readOnlyExceptions.filter((path) => path !== tempDir)) lines.push(`(allow file-read* ${subpath(path)})`);
+  for (const path of readOnlyExceptions) lines.push(`(allow file-read* ${subpath(path)})`);
   for (const gitDir of gitDirs) lines.push(`(deny file-write* ${subpath(gitDir)})`);
   return `${lines.join('\n')}\n`;
 }
@@ -162,6 +173,37 @@ export function sandboxUnavailableReason(allowUnsandboxed: boolean): string | un
   return `sandbox-exec is unavailable on ${process.platform}; refusing to run gate commands (set settings.gates.allowUnsandboxed=true only for a trusted host)`;
 }
 
+/** Recognize only a direct package-manager install command; shell chains never gain network. */
+export function installManager(command: string): InstallManager | undefined {
+  if (/\b--offline(?:\s|$)/i.test(command)) return undefined;
+  if (!/^\s*(?:npm\s+(?:ci|install)|pnpm\s+(?:install|i)|yarn\s+install)(?:\s+[^;&|<>`$]*)?\s*$/i.test(command)) return undefined;
+  if (/^\s*npm\s+/i.test(command)) return 'npm';
+  if (/^\s*pnpm\s+/i.test(command)) return 'pnpm';
+  return 'yarn';
+}
+
+export function isInstallCommand(command: string): boolean {
+  return installManager(command) !== undefined;
+}
+
+async function canonicalPaths(paths: readonly string[]): Promise<string[]> {
+  const values = await Promise.all(paths.map(async (path) => [resolve(path), await canonicalPath(path)]));
+  return unique(values.flat());
+}
+
+async function toolchainPaths(pathValue: string): Promise<string[]> {
+  const entries = pathValue.split(delimiter).map((entry) => entry.trim()).filter(Boolean).filter(isAbsolute);
+  const paths = await canonicalPaths(entries);
+  for (const entry of entries) {
+    if (/(?:^|\/)\.nvm\/versions\/node\/[^/]+\/bin\/?$/i.test(entry)) paths.push(resolve(entry, '..'));
+    for (const tool of ['node', 'npm', 'pnpm', 'yarn', 'git', 'cargo']) {
+      const target = await realpath(join(entry, tool)).catch(() => undefined);
+      if (target) paths.push(target, dirname(target));
+    }
+  }
+  return unique(paths);
+}
+
 export async function prepareGateSandbox(options: GateSandboxOptions): Promise<GateSandbox> {
   const executable = sandboxExecutable();
   if (!executable) throw new Error(`sandbox-exec is unavailable on ${process.platform}`);
@@ -178,10 +220,15 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
       canonicalPath(home),
       canonicalPath(resolve(options.operatorHome ?? homedir())),
     ]);
+    const toolchains = await toolchainPaths(process.env.PATH ?? FALLBACK_PATH);
+    const npmCaches = await canonicalPaths([join(operatorHome, '.npm')]);
     const profile = buildSandboxProfile({
       cwd: profileCwd,
       tempDir: profileTempDir,
-      operatorHomes: unique([operatorHome, profileHome]),
+      operatorHomes: [operatorHome],
+      gateHome: profileHome,
+      toolchainPaths: toolchains,
+      npmCachePaths: npmCaches,
       gitDirs: worktreeGitDirs(profileCwd),
       allowNetwork: options.allowNetwork,
     });
@@ -203,8 +250,4 @@ export async function prepareUnsandboxedGate(): Promise<Omit<GateSandbox, 'execu
 
 export async function disposeGateSandbox(tempDir: string): Promise<void> {
   await rm(tempDir, { recursive: true, force: true });
-}
-
-export function isInstallCommand(command: string): boolean {
-  return /\bnpm\s+ci\b/i.test(command);
 }

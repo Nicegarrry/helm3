@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
-import { gateRunner, sandboxEnabled } from '../src/gate.js';
+import { expandInstallChecks, gateRunner, sandboxEnabled } from '../src/gate.js';
 import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
 test('run: passing and failing checks capture output to files', async () => {
@@ -102,6 +102,19 @@ test('defaultChecks: reads gates from helm.json when present', async () => {
     writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'custom', command: 'echo hi' }] }));
     const checks = await runner.defaultChecks(dir);
     assert.deepEqual(checks, [{ name: 'custom', command: 'echo hi' }]);
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test('install checks ignore scripts online and run lifecycle scripts in a separate offline step', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-install-'));
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { prepare: 'node prepare.js' } }));
+    assert.deepEqual(await expandInstallChecks(dir, [{ name: 'install', command: 'npm ci --no-audit --no-fund' }]), [
+      { name: 'install', command: 'npm ci --ignore-scripts --no-audit --no-fund' },
+      { name: 'install (offline scripts)', command: 'npm rebuild --offline && npm run prepare --if-present --offline' },
+    ]);
   } finally {
     removeTempDir(dir);
   }

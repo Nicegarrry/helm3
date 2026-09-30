@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
 import { cleanupNodeModules } from './hygiene.js';
-import { disposeGateSandbox, isInstallCommand, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason } from './sandbox.js';
+import { disposeGateSandbox, installManager, isInstallCommand, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason, type InstallManager } from './sandbox.js';
 
 type CheckResult = { name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number };
 
@@ -28,6 +28,52 @@ function slugifyCheckName(name: string): string {
   slug = slug.replace(/^\.+/, '');
   slug = slug.replace(/^-+|-+$/g, '');
   return slug.length > 0 ? slug : 'check';
+}
+
+function withIgnoreScripts(command: string): string {
+  if (/\b--ignore-scripts(?:\s|$)/i.test(command)) return command;
+  const prefix = /^\s*(?:npm\s+(?:ci|install)|pnpm\s+(?:install|i)|yarn\s+install)/i.exec(command);
+  if (!prefix) return command;
+  const end = (prefix.index ?? 0) + prefix[0].length;
+  return `${command.slice(0, end)} --ignore-scripts${command.slice(end)}`;
+}
+
+async function hasPrepareScript(cwd: string): Promise<boolean> {
+  try {
+    const packageJson = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> };
+    return typeof packageJson.scripts?.prepare === 'string';
+  } catch {
+    return false;
+  }
+}
+
+function offlineLifecycleCommand(manager: InstallManager, prepare: boolean): string {
+  if (manager === 'yarn') return `yarn install --offline --ignore-scripts=false${prepare ? ' && yarn run prepare --offline' : ''}`;
+  return `${manager} rebuild --offline${prepare ? ` && ${manager} run prepare --if-present --offline` : ''}`;
+}
+
+/** Turn a package install into a networked dependency-only step and an offline lifecycle step. */
+export async function expandInstallChecks(cwd: string, checks: readonly GateCheck[]): Promise<GateCheck[]> {
+  const prepare = await hasPrepareScript(cwd);
+  const expanded: GateCheck[] = [];
+  for (const check of checks) {
+    const manager = installManager(check.command);
+    if (!manager) {
+      expanded.push(check);
+      continue;
+    }
+    expanded.push({ ...check, command: withIgnoreScripts(check.command) });
+    expanded.push({ name: `${check.name} (offline scripts)`, command: offlineLifecycleCommand(manager, prepare) });
+  }
+  return expanded;
+}
+
+function withGateCache(command: string, tempDir: string): string {
+  const manager = installManager(command);
+  if (!manager) return command;
+  const flag = manager === 'npm' ? '--cache' : manager === 'pnpm' ? '--store-dir' : '--cache-folder';
+  if (new RegExp(`(?:^|\\s)${flag}(?:\\s|=)`, 'i').test(command)) return command;
+  return `${command} ${flag} ${JSON.stringify(join(tempDir, `${manager}-cache`))}`;
 }
 
 async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string }): Promise<CheckResult> {
@@ -55,7 +101,8 @@ async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDi
 
   const execute = (child: NonNullable<typeof sandbox>): Promise<{ error: ExecFileError | null; stdout: string; stderr: string }> => new Promise((resolve) => {
       const executable = child.executable ?? '/bin/sh';
-      const args = child.executable ? ['-f', child.profilePath!, '/bin/sh', '-c', check.command] : ['-c', check.command];
+      const command = child.executable ? withGateCache(check.command, child.tempDir) : check.command;
+      const args = child.executable ? ['-f', child.profilePath!, '/bin/sh', '-c', command] : ['-c', command];
       execFile(executable, args, { cwd, env: child.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
         resolve({ error: error as ExecFileError | null, stdout, stderr });
       });
@@ -84,7 +131,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
       const results: CheckResult[] = [];
       const usedSlugs = new Map<string, number>();
       try {
-        for (const check of checks) {
+        for (const check of await expandInstallChecks(cwd, checks)) {
           const base = slugifyCheckName(check.name);
           const seen = usedSlugs.get(base) ?? 0;
           usedSlugs.set(base, seen + 1);

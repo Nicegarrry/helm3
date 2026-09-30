@@ -21,10 +21,13 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const cwd = '/Users/tester/.helm/worktrees/project/w-123';
   const tempDir = '/private/tmp/helm-gate-123';
   const tempHome = join(tempDir, 'home');
-  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home, tempHome], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', allowNetwork: false });
+  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gateHome: tempHome, toolchainPaths: [join(home, '.nvm', 'versions', 'node', 'v22', 'bin')], npmCachePaths: [join(home, '.npm')], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', allowNetwork: false });
 
+  assert.match(profile, new RegExp(`\\(deny file-read\\* \\(subpath "${home.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.config"\)\)/);
   assert.match(profile, /\(allow file-read\* \(subpath ".*\/\.config\/git"\)\)/);
+  assert.match(profile, /\(allow file-read\* \(subpath ".*\/\.nvm\/versions\/node\/v22\/bin"\)\)/);
+  assert.match(profile, /\(allow file-read\* \(subpath ".*\/\.npm"\)\)/);
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.ssh"\)\)/);
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.helm"\)\)/);
   assert.match(profile, new RegExp(`\\(allow file-write\\* \\(subpath "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
@@ -32,8 +35,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   assert.match(profile, /\(deny network\*\)/);
   assert.doesNotMatch(profile, /allow network/);
   const tempRead = profile.indexOf(`(allow file-read* (subpath "${tempDir}"))`);
-  const tempHomeCredentialDeny = profile.indexOf(`(deny file-read* (subpath "${join(tempHome, '.config')}"))`);
-  assert.ok(tempRead >= 0 && tempRead < tempHomeCredentialDeny, 'tempDir read grant must precede generated HOME credential denies');
+  const homeDeny = profile.indexOf(`(deny file-read* (subpath "${home}"))`);
+  assert.ok(tempRead >= 0 && homeDeny >= 0 && homeDeny < tempRead, 'HOME deny must precede disposable temp HOME re-allow');
 });
 
 test('gate cannot read the temporary HOME credential fixture or write outside the worktree', macOnly, async () => {
@@ -41,9 +44,9 @@ test('gate cannot read the temporary HOME credential fixture or write outside th
   const operatorHome = join(root, 'operator-home');
   const worktree = join(root, 'worktree');
   const logDir = join(root, 'logs');
-  const secret = join(operatorHome, '.config', 'helm', 'env');
+  const secret = join(operatorHome, 'code', 'other', '.env.local');
   const outside = join(root, 'outside.txt');
-  mkdirSync(join(operatorHome, '.config', 'helm'), { recursive: true });
+  mkdirSync(join(operatorHome, 'code', 'other'), { recursive: true });
   mkdirSync(worktree, { recursive: true });
   writeFileSync(secret, 'HELM_SECRET=must-not-escape');
   try {

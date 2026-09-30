@@ -27,7 +27,10 @@ emit({ type: 'item.completed', item: { id: 'i0', type: 'error', message: 'loadin
 emit({ type: 'turn.started' });
 emit({ type: 'item.completed', item: { id: 'i1', type: 'command_execution', command: '/bin/zsh -lc "npm test"', aggregated_output: 'ok', exit_code: 0, status: 'completed' } });
 emit({ type: 'item.completed', item: { id: 'i2', type: 'file_change', changes: [{ path: '/wt/a.ts', kind: 'update' }] } });
-if (mode === 'hang') { setTimeout(() => {}, 60000); }
+if (mode === 'hang' || mode === 'ignore-term') {
+  if (mode === 'ignore-term') process.on('SIGTERM', () => {});
+  setTimeout(() => {}, 60000);
+}
 else if (mode === 'fail') { process.stderr.write('codex: not logged in\\n'); process.exit(2); }
 else {
   const ok = mode === 'question'
@@ -179,6 +182,17 @@ test('run: a stop request kills a worker that is silent in a long command, and y
   assert.equal(outcome.result, null);
   assert.ok(events.some((e) => e.kind === 'result.invalid'));
   assert.equal(events.filter((e) => e.kind === 'turn.start').length, 1, 'no correction turn after a stop');
+});
+
+test('run: stop escalates to SIGKILL when Codex ignores SIGTERM', async () => {
+  const f = await fixture('ignore-term');
+  let asked = false;
+  setTimeout(() => { asked = true; }, 800);
+  const { hooks } = collectHooks(() => !asked);
+  const started = Date.now();
+  const outcome = await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks);
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(outcome.result, null);
 });
 
 test('laneRunner routes codex/ models to the Codex lane and everything else to Pi', async () => {

@@ -4,6 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadRepoConfig } from './repoconfig.js';
+import { hardenedGitArgs } from './git.js';
 import type { BaselineRow, GateRunner, HelmConfig, Store, WorkerRow } from './types.js';
 const exec = promisify(execFile);
 export function ensureBaselineTable(store: Store): void {
@@ -33,9 +34,9 @@ function matches(file: string, patterns: readonly string[]): boolean {
   const normalized = file.replace(/^\.\//, ''); return patterns.some((pattern) => glob(pattern.replace(/^\.\//, '')).test(normalized));
 }
 async function changedFiles(worker: WorkerRow): Promise<string[]> {
-  const { stdout: head } = await exec('git', ['rev-parse', 'HEAD'], { cwd: worker.worktree }); if (head.trim() !== worker.head) throw new Error(`validator head changed: expected ${worker.head}, got ${head.trim()}`);
-  const { stdout: status } = await exec('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: worker.worktree }); if (status.trim()) throw new Error('worktree is not clean');
-  const { stdout } = await exec('git', ['diff', '--no-renames', '--name-only', `${worker.baseSha}..${worker.head}`], { cwd: worker.worktree });
+  const { stdout: head } = await exec('git', hardenedGitArgs(['rev-parse', 'HEAD']), { cwd: worker.worktree }); if (head.trim() !== worker.head) throw new Error(`validator head changed: expected ${worker.head}, got ${head.trim()}`);
+  const { stdout: status } = await exec('git', hardenedGitArgs(['status', '--porcelain', '--untracked-files=all']), { cwd: worker.worktree }); if (status.trim()) throw new Error('worktree is not clean');
+  const { stdout } = await exec('git', hardenedGitArgs(['diff', '--no-renames', '--name-only', `${worker.baseSha}..${worker.head}`]), { cwd: worker.worktree });
   return stdout.split('\n').map((file) => file.trim()).filter(Boolean);
 }
 export async function createBaseline(input: { store: Store; gates: GateRunner; config: HelmConfig; worker: WorkerRow; nodeModulesRoot?: string; now: string }): Promise<{ ok: true } & BaselineRow | { ok: false; reason: string }> {

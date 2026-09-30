@@ -54,10 +54,12 @@ test('GC removes only settled clean workers eligible by merged PR, origin contai
   const statuses = new Map([[41, { number: 41, state: 'merged' as const, head: 'b'.repeat(40), mergeable: true, draft: false, checks: [], reviews: [], url: '' }]]);
   try {
     for (const row of workers) store.insertWorker(row);
+    mkdirSync(join(home, 'tmp', 'merged'), { recursive: true });
     store.insertPr({ repoSlug: 'owner/repo', number: 41, workerId: 'merged', url: 'https://github.com/owner/repo/pull/41', head: rowHead('merged'), createdAt: recent });
     const service = createHygiene({ home, store, settings: settings(home), workspace: fakeWorkspace(removed, contained, dirty), github: fakeGitHub(statuses), now: () => new Date('2026-01-02T00:00:00.000Z') });
     await service.gc();
     assert.deepEqual(removed.map((path) => path.split('/').at(-1)).sort(), ['contained', 'merged', 'ttl']);
+    assert.equal(existsSync(join(home, 'tmp', 'merged')), false);
     assert.equal(store.listEvents('merged').some((event) => event.kind === 'worktree.removed'), true);
     assert.equal(store.listEvents('running').some((event) => event.kind === 'worktree.removed'), false);
     assert.equal(store.listEvents('dirty').some((event) => event.kind === 'worktree.removed'), false);

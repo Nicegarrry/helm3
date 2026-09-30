@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
+import { hardenedGitArgs } from './git.js';
 
 const exec = promisify(execFile);
 type ConfigExec = (file: string, args: readonly string[], options: { cwd?: string; timeout?: number }) => Promise<{ stdout: string }>;
@@ -38,7 +39,7 @@ export async function loadRepoConfig(repo: string, sha?: string, fallbackToWorkt
   let raw: string;
   if (sha) {
     try {
-      ({ stdout: raw } = await (options.exec ?? exec)('git', ['show', `${sha}:helm.json`], { cwd: repo, timeout: options.timeout }));
+      ({ stdout: raw } = await (options.exec ?? exec)('git', hardenedGitArgs(['show', `${sha}:helm.json`]), { cwd: repo, timeout: options.timeout }));
     } catch {
       if (!fallbackToWorktree) throw new Error(`helm.json not found at ${sha}`);
       raw = await readFile(join(repo, 'helm.json'), 'utf8');

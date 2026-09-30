@@ -1,9 +1,11 @@
 /** Helm service: composes the runtime and implements the worker, budget, and lifecycle tools. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
+import { hardenedGitArgs } from './git.js';
 import type { z } from 'zod';
 import type {
   BaselineRow,
@@ -280,7 +282,7 @@ export class Helm {
         .find((check) => check.name === 'acceptance');
       if (!acceptance || acceptance.exitCode !== 0) return `acceptance check did not pass at head ${head ?? 'unknown'}`;
       try {
-        const { stdout } = await exec('git', ['diff', '--name-only', `${baseline.testCommit}..${head}`, '--', ...baseline.files], { cwd: worker.worktree });
+        const { stdout } = await exec('git', hardenedGitArgs(['diff', '--name-only', `${baseline.testCommit}..${head}`, '--', ...baseline.files]), { cwd: worker.worktree });
         const edited = stdout.split('\n').map((file) => file.trim()).filter(Boolean);
         if (edited.length > 0) return `baseline tests edited: ${edited.join(', ')}`;
       } catch (err) {
@@ -1026,6 +1028,14 @@ export class Helm {
     });
   }
 
+  private workerTempDir(workerId: string): string {
+    return join(this.config.home, 'tmp', workerId);
+  }
+
+  private async cleanupWorkerTemp(workerId: string): Promise<void> {
+    await rm(this.workerTempDir(workerId), { recursive: true, force: true });
+  }
+
   private spendCapExceeded(): boolean {
     const spend = this.effectiveSpend();
     return spend.capUsd > 0 && this.store.spendTotal().spendUsd >= spend.capUsd;
@@ -1076,7 +1086,7 @@ export class Helm {
 
   private async repoSlugFor(repo: string): Promise<string> {
     try {
-      const { stdout } = await exec('git', ['-C', repo, 'remote', 'get-url', 'origin']);
+      const { stdout } = await exec('git', hardenedGitArgs(['-C', repo, 'remote', 'get-url', 'origin']));
       const slug = parseOwnerRepo(stdout);
       if (slug) return slug;
     } catch {
@@ -1112,7 +1122,7 @@ export class Helm {
     const runInput: WorkerRunInput = {
       workerId, role: row.role, model: row.model, worktree: row.worktree, objective: row.objective,
       acceptance: row.acceptance, contextPaths: row.contextPaths, allowWorkflows: row.allowWorkflows,
-      sessionFile: row.sessionFile, sessionDir: join(this.config.home, 'sessions', workerId),
+      sessionFile: row.sessionFile, sessionDir: join(this.config.home, 'sessions', workerId), tempDir: this.workerTempDir(workerId),
     };
     const hooks: WorkerHooks = {
       emit: (kind, data) => {
@@ -1153,7 +1163,7 @@ export class Helm {
       if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {
         try {
           const commitMessage = result?.summary ?? `helm: ${workerId} turn complete`;
-          const head = await this.workspace.commitAll(row.worktree, commitMessage);
+          const head = await this.workspace.commitAll(row.worktree, commitMessage, row.repo);
           this.store.updateWorker(workerId, { head });
         } catch (err) {
           this.store.appendEvent(workerId, 'error', { message: `commit failed: ${errMessage(err)}` });
@@ -1172,6 +1182,7 @@ export class Helm {
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
       if (nextState === 'succeeded' || nextState === 'failed' || nextState === 'idle' || nextState === 'stopped') {
         await this.cleanupWorkerNodeModules(row);
+        await this.cleanupWorkerTemp(workerId).catch(() => undefined);
       }
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
@@ -1192,6 +1203,7 @@ export class Helm {
     } catch (err) {
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
+      await this.cleanupWorkerTemp(workerId).catch(() => undefined);
       this.store.updateWorker(workerId, { state: 'unknown' });
       this.store.appendEvent(workerId, 'error', { message: errMessage(err) });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: 'unknown' });

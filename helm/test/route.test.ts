@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createJevCheck } from '../src/jevcheck.js';
 import { createRouter } from '../src/route.js';
+import { createModelCatalog, type ModelCatalog } from '../src/routing/catalog.js';
 import { loadSettings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
 import type { Jev, JevAnswers } from '../src/jev.js';
@@ -18,6 +19,18 @@ function answers(score: number, noul: boolean | number = false): JevAnswers { re
 function settings(tiers: Record<string, string[]>, allowed = Object.values(tiers).flat(), minN = 8) {
   return { ...loadSettings('/missing-route-settings'), routing: { tiers, allowed, minClean: 0.5, minN } };
 }
+function catalog(available: (model: string) => boolean | Promise<boolean> = () => true): ModelCatalog {
+  return createModelCatalog({
+    claudeLaneRegistered: false,
+    sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false },
+    probe: {
+      codex: (id) => available(`codex/${id}`),
+      pi: (provider, id) => available(`${provider}/${id}`),
+      claude: () => false,
+      models: () => [],
+    },
+  });
+}
 function worker(id: string, model: string, state: WorkerRow['state'] = 'failed'): WorkerRow {
   return { workerId: id, repo: '/repo', repoSlug: 'acme/repo', role: 'builder', model, objective: id, acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'a'.repeat(40), branch: id, worktree: `/repo/${id}`, state, head: 'b'.repeat(40), sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now().toISOString(), updatedAt: now().toISOString() };
 }
@@ -30,7 +43,7 @@ test('each Jev tier selects its first available candidate', async () => {
   try {
     for (const [index, score] of scores.entries()) {
       const jev: Jev = { shadow: true, async ask() { return { ok: true, answers: answers(score) }; } };
-      const result = await choose(createRouter({ settings: settings(tiers), store, jev, now, isAvailable: () => true }));
+      const result = await choose(createRouter({ settings: settings(tiers), store, jev, now, catalog: catalog() }));
     assert.deepEqual(result, { model: `codex/tier-${index + 1}`, tier: index + 1, score, policyApplied: { lanes: ['codex', 'pi', 'claude'], subscriptionOnly: false } });
     }
   } finally { store.close(); }
@@ -39,7 +52,7 @@ test('each Jev tier selects its first available candidate', async () => {
 test('claude candidates are skipped as unavailable with a reason', async () => {
   const store = openStore(':memory:');
   try {
-    const result = await choose(createRouter({ settings: settings({ '1': ['claude/sonnet:high'], '2': ['codex/fallback'] }), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, isAvailable: () => true }));
+    const result = await choose(createRouter({ settings: settings({ '1': ['claude/sonnet:high'], '2': ['codex/fallback'] }), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, catalog: catalog() }));
     assert.equal(result.model, 'codex/fallback');
     assert.deepEqual(result.skippedCandidates, [{ model: 'claude/sonnet:high', reason: 'unavailable: no worker lane for claude', tier: 1 }]);
   } finally { store.close(); }
@@ -48,9 +61,9 @@ test('claude candidates are skipped as unavailable with a reason', async () => {
 test('a tier without an available candidate escalates to the next tier', async () => {
   const store = openStore(':memory:');
   try {
-    const result = await choose(createRouter({ settings: settings({ '1': ['pi/missing'], '2': ['codex/next'] }), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, isAvailable: (model) => model === 'codex/next' }));
+    const result = await choose(createRouter({ settings: settings({ '1': ['pi/missing'], '2': ['codex/next'] }), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, catalog: catalog((model) => model === 'codex/next') }));
     assert.equal(result.model, 'codex/next');
-    assert.deepEqual(result.skippedCandidates, [{ model: 'pi/missing', reason: 'unavailable: model is unavailable', tier: 1 }]);
+    assert.deepEqual(result.skippedCandidates, [{ model: 'pi/missing', reason: 'unavailable: Pi model cannot be resolved', tier: 1 }]);
   } finally { store.close(); }
 });
 
@@ -61,7 +74,7 @@ test('scorecard step-up skips a poor candidate', async () => {
       const row = worker(`poor-${index}`, 'codex/poor');
       store.insertWorker(row); store.setMeta(row.workerId, { issue: index, tier: 1, score: 0.2, chosenModel: row.model });
     }
-    const result = await choose(createRouter({ settings: settings({ '1': ['codex/poor', 'codex/good'] }, ['codex/poor', 'codex/good'], 2), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, isAvailable: () => true }));
+    const result = await choose(createRouter({ settings: settings({ '1': ['codex/poor', 'codex/good'] }, ['codex/poor', 'codex/good'], 2), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, catalog: catalog() }));
     assert.equal(result.model, 'codex/good');
     assert.match(result.skippedCandidates?.[0]?.reason ?? '', /clean rate below minClean/);
   } finally { store.close(); }
@@ -82,7 +95,7 @@ test('step-up evidence is isolated by tier, model, role, age, and project', asyn
     seedRoutingRow(store, 'review-3', 'codex/poor', 1, { role: 'reviewer' });
     seedRoutingRow(store, 'old-4', 'codex/poor', 1, { createdAt: '2026-08-01T00:00:00.000Z' });
     seedRoutingRow(store, 'repo-5', 'codex/poor', 1, { repoSlug: 'other/repo' });
-    const result = await choose(createRouter({ settings: settingsValue, store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, isAvailable: () => true }));
+    const result = await choose(createRouter({ settings: settingsValue, store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, catalog: catalog() }));
     assert.equal(result.model, 'codex/poor');
   } finally { store.close(); }
 });
@@ -91,7 +104,7 @@ test('step-up fires only with enough recent matching builder rows', async () => 
   const store = openStore(':memory:');
   try {
     for (const id of ['match-1', 'match-2']) seedRoutingRow(store, id, 'codex/poor', 1);
-    const result = await choose(createRouter({ settings: settings({ '1': ['codex/poor', 'codex/good'] }, ['codex/poor', 'codex/good'], 2), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, isAvailable: () => true }));
+    const result = await choose(createRouter({ settings: settings({ '1': ['codex/poor', 'codex/good'] }, ['codex/poor', 'codex/good'], 2), store, jev: { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } }, now, catalog: catalog() }));
     assert.equal(result.model, 'codex/good');
     assert.match(result.skippedCandidates?.[0]?.reason ?? '', /clean rate below minClean/);
   } finally { store.close(); }
@@ -102,7 +115,7 @@ test('routing hot-reloads a changed tier table', async () => {
   const jev: Jev = { shadow: true, async ask() { return { ok: true, answers: answers(0.2) }; } };
   try {
     writeFileSync(join(home, 'helm.json'), JSON.stringify({ routing: { tiers: { '1': ['codex/one'] } } }));
-    const route = createRouter({ settings: loadSettings('/missing-route-settings'), settingsHome: home, store, jev, now, isAvailable: () => true });
+    const route = createRouter({ settings: loadSettings('/missing-route-settings'), settingsHome: home, store, jev, now, catalog: catalog() });
     assert.equal((await choose(route)).model, 'codex/one');
     writeFileSync(join(home, 'helm.json'), JSON.stringify({ routing: { tiers: { '1': ['codex/two'] } } }));
     assert.equal((await choose(route)).model, 'codex/two');
@@ -121,7 +134,7 @@ test('issue preset reports the five-tier label and score', async () => {
 test('explicit model skips Jev', async () => {
   const store = openStore(':memory:'); let calls = 0;
   try {
-    const result = await choose(createRouter({ settings: loadSettings('/missing-route-settings'), store, jev: { shadow: true, async ask() { calls += 1; return { ok: true, answers: answers(0) }; } } }), { ...input(), model: 'custom/model' });
+    const result = await choose(createRouter({ settings: loadSettings('/missing-route-settings'), store, jev: { shadow: true, async ask() { calls += 1; return { ok: true, answers: answers(0) }; } }, catalog: catalog() }), { ...input(), model: 'custom/model' });
     assert.deepEqual(result, { model: 'custom/model' }); assert.equal(calls, 0);
   } finally { store.close(); }
 });
@@ -130,7 +143,7 @@ test('difficulty maps to a tier through policy and availability selection', asyn
   const store = openStore(':memory:');
   try {
     let calls = 0;
-    const route = createRouter({ settings: settings({ '1': ['codex/one'], '2': ['codex/two'], '3': ['claude/sonnet:high', 'codex/three'] }, ['codex/one', 'codex/two', 'claude/sonnet:high', 'codex/three']), store, jev: { shadow: true, async ask() { calls += 1; return { ok: true, answers: answers(4) }; } }, now, isAvailable: () => true });
+    const route = createRouter({ settings: settings({ '1': ['codex/one'], '2': ['codex/two'], '3': ['claude/sonnet:high', 'codex/three'] }, ['codex/one', 'codex/two', 'claude/sonnet:high', 'codex/three']), store, jev: { shadow: true, async ask() { calls += 1; return { ok: true, answers: answers(4) }; } }, now, catalog: catalog() });
     const result = await choose(route, { ...input(), difficulty: 'easy' });
     assert.equal(result.model, 'codex/two');
     assert.equal(result.tier, 2);
@@ -141,7 +154,7 @@ test('difficulty maps to a tier through policy and availability selection', asyn
 test('Jev failure uses tier 3 selection and applies policy', async () => {
   const store = openStore(':memory:');
   try {
-    const route = createRouter({ settings: { ...loadSettings('/missing-route-settings'), routing: { ...loadSettings('/missing-route-settings').routing, tiers: { '3': ['pi/paid', 'codex/terra'] }, allowed: ['pi/paid', 'codex/terra'], policy: { lanes: ['codex'], subscriptionOnly: false } } }, store, jev: { shadow: true, async ask() { throw new Error('timeout'); } }, now, isAvailable: () => true });
+    const route = createRouter({ settings: { ...loadSettings('/missing-route-settings'), routing: { ...loadSettings('/missing-route-settings').routing, tiers: { '3': ['pi/paid', 'codex/terra'] }, allowed: ['pi/paid', 'codex/terra'], policy: { lanes: ['codex'], subscriptionOnly: false } } }, store, jev: { shadow: true, async ask() { throw new Error('timeout'); } }, now, catalog: catalog() });
     const result = await choose(route);
     assert.equal(result.model, 'codex/terra');
     assert.equal(result.tier, 3);
@@ -155,7 +168,7 @@ test('no-key Jev result uses the same tier 3 policy fallback', async () => {
   try {
     const defaults = loadSettings('/missing-route-settings');
     const settingsValue = { ...defaults, routing: { ...defaults.routing, tiers: { '3': ['codex/terra'] }, allowed: ['codex/terra'], policy: { lanes: ['codex'] as ('codex' | 'pi' | 'claude')[], subscriptionOnly: false } } };
-    const result = await choose(createRouter({ settings: settingsValue, store, jev: { shadow: true, async ask() { return { ok: false, reason: 'no key' }; } }, now, isAvailable: () => true }));
+    const result = await choose(createRouter({ settings: settingsValue, store, jev: { shadow: true, async ask() { return { ok: false, reason: 'no key' }; } }, now, catalog: catalog() }));
     assert.deepEqual(result, { model: 'codex/terra', tier: 3, policyApplied: { lanes: ['codex'], subscriptionOnly: false }, warning: 'Jev routing failed; used tier 3 fallback' });
   } finally { store.close(); }
 });

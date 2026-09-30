@@ -102,7 +102,7 @@ function envNames(target: Target): Record<string, string> {
 
 export function createDeploy(options: Options) {
   const rawExec = options.exec ?? defaultExec;
-  const exec: DeployExec = options.exec ? rawExec : (file, args, execOptions) => rawExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions);
+  const exec: DeployExec = (file, args, execOptions) => rawExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions);
   const fetchImpl = options.fetch ?? globalThis.fetch; const now = options.now ?? (() => new Date()); const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   ensureDeployTable(options.store);
   const inProgress = new Set<string>();

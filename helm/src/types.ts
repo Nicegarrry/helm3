@@ -196,8 +196,8 @@ export interface Workspace {
   push(path: string, branch: string): Promise<void>;
   /** Clone `owner/name` into `dest`, preferring `gh repo clone` (uses gh auth) and falling back to https. */
   clone(slug: string, dest: string): Promise<void>;
-  /** `git fetch --prune origin`; best effort for an already-cloned repo. */
-  fetch(repo: string): Promise<void>;
+  /** Fetch origin, optionally pinning a branch into refs/helm/base/<branch>. */
+  fetch(repo: string, branch?: string): Promise<void>;
 }
 
 

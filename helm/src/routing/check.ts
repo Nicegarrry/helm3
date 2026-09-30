@@ -7,7 +7,7 @@ export type RoutingCheckService = Readonly<{
   tick(): Promise<void>;
 }>;
 
-export function createRoutingCheck(options: { store: Store; settings: Settings; settingsHome?: string; now?: () => Date; catalog?: ModelCatalog; probe?: CatalogProbe; claudeLaneRegistered?: boolean }): RoutingCheckService {
+export function createRoutingCheck(options: { store: Store; settings: Settings; settingsHome?: string; now?: () => Date; catalog?: ModelCatalog; probe?: CatalogProbe; claudeLaneRegistered?: boolean; skipStartup?: boolean }): RoutingCheckService {
   const now = options.now ?? (() => new Date());
   const currentSettings = () => options.settingsHome ? loadSettings(options.settingsHome) : options.settings;
   const catalog = options.catalog ?? createModelCatalog({ getSettings: currentSettings, probe: options.probe, claudeLaneRegistered: options.claudeLaneRegistered });
@@ -18,6 +18,7 @@ export function createRoutingCheck(options: { store: Store; settings: Settings; 
   const last = options.store.sql.prepare('SELECT checkedAt, report, staleSignature, staleEventAt FROM routing_checks WHERE id = 1');
   const save = options.store.sql.prepare('INSERT INTO routing_checks (id, checkedAt, report, staleSignature, staleEventAt) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET checkedAt = excluded.checkedAt, report = excluded.report, staleSignature = excluded.staleSignature, staleEventAt = excluded.staleEventAt');
   let activeCheck: Promise<{ ok: true; report: RoutingCheckReport }> | undefined;
+  let startupDeferredAt = options.skipStartup ? now().getTime() : undefined;
 
   function staleSignature(report: RoutingCheckReport): string {
     return JSON.stringify({
@@ -60,6 +61,7 @@ export function createRoutingCheck(options: { store: Store; settings: Settings; 
 
   async function check(): Promise<{ ok: true; report: RoutingCheckReport }> {
     if (!activeCheck) activeCheck = runCheck().finally(() => { activeCheck = undefined; });
+    startupDeferredAt = undefined;
     return activeCheck;
   }
 
@@ -68,6 +70,7 @@ export function createRoutingCheck(options: { store: Store; settings: Settings; 
     async tick() {
       const checkedAt = (last.get() as { checkedAt?: string } | undefined)?.checkedAt;
       const days = currentSettings().routing.checkDays ?? 7;
+      if (!checkedAt && startupDeferredAt !== undefined && now().getTime() - startupDeferredAt < days * 86_400_000) return;
       if (!checkedAt || now().getTime() - Date.parse(checkedAt) >= days * 86_400_000) await check();
     },
   };

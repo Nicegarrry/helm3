@@ -147,6 +147,7 @@ export type HelmDeps = Readonly<{
   routingCatalog?: ModelCatalog;
   routingProbe?: CatalogProbe;
   claudeLaneRegistered?: boolean;
+  routingSkipStartup?: boolean;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -175,14 +176,13 @@ function gateBranch(value: string | null | undefined): string | undefined {
 export async function resolveGatePolicy(options: { workspace: Pick<Workspace, 'fetch' | 'resolveSha' | 'defaultBranch'>; row: WorkerRow; meta?: WorkerMeta; baseline?: BaselineRow }): Promise<GatePolicy> {
   const candidates = [options.meta?.prBase, options.baseline?.baseRef];
   try { candidates.push(await options.workspace.defaultBranch(options.row.repo)); } catch { /* recorded spawn base is the safe fallback */ }
-  let fetched = false;
   for (const candidate of candidates) {
     const branch = gateBranch(candidate);
     if (!branch) continue;
     try {
-      if (!fetched) { await options.workspace.fetch(options.row.repo); fetched = true; }
-      const configRef = `origin/${branch}`;
-      return { configRef, baseSha: await options.workspace.resolveSha(options.row.repo, configRef), source: 'current-base' };
+      await options.workspace.fetch(options.row.repo, branch);
+      const baseSha = await options.workspace.resolveSha(options.row.repo, `refs/helm/base/${branch}`);
+      return { configRef: baseSha, baseSha, source: 'current-base' };
     } catch {
       // Try the next configured branch before falling back to the spawn-time SHA.
     }
@@ -297,7 +297,7 @@ export class Helm {
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
-    this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog });
+    this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog, skipStartup: deps.routingSkipStartup });
     this.spendSettings = createEffectiveSpendReader(deps.config, this.store, this.settings, () => this.nowDate(), deps.spendStartup ? 'startup' : 'read');
     this.statfs = deps.statfs;
     this.jev = deps.jev;

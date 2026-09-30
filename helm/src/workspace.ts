@@ -155,7 +155,11 @@ export function gitWorkspace(options: Readonly<{ exec?: WorkspaceExec }> = {}): 
       }
     },
 
-    async fetch(repo: string): Promise<void> {
+    async fetch(repo: string, branch?: string): Promise<void> {
+      if (branch) {
+        await git(repo, ['fetch', '--no-tags', 'origin', `+refs/heads/${branch}:refs/helm/base/${branch}`]);
+        return;
+      }
       await git(repo, ['fetch', '--prune', 'origin']);
     },
   };

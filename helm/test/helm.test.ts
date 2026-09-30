@@ -390,8 +390,8 @@ test('gate refreshes the current base ref for policy and records its resolved sh
   const result = await helm.gate({ workerId: spawned.workerId });
   assert.equal(result.ok, true);
   assert.deepEqual(fetched, [store.getWorker(spawned.workerId)?.repo]);
-  assert.equal(policyRef, 'origin/main');
-  assert.equal(store.listEvents(spawned.workerId).find((event) => event.kind === 'gate')?.data.baseSha, 'base-sha-origin/main');
+  assert.equal(policyRef, 'base-sha-refs/helm/base/main');
+  assert.equal(store.listEvents(spawned.workerId).find((event) => event.kind === 'gate')?.data.baseSha, 'base-sha-refs/helm/base/main');
 });
 
 test('an infrastructure gate failure is retried once instead of steering the worker', async () => {

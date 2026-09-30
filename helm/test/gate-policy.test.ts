@@ -40,7 +40,7 @@ function worker(repo: string, baseRef: string, baseSha: string): WorkerRow {
 const meta = (prBase: string | null): WorkerMeta => ({ workerId: 'w-gate-policy', issue: null, prBase, baselineId: null, tier: null, score: null, chosenModel: null, policyApplied: null, skippedCandidates: [], skills: [] });
 const baseline = (baseRef: string): BaselineRow => ({ id: 'b', repoSlug: 'owner/repo', issue: 1, validatorId: 'validator', baseRef, baseSha: 'baseline-sha', testCommit: 'test-commit', command: 'npm test', files: [], red: 1, outputPath: '/tmp/baseline.log', at: new Date().toISOString() });
 
-test('gate policy uses real origin refs for SHA, origin/main, and main base refs', async () => {
+test('gate policy resolves SHA, origin/main, and main base refs from a pinned real-git branch', async () => {
   const { repo, baseSha, currentSha } = fixture();
   const workspace = gitWorkspace();
   const runner = gateRunner({ allowUnsandboxed: true });
@@ -52,7 +52,7 @@ test('gate policy uses real origin refs for SHA, origin/main, and main base refs
     ] as const;
     for (const testCase of cases) {
       const policy = await resolveGatePolicy({ workspace, row: testCase.row, meta: testCase.meta, baseline: testCase.baseline });
-      assert.deepEqual(policy, { configRef: 'origin/main', baseSha: currentSha, source: 'current-base' });
+      assert.deepEqual(policy, { configRef: currentSha, baseSha: currentSha, source: 'current-base' });
       assert.deepEqual(await runner.defaultChecks(repo, policy.configRef), [{ name: 'current', command: 'echo current' }]);
     }
   } finally {

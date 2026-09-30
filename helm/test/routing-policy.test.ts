@@ -141,3 +141,25 @@ test('concurrent startup routing ticks share one check and stale event', async (
     assert.equal(store.listEvents('project:routing').length, 1);
   } finally { store.close(); }
 });
+
+test('startup suppression defers only the initial probe and preserves the weekly tick', async () => {
+  const store = openStore(':memory:');
+  let now = new Date('2026-09-30T00:00:00.000Z');
+  let checks = 0;
+  const settingsValue = settings({ '1': ['codex/routed'] }, {});
+  const catalog = {
+    async availability() { return { available: true }; },
+    async check(_settings: typeof settingsValue, checkedAt = new Date()) {
+      checks += 1;
+      return { checkedAt: checkedAt.toISOString() };
+    },
+  };
+  try {
+    const routing = createRoutingCheck({ store, settings: settingsValue, catalog, now: () => now, skipStartup: true });
+    await routing.tick();
+    assert.equal(checks, 0);
+    now = new Date(now.getTime() + 7 * 86_400_000);
+    await routing.tick();
+    assert.equal(checks, 1);
+  } finally { store.close(); }
+});

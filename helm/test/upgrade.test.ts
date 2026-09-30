@@ -70,13 +70,17 @@ test('real daemon handover retains its port and configuration, reopens only afte
   const fakeCodex = join(home, 'synthetic-codex.mjs');
   writeFileSync(fakeCodex, `#!${process.execPath}
 import { existsSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 const emit = (event) => console.log(JSON.stringify(event));
+const args = process.argv.slice(2);
+const cdFlag = ['-C', '--cd'].find((flag) => args.includes(flag));
+const worktree = (cdFlag ? args[args.indexOf(cdFlag) + 1] : undefined) ?? process.cwd();
 process.stdin.resume();
 emit({ type: 'thread.started', thread_id: 'synthetic-session' });
 const timer = setInterval(() => {
   if (!existsSync(${JSON.stringify(proceed)})) return;
   clearInterval(timer);
-  writeFileSync('completed.txt', 'synthetic worker finished before restart');
+  writeFileSync(join(resolve(worktree), 'completed.txt'), 'synthetic worker finished before restart');
   emit({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ status: 'succeeded', summary: 'complete synthetic work', changedFiles: ['completed.txt'], commandsRun: [] }) } });
   emit({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 10 } });
   process.exit(0);
@@ -110,6 +114,7 @@ const timer = setInterval(() => {
   assert.equal(worker.model, 'codex/gpt-6-luna:medium');
   assert.match(worker.head, /^[a-f0-9]{40}$/);
   assert.equal(readFileSync(join(spawned.worktree, 'completed.txt'), 'utf8'), 'synthetic worker finished before restart');
+  assert.equal(existsSync(join(packageRoot, 'completed.txt')), false);
   await control(old.port, { action: 'shutdown' });
   await eventually(() => existsSync(join(home, 'daemon.lock')), (locked) => !locked);
   const store = openStore(join(home, 'helm.sqlite'));

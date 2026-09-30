@@ -287,6 +287,9 @@ test('opening an old PR schema migrates every row and is idempotent', () => {
     assert.equal(store.getPrByNumber('owner/a', 230)?.workerId, 'w-a');
     assert.equal(store.getPrByNumber('owner/b', 231)?.workerId, 'https://worker-b');
     assert.equal((store.sql.prepare('SELECT COUNT(*) AS count FROM prs').get() as { count: number }).count, 2);
+    const migrated = store.sql.prepare('SELECT state, checkedAt FROM prs WHERE repoSlug = ? AND number = ?').get('owner/a', 230) as { state: string | null; checkedAt: string | null };
+    assert.equal(migrated.state, null);
+    assert.equal(migrated.checkedAt, null);
     store.close();
 
     const reopened = openStore(path);

@@ -65,6 +65,8 @@ function toPrRow(row: Record<string, unknown>): PrRow {
     url: row.url as string,
     head: row.head as string,
     createdAt: row.createdAt as string,
+    state: (row.state as PrRow['state']) ?? null,
+    checkedAt: (row.checkedAt as string | null) ?? null,
   };
 }
 
@@ -78,7 +80,11 @@ function migratePrs(db: DatabaseSync): void {
   const repoColumn = columns.find((column) => column.name === 'repoSlug');
   const numberColumn = columns.find((column) => column.name === 'number');
   const isComposite = repoColumn?.pk === 1 && numberColumn?.pk === 2;
-  if (isComposite) return;
+  if (isComposite) {
+    if (!columns.some((column) => column.name === 'state')) db.exec('ALTER TABLE prs ADD COLUMN state TEXT');
+    if (!columns.some((column) => column.name === 'checkedAt')) db.exec('ALTER TABLE prs ADD COLUMN checkedAt TEXT');
+    return;
+  }
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -91,11 +97,13 @@ function migratePrs(db: DatabaseSync): void {
         url TEXT NOT NULL,
         head TEXT NOT NULL,
         createdAt TEXT NOT NULL,
+        state TEXT,
+        checkedAt TEXT,
         PRIMARY KEY (repoSlug, number)
       );
     `);
     const rows = db.prepare('SELECT number, workerId, url, head, createdAt FROM prs').all() as Array<Record<string, unknown>>;
-    const insert = db.prepare('INSERT INTO prs_v2 (repoSlug, number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
+    const insert = db.prepare('INSERT INTO prs_v2 (repoSlug, number, workerId, url, head, createdAt, state, checkedAt) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)');
     const workerRepo = db.prepare('SELECT repoSlug FROM workers WHERE workerId = ?');
     for (const row of rows) {
       const fromUrl = repoSlugFromPrUrl(String(row.url));
@@ -196,6 +204,8 @@ export function openStore(path: string): Store {
       url TEXT NOT NULL,
       head TEXT NOT NULL,
       createdAt TEXT NOT NULL,
+      state TEXT,
+      checkedAt TEXT,
       PRIMARY KEY (repoSlug, number)
     );
     CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);
@@ -243,8 +253,8 @@ export function openStore(path: string): Store {
   const setCursorStmt = db.prepare('INSERT INTO cursors (name, seq) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET seq = excluded.seq');
   const insertGateStmt = db.prepare('INSERT INTO gates (gateId, workerId, head, passed, checks, at) VALUES (?, ?, ?, ?, ?, ?)');
   const listGatesStmt = db.prepare('SELECT * FROM gates WHERE workerId = ? ORDER BY at ASC');
-  const insertPrStmt = db.prepare('INSERT INTO prs (repoSlug, number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
-  const updatePrStmt = db.prepare('UPDATE prs SET workerId = ?, url = ?, head = ?, createdAt = ? WHERE repoSlug = ? AND number = ?');
+  const insertPrStmt = db.prepare('INSERT INTO prs (repoSlug, number, workerId, url, head, createdAt, state, checkedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+  const updatePrStmt = db.prepare('UPDATE prs SET workerId = ?, url = ?, head = ?, createdAt = ?, state = ?, checkedAt = ? WHERE repoSlug = ? AND number = ?');
   const getPrByWorkerStmt = db.prepare('SELECT * FROM prs WHERE workerId = ? ORDER BY number DESC LIMIT 1');
   const getPrByNumberStmt = db.prepare('SELECT * FROM prs WHERE repoSlug = ? AND number = ?');
   const resolvePrByNumberStmt = db.prepare('SELECT * FROM prs WHERE number = ? ORDER BY repoSlug ASC');
@@ -357,11 +367,11 @@ export function openStore(path: string): Store {
     insertPr(row: PrInput): void {
       const worker = db.prepare('SELECT repoSlug FROM workers WHERE workerId = ?').get(row.workerId) as { repoSlug?: string } | undefined;
       const repoSlug = row.repoSlug ?? repoSlugFromPrUrl(row.url) ?? worker?.repoSlug ?? `unknown/${row.workerId}`;
-      insertPrStmt.run(repoSlug, row.number, row.workerId, row.url, row.head, row.createdAt);
+      insertPrStmt.run(repoSlug, row.number, row.workerId, row.url, row.head, row.createdAt, row.state ?? 'open', row.checkedAt ?? null);
     },
 
     updatePr(row: PrRow): void {
-      updatePrStmt.run(row.workerId, row.url, row.head, row.createdAt, row.repoSlug, row.number);
+      updatePrStmt.run(row.workerId, row.url, row.head, row.createdAt, row.state, row.checkedAt, row.repoSlug, row.number);
     },
 
     getPrByWorker(workerId: string): PrRow | undefined {

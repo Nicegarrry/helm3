@@ -108,8 +108,10 @@ export type PrRow = Readonly<{
   url: string;
   head: string;
   createdAt: string;
+  state: 'open' | 'merged' | 'closed' | null;
+  checkedAt: string | null;
 }>;
-export type PrInput = Omit<PrRow, 'repoSlug'> & { repoSlug?: string };
+export type PrInput = Omit<PrRow, 'repoSlug' | 'state' | 'checkedAt'> & { repoSlug?: string; state?: PrRow['state']; checkedAt?: string | null };
 export type PrResolution = Readonly<{ pr?: PrRow; reason?: string }>;
 export type SpendRow = Readonly<{
   workerId: string;

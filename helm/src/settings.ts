@@ -80,6 +80,7 @@ const settingsSchema = z.object({
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
+  gates: z.object({ allowUnsandboxed: z.boolean().default(false) }).optional(),
   hygiene: z.object({
     keepNodeModules: z.boolean().default(false),
     gcSec: z.number().int().positive().default(600),
@@ -89,7 +90,7 @@ const settingsSchema = z.object({
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
-export type Settings = Omit<ParsedSettings, 'deploy'> & { deploy?: ParsedSettings['deploy'] };
+export type Settings = Omit<ParsedSettings, 'deploy' | 'gates'> & { deploy?: ParsedSettings['deploy']; gates?: ParsedSettings['gates'] };
 
 const DEFAULT_SETTINGS = settingsSchema.parse({});
 

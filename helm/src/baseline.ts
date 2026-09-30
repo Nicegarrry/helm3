@@ -4,6 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadRepoConfig } from './repoconfig.js';
+import { sandboxEnabled } from './gate.js';
 import type { BaselineRow, GateRunner, HelmConfig, Store, WorkerRow } from './types.js';
 const exec = promisify(execFile);
 export function ensureBaselineTable(store: Store): void {
@@ -56,7 +57,9 @@ export async function createBaseline(input: { store: Store; gates: GateRunner; c
   if (offending.length > 0) return { ok: false, reason: `validator changed non-test files: ${offending.join(', ')}` };
   const id = `b-${randomBytes(4).toString('hex')}`; const logDir = join(config.home, 'logs', worker.workerId, `baseline-${id}`);
   await mkdir(logDir, { recursive: true });
-  const outcome = await gates.run(worker.worktree, [{ name: 'acceptance', command: acceptance.command }], logDir, { timeoutMs: config.gateTimeoutMs, nodeModulesRoot: input.nodeModulesRoot });
+  const sandbox = await sandboxEnabled(worker.repo, worker.baseSha);
+  if (!sandbox) store.appendEvent(worker.workerId, 'gate.sandbox.opt_out', { project: worker.repoSlug, head: worker.head, reason: 'base helm.json sets gate.sandbox=false' });
+  const outcome = await gates.run(worker.worktree, [{ name: 'acceptance', command: acceptance.command }], logDir, { timeoutMs: config.gateTimeoutMs, nodeModulesRoot: input.nodeModulesRoot, sandbox });
   const check = outcome.checks[0];
   if (outcome.passed || check?.exitCode === 0) return { ok: false, reason: 'test already passes' };
   if (check?.exitCode === null || check?.exitCode === undefined) return { ok: false, reason: 'test did not exit non-zero' };

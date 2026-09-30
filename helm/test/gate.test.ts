@@ -4,13 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
-import { gateRunner } from '../src/gate.js';
+import { gateRunner, sandboxEnabled } from '../src/gate.js';
 import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
 test('run: passing and failing checks capture output to files', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
   const logDir = join(dir, 'logs');
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     const result = await runner.run(dir, [
       { name: 'ok', command: 'echo hello-out; echo hello-err 1>&2; exit 0' },
@@ -40,7 +40,7 @@ test('run: passing and failing checks capture output to files', async () => {
 test('run: all passing checks means passed=true', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
   const logDir = join(dir, 'logs');
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     const result = await runner.run(dir, [{ name: 'a', command: 'exit 0' }, { name: 'b', command: 'exit 0' }], logDir);
     assert.equal(result.passed, true);
@@ -53,7 +53,7 @@ test('run: all passing checks means passed=true', async () => {
 test('run: a timeout produces a null exit code', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
   const logDir = join(dir, 'logs');
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     const result = await runner.run(dir, [{ name: 'slow', command: 'sleep 5' }], logDir, { timeoutMs: 200 });
     assert.equal(result.passed, false);
@@ -70,23 +70,23 @@ test('run: removes all package node_modules on pass and fail, but preserves opte
     mkdirSync(join(dir, 'helm'), { recursive: true });
     writeFileSync(join(dir, 'helm', 'package.json'), '{}');
     const createsModules = 'mkdir -p node_modules helm/node_modules; exit 3';
-    const removed = await gateRunner().run(dir, [{ name: 'fail', command: createsModules }], logDir);
+    const removed = await gateRunner({ allowUnsandboxed: true }).run(dir, [{ name: 'fail', command: createsModules }], logDir);
     assert.equal(removed.passed, false);
     assert.equal(existsSync(join(dir, 'node_modules')), false);
     assert.equal(existsSync(join(dir, 'helm', 'node_modules')), false);
 
     mkdirSync(join(dir, 'node_modules'), { recursive: true });
     mkdirSync(join(dir, 'helm', 'node_modules'), { recursive: true });
-    await gateRunner().run(dir, [{ name: 'pass', command: 'exit 0' }], logDir);
+    await gateRunner({ allowUnsandboxed: true }).run(dir, [{ name: 'pass', command: 'exit 0' }], logDir);
     assert.equal(existsSync(join(dir, 'node_modules')), false);
     assert.equal(existsSync(join(dir, 'helm', 'node_modules')), false);
 
     mkdirSync(join(dir, 'app', 'node_modules'), { recursive: true });
     writeFileSync(join(dir, 'app', 'package.json'), '{}');
-    await gateRunner().run(dir, [{ name: 'package', command: 'exit 0' }], logDir);
+    await gateRunner({ allowUnsandboxed: true }).run(dir, [{ name: 'package', command: 'exit 0' }], logDir);
     assert.equal(existsSync(join(dir, 'app', 'node_modules')), false);
     mkdirSync(join(dir, 'app', 'node_modules'), { recursive: true });
-    await gateRunner({ keepNodeModules: true }).run(dir, [{ name: 'keep', command: 'mkdir -p node_modules helm/node_modules' }], logDir);
+    await gateRunner({ keepNodeModules: true, allowUnsandboxed: true }).run(dir, [{ name: 'keep', command: 'mkdir -p node_modules helm/node_modules' }], logDir);
     assert.equal(existsSync(join(dir, 'node_modules')), true);
     assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
     assert.equal(existsSync(join(dir, 'app', 'node_modules')), true);
@@ -97,7 +97,7 @@ test('run: removes all package node_modules on pass and fail, but preserves opte
 
 test('defaultChecks: reads gates from helm.json when present', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'custom', command: 'echo hi' }] }));
     const checks = await runner.defaultChecks(dir);
@@ -109,7 +109,7 @@ test('defaultChecks: reads gates from helm.json when present', async () => {
 
 test('defaultChecks: a worker helm.json change cannot remove base gates', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     execFileSync('git', ['init', '-q'], { cwd: dir });
     disableGitMaintenance(dir);
@@ -127,9 +127,27 @@ test('defaultChecks: a worker helm.json change cannot remove base gates', async 
   }
 });
 
+test('sandbox opt-out is read from the base helm.json, never the worker copy', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-policy-'));
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    disableGitMaintenance(dir);
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [], gate: { sandbox: false } }));
+    execFileSync('git', ['add', 'helm.json'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'base'], { cwd: dir });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [], gate: { sandbox: true } }));
+    assert.equal(await sandboxEnabled(dir, baseSha), false);
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
 test('defaultChecks: an untracked operator helm.json is used when absent at the base sha', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     execFileSync('git', ['init', '-q'], { cwd: dir });
     disableGitMaintenance(dir);
@@ -147,7 +165,7 @@ test('defaultChecks: an untracked operator helm.json is used when absent at the 
 test('defaultChecks: a helm.json in a separate worker worktree is not used', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
   const worker = mkdtempSync(join(tmpdir(), 'helm-gate-worker-'));
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     execFileSync('git', ['init', '-q'], { cwd: dir });
     disableGitMaintenance(dir);
@@ -165,7 +183,7 @@ test('defaultChecks: a helm.json in a separate worker worktree is not used', asy
 
 test('defaultChecks: falls back to package.json scripts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc --noEmit', build: 'tsc' } }));
     const checks = await runner.defaultChecks(dir);
@@ -181,7 +199,7 @@ test('defaultChecks: falls back to package.json scripts', async () => {
 test('F8: a check name with path traversal characters is slugified and its log stays inside logDir', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
   const logDir = join(dir, 'logs');
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     const result = await runner.run(dir, [{ name: 'unit/../x', command: 'echo hi' }], logDir);
     const check = result.checks[0]!;
@@ -197,7 +215,7 @@ test('F8: a check name with path traversal characters is slugified and its log s
 test('F8: two checks that slugify to the same name get distinct, index-suffixed logs', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
   const logDir = join(dir, 'logs');
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     const result = await runner.run(
       dir,
@@ -218,7 +236,7 @@ test('F8: two checks that slugify to the same name get distinct, index-suffixed 
 
 test('defaultChecks: no helm.json and no package.json means no checks', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-repo-'));
-  const runner = gateRunner();
+  const runner = gateRunner({ allowUnsandboxed: true });
   try {
     const checks = await runner.defaultChecks(dir);
     assert.deepEqual(checks, []);

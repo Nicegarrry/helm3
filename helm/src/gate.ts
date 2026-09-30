@@ -6,10 +6,20 @@ import { join } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
 import { cleanupNodeModules } from './hygiene.js';
+import { disposeGateSandbox, isInstallCommand, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason } from './sandbox.js';
 
 type CheckResult = { name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number };
 
 type ExecFileError = NodeJS.ErrnoException & { code?: number | string; signal?: string | null; killed?: boolean };
+
+/** Read the sandbox opt-out from the recorded base branch only. Missing/invalid base policy is fail-closed. */
+export async function sandboxEnabled(repo: string, sha: string): Promise<boolean> {
+  try {
+    return (await loadRepoConfig(repo, sha, false)).gate?.sandbox !== false;
+  } catch {
+    return true;
+  }
+}
 
 /** `check.name` is attacker/author-controlled free text used to build a log file path; sanitize it before it ever reaches `outputPath` (F8). */
 function slugifyCheckName(name: string): string {
@@ -20,25 +30,52 @@ function slugifyCheckName(name: string): string {
   return slug.length > 0 ? slug : 'check';
 }
 
-function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: string, timeoutMs: number): Promise<CheckResult> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const outputPath = join(logDir, `${outputSlug}.log`);
-    execFile('/bin/sh', ['-c', check.command], { cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      const durationMs = Date.now() - start;
-      const err = error as ExecFileError | null;
-      // Exit code is null when the process was killed by a signal (e.g. timeout).
-      const exitCode = err === null ? 0 : typeof err.code === 'number' ? err.code : null;
-      writeFile(outputPath, `$ ${check.command}\n\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`)
-        .catch(() => {})
-        .finally(() => resolve({ name: check.name, command: check.command, exitCode, outputPath, durationMs }));
+async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string }): Promise<CheckResult> {
+  const start = Date.now();
+  const outputPath = join(logDir, `${outputSlug}.log`);
+  let sandbox: Awaited<ReturnType<typeof prepareGateSandbox>> | Awaited<ReturnType<typeof prepareUnsandboxedGate>> | undefined;
+  const writeResult = async (stdout: string, stderr: string, exitCode: number | null): Promise<CheckResult> => {
+    const durationMs = Date.now() - start;
+    await writeFile(outputPath, `$ ${check.command}\n\n--- stdout ---\n${stdout}\n--- stderr ---\n${stderr}\n`).catch(() => {});
+    return { name: check.name, command: check.command, exitCode, outputPath, durationMs };
+  };
+
+  try {
+    const unavailable = sandboxUnavailableReason(options.allowUnsandboxed);
+    if (unavailable && (options.sandbox || process.platform !== 'darwin')) throw new Error(unavailable);
+    sandbox = options.sandbox && sandboxExecutable()
+      ? await prepareGateSandbox({ cwd, allowNetwork: isInstallCommand(check.command), operatorHome: options.operatorHome })
+      : await prepareUnsandboxedGate();
+  } catch (error) {
+    return writeResult('', error instanceof Error ? error.message : String(error), null);
+  }
+
+  const execute = (child: NonNullable<typeof sandbox>): Promise<{ error: ExecFileError | null; stdout: string; stderr: string }> => new Promise((resolve) => {
+      const executable = child.executable ?? '/bin/sh';
+      const args = child.executable ? ['-f', child.profilePath!, '/bin/sh', '-c', check.command] : ['-c', check.command];
+      execFile(executable, args, { cwd, env: child.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+        resolve({ error: error as ExecFileError | null, stdout, stderr });
+      });
     });
-  });
+
+  try {
+    let result = await execute(sandbox);
+    if (sandbox.executable && options.allowUnsandboxed && String(result.error?.code) === '71' && /sandbox_apply/i.test(result.stderr)) {
+      await disposeGateSandbox(sandbox.tempDir);
+      sandbox = await prepareUnsandboxedGate();
+      result = await execute(sandbox);
+    }
+    // Exit code is null when the process was killed by a signal (e.g. timeout).
+    const exitCode = result.error === null ? 0 : typeof result.error.code === 'number' ? result.error.code : null;
+    return writeResult(result.stdout, result.stderr, exitCode);
+  } finally {
+    await disposeGateSandbox(sandbox.tempDir);
+  }
 }
 
-export function gateRunner(options: { keepNodeModules?: boolean } = {}): GateRunner {
+export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; onNodeModulesError?: (message: string) => void }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const results: CheckResult[] = [];
@@ -49,7 +86,11 @@ export function gateRunner(options: { keepNodeModules?: boolean } = {}): GateRun
           const seen = usedSlugs.get(base) ?? 0;
           usedSlugs.set(base, seen + 1);
           const outputSlug = seen === 0 ? base : `${base}-${seen}`;
-          const result = await runCheck(cwd, check, outputSlug, logDir, timeoutMs);
+          const result = await runCheck(cwd, check, outputSlug, logDir, timeoutMs, {
+            sandbox: opts?.sandbox !== false,
+            allowUnsandboxed: options.allowUnsandboxed === true,
+            operatorHome: options.operatorHome,
+          });
           results.push(result);
         }
       } finally {

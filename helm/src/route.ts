@@ -1,57 +1,83 @@
 import type { Jev, JevAnswer } from './jev.js';
-import { issueQuestions, band, flag, score } from './jevcheck.js';
-import type { Settings } from './settings.js';
-import { cleanRateForRouting } from './scorecard.js';
+import { issueQuestions, flag, scoreTier } from './jevcheck.js';
+import { loadSettings, type Settings } from './settings.js';
 import type { Store } from './types.js';
 import type { ModelChooser, ModelChoice, SpawnInput } from './helm.js';
+import { createModelCatalog, type ModelCatalog } from './routing/catalog.js';
+import { selectCandidate } from './routing/select.js';
 
-const HIGH = 'codex/gpt-5.6-luna:high';
-
-function tooBig(answer: JevAnswer | undefined): boolean {
-  return flag(answer, 'true', true);
+function tooBig(answer: JevAnswer | undefined): boolean { return flag(answer, 'true', true); }
+function project(repo: string): string | undefined { return /^[^/\s]+\/[^/\s]+$/.test(repo) ? repo : undefined; }
+function difficultyTier(difficulty: SpawnInput['difficulty']): number | undefined {
+  return difficulty === 'super-easy' ? 1 : difficulty === 'easy' ? 2 : difficulty === 'normal' ? 3 : undefined;
 }
 
-function allowed(model: string, settings: Settings): string {
-  return settings.routing.allowed.includes(model) ? model : settings.routing.allowed.at(-1) ?? HIGH;
-}
-
-function project(repo: string): string | undefined {
-  return /^[^/\s]+\/[^/\s]+$/.test(repo) ? repo : undefined;
-}
-
-export function createRouter(options: { settings: Settings; store: Store; jev: Jev; now?: () => Date; resolveProject?: (repo: string) => Promise<string | undefined> }): ModelChooser {
-  const fallbackModel = () => allowed(HIGH, options.settings);
+export function createRouter(options: {
+  settings: Settings;
+  settingsHome?: string;
+  store: Store;
+  jev?: Jev;
+  now?: () => Date;
+  resolveProject?: (repo: string) => Promise<string | undefined>;
+  isAvailable?: (model: string) => boolean | Promise<boolean>;
+  catalog?: ModelCatalog;
+}): ModelChooser {
+  const currentSettings = () => options.settingsHome ? loadSettings(options.settingsHome) : options.settings;
+  const defaultCatalog = createModelCatalog({ getSettings: currentSettings, probe: options.isAvailable ? {
+    codex: (id) => options.isAvailable!(`codex/${id}`),
+    pi: (provider, id) => options.isAvailable!(`${provider}/${id}`),
+    claude: () => options.isAvailable!('claude/runner'),
+  } : undefined });
+  const catalog = options.catalog ?? (options.isAvailable ? {
+    availability: async (model: string) => {
+      if (model.startsWith('claude/')) return { available: false, reason: 'no worker lane for claude' };
+      try { return await options.isAvailable!(model) ? { available: true } : { available: false, reason: 'model is unavailable' }; }
+      catch { return { available: false, reason: 'model is unavailable' }; }
+    },
+    check: defaultCatalog.check,
+  } : defaultCatalog);
   return async (input: SpawnInput): Promise<ModelChoice> => {
-    if (input.model || input.difficulty) return { model: input.model ?? HIGH };
+    if (input.model) return { model: input.model };
+    const settings = currentSettings();
     const projectName = project(input.repo) ?? (options.resolveProject ? await options.resolveProject(input.repo).catch(() => undefined) : undefined);
-    const questions = issueQuestions();
-    let result: Awaited<ReturnType<Jev['ask']>>;
-    try {
-      result = await options.jev.ask('route', {
-        ...(projectName ? { project: projectName } : {}),
-        state: { objective: input.objective, acceptance: input.acceptance ?? null },
-        questions: { complexity: questions.complexity!, too_big: questions.too_big! },
-      });
-    } catch {
-      return { model: fallbackModel() };
+    let judgedTier = difficultyTier(input.difficulty);
+    let score: number | undefined;
+    let splitRecommended = false;
+    let warning: string | undefined;
+    if (judgedTier === undefined && options.jev) {
+      const questions = issueQuestions();
+      try {
+        const result = await options.jev.ask('route', {
+          ...(projectName ? { project: projectName } : {}),
+          state: { objective: input.objective, acceptance: input.acceptance ?? null },
+          questions: { complexity: questions.complexity!, too_big: questions.too_big! },
+        });
+        if (result.ok) {
+          splitRecommended = tooBig(result.answers.too_big);
+          const judged = scoreTier(result.answers.complexity);
+          judgedTier = judged?.tier;
+          score = judged?.score;
+          if (!judged) warning = splitRecommended ? 'split recommended' : undefined;
+        } else warning = 'Jev routing failed; used tier 3 fallback';
+      } catch { warning = 'Jev routing failed; used tier 3 fallback'; }
     }
-    if (!result.ok) return { model: fallbackModel() };
-    const splitRecommended = tooBig(result.answers.too_big);
-    const complexity = score(result.answers.complexity);
-    const complexityBand = band(complexity);
-    if (complexityBand === undefined) return { model: fallbackModel(), ...(splitRecommended ? { warning: 'split recommended' } : {}) };
-    let model = allowed(options.settings.routing.table[complexityBand] ?? HIGH, options.settings);
-    const rate = cleanRateForRouting(options.store, model, complexityBand, options.now?.() ?? new Date(), projectName);
-    if (rate.n >= options.settings.routing.minN && rate.clean / rate.n < options.settings.routing.minClean) model = allowed(HIGH, options.settings);
+    judgedTier ??= 3;
+    const selection = await selectCandidate({
+      settings, input, judgedTier, score, project: projectName,
+      store: options.store, catalog, now: options.now?.() ?? new Date(),
+    });
     return {
-      model,
-      band: complexityBand,
-      complexity,
-      ...(splitRecommended ? { warning: 'split recommended' } : {}),
+      ...(selection.model ? { model: selection.model } : {}),
+      tier: selection.tier,
+      ...(selection.score === undefined ? {} : { score: selection.score }),
+      policyApplied: selection.policyApplied,
+      ...(selection.skippedCandidates?.length ? { skippedCandidates: selection.skippedCandidates } : {}),
+      ...(selection.refusal ? { refusal: selection.refusal } : {}),
+      ...(splitRecommended ? { warning: 'split recommended' } : warning ? { warning } : {}),
     };
   };
 }
 
-export function registerRouting(options: { chooseModel: (chooser: ModelChooser) => void; settings: Settings; store: Store; jev?: Jev; now?: () => Date; resolveProject?: (repo: string) => Promise<string | undefined> }): void {
-  if (options.jev) options.chooseModel(createRouter({ settings: options.settings, store: options.store, jev: options.jev, now: options.now, resolveProject: options.resolveProject }));
+export function registerRouting(options: { chooseModel: (chooser: ModelChooser) => void; settings: Settings; settingsHome?: string; store: Store; jev?: Jev; now?: () => Date; resolveProject?: (repo: string) => Promise<string | undefined>; catalog?: ModelCatalog }): void {
+  options.chooseModel(createRouter({ settings: options.settings, settingsHome: options.settingsHome, store: options.store, jev: options.jev, now: options.now, resolveProject: options.resolveProject, catalog: options.catalog }));
 }

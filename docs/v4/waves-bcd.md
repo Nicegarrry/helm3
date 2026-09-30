@@ -1,7 +1,7 @@
 # Helm v4.0 — Waves B, C, D: specify+gate, ship, remember
 
 Status: plan, dispatch after wave A (A0–A9) lands. Owner: Nick. Scope: drops 4–9. Same gate/test/contract rules as `wave-a.md`.
-Lanes: builders **Codex only** (`codex/gpt-5.6-luna:high` for contract/concurrency work, `:medium` otherwise). Reviews by Claude Code subagents run by the supervisor outside Helm, recorded with `review.record` (B7). Jev for cheap judgement. Skills are supervisor/orchestrator-written in `~/code/skills`.
+Lanes: builders **Codex only** (`codex/gpt-6-luna:high` for contract/concurrency work, `:medium` otherwise). Reviews by Claude Code subagents run by the supervisor outside Helm, recorded with `review.record` (B7). Jev for cheap judgement. Skills are supervisor/orchestrator-written in `~/code/skills`.
 Jev wording and thresholds come from the spike (`helm3-worktrees/jev/spikes/jev/results/*.md`, branch `spike/jev`, not pushed). The wording quoted below is verbatim; retuning needs a new spike.
 
 ## Decisions forced by the code (recommendation first; reverse deliberately)
@@ -327,7 +327,7 @@ After each scorecard:
 **Scope:** new `src/route.ts`, registered via `helm.chooseModel`. It runs only when both `model` and `difficulty` are absent.
 - One Jev call on objective plus acceptance: `complexity` (score) and `too_big` (noul), using B2's wording.
 - Bands: <0.75 trivial, <1.5 small, <2.25 medium, else large.
-- Default `routing.table`: trivial, small and medium → `codex/gpt-5.6-luna:medium`; large → `luna:high`.
+- Default `routing.tiers`: Jev's five tiers select the first available candidate in order; Codex-only policy maps tiers 1-5 to Luna medium, Luna high, Terra high, Sol medium, and Astra high, with Sol high as the tier-5 fallback.
 - Scorecard rule: if D2's clean rate for (model, band) over the last 30 days is below `minClean` with n ≥ `minN`, step up to `luna:high`.
 - Anything outside `routing.allowed` (luna medium or high) is clamped.
 - `too_big` ≥ 0.5 → the spawn proceeds with the warning "split recommended".

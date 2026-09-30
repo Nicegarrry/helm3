@@ -125,10 +125,20 @@ function toWorkerMeta(row: Record<string, unknown>): WorkerMeta {
     issue: (row.issue as number | null) ?? null,
     prBase: (row.prBase as string | null) ?? null,
     baselineId: (row.baselineId as string | null) ?? null,
-    band: (row.band as string | null) ?? null,
-    complexity: (row.complexity as number | null) ?? null,
+    tier: (row.tier as number | null) ?? null,
+    score: (row.score as number | null) ?? null,
+    chosenModel: (row.chosenModel as string | null) ?? null,
+    policyApplied: row.policyApplied ? JSON.parse(row.policyApplied as string) : null,
+    skippedCandidates: row.skippedCandidates ? JSON.parse(row.skippedCandidates as string) : [],
     skills: row.skills ? JSON.parse(row.skills as string) : [],
   };
+}
+
+function ensureWorkerMetaColumns(db: DatabaseSync): void {
+  const existing = new Set((db.prepare('PRAGMA table_info(worker_meta)').all() as Array<{ name: string }>).map((row) => row.name));
+  for (const [name, definition] of [['tier', 'INTEGER'], ['score', 'REAL'], ['chosenModel', 'TEXT'], ['policyApplied', "TEXT"], ['skippedCandidates', "TEXT NOT NULL DEFAULT '[]'"]] as const) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE worker_meta ADD COLUMN ${name} ${definition}`);
+  }
 }
 
 function summarize(rows: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number | null }[]): SpendSummary {
@@ -228,11 +238,17 @@ export function openStore(path: string): Store {
       baselineId TEXT,
       band TEXT,
       complexity REAL,
+      tier INTEGER,
+      score REAL,
+      chosenModel TEXT,
+      policyApplied TEXT,
+      skippedCandidates TEXT NOT NULL DEFAULT '[]',
       skills TEXT NOT NULL DEFAULT '[]'
     );
     CREATE TABLE IF NOT EXISTS spend_limits (name TEXT PRIMARY KEY, value REAL NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL, tapId TEXT);
     CREATE TABLE IF NOT EXISTS spend_limit_state (id INTEGER PRIMARY KEY CHECK (id = 1), checksum TEXT NOT NULL, rows TEXT NOT NULL, at TEXT NOT NULL);
   `);
+  ensureWorkerMetaColumns(db);
   migratePrs(db);
   db.exec('CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);');
 
@@ -242,10 +258,11 @@ export function openStore(path: string): Store {
   const getWorkerStmt = db.prepare('SELECT * FROM workers WHERE workerId = ?');
   const getMetaStmt = db.prepare('SELECT * FROM worker_meta WHERE workerId = ?');
   const setMetaStmt = db.prepare(`
-    INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, skills)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, tier, score, chosenModel, policyApplied, skippedCandidates, skills)
+    VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(workerId) DO UPDATE SET issue = excluded.issue, prBase = excluded.prBase,
-      baselineId = excluded.baselineId, band = excluded.band, complexity = excluded.complexity, skills = excluded.skills
+      tier = excluded.tier, score = excluded.score, chosenModel = excluded.chosenModel, policyApplied = excluded.policyApplied,
+      skippedCandidates = excluded.skippedCandidates, skills = excluded.skills
   `);
   const findByIdempotencyKeyStmt = db.prepare('SELECT * FROM workers WHERE idempotencyKey = ?');
   const appendEventStmt = db.prepare('INSERT INTO events (workerId, at, kind, data) VALUES (?, ?, ?, ?)');
@@ -310,9 +327,9 @@ export function openStore(path: string): Store {
     },
 
     setMeta(workerId: string, patch: Partial<Omit<WorkerMeta, 'workerId'>>): void {
-      const current = this.getMeta(workerId) ?? { workerId, issue: null, prBase: null, baselineId: null, band: null, complexity: null, skills: [] };
+      const current = this.getMeta(workerId) ?? { workerId, issue: null, prBase: null, baselineId: null, tier: null, score: null, chosenModel: null, policyApplied: null, skippedCandidates: [], skills: [] };
       const next = { ...current, ...patch };
-      setMetaStmt.run(next.workerId, next.issue, next.prBase, next.baselineId, next.band, next.complexity, JSON.stringify(next.skills));
+      setMetaStmt.run(next.workerId, next.issue, next.prBase, next.baselineId, next.tier, next.score, next.chosenModel, next.policyApplied ? JSON.stringify(next.policyApplied) : null, JSON.stringify(next.skippedCandidates), JSON.stringify(next.skills));
     },
 
     findByIdempotencyKey(key: string): WorkerRow | undefined {

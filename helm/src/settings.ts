@@ -10,9 +10,17 @@ const BUDGET_DEFAULTS = { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 };
 const FACTORY_DEFAULTS = { claims: 'block' as const, claimsAt: 0.7, verdictAt: 0.5, retryMax: 2, envelopeTapAt: 0.5, tapTtlMin: 60 };
 const QUEUE_DEFAULTS = { tickSec: 30, checksTimeoutMin: 30 };
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
+const ROUTING_TIERS_DEFAULTS: Record<string, string[]> = {
+  1: ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium', 'codex/gpt-5.6-luna:medium'],
+  2: ['google/gemini-3.8-flash', 'codex/gpt-6-luna:high', 'codex/gpt-5.6-luna:high'],
+  3: ['claude/sonnet:high', 'codex/gpt-5.6-terra:high'],
+  4: ['codex/gpt-6.1-sol:medium', 'codex/gpt-5.6-sol:medium', 'claude/opus:medium'],
+  5: ['codex/gpt-6-astra:high', 'claude/opus:high', 'claude/fable:high', 'codex/gpt-6.1-sol:high', 'codex/gpt-5.6-sol:high'],
+};
 const ROUTING_DEFAULTS = {
-  table: { trivial: 'codex/gpt-5.6-luna:medium', small: 'codex/gpt-5.6-luna:medium', medium: 'codex/gpt-5.6-luna:medium', large: 'codex/gpt-5.6-luna:high' },
-  allowed: ['codex/gpt-5.6-luna:medium', 'codex/gpt-5.6-luna:high'], minClean: 0.5, minN: 8,
+  tiers: ROUTING_TIERS_DEFAULTS,
+  allowed: Object.values(ROUTING_TIERS_DEFAULTS).flat(), minClean: 0.5, minN: 8,
+  policy: { subscriptionOnly: false }, checkDays: 7,
 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
@@ -69,10 +77,15 @@ const settingsSchema = z.object({
     lessons: z.enum(['off', 'shadow', 'on']).default('shadow'),
   }).default(SELECT_DEFAULTS),
   routing: z.object({
-    table: z.record(z.string(), z.string()).default(ROUTING_DEFAULTS.table),
+    tiers: z.record(z.string(), z.array(z.string().min(1))).default(ROUTING_DEFAULTS.tiers),
     allowed: z.array(z.string()).default(ROUTING_DEFAULTS.allowed),
     minClean: z.number().default(0.5),
     minN: z.number().int().default(8),
+    policy: z.object({
+      lanes: z.array(z.enum(['codex', 'pi', 'claude'])).optional(),
+      subscriptionOnly: z.boolean().default(false),
+    }).default(ROUTING_DEFAULTS.policy),
+    checkDays: z.number().positive().default(7),
   }).default(ROUTING_DEFAULTS),
   discord: z.object({
     projects: z.record(z.string(), z.object({ webhookEnv: z.string() })).default({}),
@@ -91,14 +104,29 @@ const settingsSchema = z.object({
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
-export type Settings = Omit<ParsedSettings, 'deploy'> & { deploy?: ParsedSettings['deploy'] };
+export type Settings = Omit<ParsedSettings, 'deploy' | 'routing'> & {
+  deploy?: ParsedSettings['deploy'];
+  routing: Omit<ParsedSettings['routing'], 'policy' | 'checkDays'> & {
+    policy?: { lanes?: ('codex' | 'pi' | 'claude')[]; subscriptionOnly?: boolean };
+    checkDays?: number;
+  };
+};
+
 const DEFAULT_SETTINGS = settingsSchema.parse({});
+/** A routing block without `allowed` allows every configured tier candidate. */
+function withRoutingDefaults(settings: Settings, raw: unknown): Settings {
+  const routingRaw = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).routing : undefined;
+  if (routingRaw && typeof routingRaw === 'object' && !Array.isArray(routingRaw) && !Object.hasOwn(routingRaw, 'allowed')) {
+    return { ...settings, routing: { ...settings.routing, allowed: Object.values(settings.routing.tiers).flat() } };
+  }
+  return settings;
+}
 export function loadSettings(home: string): Settings { const result = readSettingsFile(home); if (result.error) console.error(`invalid ${join(home, 'helm.json')}; using defaults`); return result.settings ?? DEFAULT_SETTINGS; }
 function fileSignature(path: string): string { try { const stat = statSync(path); return `${stat.mtimeMs}:${stat.size}:${stat.ino}`; } catch (err) { return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unavailable'; } }
 export type SettingsFile = Readonly<{ signature: string; settings?: Settings; error?: string }>;
 export function readSettingsFile(home: string): SettingsFile {
   const path = join(home, 'helm.json');
-  try { const parsed = settingsSchema.safeParse(JSON.parse(readFileSync(path, 'utf8'))); return parsed.success ? { signature: fileSignature(path), settings: parsed.data } : { signature: fileSignature(path), error: 'schema validation failed' }; }
+  try { const raw: unknown = JSON.parse(readFileSync(path, 'utf8')); const parsed = settingsSchema.safeParse(raw); return parsed.success ? { signature: fileSignature(path), settings: withRoutingDefaults(parsed.data, raw) } : { signature: fileSignature(path), error: 'schema validation failed' }; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { signature: 'missing', settings: DEFAULT_SETTINGS } : { signature: fileSignature(path), error: 'invalid JSON' }; }
 }
 export type SpendSettingsUpdate = Readonly<{ capUsd?: number; warnUsd?: number; maxWorkers?: number }>;

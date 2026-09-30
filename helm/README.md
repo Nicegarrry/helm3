@@ -81,22 +81,47 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
 Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Nothing throws across the
 boundary.
 
-## Model selection
+## Model routing
 
-Omit `model` to use the following policy on both CLI and MCP:
+When `model` and `difficulty` are omitted, Jev scores the ticket from 0 through 4 and
+maps the expected value to tier 1 through 5. Helm checks each tier's candidates in order,
+skipping models that are not allowed, unavailable, or below the scorecard clean-rate
+threshold. A higher tier is tried when the current tier has no usable candidate.
 
-| Task tier | Model | Runtime |
-| --- | --- | --- |
-| Normal (default) | `codex/gpt-5.6-terra:medium` | Codex CLI, ChatGPT subscription |
-| Easy | `codex/gpt-5.6-luna:medium` | Codex CLI, ChatGPT subscription |
-| Super easy | `opencode-go/qwen3.8-flash` | Pi |
-| Review of any of these | `google/gemini-3.8-flash` | Pi |
+| Tier | Ordered candidates (cheapest first) |
+| --- | --- |
+| 1 | `openrouter/qwen/qwen3.8-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, `codex/gpt-6-luna:medium`, `codex/gpt-5.6-luna:medium` |
+| 2 | `google/gemini-3.8-flash`, `codex/gpt-6-luna:high`, `codex/gpt-5.6-luna:high` |
+| 3 | `claude/sonnet:high`, `codex/gpt-5.6-terra:high` |
+| 4 | `codex/gpt-6.1-sol:medium`, `codex/gpt-5.6-sol:medium`, `claude/opus:medium` |
+| 5 | `codex/gpt-6-astra:high`, `claude/opus:high`, `claude/fable:high`, `codex/gpt-6.1-sol:high`, `codex/gpt-5.6-sol:high` |
 
-Use `helm spawn --repo /path/to/repo --objective "…" --difficulty easy` or pass
-`difficulty: "easy"` to `worker.spawn`. The caller classifies the task; Helm does not
-infer difficulty from the objective. `super-easy` is for small, mechanical work.
-An explicit `--model` (MCP `model`) overrides the tier. Kimi K3 and Qwen 3.8 Max are
-never selected automatically, including on failures; explicit overrides remain available.
+The tier-1 Qwen entry is the requested `openrouter/qwen/qwen3.8-flash` identifier. The
+current operator `models.json` exposes the older `opencode-go/qwen3.8-flash` override
+instead, so the catalog reports this requested candidate unavailable until configured;
+it does not silently substitute it. Gemini 3.8 Flash is present in Pi's Google catalog.
+`claude/*` candidates remain unavailable
+until Helm has a Claude worker lane. The table, `allowed`, `minClean`, `minN`, `policy`,
+and `checkDays` are hot-reloaded from `$HELM_HOME/helm.json` for each automatic route.
+`routing.policy.lanes` may contain `codex`, `pi`, and `claude`; `subscriptionOnly: true`
+permits only Codex and Claude. `worker.spawn` accepts a repeatable `lanes` override for
+one spawn. Jev still scores every spawn without an explicit model before policy filtering.
+If a policy empties the judged tier, Helm searches higher tiers, then lower tiers; if all
+candidates are disallowed or unavailable it refuses with the policy reason rather than
+silently choosing one.
+
+`helm routing check` (or the `routing.check` tool) probes the catalog and records the last
+check in the Helm store. The weekly ticker runs it when `checkDays` has elapsed and emits
+`routing.stale` for unavailable tier candidates or models present in a lane but absent from
+the table. The Codex probe runs `codex debug models`; Pi reads its
+operator and built-in provider catalogs; Claude requires both a binary and a registered
+Helm lane.
+
+Retrospectives should review the 30-day model × tier scorecard, then edit the ordered
+`routing.tiers` lists or `routing.allowed` in `helm.json`. Keep the cheapest acceptable
+candidate first, and use a later candidate or higher tier when the clean rate is below
+`minClean` with at least `minN` observations. An explicit `model` bypasses routing;
+`difficulty` maps directly to tiers 1, 2, and 3 and still uses policy and availability checks.
 
 `helm review <id>` / `review.request` also accepts an omitted model. Reviews default to
 Gemini Flash; if an explicitly selected builder is Gemini, the default reviewer is Codex

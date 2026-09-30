@@ -87,6 +87,7 @@ function milestone(event: EventRow, projectCount: number): string | null {
       .map(optional).filter((value): value is string => Boolean(value)).join(' ');
     return `${state}: ${text(event.data.target, 'target')}${details ? ` ${details}` : ''}`;
   }
+  if (event.kind === 'routing.stale') return `Routing catalog stale: ${text(event.data.summary, 'check routing candidates')}`;
   return null;
 }
 

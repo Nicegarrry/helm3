@@ -200,9 +200,9 @@ test('laneRunner routes codex/ models to the Codex lane and everything else to P
   const lane = (name: string): WorkerRunner => ({ run: async (i) => { seen.push(`${name}:${i.model}`); return { result: null, rawText: '', sessionFile: null }; } });
   const runner = laneRunner({ pi: lane('pi'), codex: lane('codex') });
   const { hooks } = collectHooks();
-  await runner.run(input({ worktree: '/wt', sessionDir: '/s', model: 'codex/gpt-5.6-luna' }), 'x', hooks);
+  await runner.run(input({ worktree: '/wt', sessionDir: '/s', model: 'codex/gpt-6-luna' }), 'x', hooks);
   await runner.run(input({ worktree: '/wt', sessionDir: '/s', model: 'opencode-go/qwen3.8-flash' }), 'x', hooks);
-  assert.deepEqual(seen, ['codex:codex/gpt-5.6-luna', 'pi:opencode-go/qwen3.8-flash']);
+  assert.deepEqual(seen, ['codex:codex/gpt-6-luna', 'pi:opencode-go/qwen3.8-flash']);
 });
 
 test('defaultCodexBin honours HELM_CODEX_BIN', () => {

@@ -10,27 +10,36 @@ import { RESULT_INSTRUCTION } from './prompt.js';
 export const CORRECTION_MESSAGE =
   'Your final message must be exactly one JSON object matching the WorkerResult schema. Reply with only that JSON.';
 
-/** Parse whole-message JSON, then try fenced blocks from last to first until one validates. */
-export function parseWorkerResult(text: string): WorkerResult | null {
-  const attempt = (candidate: string): WorkerResult | null => {
+/** Parse whole-message JSON, then try fenced blocks from last to first until one validates; keeps the first parseable candidate's zod issues. */
+function checkWorkerResult(text: string): { result: WorkerResult | null; issues: string[] } {
+  let issues: string[] = [];
+  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)].reverse().map((fence) => fence[1] ?? '');
+  for (const candidate of [text, ...fences]) {
     let data: unknown;
     try {
-      data = JSON.parse(candidate);
+      data = JSON.parse(candidate.trim());
     } catch {
-      return null;
+      continue;
     }
     const parsed = workerResultSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  };
-  const direct = attempt(text.trim());
-  if (direct) return direct;
-  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
-  for (let i = fences.length - 1; i >= 0; i--) {
-    const candidate = fences[i]?.[1] ?? '';
-    const parsed = attempt(candidate.trim());
-    if (parsed) return parsed;
+    if (parsed.success) return { result: parsed.data, issues: [] };
+    if (!issues.length) issues = parsed.error.issues.map((issue) => `${issue.path.map((part, i) => (typeof part === 'number' ? `[${part}]` : `${i ? '.' : ''}${String(part)}`)).join('') || 'result'}: ${issue.message}`);
   }
-  return null;
+  return { result: null, issues };
+}
+
+export function parseWorkerResult(text: string): WorkerResult | null {
+  return checkWorkerResult(text).result;
+}
+
+export function workerResultIssues(text: string): string[] {
+  return checkWorkerResult(text).issues;
+}
+
+/** The correction turn: the fixed instruction plus the zod issues found in the previous reply. */
+export function correctionMessage(rawText: string): string {
+  const issues = workerResultIssues(rawText);
+  return issues.length ? `${CORRECTION_MESSAGE}\nValidation errors:\n${issues.slice(0, 10).join('\n')}` : CORRECTION_MESSAGE;
 }
 
 
@@ -341,7 +350,7 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
         let rawText = await runTurn(message);
         let result = parseWorkerResult(rawText);
         if (!result && hooks.shouldContinue()) {
-          rawText = await runTurn(CORRECTION_MESSAGE);
+          rawText = await runTurn(correctionMessage(rawText));
           result = parseWorkerResult(rawText);
         }
 

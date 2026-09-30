@@ -19,7 +19,7 @@ export const workerResultSchema = z.preprocess(omitEmptyStrings, z.object({
   commandsRun: z.array(z.string().min(1)).max(200).default([]),
   question: z.string().min(1).max(4000).optional(),
   notes: z.string().max(8000).optional(),
-  claims: z.array(z.string().max(300)).max(12).optional(),
+  claims: z.array(z.string().max(300, 'at most 300 chars')).max(12, 'at most 12').optional(),
   acceptance: z.object({ command: z.string().min(1), files: z.array(z.string().min(1)) }).optional(),
 }).strict().superRefine((result, ctx) => {
   if (result.status === 'question' && !result.question) {

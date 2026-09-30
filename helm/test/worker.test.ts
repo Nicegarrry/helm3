@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { piWorkerRunner, parseWorkerResult, classifyBash, defaultModelRuntime } from '../src/worker.js';
+import { CORRECTION_MESSAGE, correctionMessage, piWorkerRunner, parseWorkerResult, classifyBash, defaultModelRuntime } from '../src/worker.js';
 import type { EventRow, WorkerHooks, WorkerRunInput, WorkerResult } from '../src/types.js';
 
 const exec = promisify(execFile);
@@ -367,6 +367,15 @@ test('parseWorkerResult: strict JSON, fenced JSON (last wins), and invalid input
   assert.equal(parseWorkerResult('not json at all'), null);
   assert.equal(parseWorkerResult('{"status":"succeeded"}'), null);
   assert.equal(parseWorkerResult(JSON.stringify({ ...validResult, extra: 'field' })), null);
+});
+
+test('correctionMessage lists the zod issue paths and messages', () => {
+  const claims = Array.from({ length: 13 }, (_, i) => (i === 3 ? 'x'.repeat(301) : 'ok'));
+  const message = correctionMessage(JSON.stringify({ ...validResult, claims }));
+  assert.ok(message.startsWith(CORRECTION_MESSAGE));
+  assert.match(message, /^claims: at most 12$/m);
+  assert.match(message, /^claims\[3\]: at most 300 chars$/m);
+  assert.equal(correctionMessage('not json at all'), CORRECTION_MESSAGE);
 });
 
 test('parseWorkerResult accepts a question result and requires its question', () => {

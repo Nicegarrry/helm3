@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import type { WorkerHooks, WorkerRunInput, WorkerRunOutcome, WorkerRunner } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
-import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
+import { correctionMessage, parseWorkerResult } from './worker.js';
 import { hardenedGitArgs } from './git.js';
 import { credentialPaths } from './sandbox.js';
 
@@ -257,7 +257,7 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
       let rawText = await turn(message);
       let result = parseWorkerResult(rawText);
       if (!result && hooks.shouldContinue()) {
-        rawText = await turn(CORRECTION_MESSAGE);
+        rawText = await turn(correctionMessage(rawText));
         result = parseWorkerResult(rawText);
       }
       if (result) hooks.emit('result', { ...result });

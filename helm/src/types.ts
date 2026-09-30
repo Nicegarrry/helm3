@@ -1,7 +1,6 @@
 /** Shared contracts for the Helm harness. */
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
-
 function omitEmptyStrings(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(omitEmptyStrings);
   if (value && typeof value === 'object') {
@@ -28,12 +27,10 @@ export const workerResultSchema = z.preprocess(omitEmptyStrings, z.object({
   }
 }));
 export type WorkerResult = z.infer<typeof workerResultSchema>;
-
 export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded', 'failed', 'stopped', 'interrupted', 'unknown'] as const;
 export type WorkerState = (typeof WORKER_STATES)[number];
 export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
-
 export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
 export type InboxState = (typeof INBOX_STATES)[number];
 export type InboxRow = Readonly<{
@@ -48,7 +45,6 @@ export type InboxRow = Readonly<{
   createdAt: string;
   answeredAt: string | null;
 }>;
-
 
 export type WorkerRow = Readonly<{
   workerId: string;
@@ -73,7 +69,6 @@ export type WorkerRow = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
-
 export type WorkerMeta = Readonly<{
   workerId: string;
   issue: number | null;
@@ -111,8 +106,10 @@ export type PrRow = Readonly<{
   url: string;
   head: string;
   createdAt: string;
+  state: 'open' | 'merged' | 'closed' | null;
+  checkedAt: string | null;
 }>;
-export type PrInput = Omit<PrRow, 'repoSlug'> & { repoSlug?: string };
+export type PrInput = Omit<PrRow, 'repoSlug' | 'state' | 'checkedAt'> & { repoSlug?: string; state?: PrRow['state']; checkedAt?: string | null };
 export type PrResolution = Readonly<{ pr?: PrRow; reason?: string }>;
 export type SpendRow = Readonly<{
   workerId: string;
@@ -129,6 +126,11 @@ export type SpendSummary = Readonly<{
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
   unknownCostEvents: number;
 }>;
+export const SPEND_LIMIT_NAMES = ['capUsd', 'warnUsd', 'maxWorkers'] as const;
+export type SpendLimitName = (typeof SPEND_LIMIT_NAMES)[number];
+export type SpendLimitSource = 'settings' | 'env' | 'default' | 'spend.set' | 'file';
+export type SpendLimitRow = Readonly<{ name: SpendLimitName; value: number; source: SpendLimitSource; at: string; tapId: string | null }>;
+export type SpendLimitState = Readonly<{ checksum: string; rows: readonly SpendLimitRow[]; at: string }>;
 export interface Store {
   sql: DatabaseSync;
   insertWorker(row: WorkerRow): void;
@@ -150,12 +152,17 @@ export interface Store {
   updatePr(row: PrRow): void;
   getPrByWorker(workerId: string): PrRow | undefined;
   getPrByNumber(repoSlug: string, number: number): PrRow | undefined;
+  listPrs(): PrRow[];
   resolvePrByNumber(number: number, project?: string): PrResolution;
   addSpend(row: SpendRow): void;
   spendFor(workerId: string): SpendSummary;
   spendTotal(): SpendSummary;
   /** The last `limit` spend rows (by insertion order), returned ascending by `at`. Feeds the cumulative spend chart. */
   spendSeries(limit: number): Array<{ at: string; costUsd: number | null }>;
+  getSpendLimits(): SpendLimitRow[];
+  setSpendLimits(rows: readonly SpendLimitRow[]): void;
+  getSpendLimitState(): SpendLimitState | undefined;
+  setSpendLimitState(state: SpendLimitState): void;
   /** Mark every `running` worker as `interrupted`. Called once on daemon start. Returns affected ids. */
   markInterrupted(): string[];
   close(): void;
@@ -212,12 +219,15 @@ export type PrStatus = Readonly<{
   checks: ReadonlyArray<{ name: string; status: string; conclusion: string | null }>;
   reviews: ReadonlyArray<{ author: string; state: string }>;
   url: string;
+  title?: string;
+  base?: string;
 }>;
 
 export interface GitHub {
   openPr(input: { cwd: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
   findPr?(repoSlug: string, head: string): Promise<{ number: number; url: string } | undefined>;
   updatePr?(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void>;
+  issueTitle?(repoSlug: string, number: number): Promise<string | undefined>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
   comment(repoSlug: string, id: number): Promise<GitHubComment>;
   postComment(repoSlug: string, number: number, body: string): Promise<void>;
@@ -259,8 +269,6 @@ export type WorkerHooks = Readonly<{
   /** Return false to stop the turn (spend cap hit or stop requested). Checked at tool-call boundaries. */
   shouldContinue(): boolean;
 }>;
-
-
 export type ToolOk<T> = { ok: true } & T;
 export type ToolErr = { ok: false; reason: string };
 export type ToolOutcome<T> = ToolOk<T> | ToolErr;
@@ -285,7 +293,6 @@ export type WakeRow = Readonly<{
   deliveredAt: string | null;
   ackedAt: string | null;
 }>;
-
 export const spawnInput = z.object({
   repo: z.string().min(1),
   objective: z.string().min(1).max(20000),
@@ -353,14 +360,17 @@ export const deployStatusInput = z.object({ project: z.string().min(1).optional(
 export const deployRollbackInput = z.object({ id: z.string().min(1), tapId: z.string().optional() }).strict();
 
 export const routingCheckInput = z.object({}).strict();
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'routing.check', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback'] as const;
+export const spendSetInput = z.object({
+  capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().nonnegative().optional(),
+  tapId: z.string().regex(/^t-[0-9a-f]+$/).optional(),
+}).strict();
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'spend.set', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback', 'routing.check'] as const;
 export type ToolName = string;
-
-
 export type HelmConfig = Readonly<{
   home: string;            // $HELM_HOME, default ~/.helm
   spendCapUsd: number;     // 0 = no cap
   spendWarnUsd?: number;   // soft cap: warn, never block. Default 80% of the cap when a cap is set
   maxWorkers: number;
   gateTimeoutMs: number;
+  spendEnv?: Readonly<{ capUsd?: number; warnUsd?: number; maxWorkers?: number }>;
 }>;

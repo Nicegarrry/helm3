@@ -61,7 +61,7 @@ test('prStatus: maps gh pr view JSON to PrStatus, merged when mergedAt is set', 
   assert.equal(status.head, 'a'.repeat(40));
   assert.deepEqual(status.checks, [{ name: 'ci', status: 'completed', conclusion: 'success' }]);
   assert.deepEqual(status.reviews, [{ author: 'alice', state: 'APPROVED' }]);
-  assert.deepEqual(calls[0]?.args, ['pr', 'view', '5', '--repo', 'o/r', '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt']);
+  assert.deepEqual(calls[0]?.args, ['pr', 'view', '5', '--repo', 'o/r', '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt,title,baseRefName']);
 });
 
 test('prStatus: open state when not merged and not closed', async () => {

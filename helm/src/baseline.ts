@@ -38,7 +38,7 @@ async function changedFiles(worker: WorkerRow): Promise<string[]> {
   const { stdout } = await exec('git', ['diff', '--no-renames', '--name-only', `${worker.baseSha}..${worker.head}`], { cwd: worker.worktree });
   return stdout.split('\n').map((file) => file.trim()).filter(Boolean);
 }
-export async function createBaseline(input: { store: Store; gates: GateRunner; config: HelmConfig; worker: WorkerRow; now: string }): Promise<{ ok: true } & BaselineRow | { ok: false; reason: string }> {
+export async function createBaseline(input: { store: Store; gates: GateRunner; config: HelmConfig; worker: WorkerRow; nodeModulesRoot?: string; now: string }): Promise<{ ok: true } & BaselineRow | { ok: false; reason: string }> {
   const { store, gates, config, worker, now } = input;
   if (worker.role !== 'validator' || worker.state !== 'succeeded' || worker.result?.status !== 'succeeded') return { ok: false, reason: 'worker is not a succeeded validator' };
   const acceptance = worker.result.acceptance;
@@ -56,7 +56,7 @@ export async function createBaseline(input: { store: Store; gates: GateRunner; c
   if (offending.length > 0) return { ok: false, reason: `validator changed non-test files: ${offending.join(', ')}` };
   const id = `b-${randomBytes(4).toString('hex')}`; const logDir = join(config.home, 'logs', worker.workerId, `baseline-${id}`);
   await mkdir(logDir, { recursive: true });
-  const outcome = await gates.run(worker.worktree, [{ name: 'acceptance', command: acceptance.command }], logDir, { timeoutMs: config.gateTimeoutMs });
+  const outcome = await gates.run(worker.worktree, [{ name: 'acceptance', command: acceptance.command }], logDir, { timeoutMs: config.gateTimeoutMs, nodeModulesRoot: input.nodeModulesRoot });
   const check = outcome.checks[0];
   if (outcome.passed || check?.exitCode === 0) return { ok: false, reason: 'test already passes' };
   if (check?.exitCode === null || check?.exitCode === undefined) return { ok: false, reason: 'test did not exit non-zero' };

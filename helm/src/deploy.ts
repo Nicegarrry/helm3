@@ -48,13 +48,22 @@ export function ensureDeployTable(store: Store): void {
 
 function row(value: Record<string, unknown>): DeployRow { return { id: String(value.id), project: String(value.project), target: String(value.target), kind: String(value.kind), env: String(value.env), sha: String(value.sha), state: String(value.state), bootId: (value.bootId as string | null) ?? null, reason: (value.reason as string | null) ?? null, url: (value.url as string | null) ?? null, deploymentId: (value.deploymentId as string | null) ?? null, previousId: (value.previousId as string | null) ?? null, smoke: JSON.parse(String(value.smoke ?? '{}')) as Record<string, unknown>, tapId: (value.tapId as string | null) ?? null, at: String(value.at) }; }
 
-export function markDeploysInterrupted(store: Store, options: { currentBootId?: string; predecessorBootId?: string; now?: Date; timeoutMs?: number } = {}): number {
+export async function markDeploysInterrupted(store: Store, options: { currentBootId?: string; predecessorBootId?: string; now?: Date; timeoutMs?: number; timeoutFor?: (row: { project: string; target: string; sha: string }) => Promise<number | undefined> } = {}): Promise<number> {
   ensureDeployTable(store);
   const now = (options.now ?? new Date()).getTime();
   const timeoutMs = options.timeoutMs ?? 300_000;
   const liveBoots = new Set([options.currentBootId, options.predecessorBootId].filter((bootId): bootId is string => Boolean(bootId)));
-  const rows = store.sql.prepare("SELECT id, bootId, at FROM deploys WHERE state = 'deploying'").all() as Array<{ id: string; bootId: string | null; at: string }>;
-  const stale = rows.filter((row) => !liveBoots.has(row.bootId ?? '') || now - Date.parse(row.at) > timeoutMs);
+  const rows = store.sql.prepare("SELECT id, project, target, sha, bootId, at FROM deploys WHERE state = 'deploying'").all() as Array<{ id: string; project: string; target: string; sha: string; bootId: string | null; at: string }>;
+  const stale: typeof rows = [];
+  for (const row of rows) {
+    if (!liveBoots.has(row.bootId ?? '')) { stale.push(row); continue; }
+    let targetTimeout: number | undefined;
+    if (row.bootId === options.predecessorBootId) {
+      try { targetTimeout = await options.timeoutFor?.({ project: row.project, target: row.target, sha: row.sha }); } catch { targetTimeout = undefined; }
+    }
+    const limit = row.bootId === options.predecessorBootId ? (targetTimeout ?? 60) * 60_000 : timeoutMs;
+    if (now - Date.parse(row.at) > limit) stale.push(row);
+  }
   const update = store.sql.prepare("UPDATE deploys SET state = 'failed', reason = ? WHERE id = ? AND state = 'deploying'");
   for (const row of stale) update.run('interrupted (daemon restart)', row.id);
   return stale.length;
@@ -72,7 +81,7 @@ function targetFor(config: RepoConfig, name: string): Target { const target = co
 function moreRestrictive(left: string, right: string): string { const rank = (decision: string) => decision === 'never' ? 2 : decision === 'tap' ? 1 : 0; return rank(left) >= rank(right) ? left : right; }
 function requiresExternalTap(files: string[]): boolean { return files.some((file) => file.startsWith('fastlane/') || file === 'Gemfile' || file === 'Gemfile.lock'); }
 function preview(target: Target): boolean { return /^(preview|pr)$/i.test(typeof target.env === 'string' ? target.env : '') || /^preview/i.test(target.name); }
-function productionTarget(target: Target): boolean { return target.env === 'prod' || target.name === 'prod'; }
+function productionTarget(target: Target): boolean { return target.env === 'prod' || target.env === 'production' || target.name === 'prod' || target.name === 'production'; }
 function lockKey(project: string, target: string): string { return `${project}\u0000${target}`; }
 function envNames(target: Target): Record<string, string> {
   if (target.kind === 'convex') return { CONVEX_DEPLOY_KEY: typeof target.env === 'string' ? target.env : target.env.CONVEX_DEPLOY_KEY ?? 'CONVEX_DEPLOY_KEY' };

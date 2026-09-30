@@ -41,13 +41,16 @@ export async function portfolio(store: Store, settings: Settings, since?: string
 }
 export function formatPortfolio(report: Awaited<ReturnType<typeof portfolio>>): string {
   const pct = (n: number) => `${(n * 100).toFixed(0)}%`; const money = (n: number) => `$${n.toFixed(2)}`;
-  const lines = [`Portfolio ${report.since} .. ${report.until}`];
+  const active = (r: Awaited<ReturnType<typeof portfolio>>['projects'][number]) => r.usd > 0 || r.codexTokens > 0 || r.merged > 0 || r.openPrs.length > 0 || r.stuck.length > 0 || r.inbox > 0 || r.taps > 0;
+  const lines = [`Portfolio ${report.since} .. ${report.until}`]; const idle: string[] = [];
   for (const r of report.projects) {
+    if (!active(r)) { idle.push(r.project); continue; }
     lines.push(r.project.replace(/[\r\n]/g, ' '), `  Window: ${money(r.usd)}; Codex ${r.codexTokens} tokens`,
       r.budget ? `  Budget: ${money(r.budget.usd)}/${money(r.budget.capUsd)}; Codex ${r.budget.codexTokens}/${r.budget.capCodexTokens ?? 'uncapped'} tokens` : '  Budget: none',
       `  Merged ${r.merged}; clean ${pct(r.cleanRate)}; first-pass gate ${pct(r.firstPassGateRate)}`,
       `  PRs ${r.openPrs.length} (${r.openPrs.filter((p) => p.waiting === 'review').length} review, ${r.openPrs.filter((p) => p.waiting === 'merge').length} merge); stuck >2h ${r.stuck.length}; inbox ${r.inbox}; taps ${r.taps}`);
   }
+  if (idle.length) lines.push(`Idle: ${idle.join(', ')}`);
   const t = report.total; lines.push(`Fleet: ${money(t.usd)}; Codex ${t.codexTokens} tokens; merged ${t.merged}; PRs ${t.openPrs}; stuck ${t.stuck}; inbox ${t.inbox}; taps ${t.taps}`);
   return lines.join('\n');
 }

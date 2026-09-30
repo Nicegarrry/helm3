@@ -119,11 +119,12 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
     detail.answers = answers;
     detail.jevCallIds = calls;
     const choice = (claim: string): string | undefined => answers[claim]?.choice;
-    const failedClaims = claims.filter((claim) => choice(claim) === 'contradicts');
-    const supported = claims.filter((claim) => choice(claim) === 'supports');
-    detail.failedClaims = failedClaims;
-    detail.unverifiedClaims = claims.filter((claim) => choice(claim) === 'says_nothing');
+    const confident = (claim: string, wanted: string): boolean => choice(claim) === wanted && (answers[claim]?.probabilities[wanted] ?? 0) >= settings.factory.claimsAt;
+    const failedClaims = claims.filter((claim) => confident(claim, 'contradicts'));
+    const supported = claims.filter((claim) => confident(claim, 'supports'));
     const unanswered = claims.filter((claim) => !['supports', 'contradicts', 'says_nothing'].includes(choice(claim) ?? ''));
+    detail.failedClaims = failedClaims;
+    detail.unverifiedClaims = claims.filter((claim) => !failedClaims.includes(claim) && !supported.includes(claim) && !unanswered.includes(claim));
     const reason = unanswered.length ? `missing Jev answer for: ${unanswered.join('; ')}` : (supported.length === 0 && failedClaims.length === 0 ? 'no supported claims' : undefined);
     if (reason) detail.reason = reason;
     const passed = supported.length > 0 && unanswered.length === 0 && missingFiles.length === 0 && failedClaims.length === 0;

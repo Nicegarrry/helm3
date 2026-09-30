@@ -54,13 +54,17 @@ function mergeHelm(store: ReturnType<typeof openStore>, claims: ReturnType<typeo
   });
 }
 
-test('a claim fails only when Jev says the diff contradicts it', async () => {
+test('a claim is supported or contradicted only at or above claimsAt; weaker answers are unverified', async () => {
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['src/a.ts adds A'] });
   try {
-    const check = (choice: string, supports: number) => createClaims({ jev: jevFor(() => answer(supports, choice)), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
-    const weak = await check('supports', 0.3);
-    assert.equal(weak.ok && weak.passed, true);
-    const contradicted = await check('contradicts', 0.9);
+    const check = (reply: unknown) => createClaims({ jev: jevFor(() => reply), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
+    const supported = await check(answer(0.7));
+    assert.equal(supported.ok && supported.passed, true);
+    assert.deepEqual(await check(answer(0.3)), { ok: false, reason: 'no supported claims' });
+    assert.deepEqual(await check(answer(0.5, 'contradicts')), { ok: false, reason: 'no supported claims' });
+    const row = store.sql.prepare('SELECT detail FROM claims_checks WHERE workerId = ? ORDER BY rowid DESC LIMIT 1').get(worker.workerId) as { detail: string };
+    assert.deepEqual(JSON.parse(row.detail).unverifiedClaims, ['src/a.ts adds A']);
+    const contradicted = await check(answer(0.2, 'contradicts'));
     assert.equal(contradicted.ok && contradicted.passed, false);
     assert.deepEqual(contradicted.ok && contradicted.failedClaims, ['src/a.ts adds A']);
   } finally { store.close(); }

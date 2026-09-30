@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import test from 'node:test';
 import { gateRunner } from '../src/gate.js';
+import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
 test('run: passing and failing checks capture output to files', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-'));
@@ -32,7 +33,7 @@ test('run: passing and failing checks capture output to files', async () => {
     const badLog = readFileSync(bad!.outputPath, 'utf8');
     assert.match(badLog, /failing/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -45,7 +46,7 @@ test('run: all passing checks means passed=true', async () => {
     assert.equal(result.passed, true);
     assert.deepEqual(result.checks.map((c) => c.exitCode), [0, 0]);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -58,7 +59,7 @@ test('run: a timeout produces a null exit code', async () => {
     assert.equal(result.passed, false);
     assert.equal(result.checks[0]?.exitCode, null);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -90,7 +91,7 @@ test('run: removes all package node_modules on pass and fail, but preserves opte
     assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
     assert.equal(existsSync(join(dir, 'app', 'node_modules')), true);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -102,7 +103,7 @@ test('defaultChecks: reads gates from helm.json when present', async () => {
     const checks = await runner.defaultChecks(dir);
     assert.deepEqual(checks, [{ name: 'custom', command: 'echo hi' }]);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -111,6 +112,7 @@ test('defaultChecks: a worker helm.json change cannot remove base gates', async 
   const runner = gateRunner();
   try {
     execFileSync('git', ['init', '-q'], { cwd: dir });
+    disableGitMaintenance(dir);
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
     writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'base', command: 'echo base' }] }));
@@ -121,7 +123,7 @@ test('defaultChecks: a worker helm.json change cannot remove base gates', async 
 
     assert.deepEqual(await runner.defaultChecks(dir, baseSha), [{ name: 'base', command: 'echo base' }]);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -130,6 +132,7 @@ test('defaultChecks: an untracked operator helm.json is used when absent at the 
   const runner = gateRunner();
   try {
     execFileSync('git', ['init', '-q'], { cwd: dir });
+    disableGitMaintenance(dir);
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
     execFileSync('git', ['commit', '-qm', 'base', '--allow-empty'], { cwd: dir });
@@ -137,7 +140,7 @@ test('defaultChecks: an untracked operator helm.json is used when absent at the 
     writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'local', command: 'echo local' }] }));
     assert.deepEqual(await runner.defaultChecks(dir, baseSha), [{ name: 'local', command: 'echo local' }]);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -147,6 +150,7 @@ test('defaultChecks: a helm.json in a separate worker worktree is not used', asy
   const runner = gateRunner();
   try {
     execFileSync('git', ['init', '-q'], { cwd: dir });
+    disableGitMaintenance(dir);
     execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
     execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
     execFileSync('git', ['commit', '-qm', 'base', '--allow-empty'], { cwd: dir });
@@ -154,8 +158,8 @@ test('defaultChecks: a helm.json in a separate worker worktree is not used', asy
     writeFileSync(join(worker, 'helm.json'), JSON.stringify({ gates: [{ name: 'worker', command: 'echo worker' }] }));
     assert.deepEqual(await runner.defaultChecks(dir, baseSha), []);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(worker, { recursive: true, force: true });
+    removeTempDir(dir);
+    removeTempDir(worker);
   }
 });
 
@@ -170,7 +174,7 @@ test('defaultChecks: falls back to package.json scripts', async () => {
       { name: 'typecheck', command: 'npm run typecheck' },
     ]);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -186,7 +190,7 @@ test('F8: a check name with path traversal characters is slugified and its log s
     assert.ok(existsSync(check.outputPath));
     assert.equal(readFileSync(check.outputPath, 'utf8').includes('hi'), true);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -208,7 +212,7 @@ test('F8: two checks that slugify to the same name get distinct, index-suffixed 
     assert.ok(readFileSync(first!.outputPath, 'utf8').includes('one'));
     assert.ok(readFileSync(second!.outputPath, 'utf8').includes('two'));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -219,6 +223,6 @@ test('defaultChecks: no helm.json and no package.json means no checks', async ()
     const checks = await runner.defaultChecks(dir);
     assert.deepEqual(checks, []);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });

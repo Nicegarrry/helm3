@@ -10,8 +10,10 @@ import { parseCap } from '../scripts/line-cap-lib.mjs';
 
 const scripts = fileURLToPath(new URL('../scripts/', import.meta.url));
 
-test('parseCap reads the decimal k cap from AGENTS.md', () => {
+test('parseCap reads only the helm/src decimal k cap from AGENTS.md', () => {
   assert.equal(parseCap('Keep `helm/src` under 11.0k lines.'), 11_000);
+  assert.equal(parseCap('Keep other code under 3.0k lines.\nKeep `helm/src` under 11.0k lines.'), 11_000);
+  assert.throws(() => parseCap('Keep other code under 3.0k lines.'), /helm\/src line cap/);
 });
 
 test('the CLI enforces the cap through symlink and space-containing paths', () => {

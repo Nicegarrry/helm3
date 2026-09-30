@@ -8,8 +8,8 @@ const sourceDir = join(helmDir, 'src');
 const agentsPath = join(helmDir, '..', 'AGENTS.md');
 
 export function parseCap(agents) {
-  const match = agents.match(/under\s+(\d+(?:\.\d+)?)k lines/i);
-  if (!match) throw new Error('Could not find a line cap in AGENTS.md');
+  const match = agents.match(/Keep\s+`helm\/src`\s+under\s+([\d.]+)k lines/i);
+  if (!match) throw new Error('Could not find the helm/src line cap in AGENTS.md');
   return Number(match[1]) * 1000;
 }
 

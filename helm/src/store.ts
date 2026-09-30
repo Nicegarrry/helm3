@@ -248,6 +248,7 @@ export function openStore(path: string): Store {
   const getPrByWorkerStmt = db.prepare('SELECT * FROM prs WHERE workerId = ? ORDER BY number DESC LIMIT 1');
   const getPrByNumberStmt = db.prepare('SELECT * FROM prs WHERE repoSlug = ? AND number = ?');
   const resolvePrByNumberStmt = db.prepare('SELECT * FROM prs WHERE number = ? ORDER BY repoSlug ASC');
+  const listPrsStmt = db.prepare('SELECT * FROM prs ORDER BY repoSlug ASC, number ASC');
   const addSpendStmt = db.prepare(
     'INSERT INTO spend (workerId, model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   );
@@ -371,6 +372,10 @@ export function openStore(path: string): Store {
     getPrByNumber(repoSlug: string, number: number): PrRow | undefined {
       const row = getPrByNumberStmt.get(repoSlug, number) as Record<string, unknown> | undefined;
       return row ? toPrRow(row) : undefined;
+    },
+
+    listPrs(): PrRow[] {
+      return (listPrsStmt.all() as Record<string, unknown>[]).map(toPrRow);
     },
 
     resolvePrByNumber(number: number, project?: string): PrResolution {

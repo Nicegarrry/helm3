@@ -147,6 +147,7 @@ export interface Store {
   updatePr(row: PrRow): void;
   getPrByWorker(workerId: string): PrRow | undefined;
   getPrByNumber(repoSlug: string, number: number): PrRow | undefined;
+  listPrs(): PrRow[];
   resolvePrByNumber(number: number, project?: string): PrResolution;
   addSpend(row: SpendRow): void;
   spendFor(workerId: string): SpendSummary;
@@ -209,12 +210,15 @@ export type PrStatus = Readonly<{
   checks: ReadonlyArray<{ name: string; status: string; conclusion: string | null }>;
   reviews: ReadonlyArray<{ author: string; state: string }>;
   url: string;
+  title?: string;
+  base?: string;
 }>;
 
 export interface GitHub {
   openPr(input: { cwd: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
   findPr?(repoSlug: string, head: string): Promise<{ number: number; url: string } | undefined>;
   updatePr?(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void>;
+  issueTitle?(repoSlug: string, number: number): Promise<string | undefined>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
   comment(repoSlug: string, id: number): Promise<GitHubComment>;
   postComment(repoSlug: string, number: number, body: string): Promise<void>;

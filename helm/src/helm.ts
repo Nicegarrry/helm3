@@ -513,6 +513,20 @@ export class Helm {
       throw err;
     }
     this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
+    const meta = this.store.getMeta(workerId);
+    if (input.role === 'builder' || input.role === 'validator') {
+      const issue = meta?.issue ?? null;
+      if (issue !== null) {
+        let title: string | undefined;
+        try { title = await this.github.issueTitle?.(repoSlug, issue); } catch { /* issue lookup is best effort */ }
+        title ??= input.objective.split(/\r?\n/, 1)[0]!.trim().slice(0, 80);
+        const tier = ({ trivial: 1, small: 2, medium: 3, large: 4 } as Record<string, number | undefined>)[choice?.band ?? meta?.band ?? ''] ?? null;
+        this.store.appendEvent(workerId, 'dispatched', {
+          project: repoSlug, issue, title, model,
+          ...(tier !== null ? { tier } : {}),
+        });
+      }
+    }
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
@@ -687,7 +701,7 @@ export class Helm {
         }
         const updatedPr: PrRow = { repoSlug: row.repoSlug, number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso() };
         if (savedPr) this.store.updatePr(updatedPr); else this.store.insertPr(updatedPr);
-        this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true });
+        this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true, ...(input.title ?? status.title ? { title: input.title ?? status.title } : {}), ...(status.base ? { base: status.base } : {}), project: row.repoSlug });
         return { ok: true, number: existing.number, url: existing.url, head, updated: true };
       }
       const title = input.title ?? row.result?.summary?.split('\n')[0] ?? row.objective.slice(0, 72);
@@ -697,7 +711,7 @@ export class Helm {
       const opened = await this.github.openPr({ cwd: row.worktree, base, head: row.branch, title, body, draft: input.draft });
       const prRow: PrRow = { repoSlug: row.repoSlug, number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso() };
       this.store.insertPr(prRow);
-      this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url });
+      this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url, title, base, project: row.repoSlug });
       return { ok: true, number: opened.number, url: opened.url, head };
     }));
   }
@@ -926,7 +940,7 @@ export class Helm {
       const failing = status.checks.find((c) => !PASSING_CONCLUSIONS.has(c.conclusion ?? ''));
       if (failing) return refuse(`check "${failing.name}" did not succeed (${failing.conclusion ?? 'no conclusion'})`);
       await this.github.merge(worker.repoSlug, input.number, input.expectedHead);
-      this.store.appendEvent(pr.workerId, 'pr.merged', { number: input.number, url: pr.url, head: input.expectedHead, project: worker.repoSlug });
+      this.store.appendEvent(pr.workerId, 'pr.merged', { number: input.number, url: pr.url, head: input.expectedHead, project: worker.repoSlug, ...(status.title ? { title: status.title } : {}), ...(status.base ? { base: status.base } : {}) });
       return { ok: true, merged: true };
     });
   }

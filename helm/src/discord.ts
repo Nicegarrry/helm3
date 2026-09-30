@@ -36,17 +36,45 @@ function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
-function milestone(event: EventRow): string | null {
-  if (event.kind === 'pr') return `PR opened: #${text(event.data.number, 'unknown')}`;
-  if (event.kind === 'pr.merged') return `Merged: #${text(event.data.number, 'unknown')}`;
+function optional(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : typeof value === 'number' && Number.isFinite(value) ? String(value) : undefined;
+}
+
+function milestone(event: EventRow, projectCount: number): string | null {
+  const project = optional(event.data.project);
+  const prefix = projectCount > 1 && project ? `${project} ` : '';
+  if (event.kind === 'dispatched') {
+    const issue = optional(event.data.issue);
+    if (!issue) return null;
+    const title = optional(event.data.title) ?? 'untitled issue';
+    const model = optional(event.data.model) ?? 'unknown model';
+    const tier = optional(event.data.tier) ?? 'unknown';
+    return `Dispatched ${text(event.workerId, 'unknown')} on #${issue} ${title} (${model}, tier ${tier})`;
+  }
+  if (event.kind === 'pr') {
+    const title = optional(event.data.title);
+    const url = optional(event.data.url);
+    const updated = event.data.updated === true ? 'PR updated' : '';
+    return `${updated ? `${updated}: ` : ''}${prefix}#${text(event.data.number, 'unknown')}${title ? ` ${title}` : ''}${url ? ` ${url}` : ''}`;
+  }
+  if (event.kind === 'pr.merged') {
+    const title = optional(event.data.title);
+    const base = optional(event.data.base);
+    const url = optional(event.data.url);
+    return `${prefix}#${text(event.data.number, 'unknown')}${title ? ` ${title}` : ''} merged into ${base ?? 'unknown'}${url ? ` ${url}` : ''}`;
+  }
+  if (event.kind === 'pr.closed') return `${prefix}#${text(event.data.number, 'unknown')} closed${optional(event.data.url) ? ` ${optional(event.data.url)}` : ''}`;
   if (event.kind === 'watch.alert') return `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
   if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;
-  if (event.kind === 'deploy') return `Deployed: ${text(event.data.target, 'target')}${event.data.url ? ` ${text(event.data.url, '')}` : ''}`;
-  if (event.kind === 'deploy.rolledback') return `Deploy rolled back: ${text(event.data.target, 'target')}`;
-  if (event.kind === 'deploy.failed') return `Deploy failed: ${text(event.data.target, 'target')}`;
+  if (event.kind === 'deploy' || event.kind === 'deploy.rolledback' || event.kind === 'deploy.failed') {
+    const state = event.kind === 'deploy' ? 'Deployed' : event.kind === 'deploy.rolledback' ? 'Deploy rolled back' : 'Deploy failed';
+    const details = [event.data.env, event.data.sha, event.data.url, event.data.pr ? `PR #${event.data.pr}` : undefined, event.data.issue ? `issue #${event.data.issue}` : undefined]
+      .map(optional).filter((value): value is string => Boolean(value)).join(' ');
+    return `${state}: ${text(event.data.target, 'target')}${details ? ` ${details}` : ''}`;
+  }
   return null;
 }
 
@@ -143,7 +171,7 @@ export function createDiscord(options: Options): DiscordService {
 
   const consume = consumer(options.store, 'discord', (events) => {
     for (const event of events) {
-      const line = milestone(event);
+      const line = milestone(event, Object.keys(options.settings.discord.projects).length);
       if (!line) continue;
       const worker = options.store.getWorker(event.workerId);
       const project = text(event.data.project ?? worker?.repoSlug, 'unknown');

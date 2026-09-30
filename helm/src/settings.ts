@@ -121,6 +121,7 @@ const settingsSchema = z.object({
     globalWebhookEnv: z.string().optional(),
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
+  report: z.object({ at: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).default('06:00'), webhookEnv: z.string().optional() }).optional(),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
   gates: z.object({
     allowUnsandboxed: z.boolean().default(false),

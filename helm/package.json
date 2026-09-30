@@ -12,6 +12,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=gc.auto GIT_CONFIG_VALUE_0=0 GIT_CONFIG_KEY_1=maintenance.auto GIT_CONFIG_VALUE_1=false tsx --test test/*.test.ts",
+    "line-cap": "node scripts/line-cap.mjs",
     "helm": "tsx src/cli.ts"
   },
   "dependencies": {

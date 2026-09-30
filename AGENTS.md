@@ -15,7 +15,7 @@ lives in `helm/`. Read `helm/README.md` first.
 - Workers report a JSON `WorkerResult`; a model's claim is not evidence until a gate ran.
 
 ## Working method
-- Product changes are PRs from worktrees. Keep `helm/src` under 8.0k lines (raised to 8.0k on 2026-09-30 by Nick for Helm v4 waves B-D, 7,825 at merge: the Pi lane is kept, the web dashboard was removed and automatic disk hygiene added; raised to 5.3k on 2026-09-29 for Helm v4 wave B; raised from 5.0k on 2026-09-29 for wave A + A9 budgets; raised from 3.1k on
+- Product changes are PRs from worktrees. Keep `helm/src` under 11.0k lines (raised to 11.0k on 2026-09-30 by Nick after same-day capacity, routing, Claude lane, gate sandbox, hygiene and spend-cap work (10,469 at the time); counted over all .ts files under helm/src including subdirectories; raised to 8.0k on 2026-09-30 by Nick for Helm v4 waves B-D, 7,825 at merge: the Pi lane is kept, the web dashboard was removed and automatic disk hygiene added; raised to 5.3k on 2026-09-29 for Helm v4 wave B; raised from 5.0k on 2026-09-29 for wave A + A9 budgets; raised from 3.1k on
   2026-09-29 for Helm v4 wave A); cut before adding.
 - Builders: the Codex lane when the operator's subscription window allows it, otherwise open
   models via OpenCode or OpenRouter; review from a different model family either way.

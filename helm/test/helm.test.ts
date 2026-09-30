@@ -420,15 +420,34 @@ function installHarness(helmJson: object, gatesOverride?: GateRunner) {
     },
     async defaultChecks() { return []; },
   };
-  const runner = createFakeRunner(async (input) => {
+  const messages: string[] = [];
+  const runner = createFakeRunner(async (input, message) => {
+    messages.push(message);
     const path = join(input.worktree, 'node_modules');
     seen.push(!existsSync(path) ? 'missing' : lstatSync(path).isSymbolicLink() ? 'symlink' : 'dir');
     return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
   });
   const made = makeHelm({ gates: gatesOverride ?? gates, runner, workerInstall: true });
   made.workspace.resolveSha = async (_repo, ref) => execFileSync('git', ['rev-parse', ref === 'main' ? 'HEAD' : ref], { cwd: repo, encoding: 'utf8' }).trim();
-  return { ...made, installs, seen, repo };
+  return { ...made, installs, seen, messages, repo };
 }
+
+test('a failed install still runs the turn and prepends the install failure line to the message', async () => {
+  const gates: GateRunner = {
+    async run() { return { passed: false, checks: [{ name: 'install', command: 'npm ci', exitCode: 1, outputPath: '/tmp/install.log', durationMs: 1 }] }; },
+    async defaultChecks() { return []; },
+  };
+  const { helm, store, seen, messages, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }] }, gates);
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['missing']);
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0]!.startsWith('Dependency install failed: install exited 1; typecheck/tests may not run locally; the gate will run them.\n'), messages[0]);
+  assert.ok(messages[0]!.endsWith('BUILD: do the work'));
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'succeeded');
+});
 
 test('worker turns see a real node_modules from the install gate step and hygiene removes it afterwards', async () => {
   const { helm, installs, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci --no-audit --no-fund' }, { name: 'test', command: 'npm test' }] });

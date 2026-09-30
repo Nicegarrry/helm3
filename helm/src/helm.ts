@@ -1218,7 +1218,8 @@ export class Helm {
   }
 
   /** Give a worker turn node_modules by running the repo's install gate step (sandboxed, install network only); hygiene removes it when the turn settles. */
-  private async installWorkerDeps(row: WorkerRow): Promise<void> {
+  private async installWorkerDeps(row: WorkerRow): Promise<string | undefined> {
+    let refused: string | undefined;
     const lock = createHash('sha256');
     for (const name of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) if (existsSync(join(row.worktree, name))) lock.update(readFileSync(join(row.worktree, name)));
     const digest = lock.digest('hex');
@@ -1232,12 +1233,15 @@ export class Helm {
       const outcome = await this.gates.run(row.worktree, checks, join(this.config.home, 'logs', row.workerId, `install-${Date.now()}`), {
         timeoutMs: this.config.gateTimeoutMs, nodeModulesRoot: this.workerWorktreeRoot(row), keepNodeModules: true, signal: abort.signal, sandbox: await sandboxEnabled(row.repo, row.baseSha),
         onPid: (pid) => this.capacity.setPid(row.workerId, pid),
-        onRefused: (reason) => this.store.appendEvent(row.workerId, 'worker.install.refused', { reason }),
+        onRefused: (reason) => { refused = reason; this.store.appendEvent(row.workerId, 'worker.install.refused', { reason }); },
       });
       if (outcome.passed) this.installedLocks.set(row.workerId, digest);
       this.store.appendEvent(row.workerId, 'worker.install', { passed: outcome.passed, lock: digest });
+      const failed = outcome.checks.find((check) => check.exitCode !== 0);
+      return outcome.passed ? undefined : refused ?? (failed ? `${failed.name} exited ${failed.exitCode ?? 'abnormally'}` : 'install did not complete');
     } catch (err) {
       this.store.appendEvent(row.workerId, 'worker.install', { passed: false, error: errMessage(err) });
+      return errMessage(err).split(/\r?\n/, 1)[0]!.slice(0, 120);
     } finally { this.installAborts.delete(row.workerId); }
   }
 
@@ -1386,10 +1390,11 @@ export class Helm {
       },
     };
     try {
-      if (this.workerInstall && row.role !== 'reviewer') await this.installWorkerDeps(row);
+      const installError = this.workerInstall && row.role !== 'reviewer' ? await this.installWorkerDeps(row) : undefined;
+      const turnMessage = installError ? `Dependency install failed: ${installError}; typecheck/tests may not run locally; the gate will run them.\n\n${message}` : message;
       const skipped = this.stopRequested.has(workerId);
       if (skipped) this.stopObserved.add(workerId);
-      const outcome: WorkerRunOutcome = skipped ? { result: null, rawText: '', sessionFile: row.sessionFile } : await this.runner.run(runInput, message, hooks);
+      const outcome: WorkerRunOutcome = skipped ? { result: null, rawText: '', sessionFile: row.sessionFile } : await this.runner.run(runInput, turnMessage, hooks);
       const result = outcome.result;
       if ((row.role === 'builder' || row.role === 'validator') && !skipped && result?.status !== 'failed') {
         try {

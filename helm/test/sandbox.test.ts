@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import test from 'node:test';
 import { gateRunner } from '../src/gate.js';
@@ -26,6 +26,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   assert.match(profile, new RegExp(`\\(deny file-read\\* \\(subpath "${home.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.config"\)\)/);
   assert.match(profile, /\(allow file-read\* \(subpath ".*\/\.config\/git"\)\)/);
+  assert.match(profile, /\(allow file-read-metadata \(literal "\/Users"\)\)/);
+  assert.match(profile, new RegExp(`\\(allow file-read-metadata \\(literal "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')}"\\)\\)`));
   assert.match(profile, /\(allow file-read\* \(subpath ".*\/\.nvm\/versions\/node\/v22\/bin"\)\)/);
   assert.match(profile, /\(allow file-read\* \(subpath ".*\/\.npm"\)\)/);
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.ssh"\)\)/);
@@ -79,6 +81,33 @@ test('gate refuses an escaping node_modules symlink without touching its target'
     assert.equal(existsSync(link), false);
     assert.match(readFileSync(join(logDir, 'gate-refused.log'), 'utf8'), /unlinked escaping node_modules symlink/);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('real macOS sandbox permits metadata traversal under a protected fake HOME', macOnly, async () => {
+  const root = fixture('helm-gate-home-metadata-');
+  const fakeHome = join(root, 'fake-home');
+  const worktree = join(fakeHome, 'project', 'worktree');
+  const toolchain = join(fakeHome, '.nvm', 'versions', 'node', 'v-test', 'bin');
+  const secret = join(fakeHome, 'sibling-secret');
+  const logDir = join(root, 'logs');
+  mkdirSync(worktree, { recursive: true });
+  mkdirSync(toolchain, { recursive: true });
+  writeFileSync(secret, 'must-not-read');
+  symlinkSync(process.execPath, join(toolchain, 'node'));
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${toolchain}${delimiter}${previousPath ?? ''}`;
+  try {
+    const result = await gateRunner({ operatorHome: fakeHome }).run(worktree, [
+      { name: 'realpath', command: 'node -e "require(\'fs\').realpathSync(\'.\')"' },
+      { name: 'sibling-secret', command: `cat ${JSON.stringify(secret)}` },
+    ], logDir, { timeoutMs: 10_000 });
+    assert.equal(result.passed, false);
+    assert.equal(result.checks[0]?.exitCode, 0);
+    assert.notEqual(result.checks[1]?.exitCode, 0);
+  } finally {
+    process.env.PATH = previousPath;
     rmSync(root, { recursive: true, force: true });
   }
 });

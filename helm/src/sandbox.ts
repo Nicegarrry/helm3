@@ -45,6 +45,20 @@ function unique(paths: readonly string[]): string[] {
   return [...new Set(paths.map((path) => resolve(path)))];
 }
 
+function ancestors(paths: readonly string[]): string[] {
+  const result: string[] = [];
+  for (const path of paths) {
+    let current = resolve(path);
+    while (true) {
+      result.push(current);
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  return unique(result);
+}
+
 async function canonicalPath(path: string): Promise<string> {
   return realpath(path).catch(() => resolve(path));
 }
@@ -99,6 +113,11 @@ export function buildSandboxProfile(options: {
     ...(options.npmCachePaths ?? []),
   ]);
   const homes = unique(options.operatorHomes);
+  const metadataPaths = ancestors([
+    ...homes,
+    ...readOnlyExceptions,
+    ...homes.map((home) => join(home, '.config', 'git')),
+  ]);
   const lines = [
     '(version 1)',
     '(import "system.sb")',
@@ -128,6 +147,11 @@ export function buildSandboxProfile(options: {
     }
     lines.push(`(allow file-read* ${subpath(join(home, '.config', 'git'))})`);
   }
+
+  // Denying file-read* also blocks lstat/realpath traversal. Re-open metadata
+  // only for protected homes and every directory needed to reach a read-only
+  // exception; contents remain governed by the rules above and below.
+  for (const path of metadataPaths) lines.push(`(allow file-read-metadata ${literal(path)})`);
 
   // A worktree can live below ~/.helm, and its .git file can point at a real git dir.
   // These are read-only exceptions; the write rules above still exclude .git.

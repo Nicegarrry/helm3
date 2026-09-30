@@ -90,6 +90,13 @@ export function createDeploy(options: Options) {
     } catch { /* an absent or invalid link is handled by the refusal below */ }
     throw new Error(`vercel target ${target.name} is not linked: set org/project ids or run \`vercel link\` in ${repo}`);
   };
+  const convexProjectEnv = (repo: string, target: Target): Record<string, string> => {
+    const keyName = envNames(target).CONVEX_DEPLOY_KEY; const source = sourceEnv();
+    if (keyName && source[keyName]) return {};
+    const deployment = loadEnvFile(join(repo, '.env.local')).CONVEX_DEPLOYMENT;
+    if (deployment) return { CONVEX_DEPLOYMENT: deployment };
+    throw new Error(`convex target ${target.name} is not linked: set a deploy key or run \`npx convex dev\` once in ${repo}`);
+  };
   const operatorEnv = (source: NodeJS.ProcessEnv, credentials: Record<string, string>): NodeJS.ProcessEnv => ({ PATH: source.PATH ?? '', HOME: source.HOME ?? homedir(), LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8', TMPDIR: source.TMPDIR ?? tmpdir(), ...credentials });
   const run = async (file: string, args: string[], target: Target, useOperatorLogin: boolean, cwd?: string, extraCredentials: Record<string, string> = {}) => { const credentials = secretEnv(target, !useOperatorLogin, 'branch preview deploys require scoped credentials'); const values = { ...credentials.values, ...extraCredentials }; const redact = redactor(Object.values(values)); const source = sourceEnv(); const minimalEnv = { PATH: source.PATH ?? '', ...values }; const result = useOperatorLogin ? await exec(file, args, { cwd, env: operatorEnv(source, values), timeout: 300_000 }) : await withTempHome(minimalEnv, (tempEnv) => exec(file, args, { cwd, env: tempEnv, timeout: 300_000 })); if ((result.code ?? 0) !== 0) throw new Error(redact(result.stderr || result.stdout || `${file} failed`)); return { text: redact(result.stdout), credentials: { values, redact } }; };
   const runDaemon = async (file: string, args: string[], cwd?: string) => { const result = await exec(file, args, { cwd, env: daemonEnv(), timeout: 300_000 }); if ((result.code ?? 0) !== 0) throw new Error(result.stderr || result.stdout || `${file} failed`); return { text: result.stdout }; };
@@ -128,7 +135,7 @@ export function createDeploy(options: Options) {
       const deployed = await runTestFlight(target, worktree, exec, { PATH: source.PATH ?? '', HOME: source.HOME ?? homedir(), TMPDIR: source.TMPDIR ?? tmpdir(), ...credentials.values }, credentials.redact);
       return { url: null, deploymentId: deployed.deploymentId };
     }
-    if (target.kind === 'convex') { if (!worktree) throw new Error('Convex deploy requires a worktree'); await install(worktree); const result = await run('npx', ['--no-install', 'convex', 'deploy', '--yes'], target, useOperatorLogin, worktree); return { url: null, deploymentId: sha }; }
+    if (target.kind === 'convex') { if (!worktree) throw new Error('Convex deploy requires a worktree'); const providerEnv = useOperatorLogin ? convexProjectEnv(repo, target) : {}; await install(worktree); const result = await run('npx', ['--no-install', 'convex', 'deploy', '--yes'], target, useOperatorLogin, worktree, providerEnv); return { url: null, deploymentId: sha }; }
     if (target.kind !== 'vercel') throw new Error(`${target.kind} deploy adapter is not available in C2a`);
     if ((target.mode ?? 'cli') === 'git') {
       const deadline = Date.now() + 300_000;

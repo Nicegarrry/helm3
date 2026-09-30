@@ -2,39 +2,47 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
+import { assertWorktreeGitDir, expectedWorktreeGitDir, hardenedGitArgs } from './git.js';
 import type { Workspace, WorktreeInfo } from './types.js';
 
-const exec = promisify(execFile);
+const realExec = promisify(execFile);
 
-async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await exec('git', args, { cwd, maxBuffer: 16 * 1024 * 1024 });
-  return stdout;
-}
+export type WorkspaceExec = (file: string, args: string[], options: { cwd?: string; maxBuffer?: number }) => Promise<{ stdout: string; stderr: string }>;
 
-async function patchId(repo: string, baseSha: string, head: string): Promise<string> {
-  const diff = await git(repo, ['diff', `${baseSha}...${head}`]);
-  const stdout = await new Promise<string>((resolve, reject) => {
-    const child = execFile('git', ['patch-id', '--stable'], { cwd: repo, maxBuffer: 16 * 1024 * 1024 }, (error, output, stderr) => {
-      if (error) reject(new Error(stderr.trim() || error.message));
-      else resolve(output);
-    });
-    child.stdin?.end(diff);
+export function gitWorkspace(options: Readonly<{ exec?: WorkspaceExec }> = {}): Workspace {
+  const execute: WorkspaceExec = options.exec ?? (async (file, args, execOptions) => {
+    const result = await realExec(file, args, execOptions);
+    return { stdout: String(result.stdout), stderr: String(result.stderr) };
   });
-  const id = stdout.trim().split(/\s+/)[0];
-  if (!id) throw new Error(`empty patch id for ${baseSha}...${head}`);
-  return id;
-}
+  const expectedGitDirs = new Map<string, string>();
+  const git = async (cwd: string, args: string[]): Promise<string> => {
+    const { stdout } = await execute('git', hardenedGitArgs(args), { cwd, maxBuffer: 16 * 1024 * 1024 });
+    return stdout;
+  };
 
-async function refExists(repo: string, ref: string): Promise<boolean> {
-  try {
-    await git(repo, ['show-ref', '--verify', '--quiet', ref]);
-    return true;
-  } catch {
-    return false;
+  async function patchId(repo: string, baseSha: string, head: string): Promise<string> {
+    const diff = await git(repo, ['diff', `${baseSha}...${head}`]);
+    const stdout = await new Promise<string>((resolve, reject) => {
+      const child = execFile('git', hardenedGitArgs(['patch-id', '--stable']), { cwd: repo, maxBuffer: 16 * 1024 * 1024 }, (error, output, stderr) => {
+        if (error) reject(new Error(stderr.trim() || error.message));
+        else resolve(output);
+      });
+      child.stdin?.end(diff);
+    });
+    const id = stdout.trim().split(/\s+/)[0];
+    if (!id) throw new Error(`empty patch id for ${baseSha}...${head}`);
+    return id;
   }
-}
 
-export function gitWorkspace(): Workspace {
+  async function refExists(repo: string, ref: string): Promise<boolean> {
+    try {
+      await git(repo, ['show-ref', '--verify', '--quiet', ref]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   return {
     async resolveSha(repo: string, ref: string): Promise<string> {
       const out = await git(repo, ['rev-parse', ref]);
@@ -59,11 +67,13 @@ export function gitWorkspace(): Workspace {
       const resolved = await git(repo, ['rev-parse', `${baseSha}^{commit}`]);
       if (resolved.trim() !== baseSha) throw new Error(`base SHA did not resolve exactly: ${baseSha}`);
       await git(repo, ['worktree', 'add', '-b', branch, root, baseSha]);
+      expectedGitDirs.set(root, (await git(root, ['rev-parse', '--absolute-git-dir'])).trim());
       return { path: root, branch, baseSha };
     },
 
     async remove(repo: string, path: string): Promise<void> {
       await git(repo, ['worktree', 'remove', '--force', path]);
+      expectedGitDirs.delete(path);
     },
 
     async prune(repo: string): Promise<void> {
@@ -115,7 +125,10 @@ export function gitWorkspace(): Workspace {
 
     patchId,
 
-    async commitAll(path: string, message: string): Promise<string> {
+    async commitAll(path: string, message: string, repo?: string): Promise<string> {
+      const expected = expectedGitDirs.get(path) ?? (repo ? await expectedWorktreeGitDir(repo, path, git) : undefined);
+      if (!expected) throw new Error(`cannot verify gitdir for worktree ${path}`);
+      await assertWorktreeGitDir(path, expected);
       await git(path, ['add', '-A']);
       const staged = await git(path, ['diff', '--cached', '--name-only']);
       if (staged.trim() === '') return (await git(path, ['rev-parse', 'HEAD'])).trim();
@@ -133,12 +146,12 @@ export function gitWorkspace(): Workspace {
     async clone(slug: string, dest: string): Promise<void> {
       if (!/^[\w.-]+\/[\w.-]+$/.test(slug)) throw new Error('clone expects owner/name');
       try {
-        await exec('gh', ['repo', 'clone', slug, dest], { maxBuffer: 16 * 1024 * 1024 });
+        await execute('gh', ['repo', 'clone', slug, dest], { maxBuffer: 16 * 1024 * 1024 });
       } catch (err) {
         const code = (err as { code?: unknown }).code;
         // gh missing or not authenticated: fall back to anonymous https.
         if (code !== 'ENOENT' && typeof code === 'number' && existsSync(dest)) throw err;
-        await exec('git', ['clone', `https://github.com/${slug}.git`, dest], { maxBuffer: 16 * 1024 * 1024 });
+        await execute('git', hardenedGitArgs(['clone', `https://github.com/${slug}.git`, dest]), { maxBuffer: 16 * 1024 * 1024 });
       }
     },
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -31,7 +31,14 @@ async function makeRepo(): Promise<{ dir: string; repo: string; sha: string }> {
 
 test('resolveSha, defaultBranch, create worktree, commitAll, diffStat, isClean, remove', async () => {
   const { dir, repo, sha } = await makeRepo();
-  const workspace = gitWorkspace();
+  const gitArgv: string[][] = [];
+  const workspace = gitWorkspace({
+    exec: async (file, args, options) => {
+      if (file === 'git') gitArgv.push(args);
+      const result = await exec(file, args, options);
+      return { stdout: String(result.stdout), stderr: String(result.stderr) };
+    },
+  });
   try {
     const resolved = await workspace.resolveSha(repo, 'HEAD');
     assert.equal(resolved, sha);
@@ -49,10 +56,19 @@ test('resolveSha, defaultBranch, create worktree, commitAll, diffStat, isClean, 
     assert.equal(await workspace.head(worktreeRoot), sha);
 
     writeFileSync(join(worktreeRoot, 'new.txt'), 'added content\n');
+    const hookMarker = join(dir, 'hook-ran');
+    const hook = join(repo, '.git', 'hooks', 'pre-commit');
+    writeFileSync(hook, `#!/bin/sh\nprintf ran > ${hookMarker}\nexit 1\n`);
+    chmodSync(hook, 0o755);
     assert.equal(await workspace.isClean(worktreeRoot), false);
 
     const newHead = await workspace.commitAll(worktreeRoot, 'add new file');
     assert.notEqual(newHead, sha);
+    assert.equal(existsSync(hookMarker), false);
+    const commitArgs = gitArgv.find((args) => args.includes('commit'));
+    assert.ok(commitArgs);
+    for (const setting of ['core.hooksPath=/dev/null', 'core.fsmonitor=false', 'core.sshCommand=ssh', 'protocol.ext.allow=never']) assert.ok(commitArgs.includes(setting));
+    assert.ok(commitArgs.includes('--no-verify'));
     assert.equal(await workspace.isClean(worktreeRoot), true);
 
     const stat = await workspace.diffStat(worktreeRoot, sha);
@@ -66,6 +82,21 @@ test('resolveSha, defaultBranch, create worktree, commitAll, diffStat, isClean, 
     await workspace.remove(repo, worktreeRoot);
     const list = await git(repo, ['worktree', 'list']);
     assert.doesNotMatch(list, /w-1/);
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test('commitAll refuses a tampered linked-worktree git pointer', async () => {
+  const { dir, repo, sha } = await makeRepo();
+  const workspace = gitWorkspace();
+  try {
+    const worktreeRoot = join(dir, 'worktrees', 'w-tampered');
+    await workspace.create(repo, worktreeRoot, 'helm/w-tampered', sha);
+    const attackerGitDir = join(dir, 'attacker-gitdir');
+    mkdirSync(attackerGitDir);
+    writeFileSync(join(worktreeRoot, '.git'), `gitdir: ${attackerGitDir}\n`);
+    await assert.rejects(() => workspace.commitAll(worktreeRoot, 'must refuse'), /worktree \.git points/);
   } finally {
     removeTempDir(dir);
   }

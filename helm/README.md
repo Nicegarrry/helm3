@@ -2,9 +2,9 @@
 
 A small harness that lets an orchestrator agent (Claude Code, Codex, or a script) dispatch
 coding work to workers, each in its own git worktree, and get back gates, PRs and status
-without spending its own context on the mechanics. Two lanes serve the workers: Pi sessions
-on cheap API models, and the Codex CLI on the operator's ChatGPT subscription (any GPT model
-Codex offers, at $0 marginal cost).
+without spending its own context on the mechanics. Three lanes serve the workers: Pi sessions
+on cheap API models, the Codex CLI on the operator's ChatGPT subscription, and the Claude CLI
+on the operator's Claude subscription (both at $0 marginal cost).
 
 Sixteen tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
 lines of TypeScript.
@@ -62,7 +62,7 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
 
 | Tool | What it does |
 | --- | --- |
-| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, or `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`). |
+| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`), or `claude/<model>[:<effort>]` for the Claude CLI (`claude/sonnet:high`). |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | One line per worker. |
 | `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
@@ -81,22 +81,47 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
 Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Nothing throws across the
 boundary.
 
-## Model selection
+## Model routing
 
-Omit `model` to use the following policy on both CLI and MCP:
+When `model` and `difficulty` are omitted, Jev scores the ticket from 0 through 4 and
+maps the expected value to tier 1 through 5. Helm checks each tier's candidates in order,
+skipping models that are not allowed, unavailable, or below the scorecard clean-rate
+threshold. A higher tier is tried when the current tier has no usable candidate.
 
-| Task tier | Model | Runtime |
-| --- | --- | --- |
-| Normal (default) | `codex/gpt-5.6-terra:medium` | Codex CLI, ChatGPT subscription |
-| Easy | `codex/gpt-5.6-luna:medium` | Codex CLI, ChatGPT subscription |
-| Super easy | `opencode-go/qwen3.8-flash` | Pi |
-| Review of any of these | `google/gemini-3.8-flash` | Pi |
+| Tier | Ordered candidates (cheapest first) |
+| --- | --- |
+| 1 | `openrouter/qwen/qwen3.8-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, `codex/gpt-6-luna:medium`, `codex/gpt-5.6-luna:medium` |
+| 2 | `google/gemini-3.8-flash`, `codex/gpt-6-luna:high`, `codex/gpt-5.6-luna:high` |
+| 3 | `claude/sonnet:high`, `codex/gpt-5.6-terra:high` |
+| 4 | `codex/gpt-6.1-sol:medium`, `codex/gpt-5.6-sol:medium`, `claude/opus:medium` |
+| 5 | `codex/gpt-6-astra:high`, `claude/opus:high`, `claude/fable:high`, `codex/gpt-6.1-sol:high`, `codex/gpt-5.6-sol:high` |
 
-Use `helm spawn --repo /path/to/repo --objective "…" --difficulty easy` or pass
-`difficulty: "easy"` to `worker.spawn`. The caller classifies the task; Helm does not
-infer difficulty from the objective. `super-easy` is for small, mechanical work.
-An explicit `--model` (MCP `model`) overrides the tier. Kimi K3 and Qwen 3.8 Max are
-never selected automatically, including on failures; explicit overrides remain available.
+The tier-1 Qwen entry is the requested `openrouter/qwen/qwen3.8-flash` identifier. The
+current operator `models.json` exposes the older `opencode-go/qwen3.8-flash` override
+instead, so the catalog reports this requested candidate unavailable until configured;
+it does not silently substitute it. Gemini 3.8 Flash is present in Pi's Google catalog.
+`claude/*` candidates remain unavailable
+until Helm has a Claude worker lane. The table, `allowed`, `minClean`, `minN`, `policy`,
+and `checkDays` are hot-reloaded from `$HELM_HOME/helm.json` for each automatic route.
+`routing.policy.lanes` may contain `codex`, `pi`, and `claude`; `subscriptionOnly: true`
+permits only Codex and Claude. `worker.spawn` accepts a repeatable `lanes` override for
+one spawn. Jev still scores every spawn without an explicit model before policy filtering.
+If a policy empties the judged tier, Helm searches higher tiers, then lower tiers; if all
+candidates are disallowed or unavailable it refuses with the policy reason rather than
+silently choosing one.
+
+`helm routing check` (or the `routing.check` tool) probes the catalog and records the last
+check in the Helm store. The weekly ticker runs it when `checkDays` has elapsed and emits
+`routing.stale` for unavailable tier candidates or models present in a lane but absent from
+the table. The Codex probe runs `codex debug models`; Pi reads its
+operator and built-in provider catalogs; Claude requires both a binary and a registered
+Helm lane.
+
+Retrospectives should review the 30-day model × tier scorecard, then edit the ordered
+`routing.tiers` lists or `routing.allowed` in `helm.json`. Keep the cheapest acceptable
+candidate first, and use a later candidate or higher tier when the clean rate is below
+`minClean` with at least `minN` observations. An explicit `model` bypasses routing;
+`difficulty` maps directly to tiers 1, 2, and 3 and still uses policy and availability checks.
 
 `helm review <id>` / `review.request` also accepts an omitted model. Reviews default to
 Gemini Flash; if an explicitly selected builder is Gemini, the default reviewer is Codex
@@ -107,6 +132,24 @@ The Codex CLI must be signed in with ChatGPT (`codex login status`). Subscriptio
 is still finite; this policy does not measure remaining quota or automatically switch to
 paid APIs when Codex is unavailable. Pi routes need the corresponding provider login.
 See the Codex reviewer sandbox limitation below when reviewing a Gemini build.
+
+### The Claude lane
+
+A `claude/…` model runs `claude -p` in the worker worktree. The binary is
+`$HELM_CLAUDE_BIN`, else `~/.local/bin/claude`, else `claude` on PATH. Model strings accept
+`claude/<model>[:<effort>]`, for example `claude/sonnet:high`, `claude/opus:medium` and
+`claude/fable:high`; the suffix becomes Claude's `--effort` flag. Claude uses
+`--output-format stream-json --verbose`, records its session id as `claude-session:<id>`, and
+resumes steer/retry turns with `--resume <id>`. Both roles use `--restricted`, `--safe-mode`,
+an empty strict MCP configuration and no permission prompts. Builders receive `acceptEdits`
+plus `Read,Edit,Write,Glob,Grep,Bash`; reviewers use `plan` with `Read,Glob,Grep,Bash`, but
+their sandbox has no worktree write access. The Claude OS sandbox fails closed, permits builder
+writes only in the worker worktree and a per-worker temp directory cleaned with the worktree,
+denies common credential locations (while re-allowing the assigned worktree), and denies network access. Web search/fetch,
+`gh`, pushes, worktree changes and common outside-worktree shell escapes remain defense-in-depth
+denials, and only the worker worktree is added with `--add-dir`. The child receives a minimal
+environment, not Helm configuration, provider keys or webhooks. Claude subscription usage is
+recorded with `costUsd: 0`.
 
 ## What a worker can and cannot do
 
@@ -236,15 +279,38 @@ replayed automatically.
 
 Spend is summed from Pi usage events times the model's catalogue price. Per-project sprint budgets
 are created automatically at the configured default when a project first spawns a worker;
-`budget.open` starts a new sprint and closes the old one. `HELM_SPEND_CAP_USD` is only a lifetime
-global backstop: it refuses new spawns and stops running workers at the next tool call once reached.
+`budget.open` starts a new sprint and closes the old one. `$HELM_HOME/helm.json` is the live global
+spend configuration: its optional `spend` object accepts `capUsd`, `warnUsd`, and `maxWorkers`.
+Helm re-reads these values when the file changes, so lowering a limit does not require a daemon
+restart. The authoritative limits are bootstrapped into the store; direct file edits can only lower
+the current effective values, while raises (including removing a cap) are ignored. The environment
+variables below are fallbacks only, including values set in a project's `.mcp.json`.
+Use `helm cap --usd N [--warn N] [--workers N] [--tap <id>]` to update the file while preserving
+other settings. Lowering values is immediate; raising `capUsd` or `maxWorkers` requires a one-time
+`spend.cap` tap for the exact requested action. `HELM_SPEND_CAP_USD` is a lifetime global backstop:
+it refuses new spawns and stops running workers at the next tool call once reached.
 A value of `0` or an unset variable means no global cap. A soft cap,
 `HELM_SPEND_WARN_USD` (default 80% of the hard cap), never blocks: crossing it records a
 `spend.warning` event, sets `aboveSoftCap` in `run.status`, adds a `warning` field to spawn
 and steer results so the orchestrator sees it. Models
 with no price are counted as tokens and reported as unknown-cost events, never blocked.
 
+Spend limits are detected-not-prevented against a same-user forge of `helm.sqlite`: a user who can
+rewrite the database can also forge the limit state, with the same trust boundary as `envelope.json`.
+The daemon's startup Discord line always reports the effective spend limits so such a forge is visible
+to Nick.
+
 ## Configuration
+
+The live spend settings can be placed alongside the other daemon settings in `$HELM_HOME/helm.json`:
+
+```json
+{ "spend": { "capUsd": 10, "warnUsd": 8, "maxWorkers": 5 } }
+```
+
+`helm.json` wins over environment values; `.mcp.json` environment caps are fallbacks only. Raising a
+hard cap or worker limit through `helm cap` needs a granted `spend.cap` tap; the refusal names that
+kind so the supervisor can call `tap.request` with the exact action returned by the refusal.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -255,6 +321,7 @@ with no price are counted as tokens and reported as unknown-cost events, never b
 | `HELM_GATE_TIMEOUT_MS` | `900000` | Per-check timeout |
 | `HELM_CODEX_BIN` | `~/.local/bin/codex`, else `codex` | The Codex CLI the `codex/…` lane runs |
 | `HELM_CODEX_NETWORK` | unset | `1` lets Codex builders reach the network inside their sandbox |
+| `HELM_CLAUDE_BIN` | `~/.local/bin/claude`, else `claude` | The Claude CLI the `claude/…` lane runs |
 
 ## Development
 

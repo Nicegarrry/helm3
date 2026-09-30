@@ -1,9 +1,11 @@
 /** Helm service: composes the runtime and implements the worker, budget, and lifecycle tools. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
+import { hardenedGitArgs } from './git.js';
 import type { z } from 'zod';
 import type {
   BaselineRow,
@@ -55,15 +57,17 @@ import {
   deployRunInput,
   deployStatusInput,
   deployRollbackInput,
+  spendSetInput,
 } from './types.js';
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
 import { createBaseline, ensureBaselineTable, getBaseline } from './baseline.js';
 import { loadRepoConfig } from './repoconfig.js';
 
 import { Lifecycle } from './lifecycle.js';
-import { loadSettings, type Settings } from './settings.js';
+import { loadSettings, updateSpendSettings, type Settings } from './settings.js';
+import { createEffectiveSpendReader, spendLimitRaises, type EffectiveSpend, type EffectiveSpendReader } from './config.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
+import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -77,6 +81,8 @@ import { createSelector, type Selection } from './select.js';
 import type { Jev } from './jev.js';
 import type { PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
+import { createRoutingCheck, type RoutingCheckService } from './routing/check.js';
+import { createModelCatalog, type CatalogProbe, type ModelCatalog } from './routing/catalog.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
@@ -108,6 +114,7 @@ export type HelmDeps = Readonly<{
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
   settings?: Settings;
+  spendStartup?: boolean;
   supervisor?: SupervisorService;
   discord?: DiscordService;
   review?: ReviewService;
@@ -122,6 +129,9 @@ export type HelmDeps = Readonly<{
   deploySleep?: (ms: number) => Promise<void>;
   deployEnv?: NodeJS.ProcessEnv;
   statfs?: (path: string) => Promise<StatfsResult>;
+  routingCatalog?: ModelCatalog;
+  routingProbe?: CatalogProbe;
+  claudeLaneRegistered?: boolean;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -182,10 +192,8 @@ export function modelFamily(model: string): string {
 }
 
 // Explicit model overrides remain available; automatic choices exclude Kimi K3 and Qwen Max.
-const TASK_MODELS = { normal: 'codex/gpt-5.6-luna:high', easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'codex/gpt-5.6-luna:medium' } as const;
-
 export type ToolGuard = (input: unknown) => string | null | Promise<string | null>;
-export type ModelChoice = Readonly<{ model: string; band?: string; complexity?: number; warning?: string }>;
+export type ModelChoice = Readonly<{ model?: string; tier?: number; score?: number; policyApplied?: Readonly<{ lanes: readonly ('codex' | 'pi' | 'claude')[]; subscriptionOnly: boolean }>; skippedCandidates?: readonly Readonly<{ model: string; reason: string; tier: number }>[]; warning?: string; refusal?: string }>;
 export type ModelChooser = (input: SpawnInput) => string | ModelChoice | null | undefined | Promise<string | ModelChoice | null | undefined>;
 
 export class Helm {
@@ -207,6 +215,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
+  private readonly spendSettings: EffectiveSpendReader;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
   private readonly jev?: Jev;
   private readonly tapRandomInt?: (min: number, max: number) => number;
@@ -226,6 +235,7 @@ export class Helm {
   private readonly selector: ReturnType<typeof createSelector>;
   readonly scorecard: ScorecardService;
   readonly deploy: DeployService;
+  readonly routingCheck: RoutingCheckService;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
   /** Per-worker admission locks shared with hygiene so GC cannot race steer/retry. */
@@ -244,6 +254,9 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
+    const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
+    this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog });
+    this.spendSettings = createEffectiveSpendReader(deps.config, this.store, this.settings, () => this.nowDate(), deps.spendStartup ? 'startup' : 'read');
     this.statfs = deps.statfs;
     this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;
@@ -270,7 +283,7 @@ export class Helm {
         .find((check) => check.name === 'acceptance');
       if (!acceptance || acceptance.exitCode !== 0) return `acceptance check did not pass at head ${head ?? 'unknown'}`;
       try {
-        const { stdout } = await exec('git', ['diff', '--name-only', `${baseline.testCommit}..${head}`, '--', ...baseline.files], { cwd: worker.worktree });
+        const { stdout } = await exec('git', hardenedGitArgs(['diff', '--name-only', `${baseline.testCommit}..${head}`, '--', ...baseline.files]), { cwd: worker.worktree });
         const edited = stdout.split('\n').map((file) => file.trim()).filter(Boolean);
         if (edited.length > 0) return `baseline tests edited: ${edited.join(', ')}`;
       } catch (err) {
@@ -311,9 +324,8 @@ export class Helm {
       retry: this.retry ? (input) => this.retry!.retry(input, (workerId, message) => this.steer({ workerId, message })) : undefined,
     });
     this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
-    registerRouting({ chooseModel: (chooser) => this.chooseModel(chooser), settings: this.settings, store: this.store, jev: deps.jev, now: () => this.now ? new Date(this.now()) : new Date(), resolveProject: async (repo) => isAbsolute(repo) ? this.repoSlugFor(repo) : undefined });
+    registerRouting({ chooseModel: (chooser) => this.chooseModel(chooser), settings: this.settings, settingsHome: this.config.home, store: this.store, jev: deps.jev, now: () => this.now ? new Date(this.now()) : new Date(), resolveProject: async (repo) => isAbsolute(repo) ? this.repoSlugFor(repo) : undefined, catalog: routingCatalog });
   }
-
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
   async memoryLog(input: import('./memory.js').MemoryLogInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.log(input); }
   async memoryList(input: import('./memory.js').MemoryListInput): Promise<ToolOutcome<{ memories: Array<{ path: string; title: string; summary: string }> }>> { return this.memory.list(input); }
@@ -321,7 +333,32 @@ export class Helm {
   async deployRun(input: z.infer<typeof deployRunInput>) { return this.deploy.run(input); }
   async deployStatus(input: z.infer<typeof deployStatusInput>) { return this.deploy.status(input); }
   async deployRollback(input: z.infer<typeof deployRollbackInput>) { return this.deploy.rollback(input); }
+  async routingCheckNow() { return this.routingCheck.check(); }
+  async routingTick(): Promise<void> { await this.routingCheck.tick(); }
 
+  async spendSet(input: z.infer<typeof spendSetInput>): Promise<ToolOutcome<{ spend: Settings['spend'] }>> {
+    return runGuard(() => this.withLock(async () => {
+      if (input.capUsd === undefined && input.warnUsd === undefined && input.maxWorkers === undefined) return refuse('at least one spend setting is required');
+      const current = this.effectiveSpend();
+      const nextCapUsd = input.capUsd ?? current.capUsd;
+      const nextWarnUsd = input.warnUsd ?? current.warnUsd;
+      const nextMaxWorkers = input.maxWorkers ?? current.maxWorkers;
+      if (nextCapUsd > 0 && nextWarnUsd > nextCapUsd) return refuse(`warnUsd ${nextWarnUsd} exceeds capUsd ${nextCapUsd}`);
+      const raising = spendLimitRaises(nextCapUsd, current.capUsd) || spendLimitRaises(nextMaxWorkers, current.maxWorkers);
+      const action = spendCapAction(current, input);
+      let reservation: TapReservation | undefined;
+      if (raising) {
+        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}`);
+        const reserved = reserveTap(this.store, this.taps, SPEND_CAP_TAP_PROJECT, SPEND_CAP_TAP_KIND, actionHash(action), input.tapId, this.nowDate());
+        if (typeof reserved === 'string') return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${reserved}`);
+        reservation = reserved;
+      }
+      const at = this.nowIso();
+      const changed = (['capUsd', 'warnUsd', 'maxWorkers'] as const).filter((name) => input[name] !== undefined && input[name] !== current[name]);
+      try { updateSpendSettings(this.config.home, { capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }); this.spendSettings.applySpendSet(input, at, reservation?.tapId ?? null); if (changed.length > 0) this.store.appendEvent('project:global', 'spend.changed', { project: 'global', source: 'spend.set', ...(reservation?.tapId ? { tapId: reservation.tapId } : {}), ...Object.fromEntries(changed.map((name) => [name, input[name]])) }); if (reservation) commitTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()); const effective = this.effectiveSpend(); return { ok: true, spend: Object.fromEntries(Object.keys(input).filter((name): name is 'capUsd' | 'warnUsd' | 'maxWorkers' => name !== 'tapId').map((name) => [name, effective[name]])) }; }
+      catch (error) { if (reservation) rollbackTap(this.taps, reservation.tapId, reservation.token); throw error; }
+    }));
+  }
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }
   async claimsCheck(input: import('./claims.js').ClaimsCheckInput): Promise<ToolOutcome<Record<string, unknown>>> {
@@ -331,7 +368,6 @@ export class Helm {
   async mergeEnqueue(input: z.infer<typeof mergeEnqueueInput>) { return this.queue.enqueue(input); }
   async mergeQueue(input: z.infer<typeof mergeQueueInput>) { return this.queue.queue(input); }
   async mergeDequeue(input: z.infer<typeof mergeDequeueInput>) { return this.queue.dequeue(input); }
-
   async retryWorker(input: z.infer<typeof retryInput>): Promise<ToolOutcome<{ turn: number; kind: import('./retry.js').RetryKind; message: string }>> {
     if (!this.retry) return refuse('retry service is not configured');
     return runGuard(async () => {
@@ -342,19 +378,16 @@ export class Helm {
       });
     });
   }
-
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {
     const hooks = this.guards.get(tool) ?? [];
     hooks.push(fn);
     this.guards.set(tool, hooks);
   }
-
   /** Register model selection before spawn admission takes the mutex. */
   chooseModel(fn: ModelChooser): void {
     this.modelChoosers.push(fn);
   }
-
   private async refusal(tool: string, input: unknown): Promise<string | null> {
     for (const fn of this.guards.get(tool) ?? []) {
       const reason = await fn(input);
@@ -362,7 +395,6 @@ export class Helm {
     }
     return null;
   }
-
   private prByNumber(number: number, project?: string): PrRow {
     const resolution = this.store.resolvePrByNumber(number, project);
     return requireValue(resolution.pr, resolution.reason ?? 'pr not found');
@@ -382,14 +414,15 @@ export class Helm {
   }
 
   private async chosenModel(input: SpawnInput): Promise<{ input: SpawnInput; choice?: ModelChoice }> {
-    if (input.model || input.difficulty) return { input };
+    if (input.model) return { input };
     let chosen = input;
     let choice: ModelChoice | undefined;
     for (const fn of this.modelChoosers) {
       const selected = await fn(chosen);
       if (!selected) continue;
       if (typeof selected === 'string') chosen = { ...chosen, model: selected };
-      else { chosen = { ...chosen, model: selected.model }; choice = { ...choice, ...selected }; }
+      else { chosen = selected.model ? { ...chosen, model: selected.model } : chosen; choice = { ...choice, ...selected }; }
+      if (input.difficulty) break;
     }
     return { input: chosen, choice };
   }
@@ -458,6 +491,7 @@ export class Helm {
       const freeGb = await freeSpaceGb(this.config.home, this.statfs);
       if (freeGb !== null && freeGb < this.settings.hygiene.minFreeGb / 2) return refuse('disk low');
       const chosen = await this.chosenModel(input);
+      if (chosen.choice?.refusal) return refuse(chosen.choice.refusal);
       const reason = await this.refusal('worker.spawn', chosen.input);
       if (reason) return refuse(reason);
       let selection: Selection;
@@ -481,9 +515,10 @@ export class Helm {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
       if (existing) return { ok: true, workerId: existing.workerId, branch: existing.branch, worktree: existing.worktree };
     }
-    const model = input.model ?? TASK_MODELS[input.difficulty ?? 'normal'];
+    const model = requireValue(input.model, 'routing did not select a model');
     const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
-    must(active < this.config.maxWorkers, `max workers reached (${this.config.maxWorkers})`);
+    const spend = this.effectiveSpend();
+    must(spend.maxWorkers === 0 || active < spend.maxWorkers, `max workers reached (${spend.maxWorkers})`);
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
@@ -510,7 +545,7 @@ export class Helm {
         ...(input.issue !== undefined ? { issue: input.issue } : {}),
         ...(baseline ? { issue: baseline.issue, baselineId: baseline.id, prBase: baseline.baseRef } : {}),
       });
-      if (choice?.band !== undefined || choice?.complexity !== undefined) this.store.setMeta(workerId, { band: choice.band ?? null, complexity: choice.complexity ?? null });
+      if (choice?.model) this.store.setMeta(workerId, { tier: choice.tier ?? null, score: choice.score ?? null, policyApplied: choice.policyApplied ?? null, chosenModel: choice.model, skippedCandidates: choice.skippedCandidates ?? [] });
       this.store.setMeta(workerId, { skills: selection.skills });
       attachWorker(this.store, workerId, admittedBudget.id);
     } catch (err) {
@@ -518,6 +553,11 @@ export class Helm {
       throw err;
     }
     this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
+    if (choice?.model) this.store.appendEvent(workerId, 'route.selected', {
+      tier: choice.tier ?? null, ...(choice.score === undefined ? {} : { score: choice.score }), policyApplied: choice.policyApplied ?? null, chosenModel: choice.model,
+      ...(choice.skippedCandidates?.length ? { skippedCandidates: choice.skippedCandidates } : {}),
+    });
+    for (const skipped of choice?.skippedCandidates ?? []) this.store.appendEvent(workerId, 'route.skipped', skipped);
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
@@ -547,7 +587,7 @@ export class Helm {
       finally { cancelTimeout?.(); }
     }
     title ??= fallback;
-    const tier = ({ trivial: 1, small: 2, medium: 3, large: 4 } as Record<string, number | undefined>)[choice?.band ?? meta?.band ?? ''] ?? null;
+    const tier = choice?.tier ?? meta?.tier ?? null;
     this.store.appendEvent(workerId, 'dispatched', { project: row.repoSlug, issue, title, model: row.model, ...(tier !== null ? { tier } : {}) });
   }
 
@@ -816,20 +856,26 @@ export class Helm {
 
   /** Soft cap: explicit HELM_SPEND_WARN_USD, else 80% of the hard cap, else none. */
   spendWarnUsd(): number {
-    const explicit = this.config.spendWarnUsd ?? 0;
-    if (explicit > 0) return explicit;
-    return this.config.spendCapUsd > 0 ? Math.round(this.config.spendCapUsd * 0.8 * 100) / 100 : 0;
+    return this.effectiveSpend().warnUsd;
   }
 
   private aboveSoftCap(): boolean { const w = this.spendWarnUsd(); return w > 0 && this.store.spendTotal().spendUsd >= w; }
 
-  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[] }>> {
+  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[]; spendSources: EffectiveSpend['sources']; spendCapSource: EffectiveSpend['sources']['capUsd']; spendWarnSource: EffectiveSpend['sources']['warnUsd']; maxWorkersSource: EffectiveSpend['sources']['maxWorkers']; warning?: string }>> {
     return runGuard(async () => {
       const total = this.store.spendTotal();
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
+      const spend = this.effectiveSpend();
+      const routing = this.store.listWorkers().flatMap((worker) => {
+        const meta = this.store.getMeta(worker.workerId);
+        if (!meta || meta.tier === null || !meta.chosenModel) return [];
+        return [{ workerId: worker.workerId, tier: meta.tier, ...(meta.score === null ? {} : { score: meta.score }), chosenModel: meta.chosenModel, ...(meta.policyApplied ? { policyApplied: meta.policyApplied } : {}), ...(meta.skippedCandidates.length ? { skippedCandidates: meta.skippedCandidates } : {}) }];
+      });
       return {
-        ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),
-        activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(this.store),
+        ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: spend.capUsd, spendWarnUsd: spend.warnUsd, aboveSoftCap: spend.warnUsd > 0 && total.spendUsd >= spend.warnUsd,
+        activeWorkers, maxWorkers: spend.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(this.store), routing, spendSources: spend.sources,
+        spendCapSource: spend.sources.capUsd, spendWarnSource: spend.sources.warnUsd, maxWorkersSource: spend.sources.maxWorkers,
+        ...(spend.warning ? { warning: spend.warning } : {}),
       };
     });
   }
@@ -988,9 +1034,20 @@ export class Helm {
     });
   }
 
-  private spendCapExceeded(): boolean {
-    return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;
+  private workerTempDir(workerId: string): string {
+    return join(this.config.home, 'tmp', workerId);
   }
+
+  private async cleanupWorkerTemp(workerId: string): Promise<void> {
+    await rm(this.workerTempDir(workerId), { recursive: true, force: true });
+  }
+
+  private spendCapExceeded(): boolean {
+    const spend = this.effectiveSpend();
+    return spend.capUsd > 0 && this.store.spendTotal().spendUsd >= spend.capUsd;
+  }
+
+  private effectiveSpend(): EffectiveSpend { return this.spendSettings(); }
 
   private ensureProjectBudget(project: string) {
     const existing = openBudgetFor(this.store, project);
@@ -1035,7 +1092,7 @@ export class Helm {
 
   private async repoSlugFor(repo: string): Promise<string> {
     try {
-      const { stdout } = await exec('git', ['-C', repo, 'remote', 'get-url', 'origin']);
+      const { stdout } = await exec('git', hardenedGitArgs(['-C', repo, 'remote', 'get-url', 'origin']));
       const slug = parseOwnerRepo(stdout);
       if (slug) return slug;
     } catch {
@@ -1071,7 +1128,7 @@ export class Helm {
     const runInput: WorkerRunInput = {
       workerId, role: row.role, model: row.model, worktree: row.worktree, objective: row.objective,
       acceptance: row.acceptance, contextPaths: row.contextPaths, allowWorkflows: row.allowWorkflows,
-      sessionFile: row.sessionFile, sessionDir: join(this.config.home, 'sessions', workerId),
+      sessionFile: row.sessionFile, sessionDir: join(this.config.home, 'sessions', workerId), tempDir: this.workerTempDir(workerId),
     };
     const hooks: WorkerHooks = {
       emit: (kind, data) => {
@@ -1085,7 +1142,7 @@ export class Helm {
         this.store.addSpend({ ...usage, workerId, at: this.nowIso() });
         const warn = this.spendWarnUsd();
         const after = this.store.spendTotal().spendUsd;
-        if (warn > 0 && before < warn && after >= warn) this.store.appendEvent(workerId, 'spend.warning', { spendUsd: after, spendWarnUsd: warn, spendCapUsd: this.config.spendCapUsd });
+        if (warn > 0 && before < warn && after >= warn) this.store.appendEvent(workerId, 'spend.warning', { spendUsd: after, spendWarnUsd: warn, spendCapUsd: this.effectiveSpend().capUsd });
         const budget = budgetForWorker(this.store, workerId);
         if (budget) {
           const current = budgetStatus(this.store, budget);
@@ -1112,7 +1169,7 @@ export class Helm {
       if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {
         try {
           const commitMessage = result?.summary ?? `helm: ${workerId} turn complete`;
-          const head = await this.workspace.commitAll(row.worktree, commitMessage);
+          const head = await this.workspace.commitAll(row.worktree, commitMessage, row.repo);
           this.store.updateWorker(workerId, { head });
         } catch (err) {
           this.store.appendEvent(workerId, 'error', { message: `commit failed: ${errMessage(err)}` });
@@ -1131,6 +1188,7 @@ export class Helm {
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
       if (nextState === 'succeeded' || nextState === 'failed' || nextState === 'idle' || nextState === 'stopped') {
         await this.cleanupWorkerNodeModules(row);
+        await this.cleanupWorkerTemp(workerId).catch(() => undefined);
       }
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
@@ -1151,6 +1209,7 @@ export class Helm {
     } catch (err) {
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
+      await this.cleanupWorkerTemp(workerId).catch(() => undefined);
       this.store.updateWorker(workerId, { state: 'unknown' });
       this.store.appendEvent(workerId, 'error', { message: errMessage(err) });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: 'unknown' });

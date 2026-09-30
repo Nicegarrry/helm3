@@ -1,5 +1,5 @@
 /** Codex CLI per turn, native sandbox and subscription usage; see README.md and docs/runtime-notes.md. */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -8,10 +8,20 @@ import { createInterface } from 'node:readline';
 import type { WorkerRunInput, WorkerRunOutcome, WorkerRunner, WorkerHooks } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
 import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
+import { parseClaudeModel } from './claude.js';
 
 export const CODEX_PREFIX = 'codex/';
 /** What `sessionFile` holds for a Codex worker: the thread id `codex exec resume` takes. */
 export const CODEX_SESSION_PREFIX = 'codex-thread:';
+const STOP_GRACE_MS = 1_000;
+
+function stopChild(child: ChildProcess): void {
+  child.kill('SIGTERM');
+  const force = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }, STOP_GRACE_MS);
+  force.unref();
+}
 
 /** `codex/<model>[:<effort>]` -> what Codex runs, or null when the name is not on this lane. */
 export function parseCodexModel(model: string): { model: string; effort?: string } | null {
@@ -69,7 +79,13 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
         let lastText = '';
         // Cancellation is checked on every event AND on a timer: a worker deep in one long silent
         // command emits nothing, and a stop request must still land inside `stop()`'s wait.
-        const stopIfAsked = (): boolean => { if (hooks.shouldContinue()) return false; child.kill('SIGTERM'); return true; };
+        let stopSent = false;
+        const stopIfAsked = (): boolean => {
+          if (hooks.shouldContinue() || stopSent) return false;
+          stopSent = true;
+          stopChild(child);
+          return true;
+        };
         const poll = setInterval(stopIfAsked, 500);
         const lines = createInterface({ input: child.stdout });
         lines.on('line', (line) => {
@@ -124,7 +140,15 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
   };
 }
 
-/** One runner for both lanes: `codex/…` models go to Codex, everything else to Pi. */
-export function laneRunner(lanes: Readonly<{ pi: WorkerRunner; codex: WorkerRunner }>): WorkerRunner {
-  return { run: (input, message, hooks) => (parseCodexModel(input.model) ? lanes.codex : lanes.pi).run(input, message, hooks) };
+/** Route explicit CLI lanes first; models without a lane continue to use Pi. */
+export function laneRunner(lanes: Readonly<{ pi: WorkerRunner; codex: WorkerRunner; claude?: WorkerRunner }>): WorkerRunner {
+  return {
+    run: (input, message, hooks) => {
+      if (parseClaudeModel(input.model)) {
+        if (!lanes.claude) throw new Error('claude lane is unavailable: configure a Claude CLI binary');
+        return lanes.claude.run(input, message, hooks);
+      }
+      return (parseCodexModel(input.model) ? lanes.codex : lanes.pi).run(input, message, hooks);
+    },
+  };
 }

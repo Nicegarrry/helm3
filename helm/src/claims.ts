@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import type { Jev, JevAnswer, JevQuestion } from './jev.js';
 import type { Settings } from './settings.js';
 import type { Store, ToolOutcome, Workspace } from './types.js';
+import { hardenedGitArgs } from './git.js';
 
 const exec = promisify(execFile);
 const MAX_BATCH_DIFF = 70_000;
@@ -33,7 +34,7 @@ export type ClaimsService = Readonly<{
 export type ClaimsGit = (cwd: string, args: readonly string[]) => Promise<string>;
 
 function defaultGit(cwd: string, args: readonly string[]): Promise<string> {
-  return exec('git', [...args], { cwd, maxBuffer: 128 * 1024 * 1024 }).then(({ stdout }) => stdout);
+  return exec('git', hardenedGitArgs(args), { cwd, maxBuffer: 128 * 1024 * 1024 }).then(({ stdout }) => stdout);
 }
 
 function question(claim: string): JevQuestion {

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { EventRow, HelmConfig, InboxState, Store, WorkerRow } from './types.js';
-import { ensureHome, loadConfig } from './config.js';
+import { createEffectiveSpendReader, ensureHome, loadConfig } from './config.js';
 import { openStore } from './store.js';
 import { listBudgetStatuses } from './budget.js';
 import { gitWorkspace } from './workspace.js';
@@ -14,6 +14,7 @@ import { gateRunner } from './gate.js';
 import { ghGitHub } from './github.js';
 import { piWorkerRunner } from './worker.js';
 import { codexWorkerRunner, laneRunner } from './codex.js';
+import { available as claudeAvailable, claudeWorkerRunner } from './claude.js';
 import { builderPrompt, reviewerPrompt, validatorPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
@@ -56,6 +57,7 @@ function usage(): void {
   review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
   status [--json]
+  cap --usd N [--warn N] [--workers N] [--tap <id>] [--json]
   budget open <project> <label> <capUsd> [--codex-tokens n]
   budget close <project>
   budget [project] [--json]
@@ -174,11 +176,11 @@ const cmdSpawn = (args: string[]) =>
   simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective
     ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, issue: v.issue ? Number(v.issue) : undefined, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
         baseRef: v['base-ref'], role: v.role, contextPaths: v.context ?? [], allowWorkflows: v['allow-workflows'] ?? false,
-        idempotencyKey: v['idempotency-key'] }
+        idempotencyKey: v['idempotency-key'], lanes: v.lanes }
     : undefined), {
     repo: { type: 'string' }, objective: { type: 'string' }, issue: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
     'base-ref': { type: 'string' }, role: { type: 'string' }, context: { type: 'string', multiple: true },
-    'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' },
+    'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' }, lanes: { type: 'string', multiple: true },
   });
 
 const cmdPs = (args: string[]) =>
@@ -263,13 +265,21 @@ const cmdStatus = (args: string[]) =>
   readCmd(args, (_p, v, store, config) => {
     const total = store.spendTotal();
     const activeWorkers = store.listWorkers().filter((w) => w.state === 'queued' || w.state === 'running').length;
-    const payload = { spendUsd: total.spendUsd, spendCapUsd: config.spendCapUsd, activeWorkers, maxWorkers: config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(store) };
+    const spend = createEffectiveSpendReader(config, store, loadSettings(config.home))();
+    const payload = { spendUsd: total.spendUsd, spendCapUsd: spend.capUsd, spendWarnUsd: spend.warnUsd, activeWorkers, maxWorkers: spend.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(store), spendSources: spend.sources, spendCapSource: spend.sources.capUsd, spendWarnSource: spend.sources.warnUsd, maxWorkersSource: spend.sources.maxWorkers, ...(spend.warning ? { warning: spend.warning } : {}) };
     if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
     console.log(`spend:    $${payload.spendUsd.toFixed(4)}${payload.spendCapUsd > 0 ? ` / $${payload.spendCapUsd.toFixed(2)} cap` : ' (no cap)'}`);
+    console.log(`warn:     $${payload.spendWarnUsd.toFixed(2)}`);
     console.log(`workers:  ${payload.activeWorkers} / ${payload.maxWorkers} active`);
+    if (payload.warning) console.error(`warning:  ${payload.warning}`);
     console.log(`unknown-cost events: ${payload.unknownCostEvents}`);
     for (const project of payload.projects) console.log(`budget:   ${project.project} ${project.label} $${project.spentUsd.toFixed(2)} / $${project.capUsd.toFixed(2)}${project.exhausted ? ' exhausted' : ''}`);
   });
+const cmdCap = (args: string[]) =>
+  simpleCmd('spend.set', args, (_p, v) => {
+    if (v.usd === undefined || !Number.isFinite(Number(v.usd))) return undefined;
+    return { capUsd: Number(v.usd), ...(v.warn !== undefined ? { warnUsd: Number(v.warn) } : {}), ...(v.workers !== undefined ? { maxWorkers: Number(v.workers) } : {}), ...(v.tap ? { tapId: v.tap } : {}) };
+  }, { usd: { type: 'string' }, warn: { type: 'string' }, workers: { type: 'string' }, tap: { type: 'string' } });
 
 async function cmdBudget(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { json: { type: 'boolean' }, 'codex-tokens': { type: 'string' } } });
@@ -506,7 +516,9 @@ async function cmdServe(args: string[]): Promise<void> {
   const github = ghGitHub();
   const helm = new Helm({
     config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules, allowUnsandboxed: settings.gates?.allowUnsandboxed === true }), github,
-    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
+    claudeLaneRegistered: claudeAvailable(),
+    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner(), claude: claudeAvailable() ? claudeWorkerRunner() : undefined }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
+    spendStartup: true,
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
     review: createReview({ store, github, workspace, jev, settings }),
@@ -521,7 +533,7 @@ async function cmdServe(args: string[]): Promise<void> {
   await helm.markInterruptedOnStart(predecessorBootId);
   const hygiene = createHygiene({ home: config.home, store, settings, workspace, github, isRunning: (workerId) => helm.isWorkerRunning(workerId), withWorkerLock: (workerId, fn) => helm.withWorkerLock(workerId, fn), deployInProgress: (project, target) => helm.deploy.isInProgress(project, target) });
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), helm.routingTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
@@ -579,6 +591,11 @@ async function cmdShutdown(): Promise<void> {
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
 const cmdScorecard = (args: string[]) => simpleCmd('scorecard.export', args, (p, v) => (p[0] ? { project: p[0], ...(v.budget ? { budgetId: v.budget } : {}), ...(v.since ? { since: v.since } : {}) } : undefined), { budget: { type: 'string' }, since: { type: 'string' } });
+const cmdRouting = async (args: string[]): Promise<void> => {
+  const [verb, ...rest] = args;
+  if (verb === 'check') { await simpleCmd('routing.check', rest, () => ({})); return; }
+  usage(); process.exitCode = 2;
+};
 const cmdDeploy = async (args: string[]): Promise<void> => {
   const [verb, ...rest] = args;
   if (verb === 'run') { await simpleCmd('deploy.run', rest, (p, v) => p[0] && p[1] ? { project: p[0], target: p[1], ...(v.sha ? { sha: v.sha } : {}), ...(v['tap-id'] ? { tapId: v['tap-id'] } : {}) } : undefined, { sha: { type: 'string' }, 'tap-id': { type: 'string' } }); return; }
@@ -590,8 +607,8 @@ const cmdDeploy = async (args: string[]): Promise<void> => {
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
-  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, deploy: cmdDeploy,
+  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
+  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, routing: cmdRouting, deploy: cmdDeploy,
 };
 
 async function main(): Promise<void> {

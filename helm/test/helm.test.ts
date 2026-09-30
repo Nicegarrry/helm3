@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -347,6 +348,58 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'helm', 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
+});
+
+function installHarness(helmJson: object) {
+  const repo = mkTempDir('helm-install-repo-');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo });
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
+  writeFileSync(join(repo, 'helm.json'), JSON.stringify(helmJson));
+  git('add', '.'); git('commit', '-qm', 'base');
+  const installs: Array<{ commands: string[]; keepNodeModules?: boolean }> = [];
+  const seen: Array<'dir' | 'symlink' | 'missing'> = [];
+  const gates: GateRunner = {
+    async run(cwd, checks, _logDir, options) {
+      installs.push({ commands: checks.map((check) => check.command), keepNodeModules: options?.keepNodeModules });
+      mkdirSync(join(cwd, 'node_modules'), { recursive: true });
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks() { return []; },
+  };
+  const runner = createFakeRunner(async (input) => {
+    const path = join(input.worktree, 'node_modules');
+    seen.push(!existsSync(path) ? 'missing' : lstatSync(path).isSymbolicLink() ? 'symlink' : 'dir');
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const made = makeHelm({ gates, runner });
+  made.workspace.resolveSha = async (_repo, ref) => execFileSync('git', ['rev-parse', ref === 'main' ? 'HEAD' : ref], { cwd: repo, encoding: 'utf8' }).trim();
+  return { ...made, installs, seen, repo };
+}
+
+test('worker turns see a real node_modules from the install gate step and hygiene removes it afterwards', async () => {
+  const { helm, installs, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci --no-audit --no-fund' }, { name: 'test', command: 'npm test' }] });
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['dir']);
+  assert.deepEqual(installs, [{ commands: ['npm ci --no-audit --no-fund'], keepNodeModules: true }]);
+  assert.equal(existsSync(join(spawned.worktree, 'node_modules')), false);
+  assert.equal((await helm.steer({ workerId: spawned.workerId, message: 'again' })).ok, true);
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['dir', 'dir']);
+  assert.equal(installs.length, 2);
+  assert.equal(existsSync(join(spawned.worktree, 'node_modules')), false);
+});
+
+test('workerInstall false in helm.json skips the worker install', async () => {
+  const { helm, installs, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }], workerInstall: false });
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['missing']);
+  assert.deepEqual(installs, []);
 });
 
 test('gate node_modules cleanup failures are hygiene warnings', async () => {

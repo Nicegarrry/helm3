@@ -199,7 +199,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
 
 export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string; denyLocalPorts?: readonly number[]; denyLocalSocketPaths?: readonly string[]; daemonHome?: string; daemonPort?: number; daemonSocketPath?: string } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; keepNodeModules?: boolean; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const daemon = await readDaemonNetworkConfig(options.daemonHome);
@@ -231,7 +231,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
           results.push(result);
         }
       } finally {
-        await cleanupNodeModules(cwd, options.keepNodeModules, { allowedRoot: opts?.nodeModulesRoot, onError: opts?.onNodeModulesError });
+        await cleanupNodeModules(cwd, opts?.keepNodeModules ?? options.keepNodeModules, { allowedRoot: opts?.nodeModulesRoot, onError: opts?.onNodeModulesError });
       }
       const passed = results.every((result) => result.exitCode === 0);
       return { passed, checks: results };

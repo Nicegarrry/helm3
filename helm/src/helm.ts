@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { hardenedGitArgs } from './git.js';
 import type { z } from 'zod';
@@ -94,6 +94,7 @@ import { askLoadClass } from './capacity/classify.js';
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 import { sandboxEnabled } from './gate.js';
+import { installManager } from './sandbox.js';
 
 const exec = promisify(execFile);
 const INFRA_GATE_FAILURE = /EAGAIN|ENOMEM|resource temporarily unavailable/i;
@@ -258,6 +259,7 @@ export class Helm {
   private readonly stopRequested = new Set<string>();
   /** Workers whose current turn actually observed the stop request via hooks.shouldContinue(). */
   private readonly stopObserved = new Set<string>();
+  private readonly installedLocks = new Map<string, string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
@@ -1198,6 +1200,28 @@ export class Helm {
     });
   }
 
+  /** Give a worker turn node_modules by running the repo's install gate step (sandboxed, install network only); hygiene removes it when the turn settles. */
+  private async installWorkerDeps(row: WorkerRow): Promise<void> {
+    const lock = createHash('sha256');
+    for (const name of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) if (existsSync(join(row.worktree, name))) lock.update(readFileSync(join(row.worktree, name)));
+    const digest = lock.digest('hex');
+    try {
+      const config = await loadRepoConfig(row.repo, row.baseSha, false).catch(() => undefined);
+      const checks = (config?.gates ?? []).filter((gate) => installManager(gate.command));
+      if (config?.workerInstall === false || checks.length === 0) return;
+      if (this.installedLocks.get(row.workerId) === digest && existsSync(join(row.worktree, 'node_modules'))) return;
+      const outcome = await this.gates.run(row.worktree, checks, join(this.config.home, 'logs', row.workerId, `install-${Date.now()}`), {
+        timeoutMs: this.config.gateTimeoutMs, nodeModulesRoot: this.workerWorktreeRoot(row), keepNodeModules: true, sandbox: await sandboxEnabled(row.repo, row.baseSha),
+        onPid: (pid) => this.capacity.setPid(row.workerId, pid),
+        onRefused: (reason) => this.store.appendEvent(row.workerId, 'worker.install.refused', { reason }),
+      });
+      if (outcome.passed) this.installedLocks.set(row.workerId, digest);
+      this.store.appendEvent(row.workerId, 'worker.install', { passed: outcome.passed, lock: digest });
+    } catch (err) {
+      this.store.appendEvent(row.workerId, 'worker.install', { passed: false, error: errMessage(err) });
+    }
+  }
+
   private workerTempDir(workerId: string): string {
     return join(this.config.home, 'tmp', workerId);
   }
@@ -1343,6 +1367,7 @@ export class Helm {
       },
     };
     try {
+      if (row.role !== 'reviewer') await this.installWorkerDeps(row);
       const outcome = await this.runner.run(runInput, message, hooks);
       const result = outcome.result;
       if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {

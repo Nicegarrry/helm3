@@ -123,10 +123,12 @@ export function createClaims({ jev, store, settings, workspace, git = defaultGit
     const supported = claims.filter((claim) => choice(claim) === 'supports');
     detail.failedClaims = failedClaims;
     detail.unverifiedClaims = claims.filter((claim) => choice(claim) === 'says_nothing');
-    if (supported.length === 0) detail.reason = 'no supported claims';
-    const passed = supported.length > 0 && missingFiles.length === 0 && failedClaims.length === 0;
+    const unanswered = claims.filter((claim) => !['supports', 'contradicts', 'says_nothing'].includes(choice(claim) ?? ''));
+    const reason = unanswered.length ? `missing Jev answer for: ${unanswered.join('; ')}` : (supported.length === 0 && failedClaims.length === 0 ? 'no supported claims' : undefined);
+    if (reason) detail.reason = reason;
+    const passed = supported.length > 0 && unanswered.length === 0 && missingFiles.length === 0 && failedClaims.length === 0;
     store.sql.prepare('INSERT INTO claims_checks (workerId, head, passed, detail, jevCallId, at) VALUES (?, ?, ?, ?, ?, ?)').run(input.workerId, head, passed ? 1 : 0, JSON.stringify(detail), calls[0] ?? null, now().toISOString());
-    if (supported.length === 0 && failedClaims.length === 0) return { ok: false, reason: 'no supported claims' };
+    if (reason) return { ok: false, reason };
     return { ok: true, passed, head, ...(failedClaims.length ? { failedClaims } : {}), ...(missingFiles.length ? { missingFiles } : {}), ...(settings.factory.claims === 'shadow' ? { warning: 'claims checks are shadow-only' } : {}) };
   }
   async function guard(input: unknown): Promise<string | null> {

@@ -77,6 +77,16 @@ test('says_nothing claims are unverified: recorded in detail and excluded from p
   } finally { store.close(); }
 });
 
+test('a claim with no Jev answer or an unrecognised choice fails the check', async () => {
+  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['src/a.ts adds A', 'src/a.ts adds B', 'src/a.ts adds C'] });
+  try {
+    const answers: Record<string, unknown> = { 'src/a.ts adds A': answer(1), 'src/a.ts adds C': answer(1, 'maybe') };
+    const result = await createClaims({ jev: jevFor((claim) => answers[claim]), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
+    assert.deepEqual(result, { ok: false, reason: 'missing Jev answer for: src/a.ts adds B; src/a.ts adds C' });
+    assert.equal((store.sql.prepare('SELECT passed FROM claims_checks WHERE workerId = ?').get(worker.workerId) as { passed: number }).passed, 0);
+  } finally { store.close(); }
+});
+
 test('claims that are all says_nothing fail with no supported claims', async () => {
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['tests pass', 'src/a.ts adds A'] });
   try {

@@ -33,13 +33,14 @@ import { createRetry } from './retry.js';
 import { createEnvelopeTicker } from './envelope.js';
 import { createMemorySync } from './memory-sync.js';
 import { createHygiene } from './hygiene.js';
+import { createPrTicker } from './pr-watch.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
 
 function usage(): void {
   console.error(`usage: helm <command> [options]
-  spawn --repo <path> --objective <text> [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
+  spawn --repo <path> --objective <text> [--issue n] [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
         [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k]
   ps [--repo path] [--state s] [--json]
   logs <id> [-f] [--json]
@@ -172,11 +173,11 @@ async function readCmd(
 
 const cmdSpawn = (args: string[]) =>
   simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective
-    ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
+    ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, issue: v.issue ? Number(v.issue) : undefined, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
         baseRef: v['base-ref'], role: v.role, contextPaths: v.context ?? [], allowWorkflows: v['allow-workflows'] ?? false,
         idempotencyKey: v['idempotency-key'] }
     : undefined), {
-    repo: { type: 'string' }, objective: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
+    repo: { type: 'string' }, objective: { type: 'string' }, issue: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
     'base-ref': { type: 'string' }, role: { type: 'string' }, context: { type: 'string', multiple: true },
     'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' },
   });
@@ -527,16 +528,17 @@ async function cmdServe(args: string[]): Promise<void> {
   const predecessorBootId = process.env.HELM_UPGRADE_ID && pending?.id === process.env.HELM_UPGRADE_ID && pending.phase === 'starting'
     ? String((pending.source as Record<string, unknown> | undefined)?.bootId ?? '') || undefined
     : undefined;
-  helm.markInterruptedOnStart(predecessorBootId);
+  await helm.markInterruptedOnStart(predecessorBootId);
   const hygiene = createHygiene({ home: config.home, store, settings, workspace, github, isRunning: (workerId) => helm.isWorkerRunning(workerId), withWorkerLock: (workerId, fn) => helm.withWorkerLock(workerId, fn), deployInProgress: (project, target) => helm.deploy.isInProgress(project, target) });
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
+  const stopPrWatch = startTicker(5 * 60_000, [createPrTicker({ store, github })]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopMemory(); stopHygiene(); };
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopPrWatch(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();

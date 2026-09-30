@@ -10,6 +10,7 @@ import { createSupervisor } from '../src/supervise.js';
 import { openStore } from '../src/store.js';
 import { loadSettings, type Settings } from '../src/settings.js';
 import type { GitHub, PrStatus, WorkerRow, Workspace } from '../src/types.js';
+import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
 const h1 = '1'.repeat(40);
 const h2 = '2'.repeat(40);
@@ -129,12 +130,13 @@ test('leftover conflict markers trigger one second retry, then conflict and a wa
   let retries = 0;
   const worktree = mkdtempSync(join(tmpdir(), 'helm-queue-git-'));
   execFileSync('git', ['init', '-q'], { cwd: worktree }); execFileSync('git', ['config', 'user.email', 'helm@example.invalid'], { cwd: worktree }); execFileSync('git', ['config', 'user.name', 'Helm Test'], { cwd: worktree });
+  disableGitMaintenance(worktree);
   writeFileSync(join(worktree, 'conflict.txt'), '<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n'); execFileSync('git', ['add', 'conflict.txt'], { cwd: worktree }); execFileSync('git', ['commit', '-qm', 'marker'], { cwd: worktree });
   const markerHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim();
   const d = setup({ worktree, mergeHead: markerHead, retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'merge-base') return { stdout: '', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); if (file === 'git' && (args[0] === 'ls-files' || args[0] === 'grep')) { try { return { stdout: execFileSync(file, args, { cwd: opts.cwd, encoding: 'utf8' }), stderr: '', code: 0 }; } catch (error) { throw error; } } return { stdout: '', stderr: '', code: 0 }; } });
   d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
   try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(retries, 2); assert.equal(rows(d)[0]?.state, 'updating'); assert.equal(d.store.listEvents('w-1').filter((event) => event.kind === 'conflict').at(-1)?.data.head, markerHead); assert.deepEqual(d.store.listEvents('w-1').filter((event) => event.kind === 'conflict').at(-1)?.data.files, ['conflict.txt']); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
-  finally { d.store.close(); }
+  finally { d.store.close(); removeTempDir(worktree); }
 });
 
 test('an aborted merge or leftover MERGE_HEAD triggers a second retry then conflict', async () => {

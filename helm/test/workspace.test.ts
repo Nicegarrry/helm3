@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { gitWorkspace } from '../src/workspace.js';
+import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
 const exec = promisify(execFile);
 
@@ -18,6 +19,7 @@ async function makeRepo(): Promise<{ dir: string; repo: string; sha: string }> {
   const dir = mkdtempSync(join(tmpdir(), 'helm-ws-'));
   const repo = join(dir, 'repo');
   await exec('git', ['init', '-b', 'main', repo]);
+  disableGitMaintenance(repo);
   await exec('git', ['-C', repo, 'config', 'user.name', 'Test'], {});
   await exec('git', ['-C', repo, 'config', 'user.email', 'test@example.com'], {});
   writeFileSync(join(repo, 'file.txt'), 'hello\n');
@@ -65,7 +67,7 @@ test('resolveSha, defaultBranch, create worktree, commitAll, diffStat, isClean, 
     const list = await git(repo, ['worktree', 'list']);
     assert.doesNotMatch(list, /w-1/);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -76,7 +78,7 @@ test('create rejects a base SHA that does not resolve exactly', async () => {
     const worktreeRoot = join(dir, 'worktrees', 'w-bad');
     await assert.rejects(() => workspace.create(repo, worktreeRoot, 'helm/w-bad', 'f'.repeat(40)));
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });
 
@@ -103,6 +105,6 @@ test('commitAll sets a commit identity when the repo has none configured', async
       if (originalNoSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM; else process.env.GIT_CONFIG_NOSYSTEM = originalNoSystem;
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTempDir(dir);
   }
 });

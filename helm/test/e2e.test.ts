@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -18,6 +18,7 @@ import { openStore } from '../src/store.ts';
 import type { GitHub, HelmConfig, PrStatus } from '../src/types.ts';
 import { piWorkerRunner } from '../src/worker.ts';
 import { gitWorkspace } from '../src/workspace.ts';
+import { disableGitMaintenance, removeTempDir } from './git-fixture.ts';
 
 const exec = promisify(execFile);
 
@@ -26,6 +27,8 @@ async function makeRepoWithOrigin(root: string): Promise<{ repo: string; sha: st
   const repo = join(root, 'repo');
   await exec('git', ['init', '--bare', '-b', 'main', origin]);
   await exec('git', ['init', '-b', 'main', repo]);
+  disableGitMaintenance(origin);
+  disableGitMaintenance(repo);
   await exec('git', ['-C', repo, 'config', 'user.name', 'e2e']);
   await exec('git', ['-C', repo, 'config', 'user.email', 'e2e@example.invalid']);
   writeFileSync(join(repo, 'README.md'), '# target\n');
@@ -119,7 +122,7 @@ test('e2e: spawn -> faux Pi writes a file -> commit -> gate -> pr.open -> daemon
   } finally {
     await daemon.close();
     store.close();
-    rmSync(root, { recursive: true, force: true });
+    removeTempDir(root);
   }
 });
 
@@ -151,7 +154,7 @@ test('e2e: daemon restart marks a running worker interrupted; steer resumes it',
     // Second daemon life.
     store = openStore(dbPath);
     helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub([]), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt } });
-    assert.deepEqual(helm.markInterruptedOnStart(), [spawned.workerId]);
+    assert.deepEqual(await helm.markInterruptedOnStart(), [spawned.workerId]);
     assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
     assert.ok(store.getWorker(spawned.workerId)?.sessionFile, 'session file recorded for resume');
 
@@ -163,6 +166,6 @@ test('e2e: daemon restart marks a running worker interrupted; steer resumes it',
     assert.equal(store.getWorker(spawned.workerId)?.result?.summary, 'finished after resume');
   } finally {
     store.close();
-    rmSync(root, { recursive: true, force: true });
+    removeTempDir(root);
   }
 });

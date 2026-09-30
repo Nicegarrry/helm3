@@ -447,8 +447,29 @@ export class Helm {
   }
 
   /** Called once on daemon start: every `running` worker becomes `interrupted`. */
-  markInterruptedOnStart(predecessorBootId?: string): string[] {
-    markDeploysInterrupted(this.store, { currentBootId: this.lifecycle.bootId, predecessorBootId });
+  async markInterruptedOnStart(predecessorBootId?: string): Promise<string[]> {
+    await markDeploysInterrupted(this.store, {
+      currentBootId: this.lifecycle.bootId,
+      predecessorBootId,
+      timeoutFor: async (row) => {
+        let timer: NodeJS.Timeout | undefined;
+        const lookup = (async () => {
+          const repo = requireValue(await this.resolveRepo(row.project, { allowRemote: false }), `project not found: ${row.project}`);
+          const config = await loadRepoConfig(repo, row.sha, false, { timeout: 5_000 });
+          return config.deploy?.targets.find((target) => target.name === row.target)?.timeoutMin;
+        })();
+        try {
+          return await Promise.race([
+            lookup,
+            new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 5_000); }),
+          ]);
+        } catch {
+          return undefined;
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      },
+    });
     return this.store.markInterrupted();
   }
 
@@ -461,7 +482,11 @@ export class Helm {
       if (reason) return refuse(reason);
       let selection: Selection;
       try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
-      return this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
+      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
+      if (outcome.ok) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice).catch((error) => {
+        try { this.store.appendEvent(outcome.workerId, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
+      });
+      return outcome;
     });
   }
 
@@ -523,6 +548,28 @@ export class Helm {
     this.startRun(workerId, message, onDone);
     const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
     return { ok: true, workerId, branch, worktree, ...(warnings.length ? { warning: warnings.join('; ') } : {}) };
+  }
+
+  private async emitDispatched(workerId: string, input: SpawnInput, choice?: ModelChoice): Promise<void> {
+    if (input.role !== 'builder' && input.role !== 'validator') return;
+    if (this.store.listEvents(workerId, { limit: 100 }).some((event) => event.kind === 'dispatched')) return;
+    const row = this.store.getWorker(workerId);
+    const meta = this.store.getMeta(workerId);
+    const issue = meta?.issue ?? null;
+    if (!row || issue === null) return;
+    const fallback = input.objective.split(/\r?\n/, 1)[0]!.trim().slice(0, 80);
+    let title: string | undefined;
+    const lookup = this.github.issueTitle?.(row.repoSlug, issue);
+    if (lookup) {
+      let cancelTimeout: (() => void) | undefined;
+      try {
+        title = await Promise.race([lookup, new Promise<undefined>((resolve) => { const timer = setTimeout(resolve, 3_000); cancelTimeout = () => clearTimeout(timer); })]);
+      } catch { /* issue lookup is best effort */ }
+      finally { cancelTimeout?.(); }
+    }
+    title ??= fallback;
+    const tier = ({ trivial: 1, small: 2, medium: 3, large: 4 } as Record<string, number | undefined>)[choice?.band ?? meta?.band ?? ''] ?? null;
+    this.store.appendEvent(workerId, 'dispatched', { project: row.repoSlug, issue, title, model: row.model, ...(tier !== null ? { tier } : {}) });
   }
 
   async inspect(input: z.infer<typeof inspectInput>) {
@@ -642,7 +689,7 @@ export class Helm {
       const outcome = await this.gates.run(row.worktree, checks, logDir, {
         timeoutMs: this.config.gateTimeoutMs,
         nodeModulesRoot: this.workerWorktreeRoot(row),
-        onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'error', { message }),
+        onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
       });
       const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
       this.store.insertGate(gateRow);
@@ -655,7 +702,7 @@ export class Helm {
     return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(!this.running.has(input.workerId), 'worker turn running; wait');
-      return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, now: this.nowIso() });
+      return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, nodeModulesRoot: this.workerWorktreeRoot(row), now: this.nowIso() });
     }));
   }
 
@@ -676,9 +723,10 @@ export class Helm {
       const meta = this.store.getMeta(row.workerId);
       const savedPr = this.store.getPrByWorker(input.workerId);
       const existing = savedPr ?? await this.github.findPr?.(row.repoSlug, row.branch);
+      let prStatus: PrStatus | undefined;
       if (existing) {
-        const status = await this.github.prStatus(row.repoSlug, existing.number);
-        must(status.state === 'open', `pull request #${existing.number} is ${status.state}; refusing to push`);
+        prStatus = await this.github.prStatus(row.repoSlug, existing.number);
+        must(prStatus.state === 'open', `pull request #${existing.number} is ${prStatus.state}; refusing to push`);
       }
       await this.workspace.push(row.worktree, row.branch);
       if (existing) {
@@ -686,9 +734,9 @@ export class Helm {
           must(this.github.updatePr, 'GitHub update is unavailable');
           await this.github.updatePr(row.repoSlug, existing.number, { ...(input.title !== undefined ? { title: input.title } : {}), ...(input.body !== undefined ? { body: input.body } : {}) });
         }
-        const updatedPr: PrRow = { repoSlug: row.repoSlug, number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso() };
+        const updatedPr: PrRow = { repoSlug: row.repoSlug, number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso(), state: savedPr?.state ?? 'open', checkedAt: savedPr?.checkedAt ?? null };
         if (savedPr) this.store.updatePr(updatedPr); else this.store.insertPr(updatedPr);
-        this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true });
+        this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true, ...(input.title ?? prStatus?.title ? { title: input.title ?? prStatus?.title } : {}), ...(prStatus?.base ? { base: prStatus.base } : {}), project: row.repoSlug });
         return { ok: true, number: existing.number, url: existing.url, head, updated: true };
       }
       const title = input.title ?? row.result?.summary?.split('\n')[0] ?? row.objective.slice(0, 72);
@@ -696,9 +744,9 @@ export class Helm {
       const body = `${input.body ?? `${row.result?.summary ?? ''}\n\nGate: passed at ${head}`}\n\n${baseline ? `red at ${baseline.baseSha}, green at ${head}` : ''}`;
       const base = input.base ?? meta?.prBase ?? await this.workspace.defaultBranch(row.repo);
       const opened = await this.github.openPr({ cwd: row.worktree, base, head: row.branch, title, body, draft: input.draft });
-      const prRow: PrRow = { repoSlug: row.repoSlug, number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso() };
+      const prRow: PrRow = { repoSlug: row.repoSlug, number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso(), state: 'open', checkedAt: null };
       this.store.insertPr(prRow);
-      this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url });
+      this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url, title, base, project: row.repoSlug });
       return { ok: true, number: opened.number, url: opened.url, head };
     }));
   }
@@ -928,7 +976,8 @@ export class Helm {
       const failing = status.checks.find((c) => !PASSING_CONCLUSIONS.has(c.conclusion ?? ''));
       if (failing) return refuse(`check "${failing.name}" did not succeed (${failing.conclusion ?? 'no conclusion'})`);
       await this.github.merge(worker.repoSlug, input.number, input.expectedHead);
-      this.store.appendEvent(pr.workerId, 'pr.merged', { number: input.number, url: pr.url, head: input.expectedHead, project: worker.repoSlug });
+      this.store.updatePr({ ...pr, state: 'merged', checkedAt: this.nowIso() });
+      this.store.appendEvent(pr.workerId, 'pr.merged', { number: input.number, url: pr.url, head: input.expectedHead, project: worker.repoSlug, ...(status.title ? { title: status.title } : {}), ...(status.base ? { base: status.base } : {}) });
       return { ok: true, merged: true };
     });
   }
@@ -952,7 +1001,7 @@ export class Helm {
   private async cleanupWorkerNodeModules(row: WorkerRow): Promise<void> {
     await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules, {
       allowedRoot: this.workerWorktreeRoot(row),
-      onError: (message) => this.store.appendEvent(row.workerId, 'error', { message }),
+      onError: (message) => this.store.appendEvent(row.workerId, 'hygiene.warning', { message }),
     });
   }
 
@@ -986,14 +1035,17 @@ export class Helm {
   }
 
   /** Absolute local paths are used as-is; `owner/name` is cloned once under $HELM_HOME/repos and fetched on later use. */
-  private async resolveRepo(repo: string): Promise<string | undefined> {
+  private async resolveRepo(repo: string, options: { allowRemote?: boolean } = {}): Promise<string | undefined> {
     if (/^[\w.-]+\/[\w.-]+$/.test(repo)) {
       const dest = join(this.config.home, 'repos', repo.replace('/', '__'));
       if (existsSync(join(dest, '.git'))) {
+        if (options.allowRemote === false) return dest;
         try { await this.workspace.fetch(dest); } catch { /* offline is fine; use what we have */ }
-      } else {
+      } else if (options.allowRemote !== false) {
         mkdirSync(dirname(dest), { recursive: true });
         await this.workspace.clone(repo, dest);
+      } else {
+        return undefined;
       }
       return dest;
     }

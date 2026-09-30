@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import { Helm } from '../src/helm.js';
 import { ensureBaselineTable } from '../src/baseline.js';
 import { openStore } from '../src/store.js';
 import type { GateRunner, GitHub, HelmConfig, PrStatus, Store, WorkerHooks, WorkerRunner, Workspace } from '../src/types.js';
+import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
 const TEST_COMMIT = 'test-commit';
 
@@ -18,6 +19,7 @@ function git(cwd: string, args: string[]): string {
 function repoFixture(): { repo: string; baseSha: string; testCommit: string; head: string } {
   const repo = mkdtempSync(join(tmpdir(), 'helm-b5b-repo-'));
   git(repo, ['init', '-q']); git(repo, ['config', 'user.name', 'Test']); git(repo, ['config', 'user.email', 'test@example.invalid']);
+  disableGitMaintenance(repo);
   mkdirSync(join(repo, 'test'), { recursive: true });
   writeFileSync(join(repo, 'helm.json'), JSON.stringify({ gates: [], acceptance: { testGlobs: ['test/**/*.test.ts'], command: 'npm run acceptance-from-base' } }));
   writeFileSync(join(repo, 'test', 'feature.test.ts'), 'assert.fail()'); writeFileSync(join(repo, 'src.ts'), 'export const base = true;');
@@ -48,7 +50,7 @@ function harness(fixture: ReturnType<typeof repoFixture>, gateOutcome = { passed
   const runner: WorkerRunner = { async run(_input, _message, _hooks: WorkerHooks) { return { result: { status: 'succeeded', summary: 'built', changedFiles: ['src.ts'], commandsRun: [] }, rawText: '', sessionFile: null }; } };
   const config: HelmConfig = { home, spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 5000 };
   const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'build', reviewer: () => 'review', validator: () => 'validate' } });
-  return { helm, store, created, get opened() { return opened; }, get recordedChecks() { return recordedChecks; }, close() { store.close(); rmSync(home, { recursive: true, force: true }); rmSync(fixture.repo, { recursive: true, force: true }); } };
+  return { helm, store, created, get opened() { return opened; }, get recordedChecks() { return recordedChecks; }, close() { store.close(); removeTempDir(home); removeTempDir(fixture.repo); } };
 }
 
 test('B5b binds spawn base, gate acceptance, PR base, and red/green body', async () => {

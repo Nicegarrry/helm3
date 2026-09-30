@@ -944,6 +944,7 @@ export class Helm {
       must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
         `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
       const head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      try { await this.workspace.fetch(sourceWorker.repo, `pull-${pr.number}`, `refs/pull/${pr.number}/head`); } catch { /* offline: use local objects */ }
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {
         repo: sourceWorker.repo, objective, model, baseRef: head,
@@ -960,10 +961,16 @@ export class Helm {
   }
 
   private async finishReview(workerId: string, result: WorkerResult | null, project: string, number: number, head: string, reviewer: string): Promise<void> {
-    const raw = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
+    if (!result) {
+      this.store.appendEvent(workerId, 'review.warning', { project, number, summary: 'reviewer produced no result; no review recorded' });
+      return;
+    }
+    const raw = `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}`;
     let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
     // Move verdict lines or trailing verdict sentences below the summary and notes.
-    const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (_match, prefix: string, line: string) => {
+    const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (match, prefix: string, line: string, offset: number, whole: string) => {
+      // A verdict inside an open quotation is quoted text, not the reviewer's verdict.
+      if ((whole.slice(whole.lastIndexOf('\n', offset) + 1, offset).match(/["“”]/g)?.length ?? 0) % 2) return match;
       lastVerdict = line.trim();
       return prefix.trimEnd();
     }).trim();

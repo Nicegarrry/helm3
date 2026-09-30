@@ -197,3 +197,23 @@ test('reconcile does not count a Helm merge again or adopt another repository wo
     assert.equal(store.getMeta('w-03d20cc7')?.issue, 273);
   } finally { store.close(); }
 });
+
+test('discovery leaves checkedAt alone so open Helm PRs are still polled, and baselines null-state rows silently', async () => {
+  const store = openStore(':memory:');
+  try {
+    const remote = JSON.parse(captured)[0];
+    for (const id of ['w-03d20cc7', 'w-1d04e3fd']) store.insertWorker(makeWorker(id));
+    const legacy = { repoSlug: 'o/r', number: 276, workerId: 'w-1d04e3fd', url: 'https://github.com/o/r/pull/276', head: 'old', createdAt: '2026-09-30T00:00:00Z' };
+    store.insertPr(legacy);
+    store.sql.prepare('UPDATE prs SET state = NULL, checkedAt = NULL WHERE number = 276').run();
+    const listed = ghGitHub(async () => ({ stdout: JSON.stringify([{ ...remote, state: 'OPEN', mergedAt: null }, JSON.parse(captured)[1]]), stderr: '', code: 0 }));
+    const polled: number[] = [];
+    const github = { ...listed, prStatus: async (_repo: string, number: number) => { polled.push(number); return { number, state: 'open' as const, head: 'h', mergeable: true, draft: false, checks: [], reviews: [], url: `https://github.com/o/r/pull/${number}` }; } } as GitHub;
+    const current = new Date('2026-10-01T00:00:00Z');
+    await createPrTicker({ store, github, now: () => current })();
+    assert.deepEqual(polled, [277]);
+    assert.equal(store.getPrByNumber('o/r', 277)?.checkedAt, current.toISOString());
+    assert.equal(store.getPrByNumber('o/r', 276)?.state, 'merged');
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'pr.merged').length, 0);
+  } finally { store.close(); }
+});

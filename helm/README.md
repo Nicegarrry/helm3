@@ -2,9 +2,9 @@
 
 A small harness that lets an orchestrator agent (Claude Code, Codex, or a script) dispatch
 coding work to workers, each in its own git worktree, and get back gates, PRs and status
-without spending its own context on the mechanics. Two lanes serve the workers: Pi sessions
-on cheap API models, and the Codex CLI on the operator's ChatGPT subscription (any GPT model
-Codex offers, at $0 marginal cost).
+without spending its own context on the mechanics. Three lanes serve the workers: Pi sessions
+on cheap API models, the Codex CLI on the operator's ChatGPT subscription, and the Claude CLI
+on the operator's Claude subscription (both at $0 marginal cost).
 
 Sixteen tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
 lines of TypeScript.
@@ -62,7 +62,7 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
 
 | Tool | What it does |
 | --- | --- |
-| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, or `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`). |
+| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`), or `claude/<model>[:<effort>]` for the Claude CLI (`claude/sonnet:high`). |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | One line per worker. |
 | `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
@@ -107,6 +107,20 @@ The Codex CLI must be signed in with ChatGPT (`codex login status`). Subscriptio
 is still finite; this policy does not measure remaining quota or automatically switch to
 paid APIs when Codex is unavailable. Pi routes need the corresponding provider login.
 See the Codex reviewer sandbox limitation below when reviewing a Gemini build.
+
+### The Claude lane
+
+A `claude/…` model runs `claude -p` in the worker worktree. The binary is
+`$HELM_CLAUDE_BIN`, else `~/.local/bin/claude`, else `claude` on PATH. Model strings accept
+`claude/<model>[:<effort>]`, for example `claude/sonnet:high`, `claude/opus:medium` and
+`claude/fable:high`; the suffix becomes Claude's `--effort` flag. Claude uses
+`--output-format stream-json --verbose`, records its session id as `claude-session:<id>`, and
+resumes steer/retry turns with `--resume <id>`. Builders receive `acceptEdits` plus explicit
+worktree tool permissions; reviewers use `plan` with read-only tools. Web search/fetch,
+`gh`, pushes, worktree changes and common outside-worktree shell escapes are disallowed, and
+only the worker worktree is added with `--add-dir`. The child receives a minimal environment,
+not Helm configuration, provider keys or webhooks. Claude subscription usage is recorded with
+`costUsd: 0`.
 
 ## What a worker can and cannot do
 
@@ -255,6 +269,7 @@ with no price are counted as tokens and reported as unknown-cost events, never b
 | `HELM_GATE_TIMEOUT_MS` | `900000` | Per-check timeout |
 | `HELM_CODEX_BIN` | `~/.local/bin/codex`, else `codex` | The Codex CLI the `codex/…` lane runs |
 | `HELM_CODEX_NETWORK` | unset | `1` lets Codex builders reach the network inside their sandbox |
+| `HELM_CLAUDE_BIN` | `~/.local/bin/claude`, else `claude` | The Claude CLI the `claude/…` lane runs |
 
 ## Development
 

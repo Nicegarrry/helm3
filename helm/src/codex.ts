@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import type { WorkerRunInput, WorkerRunOutcome, WorkerRunner, WorkerHooks } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
 import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
+import { parseClaudeModel } from './claude.js';
 
 export const CODEX_PREFIX = 'codex/';
 /** What `sessionFile` holds for a Codex worker: the thread id `codex exec resume` takes. */
@@ -124,7 +125,15 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
   };
 }
 
-/** One runner for both lanes: `codex/…` models go to Codex, everything else to Pi. */
-export function laneRunner(lanes: Readonly<{ pi: WorkerRunner; codex: WorkerRunner }>): WorkerRunner {
-  return { run: (input, message, hooks) => (parseCodexModel(input.model) ? lanes.codex : lanes.pi).run(input, message, hooks) };
+/** Route explicit CLI lanes first; models without a lane continue to use Pi. */
+export function laneRunner(lanes: Readonly<{ pi: WorkerRunner; codex: WorkerRunner; claude?: WorkerRunner }>): WorkerRunner {
+  return {
+    run: (input, message, hooks) => {
+      if (parseClaudeModel(input.model)) {
+        if (!lanes.claude) throw new Error('claude lane is unavailable: configure a Claude CLI binary');
+        return lanes.claude.run(input, message, hooks);
+      }
+      return (parseCodexModel(input.model) ? lanes.codex : lanes.pi).run(input, message, hooks);
+    },
+  };
 }

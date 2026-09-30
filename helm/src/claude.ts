@@ -100,7 +100,7 @@ export function claudeSandboxSettings(
         allowRead: [...new Set([worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
         allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
         denyWrite: [gitDirs.gitDir, gitDirs.commonDir, join(worktree, '.git')],
-        denyRead: credentialPaths(homedir(), helmHome),
+        denyRead: [...credentialPaths(homedir(), helmHome), join(helmHome, 'serve.json.*.tmp')],
       },
       network: {
         allowedDomains: [],

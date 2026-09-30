@@ -23,6 +23,9 @@ jobs:
       - name: Typecheck helm harness
         run: npm run typecheck
         working-directory: helm
+      - name: Check helm source line cap
+        run: npm run line-cap
+        working-directory: helm
       - name: Test helm harness
         run: npm test
         working-directory: helm

@@ -77,9 +77,10 @@ test('test steps have no network, while npm ci steps are profiled for network', 
 test('real macOS smoke applies the profile to cat, curl, and an in-worktree node write', macOnly, async () => {
   const root = fixture('helm-gate-smoke-');
   const worktree = join(root, 'worktree');
-  const secret = join(root, 'secret.txt');
+  const secret = join(root, '.config', 'helm', 'env');
   const output = join(worktree, 'ok.txt');
   mkdirSync(worktree, { recursive: true });
+  mkdirSync(join(root, '.config', 'helm'), { recursive: true });
   writeFileSync(secret, 'smoke-secret');
   try {
     const result = await gateRunner({ operatorHome: root }).run(worktree, [

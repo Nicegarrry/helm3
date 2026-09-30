@@ -1,6 +1,6 @@
 /** macOS Seatbelt profiles and the minimal environment used by gate commands. */
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
@@ -39,6 +39,10 @@ function regex(value: string): string {
 
 function unique(paths: readonly string[]): string[] {
   return [...new Set(paths.map((path) => resolve(path)))];
+}
+
+async function canonicalPath(path: string): Promise<string> {
+  return realpath(path).catch(() => resolve(path));
 }
 
 /** The deny list shared by every worker-facing macOS sandbox. */
@@ -160,12 +164,20 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
   try {
     const home = join(tempDir, 'home');
     await mkdir(home, { recursive: true });
-    const operatorHome = resolve(options.operatorHome ?? homedir());
+    // macOS exposes temporary paths through /var, while Seatbelt matches the
+    // canonical /private/var paths. Generate rules for the paths the kernel
+    // evaluates, or temporary worktrees and credential fixtures bypass them.
+    const [profileCwd, profileTempDir, profileHome, operatorHome] = await Promise.all([
+      canonicalPath(options.cwd),
+      canonicalPath(tempDir),
+      canonicalPath(home),
+      canonicalPath(resolve(options.operatorHome ?? homedir())),
+    ]);
     const profile = buildSandboxProfile({
-      cwd: options.cwd,
-      tempDir,
-      operatorHomes: unique([operatorHome, home]),
-      gitDirs: worktreeGitDirs(options.cwd),
+      cwd: profileCwd,
+      tempDir: profileTempDir,
+      operatorHomes: unique([operatorHome, profileHome]),
+      gitDirs: worktreeGitDirs(profileCwd),
       allowNetwork: options.allowNetwork,
     });
     const profilePath = join(tempDir, 'profile.sb');

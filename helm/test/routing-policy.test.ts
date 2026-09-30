@@ -71,6 +71,21 @@ test('Codex catalog parses debug models slugs', () => {
   assert.deepEqual(parseCodexModelSlugs({ models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-5.6-luna' }] }), ['gpt-6-astra', 'gpt-5.6-luna']);
 });
 
+test('catalog probes use the resolved Codex and Claude lane binaries', async () => {
+  const calls: string[] = [];
+  const catalog = createModelCatalog({
+    claudeLaneRegistered: true,
+    env: { HELM_CODEX_BIN: '/custom/codex', HELM_CLAUDE_BIN: '/custom/claude' },
+    exec: async (file, args) => {
+      calls.push(`${file} ${args.join(' ')}`);
+      return { stdout: file.endsWith('codex') ? JSON.stringify({ models: [{ slug: 'gpt-6-luna' }] }) : 'claude 1.0', stderr: '' };
+    },
+  });
+  assert.equal((await catalog.availability('codex/gpt-6-luna:medium')).available, true);
+  assert.equal((await catalog.availability('claude/sonnet:high')).available, true);
+  assert.deepEqual(calls, ['/custom/codex debug models', '/custom/claude --version']);
+});
+
 test('catalog retries a failed refresh while preserving the last known result', async () => {
   let calls = 0;
   const catalog = createModelCatalog({ probe: { codex: () => { calls += 1; if (calls === 2) throw new Error('temporary'); return true; } }, sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false } });
@@ -95,11 +110,56 @@ test('catalog probes are cached and routing checks report stale entries', async 
     assert.equal(first.report.unavailable?.[0]?.model, 'codex/missing');
     assert.deepEqual(first.report.extraModels, [{ lane: 'codex', model: 'codex/gpt-6.2-new' }]);
     assert.equal(store.listEvents('project:routing')[0]?.kind, 'routing.stale');
+    assert.match(String(store.listEvents('project:routing')[0]?.data.summary), /^unavailable: codex\/missing/);
     const before = store.listEvents('project:routing').length;
+    await routing.check();
+    assert.equal(store.listEvents('project:routing').length, before);
     await routing.tick();
     assert.equal(store.listEvents('project:routing').length, before);
     now = new Date(now.getTime() + 8 * 86_400_000);
     await routing.tick();
     assert.equal(store.listEvents('project:routing').length, before + 1);
+  } finally { store.close(); }
+});
+
+test('concurrent startup routing ticks share one check and stale event', async () => {
+  const store = openStore(':memory:');
+  let checks = 0;
+  const settingsValue = settings({ '1': ['codex/missing'] }, {});
+  const catalog = {
+    async availability() { return { available: false, reason: 'missing' }; },
+    async check(_settings: typeof settingsValue, checkedAt = new Date()) {
+      checks += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { checkedAt: checkedAt.toISOString(), unavailable: [{ tier: 1, model: 'codex/missing', reason: 'missing' }] };
+    },
+  };
+  try {
+    const routing = createRoutingCheck({ store, settings: settingsValue, catalog, now: () => new Date('2026-09-30T00:00:00.000Z') });
+    await Promise.all([routing.tick(), routing.tick(), routing.tick(), routing.tick()]);
+    assert.equal(checks, 1);
+    assert.equal(store.listEvents('project:routing').length, 1);
+  } finally { store.close(); }
+});
+
+test('startup suppression defers only the initial probe and preserves the weekly tick', async () => {
+  const store = openStore(':memory:');
+  let now = new Date('2026-09-30T00:00:00.000Z');
+  let checks = 0;
+  const settingsValue = settings({ '1': ['codex/routed'] }, {});
+  const catalog = {
+    async availability() { return { available: true }; },
+    async check(_settings: typeof settingsValue, checkedAt = new Date()) {
+      checks += 1;
+      return { checkedAt: checkedAt.toISOString() };
+    },
+  };
+  try {
+    const routing = createRoutingCheck({ store, settings: settingsValue, catalog, now: () => now, skipStartup: true });
+    await routing.tick();
+    assert.equal(checks, 0);
+    now = new Date(now.getTime() + 7 * 86_400_000);
+    await routing.tick();
+    assert.equal(checks, 1);
   } finally { store.close(); }
 });

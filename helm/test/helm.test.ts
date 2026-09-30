@@ -370,6 +370,30 @@ test('gate node_modules cleanup failures are hygiene warnings', async () => {
   assert.equal(store.listEvents(spawned.workerId).some((event) => event.kind === 'error' && event.data.message === 'permission denied'), false);
 });
 
+test('gate refreshes the current base ref for policy and records its resolved sha', async () => {
+  let policyRef: string | undefined;
+  const gates: GateRunner = {
+    async run(_cwd, checks) {
+      assert.deepEqual(checks, [{ name: 'current-base', command: 'echo current-base' }]);
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks(_repo, sha) {
+      policyRef = sha;
+      return [{ name: 'current-base', command: 'echo current-base' }];
+    },
+  };
+  const { helm, store, fetched } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-current-base-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId });
+  assert.equal(result.ok, true);
+  assert.deepEqual(fetched, [store.getWorker(spawned.workerId)?.repo]);
+  assert.equal(policyRef, 'base-sha-refs/helm/base/main');
+  assert.equal(store.listEvents(spawned.workerId).find((event) => event.kind === 'gate')?.data.baseSha, 'base-sha-refs/helm/base/main');
+});
+
 test('an infrastructure gate failure is retried once instead of steering the worker', async () => {
   let attempts = 0;
   const gates: GateRunner = {

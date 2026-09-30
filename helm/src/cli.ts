@@ -547,6 +547,7 @@ async function cmdServe(args: string[]): Promise<void> {
     jevChecker: createJevCheck({ jev, store }),
     jev,
     claims: createClaims({ jev, store, settings, workspace }),
+    routingSkipStartup: process.env.HELM_ROUTING_STARTUP_CHECK === '0',
   });
   const predecessorBootId = process.env.HELM_UPGRADE_ID && pending?.id === process.env.HELM_UPGRADE_ID && pending.phase === 'starting'
     ? String((pending.source as Record<string, unknown> | undefined)?.bootId ?? '') || undefined

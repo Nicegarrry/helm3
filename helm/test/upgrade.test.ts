@@ -35,7 +35,7 @@ function candidate(root: string, version = '1.5.1-test') {
 }
 async function start(home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ child: ChildProcess; port: number; errors: () => string }> {
   const child = spawn(process.execPath, ['--import', 'tsx', join(packageRoot, 'src', 'cli.ts'), 'serve', '--http'], {
-    cwd: packageRoot, env: { ...process.env, HELM_HOME: home, HELM_UPGRADE_ID: '', HELM_SPEND_CAP_USD: '3.75', HELM_MAX_WORKERS: '2', ...extraEnv }, stdio: ['ignore', 'ignore', 'pipe'],
+    cwd: packageRoot, env: { ...process.env, HELM_HOME: home, HELM_UPGRADE_ID: '', HELM_SPEND_CAP_USD: '3.75', HELM_MAX_WORKERS: '2', HELM_ROUTING_STARTUP_CHECK: '0', ...extraEnv }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   let errors = '';
   child.stderr!.on('data', (chunk) => { errors += chunk; });
@@ -73,8 +73,13 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 const emit = (event) => console.log(JSON.stringify(event));
 const args = process.argv.slice(2);
+if (args[0] === 'debug' && args[1] === 'models') {
+  console.log(JSON.stringify({ models: [{ slug: 'gpt-5.6-luna' }] }));
+  process.exit(0);
+}
 const cdFlag = ['-C', '--cd'].find((flag) => args.includes(flag));
-const worktree = (cdFlag ? args[args.indexOf(cdFlag) + 1] : undefined) ?? process.cwd();
+if (!cdFlag) process.exit(2);
+const worktree = args[args.indexOf(cdFlag) + 1];
 process.stdin.resume();
 emit({ type: 'thread.started', thread_id: 'synthetic-session' });
 const timer = setInterval(() => {

@@ -178,6 +178,19 @@ test('wake.list renders object summaries as bounded readable strings', async () 
   }
 });
 
+test('wake.list preserves ask questions up to 2,000 characters', async () => {
+  const { helm } = createFakeHelm();
+  const question = 'question '.repeat(300);
+  helm.wakeList = (async () => ({ ok: true, wakes: [{ kind: 'ask', workerId: 'w-1', summary: question }] })) as unknown as Helm['wakeList'];
+  const result = await createToolRegistry(helm, 'core', true).call('wake.list', { project: 'acme/widgets' });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const wake = (result.wakes as string[])[0] ?? '';
+    assert.equal(wake, question.slice(0, 2000 - 3) + '...');
+    assert.ok(wake.length <= 2000);
+  }
+});
+
 
 test('routing inputs accept omitted worker models and reject invalid difficulty before dispatch', async () => {
   const { helm, calls } = createFakeHelm();

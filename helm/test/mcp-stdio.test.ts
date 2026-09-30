@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { CORE_TOOL_NAMES, META_TOOL_NAMES } from '../src/tools.ts';
+import { CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.ts';
 
-function stdioFrontEnd(home: string) {
+function stdioFrontEnd(home: string, tools = 'core') {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['--import', 'tsx', 'src/cli.ts', 'serve', '--stdio'],
     cwd: process.cwd(),
-    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3' } as Record<string, string>,
+    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools } as Record<string, string>,
     stderr: 'pipe',
   });
   return { transport, client: new Client({ name: 'helm-test', version: '0' }) };
@@ -68,7 +68,7 @@ test('mcp stdio: a real client lists core tools and calls them through helm serv
 test('mcp stdio: the front-end exits with its client, the daemon outlives it, and a second client attaches to the same daemon', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const a = stdioFrontEnd(home);
-  const b = stdioFrontEnd(home);
+  const b = stdioFrontEnd(home, 'supervisor');
   try {
     await a.client.connect(a.transport);
     const daemon = daemonOf(home);
@@ -79,6 +79,8 @@ test('mcp stdio: the front-end exits with its client, the daemon outlives it, an
     await b.client.connect(b.transport);
     assert.deepEqual(daemonOf(home), daemon, 'the second front-end attached instead of starting a daemon');
     assert.notEqual(b.transport.pid, aPid);
+    const { tools } = await b.client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [...SUPERVISOR_TOOL_NAMES, ...META_TOOL_NAMES].sort());
     const fromB = JSON.parse(text(await b.client.callTool({ name: 'run.status', arguments: {} }))) as { ok: boolean };
     assert.equal(fromB.ok, true);
 

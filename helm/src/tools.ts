@@ -137,6 +137,7 @@ function compactWakes(outcome: ToolOutcome<unknown>, verbose: boolean): ToolOutc
     wakes: source.wakes.map((wake) => {
       const row = wake as JsonObject;
       const detail = row.summary ?? row.data ?? '';
+      if (row.kind === 'ask') return truncate(detail, 2000);
       return truncate(`${String(row.kind ?? 'wake')} ${String(row.workerId ?? '').trim()} ${truncate(detail, 130)}`.replace(/\s+/g, ' ').trim(), 160);
     }),
   } as ToolOutcome<Record<string, unknown>>;

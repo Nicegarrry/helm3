@@ -44,7 +44,7 @@ function setup(options: { gate?: boolean; mergeHead?: string; worktree?: string;
   } as Workspace;
   const github: GitHub = {
     async prStatus(_repo, number): Promise<PrStatus> { if (options.statusError) throw new Error('checks service unavailable'); return { number, state: options.merged ? 'merged' : 'open', head: heads.get(number)!, mergeable: options.mergeable === undefined ? true : options.mergeable, draft: false, checks: options.pending ? [{ name: 'ci', status: 'pending', conclusion: null }] : [], reviews: [], url: 'https://example.invalid/pr' }; },
-    async openPr() { return { number: 1, url: 'https://example.invalid/pr' }; }, async comment() { return { body: 'APPROVE: ok', issueNumber: 1 }; }, async postComment() {}, async merge() {},
+    async openPr() { return { number: 1, url: 'https://example.invalid/pr' }; }, async comment() { return { body: 'APPROVE: ok', issueNumber: 1 }; }, async postComment() { return 'https://github.com/o/r/pull/1#issuecomment-1'; }, async merge() {},
   };
   const exec: QueueExec = options.exec ?? (async (file, args, opts) => { args = unHardenedGitArgs(file, args); calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) return rejectExec(); return { stdout: '', stderr: '', code: 0 }; });
   const settings = { ...loadSettings('/missing-queue-settings'), queue: { tickSec: 1, checksTimeoutMin: 1 } } as Settings;

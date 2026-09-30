@@ -17,7 +17,7 @@ const worker = (id: string, state: WorkerRow['state'] = 'succeeded'): WorkerRow 
 });
 const github: GitHub = {
   async openPr() { return { number: 1, url: 'https://example.invalid' }; }, async prStatus() { throw new Error('unused'); },
-  async comment() { return { body: 'REQUEST_CHANGES: fix the review body' }; }, async postComment() {}, async merge() {},
+  async comment() { return { body: 'REQUEST_CHANGES: fix the review body' }; }, async postComment() { return 'https://github.com/o/r/pull/1#issuecomment-1'; }, async merge() {},
 };
 const settings = () => loadSettings(join(root(), 'missing'));
 

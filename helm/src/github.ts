@@ -1,6 +1,6 @@
 /** `gh` CLI transport: pr create, status, comment, merge. See DESIGN.md. */
 import { execFile } from 'node:child_process';
-import type { GitHub, GitHubComment, PrStatus } from './types.js';
+import type { GitHub, GitHubComment, PrStatus, WorkerPr } from './types.js';
 
 export type ExecFn = (
   file: string,
@@ -37,6 +37,7 @@ type PrViewJson = {
   reviews?: { author?: { login?: string }; state?: string }[] | null;
   title?: string;
   baseRefName?: string;
+  body?: string;
 };
 
 const PENDING_CONTEXT_STATES: ReadonlySet<string> = new Set(['PENDING', 'EXPECTED']);
@@ -73,6 +74,7 @@ function mapPrStatus(json: PrViewJson): PrStatus {
     url: json.url,
     ...(json.title ? { title: json.title } : {}),
     ...(json.baseRefName ? { base: json.baseRefName } : {}),
+    ...(json.body !== undefined ? { body: json.body } : {}),
   };
 }
 
@@ -94,6 +96,18 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       return parsed[0];
     },
 
+    async listWorkerPrs(repoSlug: string, mergedSince: string): Promise<WorkerPr[]> {
+      const fields = 'headRefName,number,state,mergedAt,body,headRefOid';
+      const result: WorkerPr[] = [];
+      for (const state of ['open', 'merged']) {
+        const args = ['pr', 'list', '--repo', repoSlug, '--state', state, '--limit', '1000', '--json', fields];
+        if (state === 'merged') args.push('--search', `merged:>=${mergedSince}`);
+        const rows = JSON.parse(await run(exec, args)) as WorkerPr[];
+        result.push(...rows.filter((pr) => /^helm\/w-[\w-]+$/.test(pr.headRefName) && (pr.state === 'OPEN' || pr.state === 'MERGED')));
+      }
+      return result;
+    },
+
     async updatePr(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void> {
       const args = ['pr', 'edit', String(number), '--repo', repoSlug];
       if (input.title !== undefined) args.push('--title', input.title);
@@ -111,7 +125,7 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       const stdout = await run(exec, [
         'pr', 'view', String(number),
         '--repo', repoSlug,
-        '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt,title,baseRefName',
+        '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt,title,baseRefName,body',
       ]);
       const parsed = JSON.parse(stdout) as PrViewJson;
       return mapPrStatus(parsed);
@@ -127,8 +141,8 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       return { body: parsed.body, issueUrl, pullRequestUrl, ...(Number.isInteger(issueNumber) ? { issueNumber } : {}) };
     },
 
-    async postComment(repoSlug: string, number: number, body: string): Promise<void> {
-      await run(exec, ['pr', 'comment', String(number), '--repo', repoSlug, '--body-file', '-'], { input: body });
+    async postComment(repoSlug: string, number: number, body: string): Promise<string> {
+      return (await run(exec, ['pr', 'comment', String(number), '--repo', repoSlug, '--body-file', '-'], { input: body })).trim();
     },
 
     async merge(repoSlug: string, number: number, expectedHead: string): Promise<void> {

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Jev } from '../src/jev.js';
 import { Helm } from '../src/helm.js';
 import { createReview } from '../src/review.js';
@@ -11,29 +14,30 @@ import type { GateRunner, GitHub, HelmConfig, PrStatus, WorkerRow, WorkerRunner,
 const head1 = 'a'.repeat(40);
 const head2 = 'b'.repeat(40);
 
-function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchIds?: Record<string, string> } = {}) {
+function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchIds?: Record<string, string>; home?: string; runner?: WorkerRunner } = {}) {
   const store = openStore(':memory:');
   const now = new Date().toISOString();
-  const worker: WorkerRow = { workerId: 'w-review', repo: '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-6-luna:high', objective: 'work', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: 'helm/review', worktree: '/repo', state: 'succeeded', head: head1, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
+  const worker: WorkerRow = { workerId: 'w-review', repo: options.home ?? '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-6-luna:high', objective: 'work', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: 'helm/review', worktree: '/repo', state: 'succeeded', head: head1, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
   store.insertWorker(worker);
   store.insertPr({ number: 1, workerId: worker.workerId, url: 'https://github.com/owner/repo/pull/1', head: head1, createdAt: now });
   let currentHead = head1;
   let merges = 0;
-  const workspace = { patchId: async (_repo: string, _base: string, head: string) => options.patchIds?.[head] ?? head } as Workspace;
+  const posted: string[] = [];
+  const workspace = { resolveSha: async (_repo: string, ref: string) => ref, create: async (_repo: string, path: string, branch: string, baseSha: string) => ({ path, branch, baseSha }), patchId: async (_repo: string, _base: string, head: string) => options.patchIds?.[head] ?? head } as Workspace;
   const github = {
     async openPr() { return { number: 1, url: worker.repoSlug }; },
     async prStatus(_repo: string, number: number): Promise<PrStatus> { return { number, state: 'open', head: currentHead, mergeable: true, draft: false, checks: [], reviews: [], url: worker.repoSlug }; },
     async comment() { return { body: options.body ?? 'APPROVE: ok', issueNumber: options.issueNumber ?? 1 }; },
-    async postComment() {},
+    async postComment(_repo: string, _number: number, body: string) { posted.push(body); return 'https://github.com/owner/repo/pull/1#issuecomment-1'; },
     async merge() { merges += 1; },
   } as unknown as GitHub;
   const jev = options.jev ?? { shadow: false, async ask() { return { ok: true as const, answers: { approve: { noul: 1 } } }; } };
   const review = createReview({ store, github, workspace, jev, settings: loadSettings('/missing-review-settings') });
-  const config: HelmConfig = { home: '/tmp/helm-review', spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 1000 };
+  const config: HelmConfig = { home: options.home ?? '/tmp/helm-review', spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 1000 };
   const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
   const runner: WorkerRunner = { async run() { return { result: null, rawText: '', sessionFile: null }; } };
-  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, review });
-  return { store, helm, review, github, setHead: (head: string) => { currentHead = head; }, merged: () => merges };
+  const helm = new Helm({ config, store, workspace, gates, github, runner: options.runner ?? runner, prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, review });
+  return { store, helm, review, github, posted, setHead: (head: string) => { currentHead = head; }, merged: () => merges };
 }
 
 test('pr.merge refuses without an approving review at the expected head', async () => {
@@ -182,4 +186,35 @@ test('a Jev answer without noul is unknown and stores a null approval score', as
       assert.equal(result.review.jevApprove, null);
     }
   } finally { d.store.close(); }
+});
+
+for (const verdict of ['APPROVE: looks good', 'REQUEST_CHANGES: fix this']) {
+  test(`review.request automatically records the last verdict line: ${verdict}`, async () => {
+    const home = mkdtempSync(join(tmpdir(), 'helm-auto-review-'));
+    const body = `Findings\n\n${verdict}`;
+    const d = setup({ home, body, jev: { shadow: false, async ask() { return { ok: false as const, reason: 'no key' }; } }, runner: { async run() { return { result: { status: 'succeeded', summary: 'Findings', notes: verdict, changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } } });
+    try {
+      const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+      assert.equal(result.ok, true); if (!result.ok) return;
+      await d.helm.settle(result.reviewWorkerId);
+      assert.deepEqual(d.posted, [body]);
+      const rows = d.store.sql.prepare('SELECT head,reviewer,stated,verdict,commentUrl FROM reviews').all() as Record<string, unknown>[];
+      assert.deepEqual(rows.map((row) => ({ ...row })), [{ head: head1, reviewer: 'google/gemini-3.8-flash', stated: verdict.startsWith('APPROVE:') ? 'approve' : 'request_changes', verdict: verdict.startsWith('APPROVE:') ? 'approve' : 'changes', commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-1' }]);
+      assert.equal(d.store.getWorker(result.reviewWorkerId)?.baseSha, head1);
+    } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+  });
+}
+
+test('review.request does not record an approval if the PR head changes during review', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-stale-review-'));
+  let changeHead = () => {};
+  const d = setup({ home, runner: { async run() { changeHead(); return { result: { status: 'succeeded', summary: 'APPROVE: okay', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } } });
+  changeHead = () => d.setHead(head2);
+  try {
+    const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    assert.equal(result.ok, true); if (!result.ok) return;
+    await d.helm.settle(result.reviewWorkerId);
+    assert.equal(d.store.sql.prepare('SELECT * FROM reviews').all().length, 0);
+    assert.ok(d.store.listAllEvents().some((event) => event.kind === 'review.record.failed'));
+  } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
 });

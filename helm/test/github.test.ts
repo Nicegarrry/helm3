@@ -61,7 +61,7 @@ test('prStatus: maps gh pr view JSON to PrStatus, merged when mergedAt is set', 
   assert.equal(status.head, 'a'.repeat(40));
   assert.deepEqual(status.checks, [{ name: 'ci', status: 'completed', conclusion: 'success' }]);
   assert.deepEqual(status.reviews, [{ author: 'alice', state: 'APPROVED' }]);
-  assert.deepEqual(calls[0]?.args, ['pr', 'view', '5', '--repo', 'o/r', '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt,title,baseRefName']);
+  assert.deepEqual(calls[0]?.args, ['pr', 'view', '5', '--repo', 'o/r', '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt,title,baseRefName,body']);
 });
 
 test('prStatus: open state when not merged and not closed', async () => {
@@ -74,9 +74,9 @@ test('prStatus: open state when not merged and not closed', async () => {
 });
 
 test('comment: pipes the body on stdin via --body-file -', async () => {
-  const { exec, calls } = fakeExec(() => ({ stdout: '', stderr: '', code: 0 }));
+  const { exec, calls } = fakeExec(() => ({ stdout: 'https://github.com/o/r/pull/3#issuecomment-9\n', stderr: '', code: 0 }));
   const github = ghGitHub(exec);
-  await github.postComment('o/r', 3, 'nice work');
+  assert.equal(await github.postComment('o/r', 3, 'nice work'), 'https://github.com/o/r/pull/3#issuecomment-9');
   assert.deepEqual(calls[0]?.args, ['pr', 'comment', '3', '--repo', 'o/r', '--body-file', '-']);
   assert.equal(calls[0]?.opts.input, 'nice work');
 });
@@ -127,4 +127,17 @@ test('prStatus: normalises gh casing, empty conclusions and commit-status contex
     { name: 'Vercel Preview', status: 'pending', conclusion: null },
     { name: 'flaky', status: 'completed', conclusion: 'failure' },
   ]);
+});
+
+test('listWorkerPrs requests open and recently merged gh JSON and excludes unrelated branches', async () => {
+  const { readFileSync } = await import('node:fs');
+  const fixture = readFileSync(new URL('./fixtures/gh-pr-list.json', import.meta.url), 'utf8');
+  const { exec, calls } = fakeExec(() => ({ stdout: fixture, stderr: '', code: 0 }));
+  const github = ghGitHub(exec);
+  const prs = await github.listWorkerPrs!('Nicegarrry/helm3', '2026-09-01');
+  assert.ok(prs.every((pr) => pr.headRefName.startsWith('helm/w-') && pr.state === 'MERGED' && pr.mergedAt !== null));
+  assert.equal(prs.length, 6); // The fake returns the same captured list for both queries.
+  const common = ['pr', 'list', '--repo', 'Nicegarrry/helm3', '--state'];
+  const fields = ['--limit', '1000', '--json', 'headRefName,number,state,mergedAt,body,headRefOid'];
+  assert.deepEqual(calls.map((call) => call.args), [[...common, 'open', ...fields], [...common, 'merged', ...fields, '--search', 'merged:>=2026-09-01']]);
 });

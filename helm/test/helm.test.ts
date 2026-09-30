@@ -136,6 +136,7 @@ function createFakeGitHub() {
     async comment() { return { body: '', issueNumber: 1 }; },
     async postComment(repoSlug, number, body) {
       comments.push({ repoSlug, number, body });
+      return `https://github.com/${repoSlug}/pull/${number}#issuecomment-${comments.length}`;
     },
     async merge(repoSlug, number, expectedHead) {
       merged.push({ repoSlug, number, expectedHead });
@@ -1438,4 +1439,19 @@ test('constructing and closing Helm leaves no capacity timer or child process re
     return false;
   });
   assert.deepEqual(extra.filter((resource) => resource === 'Timeout' || resource === 'ChildProcess'), [], `new active resources: ${extra.join(', ')}`);
+});
+
+test('pr.open infers a missing issue from the new or updated PR body', async () => {
+  const { helm, store } = makeHelm();
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-issue-repo-')));
+  assert.equal(spawned.ok, true); if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  await helm.gate({ workerId: spawned.workerId });
+  assert.equal((await helm.prOpen({ workerId: spawned.workerId, body: 'Closes #279', draft: false })).ok, true);
+  assert.equal(store.getMeta(spawned.workerId)?.issue, 279);
+  store.setMeta(spawned.workerId, { issue: null });
+  assert.equal((await helm.prOpen({ workerId: spawned.workerId, body: 'Fixes #280', draft: false })).ok, true);
+  assert.equal(store.getMeta(spawned.workerId)?.issue, 280);
+  assert.equal((await helm.prOpen({ workerId: spawned.workerId, body: 'Resolves #281', draft: false })).ok, true);
+  assert.equal(store.getMeta(spawned.workerId)?.issue, 280);
 });

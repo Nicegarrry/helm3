@@ -1,0 +1,1 @@
+gh-pr-list.json is captured output of `gh pr list --state all --limit 4 --json headRefName,number,state,mergedAt,body,headRefOid` from Nicegarrry/helm3. PR bodies were trimmed to 200 characters by the supervisor. Tests derive OPEN/null lifecycle variants from these captured rows.

@@ -53,7 +53,7 @@ function deps(store: Store, gates: GateRunner): Helm {
   const github: GitHub = {
     async openPr() { return { number: 1, url: 'https://example.invalid/1' }; },
     async prStatus(_repo, number): Promise<PrStatus> { return { number, state: 'open', head: SHA, mergeable: true, draft: false, checks: [], reviews: [], url: 'https://example.invalid/1' }; },
-    async comment() { return { body: '' }; }, async postComment() {}, async merge() {},
+    async comment() { return { body: '' }; }, async postComment() { return 'https://github.com/o/r/pull/1#issuecomment-1'; }, async merge() {},
   };
   const runner: WorkerRunner = { async run() { return { result: null, rawText: '', sessionFile: null }; } };
   return new Helm({ config: { home, spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 5000 }, store, workspace, gates, github, runner, prompts: { builder: () => 'build', reviewer: () => 'review', validator: validatorPrompt } });

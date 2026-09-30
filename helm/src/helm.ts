@@ -73,6 +73,8 @@ import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGua
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
+import { verdictLine } from './review.js';
+import { inferPrIssue, recordPrMerge } from './pr-watch.js';
 import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
 import { createMemory, type MemoryService } from './memory.js';
@@ -389,12 +391,10 @@ export class Helm {
     if (!worker || worker.state !== 'queued') return undefined;
     const promptInput: PromptInput = { objective: worker.objective, acceptance: worker.acceptance, contextPaths: worker.contextPaths };
     const message = worker.role === 'reviewer' ? this.prompts.reviewer(promptInput) : worker.role === 'validator' ? this.prompts.validator(promptInput) : this.prompts.builder(promptInput);
-    const reviewPayload = job.payload as { type?: unknown; repoSlug?: unknown; number?: unknown } | undefined;
+    const reviewPayload = job.payload as { type?: unknown; repoSlug?: unknown; number?: unknown; head?: string } | undefined;
     const onDone: OnDone | undefined = reviewPayload?.type === 'review' && typeof reviewPayload.repoSlug === 'string' && typeof reviewPayload.number === 'number'
       ? async (workerId, result) => {
-        const body = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
-        await this.github.postComment(String(reviewPayload.repoSlug), Number(reviewPayload.number), body);
-        this.store.appendEvent(workerId, 'review.posted', { number: Number(reviewPayload.number) });
+        await this.finishReview(workerId, result, String(reviewPayload.repoSlug), Number(reviewPayload.number), reviewPayload.head ?? worker.baseSha, worker.model);
       } : undefined;
     return () => this.startRun(worker.workerId, message, onDone);
   }
@@ -902,6 +902,7 @@ export class Helm {
         }
         const updatedPr: PrRow = { repoSlug: row.repoSlug, number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso(), state: savedPr?.state ?? 'open', checkedAt: savedPr?.checkedAt ?? null };
         if (savedPr) this.store.updatePr(updatedPr); else this.store.insertPr(updatedPr);
+        inferPrIssue(this.store, row.workerId, input.body ?? prStatus?.body ?? '');
         this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true, ...(input.title ?? prStatus?.title ? { title: input.title ?? prStatus?.title } : {}), ...(prStatus?.base ? { base: prStatus.base } : {}), project: row.repoSlug });
         return { ok: true, number: existing.number, url: existing.url, head, updated: true };
       }
@@ -912,6 +913,7 @@ export class Helm {
       const opened = await this.github.openPr({ cwd: row.worktree, base, head: row.branch, title, body, draft: input.draft });
       const prRow: PrRow = { repoSlug: row.repoSlug, number: opened.number, workerId: input.workerId, url: opened.url, head, createdAt: this.nowIso(), state: 'open', checkedAt: null };
       this.store.insertPr(prRow);
+      inferPrIssue(this.store, row.workerId, body);
       this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url, title, base, project: row.repoSlug });
       return { ok: true, number: opened.number, url: opened.url, head };
     }));
@@ -938,21 +940,28 @@ export class Helm {
       must(model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
       must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
         `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
+      const head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {
-        repo: sourceWorker.repo, objective, model, baseRef: sourceWorker.branch,
+        repo: sourceWorker.repo, objective, model, baseRef: head,
         role: 'reviewer', contextPaths: [], allowWorkflows: false,
       };
       const onDone: OnDone = async (workerId, result) => {
-        const body = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
-        await this.github.postComment(sourceWorker.repoSlug, pr.number, body);
-        this.store.appendEvent(workerId, 'review.posted', { number: pr.number });
+        await this.finishReview(workerId, result, sourceWorker.repoSlug, pr.number, head, model);
       };
       const outcome = await runGuard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
       if (!outcome.ok) return outcome;
-      this.capacity.updatePayload(outcome.workerId, { type: 'review', workerId: outcome.workerId, repoSlug: sourceWorker.repoSlug, number: pr.number });
+      this.capacity.updatePayload(outcome.workerId, { type: 'review', workerId: outcome.workerId, repoSlug: sourceWorker.repoSlug, number: pr.number, head });
       return { ok: true, reviewWorkerId: outcome.workerId, ...(outcome.queued ? { queued: true as const, warning: 'queued: capacity' as const } : {}) };
     });
+  }
+
+  private async finishReview(workerId: string, result: WorkerResult | null, project: string, number: number, head: string, reviewer: string): Promise<void> {
+    const body = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
+    const commentUrl = await this.github.postComment(project, number, body);
+    this.store.appendEvent(workerId, 'review.posted', { number, commentUrl });
+    const recorded = await this.reviewRecord({ project, number, head, reviewer, commentUrl, verdict: verdictLine(body) === 'approve' ? 'approve' : 'request_changes' });
+    if (!recorded.ok) this.store.appendEvent(workerId, 'review.record.failed', { project, number, head, reason: recorded.reason });
   }
 
   async reviewRecord(input: ReviewRecordInput): Promise<ToolOutcome<unknown>> {
@@ -1150,7 +1159,7 @@ export class Helm {
       if (failing) return refuse(`check "${failing.name}" did not succeed (${failing.conclusion ?? 'no conclusion'})`);
       await this.github.merge(worker.repoSlug, input.number, input.expectedHead);
       this.store.updatePr({ ...pr, state: 'merged', checkedAt: this.nowIso() });
-      this.store.appendEvent(pr.workerId, 'pr.merged', { number: input.number, url: pr.url, head: input.expectedHead, project: worker.repoSlug, ...(status.title ? { title: status.title } : {}), ...(status.base ? { base: status.base } : {}) });
+      recordPrMerge(this.store, { ...pr, head: input.expectedHead }, { ...(status.title ? { title: status.title } : {}), ...(status.base ? { base: status.base } : {}) });
       return { ok: true, merged: true };
     });
   }

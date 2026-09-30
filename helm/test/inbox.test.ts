@@ -25,7 +25,7 @@ function deps() {
   const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
   const github: GitHub = {
     async openPr() { return { number: 1, url: 'https://example.invalid/pr/1' }; },
-    async prStatus() { throw new Error('unused'); }, async comment() { return { body: '', issueNumber: 1 }; }, async postComment() {}, async merge() {},
+    async prStatus() { throw new Error('unused'); }, async comment() { return { body: '', issueNumber: 1 }; }, async postComment() { return 'https://github.com/o/r/pull/1#issuecomment-1'; }, async merge() {},
   };
   const sessions: Array<string | null> = [];
   const messages: string[] = [];

@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { attachWorker, openBudget } from '../src/budget.js';
 import { createMemory } from '../src/memory.js';
-import { createScorecard } from '../src/scorecard.js';
+import { createScorecard, cleanRateForRouting } from '../src/scorecard.js';
+import { createPrTicker } from '../src/pr-watch.js';
+import { ghGitHub } from '../src/github.js';
 import { openStore } from '../src/store.js';
 import type { WorkerRow } from '../src/types.js';
 
@@ -107,5 +109,24 @@ test('rerun overwrites one memory page and budget.closed consumer exports', asyn
     const files = await (await import('../src/memory.js')).createMemory({ store: seeded.store, home: seeded.dir }).list({ project: 'acme/widgets', type: 'scorecard' });
     assert.equal(files.ok ? files.memories.length : -1, 1); assert.equal((seeded.store.sql.prepare('SELECT COUNT(*) AS count FROM memory_outbox').get() as { count: number }).count, 3);
     assert.ok(files.ok); assert.match(readFileSync(join(seeded.dir, 'memory', files.memories[0]!.path), 'utf8'), /# Scorecard/);
+  } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
+});
+
+test('an adopted external merge with an inferred issue counts in scorecard and routing', async () => {
+  const seeded = seed();
+  try {
+    const remote = JSON.parse(readFileSync(new URL('./fixtures/gh-pr-list.json', import.meta.url), 'utf8'))[0];
+    const row = { ...worker('w-03d20cc7', 'codex/external'), branch: remote.headRefName };
+    seeded.store.insertWorker(row);
+    seeded.store.setMeta(row.workerId, { tier: 2 });
+    const github = ghGitHub(async () => ({ stdout: JSON.stringify([remote]), stderr: '', code: 0 }));
+    const tick = createPrTicker({ store: seeded.store, github, now: () => new Date('2026-10-01T00:00:00Z') });
+    await tick(); await tick();
+    const result = await seeded.scorecard.export({ project: 'acme/widgets' });
+    assert.equal(result.ok, true); if (!result.ok) return;
+    assert.equal(result.json.tickets, 4);
+    assert.equal(result.json.merged, 2);
+    assert.deepEqual(result.json.outcomes.find((outcome) => outcome.model === row.model), { model: row.model, tier: 2, clean: 1, rework: 0, failed: 0 });
+    assert.deepEqual(cleanRateForRouting(seeded.store, row.model, 2, new Date('2026-10-01T00:00:00Z'), row.repoSlug), { clean: 1, n: 1 });
   } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
 });

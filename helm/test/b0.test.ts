@@ -27,7 +27,7 @@ function deps() {
   const github: GitHub = {
     async openPr() { return { number: 1, url: 'https://example.invalid/1' }; },
     async prStatus(_repo, number): Promise<PrStatus> { return { number, state: 'open', head: 'a'.repeat(40), mergeable: true, draft: false, checks: [], reviews: [], url: 'https://example.invalid/1' }; },
-    async comment() { return { body: '', issueNumber: 1 }; }, async postComment() {}, async merge() {},
+    async comment() { return { body: '', issueNumber: 1 }; }, async postComment() { return 'https://github.com/o/r/pull/1#issuecomment-1'; }, async merge() {},
   };
   const runner: WorkerRunner = { async run(_input, _message, _hooks) { return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } };
   const routingCatalog = createModelCatalog({

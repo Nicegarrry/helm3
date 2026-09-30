@@ -1,0 +1,34 @@
+[
+ {
+  "body": "Closes #273. Spec: docs/v4/ (wave-a.md, waves-bcd.md).\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+  "headRefName": "helm/w-03d20cc7",
+  "headRefOid": "c09b3abe1905e9406722ece332aad3a526315936",
+  "mergedAt": "2026-09-30T13:22:30Z",
+  "number": 277,
+  "state": "MERGED"
+ },
+ {
+  "body": "Closes #205. Spec: docs/v4/ (wave-a.md, waves-bcd.md).\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)\n\n",
+  "headRefName": "helm/w-1d04e3fd",
+  "headRefOid": "df71a8c78e907dd51680d073fbebe3e81b450287",
+  "mergedAt": "2026-09-30T13:01:35Z",
+  "number": 276,
+  "state": "MERGED"
+ },
+ {
+  "body": "Every sandboxed gate failed at npm test: tsx's IPC pipe (listen EPERM in the gate temp dir) and Helm's own 127.0.0.1 test servers were blocked by (deny network*). Allows unix sockets only under the ga",
+  "headRefName": "helm/w-77baf60f",
+  "headRefOid": "e1cf6ebc73a749de23a0679e9c3eaf1d8ec23211",
+  "mergedAt": "2026-09-30T12:49:28Z",
+  "number": 274,
+  "state": "MERGED"
+ },
+ {
+  "body": "Every gate failed after the daemon restart: the sandbox (#268) only grants network to a direct package-manager install, and our install step was a shell chain, so npm ci ran offline and tsc/tsx were m",
+  "headRefName": "fix/gate-install-direct",
+  "headRefOid": "9b5b615d727686ddcd4634f6744258943870fbfc",
+  "mergedAt": "2026-09-30T11:30:14Z",
+  "number": 272,
+  "state": "MERGED"
+ }
+]

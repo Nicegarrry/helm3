@@ -223,7 +223,11 @@ export type PrStatus = Readonly<{
   url: string;
   title?: string;
   base?: string;
+  body?: string;
 }>;
+
+/** Raw fields returned by gh pr list. */
+export type WorkerPr = Readonly<{ headRefName: string; number: number; state: 'OPEN' | 'MERGED' | 'CLOSED'; mergedAt: string | null; body: string; headRefOid: string }>;
 
 export interface GitHub {
   openPr(input: { cwd: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
@@ -232,7 +236,8 @@ export interface GitHub {
   issueTitle?(repoSlug: string, number: number): Promise<string | undefined>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
   comment(repoSlug: string, id: number): Promise<GitHubComment>;
-  postComment(repoSlug: string, number: number, body: string): Promise<void>;
+  postComment(repoSlug: string, number: number, body: string): Promise<string>;
+  listWorkerPrs?(repoSlug: string, mergedSince: string): Promise<WorkerPr[]>;
   merge(repoSlug: string, number: number, expectedHead: string): Promise<void>;
 }
 

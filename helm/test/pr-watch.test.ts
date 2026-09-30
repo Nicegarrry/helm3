@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createPrTicker } from '../src/pr-watch.js';
+import { readFileSync } from 'node:fs';
+import { ghGitHub } from '../src/github.js';
+import { createPrTicker, inferPrIssue, recordPrMerge } from '../src/pr-watch.js';
 import { openStore } from '../src/store.js';
 import type { GitHub, WorkerRow } from '../src/types.js';
 
@@ -114,5 +116,84 @@ test('PR polling backs off after errors', async () => {
     current = new Date(current.getTime() + 5 * 60_000);
     await tick();
     assert.equal(calls, 3);
+  } finally { store.close(); }
+});
+
+const captured = readFileSync(new URL('./fixtures/gh-pr-list.json', import.meta.url), 'utf8');
+
+test('reconcile adopts captured outside PRs, infers issues, and deduplicates across ticks', async () => {
+  const store = openStore(':memory:');
+  try {
+    for (const id of ['w-03d20cc7', 'w-1d04e3fd', 'w-77baf60f']) store.insertWorker(makeWorker(id));
+    let current = new Date('2026-10-01T00:00:00Z');
+    const github = ghGitHub(async () => ({ stdout: captured, stderr: '', code: 0 }));
+    const tick = createPrTicker({ store, github, now: () => current });
+    await tick();
+    current = new Date(current.getTime() + 5 * 60_000);
+    await tick();
+    assert.equal(store.listPrs().length, 3);
+    assert.equal(store.getMeta('w-03d20cc7')?.issue, 273);
+    assert.equal(store.getMeta('w-1d04e3fd')?.issue, 205);
+    assert.equal(store.getMeta('w-77baf60f')?.issue ?? null, null);
+    assert.equal(store.getPrByNumber('o/r', 277)?.head, JSON.parse(captured)[0].headRefOid);
+    const merges = store.listAllEvents().filter((event) => event.kind === 'pr.merged');
+    assert.equal(merges.length, 3);
+    assert.ok(merges.every((event) => event.data.external === true && event.data.adopted === true));
+    assert.equal(store.getPrByNumber('o/r', 272), undefined);
+  } finally { store.close(); }
+});
+
+test('an adopted open PR emits its later merge once and preserves explicit issue metadata', async () => {
+  const store = openStore(':memory:');
+  try {
+    const remote = JSON.parse(captured)[0];
+    store.insertWorker(makeWorker('w-03d20cc7'));
+    store.setMeta('w-03d20cc7', { issue: 99, tier: 2 });
+    let merged = false;
+    let current = new Date('2026-10-01T00:00:00Z');
+    // Derive the open lifecycle variant from the captured row; gh uses OPEN and null.
+    const github = ghGitHub(async () => ({ stdout: JSON.stringify([{ ...remote, state: merged ? 'MERGED' : 'OPEN', mergedAt: merged ? remote.mergedAt : null }]), stderr: '', code: 0 }));
+    const tick = createPrTicker({ store, github, now: () => current });
+    await tick();
+    assert.equal(store.getPrByNumber('o/r', 277)?.state, 'open');
+    assert.equal(store.listAllEvents().length, 0);
+    merged = true;
+    current = new Date(current.getTime() + 5 * 60_000);
+    await tick();
+    const pr = store.getPrByNumber('o/r', 277)!;
+    recordPrMerge(store, pr, {}); // Helm's merge completion racing with reconciliation.
+    current = new Date(current.getTime() + 5 * 60_000);
+    await tick();
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'pr.merged').length, 1);
+    assert.equal(store.getMeta('w-03d20cc7')?.issue, 99);
+    assert.equal(store.getMeta('w-03d20cc7')?.tier, 2);
+  } finally { store.close(); }
+});
+
+test('issue inference accepts closing keywords only and preserves routing metadata', () => {
+  const store = openStore(':memory:');
+  try {
+    for (const [index, body] of ['Fixes #11', 'resolves #12', 'Closes #13', 'mentions #14'].entries()) {
+      const id = `w-infer-${index}`;
+      store.insertWorker(makeWorker(id)); store.setMeta(id, { tier: 3 });
+      inferPrIssue(store, id, body);
+      assert.equal(store.getMeta(id)?.issue, index === 3 ? null : index + 11);
+      assert.equal(store.getMeta(id)?.tier, 3);
+    }
+  } finally { store.close(); }
+});
+
+test('reconcile does not count a Helm merge again or adopt another repository worker', async () => {
+  const store = openStore(':memory:');
+  try {
+    store.insertWorker(makeWorker('w-03d20cc7'));
+    store.insertWorker(makeWorker('w-1d04e3fd', 'other/repo'));
+    const pr = { repoSlug: 'o/r', number: 277, workerId: 'w-03d20cc7', url: 'https://github.com/o/r/pull/277', head: 'head', createdAt: '2026-09-30T00:00:00Z', state: 'merged' as const, checkedAt: null };
+    store.insertPr(pr); recordPrMerge(store, pr, {});
+    const github = ghGitHub(async (_file, args) => ({ stdout: args.includes('o/r') ? captured : '[]', stderr: '', code: 0 }));
+    await createPrTicker({ store, github, now: () => new Date('2026-10-01T00:00:00Z') })();
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'pr.merged').length, 1);
+    assert.equal(store.getPrByNumber('o/r', 276), undefined);
+    assert.equal(store.getMeta('w-03d20cc7')?.issue, 273);
   } finally { store.close(); }
 });

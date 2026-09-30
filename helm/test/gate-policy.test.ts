@@ -52,10 +52,52 @@ test('gate policy resolves SHA, origin/main, and main base refs from a pinned re
     ] as const;
     for (const testCase of cases) {
       const policy = await resolveGatePolicy({ workspace, row: testCase.row, meta: testCase.meta, baseline: testCase.baseline });
-      assert.deepEqual(policy, { configRef: currentSha, baseSha: currentSha, source: 'current-base' });
+      assert.deepEqual(policy, { configRef: currentSha, baseSha: currentSha, source: 'current-base', branch: 'main', fallback: false });
       assert.deepEqual(await runner.defaultChecks(repo, policy.configRef), [{ name: 'current', command: 'echo current' }]);
     }
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test('gate policy uses a non-default spawn baseRef config when there is no prBase', async () => {
+  const { repo, baseSha } = fixture();
+  try {
+    git(repo, ['checkout', '-q', '-b', 'release']);
+    writeFileSync(join(repo, 'helm.json'), JSON.stringify({ gates: [{ name: 'release', command: 'echo release' }] }));
+    git(repo, ['commit', '-qam', 'release config']);
+    const releaseSha = git(repo, ['rev-parse', 'HEAD']);
+    git(repo, ['fetch', '-q', 'origin', 'release']);
+    const policy = await resolveGatePolicy({ workspace: gitWorkspace(), row: worker(repo, 'release', baseSha), meta: undefined, baseline: undefined });
+    assert.deepEqual(policy, { configRef: releaseSha, baseSha: releaseSha, source: 'current-base', branch: 'release', fallback: false });
+    assert.deepEqual(await gateRunner({ allowUnsandboxed: true }).defaultChecks(repo, policy.configRef), [{ name: 'release', command: 'echo release' }]);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('gate policy flags the spawn-time SHA as a fallback when every base fetch fails', async () => {
+  const workspace = {
+    defaultBranch: async () => 'main',
+    fetch: async () => { throw new Error('fetch failed'); },
+    resolveSha: async (_repo: string, ref: string) => ref,
+  };
+  assert.deepEqual(
+    await resolveGatePolicy({ workspace, row: worker('/repo', 'release', 'spawn-sha'), meta: meta('release'), baseline: undefined }),
+    { configRef: 'spawn-sha', baseSha: 'spawn-sha', source: 'spawn-base', branch: 'release', fallback: true });
+  assert.deepEqual(
+    await resolveGatePolicy({ workspace, row: worker('/repo', 'deadbeef1234', 'spawn-sha'), meta: undefined, baseline: undefined }),
+    { configRef: 'spawn-sha', baseSha: 'spawn-sha', source: 'spawn-base', branch: 'spawn-sha', fallback: true });
+});
+
+test('gate policy records the fallback branch when the preferred base fetch fails', async () => {
+  const fetched: string[] = [];
+  const workspace = {
+    defaultBranch: async () => 'main',
+    fetch: async (_repo: string, branch?: string) => { fetched.push(String(branch)); if (branch === 'release') throw new Error('fetch failed'); },
+    resolveSha: async (_repo: string, ref: string) => `sha-of-${ref}`,
+  };
+  const policy = await resolveGatePolicy({ workspace, row: worker('/repo', 'release', 'spawn-sha'), meta: meta('release'), baseline: undefined });
+  assert.deepEqual(fetched, ['release', 'release', 'main']);
+  assert.deepEqual(policy, { configRef: 'sha-of-refs/helm/base/main', baseSha: 'sha-of-refs/helm/base/main', source: 'current-base', branch: 'main', fallback: true });
 });

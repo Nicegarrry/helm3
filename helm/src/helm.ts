@@ -157,7 +157,7 @@ const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set(['success', 'neutral', 
 
 type OnDone = (workerId: string, result: WorkerResult | null, outcome: WorkerRunOutcome) => Promise<void>;
 type GateToolResult = { head: string; passed: boolean; checks: GateRow['checks']; gateId?: string; queued?: true };
-export type GatePolicy = Readonly<{ configRef: string; baseSha: string; source: 'current-base' | 'spawn-base' }>;
+export type GatePolicy = Readonly<{ configRef: string; baseSha: string; source: 'current-base' | 'spawn-base'; branch?: string; fallback?: boolean }>;
 
 function refuse(reason: string): { ok: false; reason: string } {
   return { ok: false, reason };
@@ -174,20 +174,23 @@ function gateBranch(value: string | null | undefined): string | undefined {
 }
 
 export async function resolveGatePolicy(options: { workspace: Pick<Workspace, 'fetch' | 'resolveSha' | 'defaultBranch'>; row: WorkerRow; meta?: WorkerMeta; baseline?: BaselineRow }): Promise<GatePolicy> {
-  const candidates = [options.meta?.prBase, options.baseline?.baseRef];
+  const candidates = [options.meta?.prBase, options.baseline?.baseRef, options.row.baseRef];
   try { candidates.push(await options.workspace.defaultBranch(options.row.repo)); } catch { /* recorded spawn base is the safe fallback */ }
+  let preferred: string | undefined;
   for (const candidate of candidates) {
     const branch = gateBranch(candidate);
     if (!branch) continue;
+    preferred ??= branch;
     try {
+      // Remote URL still comes from origin; see #275.
       await options.workspace.fetch(options.row.repo, branch);
       const baseSha = await options.workspace.resolveSha(options.row.repo, `refs/helm/base/${branch}`);
-      return { configRef: baseSha, baseSha, source: 'current-base' };
+      return { configRef: baseSha, baseSha, source: 'current-base', branch, fallback: branch !== preferred };
     } catch {
       // Try the next configured branch before falling back to the spawn-time SHA.
     }
   }
-  return { configRef: options.row.baseSha, baseSha: options.row.baseSha, source: 'spawn-base' };
+  return { configRef: options.row.baseSha, baseSha: options.row.baseSha, source: 'spawn-base', branch: gateBranch(options.row.baseRef) ?? 'spawn-sha', fallback: true };
 }
 
 /** Turns thrown errors into the harness's stable refusal shape. */
@@ -850,7 +853,7 @@ export class Helm {
           }
           const gateRow: GateRow = { gateId: runId, workerId: input.workerId, head: prepared.head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
           this.store.insertGate(gateRow);
-          this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head: prepared.head, baseSha: prepared.policy.baseSha, configRef: prepared.policy.configRef, configSource: prepared.policy.source });
+          this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head: prepared.head, baseSha: prepared.policy.baseSha, configRef: prepared.policy.configRef, configSource: prepared.policy.source, configBranch: prepared.policy.branch, configFallback: prepared.policy.fallback === true, project: current.repoSlug });
           return { ok: true, head: prepared.head, passed: outcome.passed, checks: outcome.checks };
         });
       };

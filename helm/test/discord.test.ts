@@ -164,6 +164,23 @@ test('formats an unsandboxed gate fallback as a milestone', async () => {
   } finally { store.close(); }
 });
 
+test('flags a gate that used a fallback config branch as a milestone', async () => {
+  const store = openStore(':memory:');
+  const bodies: string[] = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: settings(), env: { HELM_TEST_WEBHOOK: 'https://discord.test/one' }, now: () => clock,
+      fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('w-1', 'gate', { project: 'o/r', passed: true, configBranch: 'main', configFallback: true });
+    store.appendEvent('w-1', 'gate', { project: 'o/r', passed: true, configBranch: 'main', configFallback: false });
+    await discord.tick();
+    clock = new Date(clock.getTime() + 60_000);
+    await discord.tick();
+    assert.match(JSON.parse(bodies[0]!).content, /Gate passed on fallback config branch main/);
+    assert.equal((JSON.parse(bodies[0]!).content.match(/fallback config branch/g) ?? []).length, 1);
+  } finally { store.close(); }
+});
+
 test('caps digest posts with one muted line and rate-limits notify.nick', async () => {
   const store = openStore(':memory:');
   const bodies: string[] = [];

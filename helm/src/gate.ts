@@ -6,13 +6,26 @@ import { join, relative, resolve } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
 import { cleanupNodeModules } from './hygiene.js';
-import { disposeGateSandbox, installManager, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason, type InstallManager } from './sandbox.js';
+import { DEFAULT_DENY_LOCAL_PORTS, disposeGateSandbox, installManager, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason, type InstallManager } from './sandbox.js';
 
 type CheckResult = { name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number };
 type PreparedGateCheck = GateCheck & { allowNetwork?: boolean };
 type EscapingSymlink = { path: string; nodeModules: boolean };
 
 type ExecFileError = NodeJS.ErrnoException & { code?: number | string; signal?: string | null; killed?: boolean };
+type DaemonNetworkConfig = Readonly<{ port?: number; socketPath?: string }>;
+
+async function readDaemonNetworkConfig(home: string | undefined): Promise<DaemonNetworkConfig> {
+  if (!home) return {};
+  try {
+    const raw = JSON.parse(await readFile(join(home, 'serve.json'), 'utf8')) as Record<string, unknown>;
+    const port = typeof raw.port === 'number' && Number.isInteger(raw.port) && raw.port >= 1 && raw.port <= 65_535 ? raw.port : undefined;
+    const socketPath = [raw.socketPath, raw.socket, raw.unixSocketPath].find((value): value is string => typeof value === 'string' && value.length > 0);
+    return { ...(port === undefined ? {} : { port }), ...(socketPath === undefined ? {} : { socketPath }) };
+  } catch {
+    return {};
+  }
+}
 
 /** Read the sandbox opt-out from the recorded base branch only. Missing/invalid base policy is fail-closed. */
 export async function sandboxEnabled(repo: string, sha: string): Promise<boolean> {
@@ -129,7 +142,7 @@ async function refuseEscapingSymlinks(worktree: string, logDir: string): Promise
   return { reason, result: { name: 'gate.refused', command: 'symlink preflight', exitCode: 1, outputPath, durationMs: 0 } };
 }
 
-async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<CheckResult> {
+async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; denyLocalPorts: readonly number[]; denyLocalSocketPaths: readonly string[]; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<CheckResult> {
   const start = Date.now();
   const outputPath = join(logDir, `${outputSlug}.log`);
   let sandbox: Awaited<ReturnType<typeof prepareGateSandbox>> | Awaited<ReturnType<typeof prepareUnsandboxedGate>> | undefined;
@@ -147,7 +160,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
       options.onUnsandboxed?.(`sandbox-exec is unavailable on ${process.platform}; running gate unsandboxed because allowUnsandboxed is enabled`);
     }
     sandbox = options.sandbox && executable
-      ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome })
+      ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome, denyLocalPorts: options.denyLocalPorts, denyLocalSocketPaths: options.denyLocalSocketPaths })
       : await prepareUnsandboxedGate();
     if (sandbox.executable && sandbox.profilePath && /^(1|true)$/i.test(process.env.HELM_DEBUG_SANDBOX ?? '')) {
       await copyFile(sandbox.profilePath, join(logDir, `${outputSlug}.profile.sb`)).catch(() => {});
@@ -184,11 +197,14 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
   }
 }
 
-export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string } = {}): GateRunner {
+export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string; denyLocalPorts?: readonly number[]; denyLocalSocketPaths?: readonly string[]; daemonHome?: string; daemonPort?: number; daemonSocketPath?: string } = {}): GateRunner {
   return {
     async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
+      const daemon = await readDaemonNetworkConfig(options.daemonHome);
+      const denyLocalPorts = [...(options.denyLocalPorts ?? DEFAULT_DENY_LOCAL_PORTS), ...(options.daemonPort === undefined ? [] : [options.daemonPort]), ...(daemon.port === undefined ? [] : [daemon.port])];
+      const denyLocalSocketPaths = [...(options.denyLocalSocketPaths ?? []), ...(options.daemonSocketPath === undefined ? [] : [options.daemonSocketPath]), ...(daemon.socketPath === undefined ? [] : [daemon.socketPath])];
       const results: CheckResult[] = [];
       const usedSlugs = new Map<string, number>();
       const refusal = await refuseEscapingSymlinks(cwd, logDir);
@@ -206,6 +222,8 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
             sandbox: opts?.sandbox !== false,
             allowUnsandboxed: options.allowUnsandboxed === true,
             operatorHome: options.operatorHome,
+            denyLocalPorts,
+            denyLocalSocketPaths,
             onUnsandboxed: opts?.onUnsandboxed,
             onPid: opts?.onPid,
           });

@@ -22,7 +22,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const cwd = '/Users/tester/.helm/worktrees/project/w-123';
   const tempDir = '/private/tmp/helm-gate-123';
   const tempHome = join(tempDir, 'home');
-  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gateHome: tempHome, toolchainPaths: [join(home, '.nvm', 'versions', 'node', 'v22', 'bin')], npmCachePaths: [join(home, '.npm')], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', allowNetwork: false });
+  const daemonSocket = '/private/tmp/helm-daemon.sock';
+  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gateHome: tempHome, toolchainPaths: [join(home, '.nvm', 'versions', 'node', 'v22', 'bin')], npmCachePaths: [join(home, '.npm')], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', denyLocalSocketPaths: [daemonSocket], allowNetwork: false });
 
   assert.match(profile, new RegExp(`\\(deny file-read\\* \\(subpath "${home.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.config"\)\)/);
@@ -42,6 +43,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   }
   assert.match(profile, /\(allow network\* \(local ip "localhost:\*"\)\)/);
   assert.match(profile, /\(allow network\* \(remote ip "localhost:\*"\)\)/);
+  for (const port of [4747, 4748, 4749, 4750]) assert.match(profile, new RegExp(`\\(deny network-outbound \\(remote ip "localhost:${port}"\\)\\)`));
+  assert.ok(profile.includes(`(deny network-outbound (remote unix-socket (subpath "${daemonSocket}")))`));
   const tempRead = profile.indexOf(`(allow file-read* (subpath "${tempDir}"))`);
   const homeDeny = profile.indexOf(`(deny file-read* (subpath "${home}"))`);
   assert.ok(tempRead >= 0 && homeDeny >= 0 && homeDeny < tempRead, 'HOME deny must precede disposable temp HOME re-allow');
@@ -57,6 +60,7 @@ test('install profiles retain unrestricted network access', () => {
 
   assert.match(profile, /^\(allow network\*\)$/m);
   assert.doesNotMatch(profile, /\(allow network\* \(/);
+  assert.doesNotMatch(profile, /\(deny network-outbound /);
 });
 
 test('operatorHome adds a fixture to the real operator HOME deny list', () => {
@@ -208,6 +212,14 @@ test('real macOS offline sandbox permits scoped IPC and loopback only', macOnly,
     server.once('error', reject);
     server.listen(outsideSocket, () => resolve(server));
   });
+  const deniedPortServer = await new Promise<Server>((resolve, reject) => {
+    const server = createServer((socket) => socket.end('denied-port'));
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+  const deniedPortAddress = deniedPortServer.address();
+  assert.ok(deniedPortAddress && typeof deniedPortAddress === 'object');
+  const deniedPort = deniedPortAddress.port;
 
   const unixScript = [
     "const net = require('node:net');",
@@ -238,21 +250,30 @@ test('real macOS offline sandbox permits scoped IPC and loopback only', macOnly,
     "client.on('error', () => process.exit(0));",
     "client.setTimeout(1000, () => process.exit(0));",
   ].join(' ');
+  const blockedPortScript = [
+    `const client = require('node:net').createConnection({ host: '127.0.0.1', port: ${deniedPort} });`,
+    "client.on('connect', () => process.exit(1));",
+    "client.on('error', () => process.exit(0));",
+    "client.setTimeout(1000, () => process.exit(0));",
+  ].join(' ');
 
   try {
-    const result = await gateRunner().run(worktree, [
+    const result = await gateRunner({ denyLocalPorts: [deniedPort] }).run(worktree, [
       { name: 'temp-unix', command: `node -e ${JSON.stringify(unixScript)}` },
       { name: 'loopback', command: `node -e ${JSON.stringify(loopbackScript)}` },
+      { name: 'denied-loopback', command: `node -e ${JSON.stringify(blockedPortScript)}` },
       { name: 'external-network', command: 'curl --max-time 2 --silent --show-error https://example.com >/dev/null' },
       { name: 'outside-unix', command: `node -e ${JSON.stringify(blockedUnixScript)}` },
     ], logDir, { timeoutMs: 10_000 });
     assert.equal(result.passed, false);
     assert.equal(result.checks[0]?.exitCode, 0, readFileSync(result.checks[0]!.outputPath, 'utf8'));
     assert.equal(result.checks[1]?.exitCode, 0, readFileSync(result.checks[1]!.outputPath, 'utf8'));
-    assert.notEqual(result.checks[2]?.exitCode, 0, readFileSync(result.checks[2]!.outputPath, 'utf8'));
-    assert.equal(result.checks[3]?.exitCode, 0, readFileSync(result.checks[3]!.outputPath, 'utf8'));
+    assert.equal(result.checks[2]?.exitCode, 0, readFileSync(result.checks[2]!.outputPath, 'utf8'));
+    assert.notEqual(result.checks[3]?.exitCode, 0, readFileSync(result.checks[3]!.outputPath, 'utf8'));
+    assert.equal(result.checks[4]?.exitCode, 0, readFileSync(result.checks[4]!.outputPath, 'utf8'));
   } finally {
     await new Promise<void>((resolve) => outsideServer.close(() => resolve()));
+    await new Promise<void>((resolve) => deniedPortServer.close(() => resolve()));
     rmSync(root, { recursive: true, force: true });
   }
 });

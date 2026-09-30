@@ -18,9 +18,13 @@ export type GateSandboxOptions = Readonly<{
   cwd: string;
   allowNetwork: boolean;
   operatorHome?: string;
+  denyLocalPorts?: readonly number[];
+  denyLocalSocketPaths?: readonly string[];
 }>;
 
 export type InstallManager = 'npm' | 'pnpm' | 'yarn';
+
+export const DEFAULT_DENY_LOCAL_PORTS = [4747, 4748, 4749, 4750] as const;
 
 const FALLBACK_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 const exec = promisify(execFile);
@@ -43,6 +47,10 @@ function regex(value: string): string {
 
 function unique(paths: readonly string[]): string[] {
   return [...new Set(paths.map((path) => resolve(path)))];
+}
+
+function validPorts(ports: readonly number[]): number[] {
+  return [...new Set(ports.filter((port) => Number.isInteger(port) && port >= 1 && port <= 65_535))];
 }
 
 function ancestors(paths: readonly string[]): string[] {
@@ -99,6 +107,8 @@ export function buildSandboxProfile(options: {
   npmCachePaths?: readonly string[];
   gitDir?: string;
   gitDirs?: readonly string[];
+  denyLocalPorts?: readonly number[];
+  denyLocalSocketPaths?: readonly string[];
   allowNetwork: boolean;
 }): string {
   const cwd = resolve(options.cwd);
@@ -113,6 +123,8 @@ export function buildSandboxProfile(options: {
     ...(options.npmCachePaths ?? []),
   ]);
   const homes = unique(options.operatorHomes);
+  const denyLocalPorts = validPorts(options.denyLocalPorts ?? DEFAULT_DENY_LOCAL_PORTS);
+  const denyLocalSocketPaths = unique(options.denyLocalSocketPaths ?? []);
   const metadataPaths = ancestors([
     ...homes,
     ...readOnlyExceptions,
@@ -138,6 +150,8 @@ export function buildSandboxProfile(options: {
     }
     lines.push('(allow network* (local ip "localhost:*"))');
     lines.push('(allow network* (remote ip "localhost:*"))');
+    for (const port of denyLocalPorts) lines.push(`(deny network-outbound (remote ip "localhost:${port}"))`);
+    for (const path of denyLocalSocketPaths) lines.push(`(deny network-outbound (remote unix-socket ${subpath(path)}))`);
   }
 
   for (const home of homes) {
@@ -262,6 +276,8 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
       toolchainPaths: toolchains,
       npmCachePaths: npmCaches,
       gitDirs: await worktreeGitDirs(profileCwd),
+      denyLocalPorts: options.denyLocalPorts,
+      denyLocalSocketPaths: await Promise.all((options.denyLocalSocketPaths ?? []).map((path) => canonicalPath(path))),
       allowNetwork: options.allowNetwork,
     });
     const profilePath = join(tempDir, 'profile.sb');

@@ -76,6 +76,20 @@ test('gate policy uses a non-default spawn baseRef config when there is no prBas
   }
 });
 
+test('gate policy flags the spawn-time SHA as a fallback when every base fetch fails', async () => {
+  const workspace = {
+    defaultBranch: async () => 'main',
+    fetch: async () => { throw new Error('fetch failed'); },
+    resolveSha: async (_repo: string, ref: string) => ref,
+  };
+  assert.deepEqual(
+    await resolveGatePolicy({ workspace, row: worker('/repo', 'release', 'spawn-sha'), meta: meta('release'), baseline: undefined }),
+    { configRef: 'spawn-sha', baseSha: 'spawn-sha', source: 'spawn-base', branch: 'release', fallback: true });
+  assert.deepEqual(
+    await resolveGatePolicy({ workspace, row: worker('/repo', 'deadbeef1234', 'spawn-sha'), meta: undefined, baseline: undefined }),
+    { configRef: 'spawn-sha', baseSha: 'spawn-sha', source: 'spawn-base', branch: 'spawn-sha', fallback: true });
+});
+
 test('gate policy records the fallback branch when the preferred base fetch fails', async () => {
   const fetched: string[] = [];
   const workspace = {

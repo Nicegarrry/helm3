@@ -190,7 +190,7 @@ export async function resolveGatePolicy(options: { workspace: Pick<Workspace, 'f
       // Try the next configured branch before falling back to the spawn-time SHA.
     }
   }
-  return { configRef: options.row.baseSha, baseSha: options.row.baseSha, source: 'spawn-base' };
+  return { configRef: options.row.baseSha, baseSha: options.row.baseSha, source: 'spawn-base', branch: gateBranch(options.row.baseRef) ?? 'spawn-sha', fallback: true };
 }
 
 /** Turns thrown errors into the harness's stable refusal shape. */

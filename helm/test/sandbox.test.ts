@@ -20,7 +20,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const home = '/Users/tester';
   const cwd = '/Users/tester/.helm/worktrees/project/w-123';
   const tempDir = '/private/tmp/helm-gate-123';
-  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', allowNetwork: false });
+  const tempHome = join(tempDir, 'home');
+  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home, tempHome], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', allowNetwork: false });
 
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.config"\)\)/);
   assert.match(profile, /\(allow file-read\* \(subpath ".*\/\.config\/git"\)\)/);
@@ -30,6 +31,9 @@ test('generated profile denies credentials and writes outside the worktree', () 
   assert.match(profile, new RegExp(`\\(deny file-write\\* \\(subpath "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}/\\.git"\\)\\)`));
   assert.match(profile, /\(deny network\*\)/);
   assert.doesNotMatch(profile, /allow network/);
+  const tempRead = profile.indexOf(`(allow file-read* (subpath "${tempDir}"))`);
+  const tempHomeCredentialDeny = profile.indexOf(`(deny file-read* (subpath "${join(tempHome, '.config')}"))`);
+  assert.ok(tempRead >= 0 && tempRead < tempHomeCredentialDeny, 'tempDir read grant must precede generated HOME credential denies');
 });
 
 test('gate cannot read the temporary HOME credential fixture or write outside the worktree', macOnly, async () => {

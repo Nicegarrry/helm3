@@ -86,7 +86,7 @@ test('run: removes all package node_modules on pass and fail, but preserves opte
     await gateRunner({ allowUnsandboxed: true }).run(dir, [{ name: 'package', command: 'exit 0' }], logDir);
     assert.equal(existsSync(join(dir, 'app', 'node_modules')), false);
     mkdirSync(join(dir, 'app', 'node_modules'), { recursive: true });
-    await gateRunner({ keepNodeModules: true, allowUnsandboxed: true }).run(dir, [{ name: 'keep', command: 'mkdir -p node_modules helm/node_modules' }], logDir);
+    await gateRunner({ keepNodeModules: true, allowUnsandboxed: true }).run(dir, [{ name: 'keep', command: 'mkdir -p node_modules helm/node_modules; exit 0' }], logDir, { sandbox: false });
     assert.equal(existsSync(join(dir, 'node_modules')), true);
     assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
     assert.equal(existsSync(join(dir, 'app', 'node_modules')), true);

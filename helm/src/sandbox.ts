@@ -98,6 +98,11 @@ export function buildSandboxProfile(options: {
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
   ];
 
+  // The temporary HOME lives below tempDir. Grant tempDir before adding the
+  // credential denies so the latter remains the last matching read rule for
+  // the generated HOME's credential paths.
+  lines.push(`(allow file-read* ${subpath(tempDir)})`);
+
   for (const home of homes) {
     for (const path of credentialPaths(home)) {
       if (path.endsWith(join('', '.yarnrc'))) {
@@ -113,7 +118,7 @@ export function buildSandboxProfile(options: {
 
   // A worktree can live below ~/.helm, and its .git file can point at a real git dir.
   // These are read-only exceptions; the write rules above still exclude .git.
-  for (const path of readOnlyExceptions) lines.push(`(allow file-read* ${subpath(path)})`);
+  for (const path of readOnlyExceptions.filter((path) => path !== tempDir)) lines.push(`(allow file-read* ${subpath(path)})`);
   for (const gitDir of gitDirs) lines.push(`(deny file-write* ${subpath(gitDir)})`);
   return `${lines.join('\n')}\n`;
 }

@@ -1,7 +1,7 @@
 /** Run checks as child processes, capture output. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
@@ -46,6 +46,9 @@ async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDi
     sandbox = options.sandbox && sandboxExecutable()
       ? await prepareGateSandbox({ cwd, allowNetwork: isInstallCommand(check.command), operatorHome: options.operatorHome })
       : await prepareUnsandboxedGate();
+    if (sandbox.executable && sandbox.profilePath && /^(1|true)$/i.test(process.env.HELM_DEBUG_SANDBOX ?? '')) {
+      await copyFile(sandbox.profilePath, join(logDir, `${outputSlug}.profile.sb`)).catch(() => {});
+    }
   } catch (error) {
     return writeResult('', error instanceof Error ? error.message : String(error), null);
   }

@@ -11,10 +11,26 @@ const HARDENING_ARGS = [
 /** Add the daemon-owned git policy to every Helm git invocation. */
 export function hardenedGitArgs(args: readonly string[]): string[] {
   const hardened = [...HARDENING_ARGS, ...args];
-  const commandIndex = args.findIndex((arg) => arg === 'commit' || arg === 'merge');
-  const command = commandIndex < 0 ? undefined : args[commandIndex];
-  if (command) {
-    hardened.splice(HARDENING_ARGS.length + commandIndex + 1, 0, '--no-verify');
+  let subcommandIndex = 0;
+  while (subcommandIndex < args.length) {
+    const arg = args[subcommandIndex];
+    if (arg === '--') break;
+    if (arg === '-c' || arg === '-C' || arg === '--git-dir' || arg === '--work-tree' || arg === '--namespace' || arg === '--exec-path' || arg === '--config-env') {
+      subcommandIndex += 2;
+      continue;
+    }
+    if (arg?.startsWith('-c') || arg?.startsWith('--git-dir=') || arg?.startsWith('--work-tree=') || arg?.startsWith('--namespace=') || arg?.startsWith('--exec-path=') || arg?.startsWith('--config-env=')) {
+      subcommandIndex += 1;
+      continue;
+    }
+    if (arg?.startsWith('-')) {
+      subcommandIndex += 1;
+      continue;
+    }
+    break;
+  }
+  if (args[subcommandIndex] === 'commit' || args[subcommandIndex] === 'merge') {
+    hardened.splice(HARDENING_ARGS.length + subcommandIndex + 1, 0, '--no-verify');
   }
   return hardened;
 }

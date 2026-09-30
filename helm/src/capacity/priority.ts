@@ -12,7 +12,7 @@ const pick = (answer: JevAnswer | undefined, options: string[]): string | undefi
 export async function quickCheck(jev: Jev | undefined, input: Readonly<{ objective: string; project: string }>): Promise<QuickCheck> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await Promise.race([jev?.ask('priority', { project: input.project, state: { objective: input.objective }, questions: QUESTIONS }), new Promise<undefined>((resolve) => { timer = setTimeout(resolve, 2_000); })]);
+    const result = await Promise.race([jev?.ask('priority', { project: input.project, state: { objective: input.objective }, questions: QUESTIONS }), new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 2_000); })]);
     return result?.ok ? { class: pick(result.answers.class, CLASSES), size: pick(result.answers.size, SIZES) } : {};
   } catch { return {}; } finally { clearTimeout(timer); }
 }

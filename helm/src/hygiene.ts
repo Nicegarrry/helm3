@@ -5,6 +5,7 @@ import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Settings } from './settings.js';
 import type { GitHub, Store, Workspace, WorkerRow } from './types.js';
+import { hardenedGitArgs } from './git.js';
 
 export type StatfsResult = Readonly<{ bavail: number; bsize: number }>;
 export type HygieneExec = (file: string, args: string[], options: { cwd?: string }) => Promise<{ stdout: string; stderr?: string; code?: number }>;
@@ -99,7 +100,8 @@ export type HygieneService = Readonly<{ tick(): Promise<void>; gc(): Promise<voi
 
 export function createHygiene(options: Options): HygieneService {
   const now = options.now ?? (() => new Date());
-  const exec = options.exec ?? defaultExec;
+  const rawExec = options.exec ?? defaultExec;
+  const exec: HygieneExec = (file, args, execOptions) => rawExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions);
   const fs = options.fs ?? defaultFs;
   const worktreeRoot = join(options.home, 'worktrees');
   const deployRoot = join(options.home, 'deploys');

@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import type { WorkerHooks, WorkerRunInput, WorkerRunOutcome, WorkerRunner } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
 import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
+import { hardenedGitArgs } from './git.js';
 
 export const CLAUDE_PREFIX = 'claude/';
 /** What `--resume` holds for a Claude worker: the CLI session id. */
@@ -81,7 +82,7 @@ export type ClaudeGitDirs = Readonly<{ gitDir: string; commonDir: string }>;
 export async function resolveClaudeGitDirs(worktree: string): Promise<ClaudeGitDirs> {
   const { stdout } = await execFileAsync(
     'git',
-    ['-C', worktree, 'rev-parse', '--absolute-git-dir', '--git-common-dir'],
+    hardenedGitArgs(['-C', worktree, 'rev-parse', '--absolute-git-dir', '--git-common-dir']),
     { cwd: worktree },
   );
   const paths = stdout.trim().split(/\r?\n/).filter(Boolean);
@@ -118,6 +119,7 @@ export function claudeSandboxSettings(
       filesystem: {
         allowRead: [...new Set([worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
         allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
+        denyWrite: [gitDirs.gitDir, gitDirs.commonDir, join(worktree, '.git')],
         denyRead: CLAUDE_DENY_READ,
       },
       network: {

@@ -108,6 +108,7 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.deepEqual(settings.sandbox.filesystem, {
     allowRead: ['/wt', join(homedir(), '.config', 'git'), '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/helm-claude'],
     allowWrite: ['/wt', '/tmp/helm-claude'],
+    denyWrite: ['/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/wt/.git'],
     denyRead: [
       join(homedir(), '.config'), join(homedir(), '.ssh'), join(homedir(), '.aws'), join(homedir(), '.gnupg'), join(homedir(), '.netrc'),
       join(homedir(), '.npmrc'), join(homedir(), '.yarnrc*'), join(homedir(), '.docker'), join(homedir(), '.kube'), join(homedir(), '.stripe'),
@@ -125,9 +126,10 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.equal(review[review.indexOf('--permission-mode') + 1], 'plan');
   assert.equal(review[review.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash');
   assert.ok(!review[review.indexOf('--tools') + 1]!.includes('Edit'));
-  const reviewSettings = JSON.parse(review[review.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[] } } };
+  const reviewSettings = JSON.parse(review[review.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[]; denyWrite: string[] } } };
   assert.deepEqual(reviewSettings.sandbox.filesystem.allowRead, ['/wt', join(homedir(), '.config', 'git'), '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/review-temp']);
   assert.deepEqual(reviewSettings.sandbox.filesystem.allowWrite, ['/tmp/review-temp']);
+  assert.deepEqual(reviewSettings.sandbox.filesystem.denyWrite, ['/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/wt/.git']);
   assert.ok(!review.slice(review.indexOf('--disallowedTools')).includes('Bash'));
 });
 

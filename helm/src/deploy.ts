@@ -10,6 +10,7 @@ import type { Store, ToolOutcome, Workspace } from './types.js';
 import { loadEnvFile } from './settings.js';
 import { registerWakeKind } from './supervise.js';
 import { runTestFlight, withTempHome } from './testflight.js';
+import { hardenedGitArgs } from './git.js';
 
 export type DeployInput = Readonly<{ project: string; target: string; sha?: string; tapId?: string }>;
 export type DeployStatusInput = Readonly<{ project?: string; id?: string }>;
@@ -98,7 +99,9 @@ function envNames(target: Target): Record<string, string> {
 }
 
 export function createDeploy(options: Options) {
-  const exec = options.exec ?? defaultExec; const fetchImpl = options.fetch ?? globalThis.fetch; const now = options.now ?? (() => new Date()); const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const rawExec = options.exec ?? defaultExec;
+  const exec: DeployExec = options.exec ? rawExec : (file, args, execOptions) => rawExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions);
+  const fetchImpl = options.fetch ?? globalThis.fetch; const now = options.now ?? (() => new Date()); const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   ensureDeployTable(options.store);
   const inProgress = new Set<string>();
   const daemonEnv = () => ({ ...process.env, ...(options.env ?? {}) });

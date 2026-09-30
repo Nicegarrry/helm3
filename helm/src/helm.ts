@@ -5,6 +5,7 @@ import { rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
+import { hardenedGitArgs } from './git.js';
 import type { z } from 'zod';
 import type {
   BaselineRow,
@@ -270,7 +271,7 @@ export class Helm {
         .find((check) => check.name === 'acceptance');
       if (!acceptance || acceptance.exitCode !== 0) return `acceptance check did not pass at head ${head ?? 'unknown'}`;
       try {
-        const { stdout } = await exec('git', ['diff', '--name-only', `${baseline.testCommit}..${head}`, '--', ...baseline.files], { cwd: worker.worktree });
+        const { stdout } = await exec('git', hardenedGitArgs(['diff', '--name-only', `${baseline.testCommit}..${head}`, '--', ...baseline.files]), { cwd: worker.worktree });
         const edited = stdout.split('\n').map((file) => file.trim()).filter(Boolean);
         if (edited.length > 0) return `baseline tests edited: ${edited.join(', ')}`;
       } catch (err) {
@@ -998,7 +999,7 @@ export class Helm {
 
   private async repoSlugFor(repo: string): Promise<string> {
     try {
-      const { stdout } = await exec('git', ['-C', repo, 'remote', 'get-url', 'origin']);
+      const { stdout } = await exec('git', hardenedGitArgs(['-C', repo, 'remote', 'get-url', 'origin']));
       const slug = parseOwnerRepo(stdout);
       if (slug) return slug;
     } catch {
@@ -1075,7 +1076,7 @@ export class Helm {
       if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {
         try {
           const commitMessage = result?.summary ?? `helm: ${workerId} turn complete`;
-          const head = await this.workspace.commitAll(row.worktree, commitMessage);
+          const head = await this.workspace.commitAll(row.worktree, commitMessage, row.repo);
           this.store.updateWorker(workerId, { head });
         } catch (err) {
           this.store.appendEvent(workerId, 'error', { message: `commit failed: ${errMessage(err)}` });

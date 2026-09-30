@@ -18,9 +18,13 @@ export type GateSandboxOptions = Readonly<{
   cwd: string;
   allowNetwork: boolean;
   operatorHome?: string;
+  denyLocalPorts?: readonly number[];
+  denyLocalSocketPaths?: readonly string[];
 }>;
 
 export type InstallManager = 'npm' | 'pnpm' | 'yarn';
+
+export const DEFAULT_DENY_LOCAL_PORTS = [4747, 4748, 4749, 4750] as const;
 
 const FALLBACK_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 const exec = promisify(execFile);
@@ -43,6 +47,26 @@ function regex(value: string): string {
 
 function unique(paths: readonly string[]): string[] {
   return [...new Set(paths.map((path) => resolve(path)))];
+}
+
+function validPorts(ports: readonly number[]): number[] {
+  return [...new Set(ports.filter((port) => Number.isInteger(port) && port >= 1 && port <= 65_535))];
+}
+
+let darwinGitDirPromise: Promise<string | undefined> | undefined;
+
+/** Resolve Apple's real git binary once per daemon process so gates avoid /usr/bin/git's xcrun shim. */
+export function resolveDarwinGitDir(): Promise<string | undefined> {
+  if (process.platform !== 'darwin') return Promise.resolve(undefined);
+  if (darwinGitDirPromise) return darwinGitDirPromise;
+  const resolved = exec('xcrun', ['--find', 'git'], { timeout: 10_000 })
+    .then(({ stdout }) => {
+      const path = stdout.trim();
+      return path ? dirname(path) : undefined;
+    })
+    .catch(() => undefined);
+  darwinGitDirPromise = resolved;
+  return resolved;
 }
 
 function ancestors(paths: readonly string[]): string[] {
@@ -99,6 +123,8 @@ export function buildSandboxProfile(options: {
   npmCachePaths?: readonly string[];
   gitDir?: string;
   gitDirs?: readonly string[];
+  denyLocalPorts?: readonly number[];
+  denyLocalSocketPaths?: readonly string[];
   allowNetwork: boolean;
 }): string {
   const cwd = resolve(options.cwd);
@@ -113,6 +139,8 @@ export function buildSandboxProfile(options: {
     ...(options.npmCachePaths ?? []),
   ]);
   const homes = unique(options.operatorHomes);
+  const denyLocalPorts = validPorts(options.denyLocalPorts ?? DEFAULT_DENY_LOCAL_PORTS);
+  const denyLocalSocketPaths = unique(options.denyLocalSocketPaths ?? []);
   const metadataPaths = ancestors([
     ...homes,
     ...readOnlyExceptions,
@@ -128,8 +156,20 @@ export function buildSandboxProfile(options: {
     `(allow file-write* ${subpath(cwd)})`,
     `(allow file-write* ${subpath(tempDir)})`,
     `(deny file-write* ${subpath(join(cwd, '.git'))})`,
+    '(allow signal (target same-sandbox))',
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
   ];
+
+  if (!options.allowNetwork) {
+    for (const path of [tempDir, cwd]) {
+      lines.push(`(allow network* (local unix-socket ${subpath(path)}))`);
+      lines.push(`(allow network* (remote unix-socket ${subpath(path)}))`);
+    }
+    lines.push('(allow network* (local ip "localhost:*"))');
+    lines.push('(allow network* (remote ip "localhost:*"))');
+    for (const port of denyLocalPorts) lines.push(`(deny network-outbound (remote ip "localhost:${port}"))`);
+    for (const path of denyLocalSocketPaths) lines.push(`(deny network-outbound (remote unix-socket ${subpath(path)}))`);
+  }
 
   for (const home of homes) {
     // The operator HOME is deny-by-default. Later rules re-open only the
@@ -174,12 +214,13 @@ export async function worktreeGitDirs(cwd: string): Promise<string[]> {
   }
 }
 
-export function minimalGateEnv(home: string, tempDir: string): NodeJS.ProcessEnv {
+export function minimalGateEnv(home: string, tempDir: string, gitDir?: string): NodeJS.ProcessEnv {
   return {
-    PATH: process.env.PATH ?? FALLBACK_PATH,
+    PATH: [gitDir, process.env.PATH ?? FALLBACK_PATH].filter(Boolean).join(delimiter),
     HOME: home,
     LANG: process.env.LANG ?? 'C',
     TMPDIR: tempDir,
+    HELM_GATE_SANDBOXED: '1',
     CI: '1',
     GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_0: 'gc.auto',
@@ -253,11 +294,13 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
       toolchainPaths: toolchains,
       npmCachePaths: npmCaches,
       gitDirs: await worktreeGitDirs(profileCwd),
+      denyLocalPorts: options.denyLocalPorts,
+      denyLocalSocketPaths: await Promise.all((options.denyLocalSocketPaths ?? []).map((path) => canonicalPath(path))),
       allowNetwork: options.allowNetwork,
     });
     const profilePath = join(tempDir, 'profile.sb');
     await writeFile(profilePath, profile, 'utf8');
-    return { executable, env: minimalGateEnv(home, tempDir), home, tempDir, profilePath };
+    return { executable, env: minimalGateEnv(home, tempDir, await resolveDarwinGitDir()), home, tempDir, profilePath };
   } catch (error) {
     await disposeGateSandbox(tempDir);
     throw error;
@@ -268,7 +311,7 @@ export async function prepareUnsandboxedGate(): Promise<Omit<GateSandbox, 'execu
   const tempDir = await mkdtemp(join(tmpdir(), 'helm-gate-'));
   const home = join(tempDir, 'home');
   await mkdir(home, { recursive: true });
-  return { env: minimalGateEnv(home, tempDir), home, tempDir };
+  return { env: minimalGateEnv(home, tempDir, await resolveDarwinGitDir()), home, tempDir };
 }
 
 export async function disposeGateSandbox(tempDir: string): Promise<void> {

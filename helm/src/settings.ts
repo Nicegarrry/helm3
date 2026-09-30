@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { DEFAULT_DENY_LOCAL_PORTS } from './sandbox.js';
 
 const JEV_DEFAULTS = { shadow: true, model: 'jev-latest', triageHumanAt: 0.3, attentionAt: 0.4, timeoutMs: 5000 };
 const WAKE_DEFAULTS = { minIntervalSec: 120, maxPerHour: 20 };
@@ -121,7 +122,13 @@ const settingsSchema = z.object({
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
-  gates: z.object({ allowUnsandboxed: z.boolean().default(false) }).optional(),
+  gates: z.object({
+    allowUnsandboxed: z.boolean().default(false),
+    denyLocalPorts: z.array(z.number().int().min(1).max(65_535)).default([...DEFAULT_DENY_LOCAL_PORTS]),
+  }).default({
+    allowUnsandboxed: false,
+    denyLocalPorts: [...DEFAULT_DENY_LOCAL_PORTS],
+  }),
   hygiene: z.object({
     keepNodeModules: z.boolean().default(false),
     gcSec: z.number().int().positive().default(600),

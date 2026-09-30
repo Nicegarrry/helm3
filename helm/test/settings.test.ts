@@ -26,6 +26,7 @@ test('loadSettings returns the v4 defaults when helm.json is missing', () => {
       routing: { tiers: { '1': ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium', 'codex/gpt-5.6-luna:medium'], '2': ['google/gemini-3.8-flash', 'codex/gpt-6-luna:high', 'codex/gpt-5.6-luna:high'], '3': ['claude/sonnet:high', 'codex/gpt-5.6-terra:high'], '4': ['codex/gpt-6.1-sol:medium', 'codex/gpt-5.6-sol:medium', 'claude/opus:medium'], '5': ['codex/gpt-6-astra:high', 'claude/opus:high', 'claude/fable:high', 'codex/gpt-6.1-sol:high', 'codex/gpt-5.6-sol:high'] }, allowed: ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium', 'codex/gpt-5.6-luna:medium', 'google/gemini-3.8-flash', 'codex/gpt-6-luna:high', 'codex/gpt-5.6-luna:high', 'claude/sonnet:high', 'codex/gpt-5.6-terra:high', 'codex/gpt-6.1-sol:medium', 'codex/gpt-5.6-sol:medium', 'claude/opus:medium', 'codex/gpt-6-astra:high', 'claude/opus:high', 'claude/fable:high', 'codex/gpt-6.1-sol:high', 'codex/gpt-5.6-sol:high'], minClean: 0.5, minN: 8, policy: { subscriptionOnly: false }, checkDays: 7 },
       discord: { projects: {}, digestSec: 60, maxPerHour: 20 },
       deploy: { smokeEnv: [] },
+      gates: { allowUnsandboxed: false, denyLocalPorts: [4747, 4748, 4749, 4750] },
       hygiene: { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 },
     });
   } finally {

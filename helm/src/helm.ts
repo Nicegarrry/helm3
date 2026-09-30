@@ -1225,7 +1225,6 @@ export class Helm {
     let timeout: NodeJS.Timeout | undefined;
     const timer = new Promise<void>((resolve) => {
       timeout = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs);
-      timeout.unref();
     });
     try {
       await Promise.race([running, timer]);

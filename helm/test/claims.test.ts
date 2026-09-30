@@ -54,69 +54,34 @@ function mergeHelm(store: ReturnType<typeof openStore>, claims: ReturnType<typeo
   });
 }
 
-test('claims use the 0.7 boundary and name a failing claim', async () => {
-  const first = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['src/a.ts adds A'] });
+test('a claim fails only when Jev says the diff contradicts it', async () => {
+  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['src/a.ts adds A'] });
   try {
-    const calls: unknown[] = [];
-    const service = createClaims({ jev: jevFor(() => answer(0.69), calls), store: first.store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
-    const failed = await service.check({ workerId: first.worker.workerId });
-    assert.equal(failed.ok && failed.passed, false);
-    assert.deepEqual(failed.ok && failed.failedClaims, ['src/a.ts adds A']);
-    first.store.updateWorker(first.worker.workerId, { result: { ...first.worker.result!, claims: ['src/a.ts adds A'] } });
-    const passed = await createClaims({ jev: jevFor(() => answer(0.7)), store: first.store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: first.worker.workerId });
-    assert.equal(passed.ok && passed.passed, true);
-  } finally { first.store.close(); }
+    const check = (choice: string, supports: number) => createClaims({ jev: jevFor(() => answer(supports, choice)), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
+    const weak = await check('supports', 0.3);
+    assert.equal(weak.ok && weak.passed, true);
+    const contradicted = await check('contradicts', 0.9);
+    assert.equal(contradicted.ok && contradicted.passed, false);
+    assert.deepEqual(contradicted.ok && contradicted.failedClaims, ['src/a.ts adds A']);
+  } finally { store.close(); }
 });
 
-test('process claims answered says_nothing are left to the gate', async () => {
+test('says_nothing claims are unverified: recorded in detail and excluded from pass/fail', async () => {
+  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['tests pass', 'the diff contains 12 lines.', 'src/a.ts adds A'] });
+  try {
+    const result = await createClaims({ jev: jevFor((claim) => claim === 'src/a.ts adds A' ? answer(0.9) : answer(0, 'says_nothing')), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
+    assert.equal(result.ok && result.passed, true);
+    assert.equal(result.ok && result.failedClaims, undefined);
+    const row = store.sql.prepare('SELECT detail FROM claims_checks WHERE workerId = ?').get(worker.workerId) as { detail: string };
+    assert.deepEqual(JSON.parse(row.detail).unverifiedClaims, ['tests pass', 'the diff contains 12 lines.']);
+  } finally { store.close(); }
+});
+
+test('claims that are all says_nothing fail with no supported claims', async () => {
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['tests pass', 'src/a.ts adds A'] });
   try {
-    const service = createClaims({ jev: jevFor((claim) => claim === 'tests pass' ? answer(0, 'says_nothing') : answer(0.9)), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
-    const result = await service.check({ workerId: worker.workerId });
-    assert.equal(result.ok && result.passed, true);
-  } finally { store.close(); }
-});
-
-test('only a whole process claim is dropped when Jev says_nothing', async () => {
-  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: ['tests pass and I added X'] });
-  try {
     const result = await createClaims({ jev: jevFor(() => answer(0, 'says_nothing')), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
-    assert.equal(result.ok && result.passed, false);
-    assert.deepEqual(result.ok && result.failedClaims, ['tests pass and I added X']);
-  } finally { store.close(); }
-});
-
-test('line-count and line-cap claims answered says_nothing are process claims', async () => {
-  const lineCounts = [
-    'helm/src contains 10,877 lines.',
-    'helm/src totals 10,845 lines per a Grep line count',
-    'Source count is 10,912 lines.',
-    'npm run line-cap reported 10845 lines against a cap of 11000.',
-    '10921 lines in src (cap 11000)',
-    'npm run line-cap reported 10921 lines in src (cap 11000).',
-  ];
-  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: [...lineCounts, 'src/a.ts adds A'] });
-  try {
-    const service = createClaims({ jev: jevFor((claim) => lineCounts.includes(claim) ? answer(0, 'says_nothing') : answer(1)), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') });
-    const result = await service.check({ workerId: worker.workerId });
-    assert.equal(result.ok && result.passed, true);
-  } finally { store.close(); }
-});
-
-test('ordinary code claims are not treated as line-count process claims', async () => {
-  const codeClaims = [
-    'server.ts writes serve.json with mode 0600',
-    'helm/src contains the claims module',
-    'the diff contains 12 lines.',
-    'this change adds 40 lines to server.ts',
-    '10921 lines in the diff (cap 11000)',
-    'the diff shows 12 lines in src/claims.ts',
-  ];
-  const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: codeClaims });
-  try {
-    const result = await createClaims({ jev: jevFor(() => answer(0, 'says_nothing')), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });
-    assert.equal(result.ok && result.passed, false);
-    assert.deepEqual(result.ok && result.failedClaims, codeClaims);
+    assert.deepEqual(result, { ok: false, reason: 'no supported claims' });
   } finally { store.close(); }
 });
 
@@ -133,7 +98,7 @@ test('claim text is JSON-escaped and kept on one instruction line', async () => 
   } finally { store.close(); }
 });
 
-test('zero checkable claims fails instead of passing vacuously', async () => {
+test('zero supported claims fails instead of passing vacuously', async () => {
   const cases: WorkerRow['result'][] = [
     { status: 'succeeded', summary: 'summary', changedFiles: [], commandsRun: [], claims: ['tests pass', 'committed'] },
     { status: 'succeeded', summary: '', changedFiles: [], commandsRun: [], claims: [] },
@@ -143,7 +108,7 @@ test('zero checkable claims fails instead of passing vacuously', async () => {
     const { store, worker } = seed(result, true, `w-no-checkable-${index}`);
     try {
       const checked = await createClaims({ jev: jevFor(() => answer(0, 'says_nothing')), store, settings: settings(), git: fakeGit([], 'diff') }).check({ workerId: worker.workerId });
-      assert.deepEqual(checked, { ok: false, reason: 'no checkable claims' });
+      assert.deepEqual(checked, { ok: false, reason: 'no supported claims' });
     } finally { store.close(); }
   }
 });

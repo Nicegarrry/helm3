@@ -1,9 +1,9 @@
 /** Claude CLI per turn, native permissions and subscription usage; see README.md. */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { WorkerHooks, WorkerRunInput, WorkerRunOutcome, WorkerRunner } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
@@ -46,24 +46,47 @@ const INHERITED_ENV = [
 export function minimalClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
   for (const key of INHERITED_ENV) if (env[key] !== undefined) result[key] = env[key];
-  // Test fixtures use these names to record argv/stdin without weakening the production allowlist.
-  for (const [key, value] of Object.entries(env)) if (key.startsWith('FAKE_CLAUDE_') && value !== undefined) result[key] = value;
   return result;
 }
 
 const CLAUDE_DENY_READ = [
-  join(homedir(), '.config', 'helm'),
+  join(homedir(), '.config'),
   join(homedir(), '.ssh'),
+  join(homedir(), '.aws'),
+  join(homedir(), '.gnupg'),
+  join(homedir(), '.netrc'),
+  join(homedir(), '.npmrc'),
+  join(homedir(), '.yarnrc*'),
+  join(homedir(), '.docker'),
+  join(homedir(), '.kube'),
+  join(homedir(), '.stripe'),
+  join(homedir(), '.convex'),
   join(homedir(), '.codex'),
   join(homedir(), '.pi'),
+  join(homedir(), '.claude'),
   join(homedir(), '.claude.json'),
   join(homedir(), '.appstoreconnect'),
-  join(homedir(), 'Library', 'Application Support', 'com.vercel.cli'),
-  join(homedir(), '.convex'),
+  join(homedir(), 'Library', 'Keychains'),
+  join(homedir(), 'Library', 'Application Support'),
+  join(homedir(), '.helm'),
 ];
 
+const STOP_GRACE_MS = 1_000;
+
+function stopChild(child: ChildProcess): void {
+  child.kill('SIGTERM');
+  const force = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }, STOP_GRACE_MS);
+  force.unref();
+}
+
+function workerTempDir(input: Pick<WorkerRunInput, 'workerId' | 'sessionDir'>): string {
+  return join(dirname(dirname(input.sessionDir)), 'tmp', input.workerId);
+}
+
 /** Claude Code's OS sandbox policy; fail closed if the sandbox backend is unavailable. */
-export function claudeSandboxSettings(worktree: string, temporaryDirectory: string = tmpdir()): string {
+export function claudeSandboxSettings(worktree: string, temporaryDirectory: string, reviewer = false): string {
   return JSON.stringify({
     sandbox: {
       enabled: true,
@@ -72,7 +95,8 @@ export function claudeSandboxSettings(worktree: string, temporaryDirectory: stri
       autoAllowBashIfSandboxed: true,
       excludedCommands: [],
       filesystem: {
-        allowWrite: [worktree, temporaryDirectory],
+        allowRead: [worktree],
+        allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
         denyRead: CLAUDE_DENY_READ,
       },
       network: {
@@ -87,15 +111,14 @@ export function claudeArgs(
   input: Pick<WorkerRunInput, 'role' | 'worktree'>,
   spec: { model: string; effort?: string },
   sessionId: string | null,
-  temporaryDirectory: string = tmpdir(),
+  temporaryDirectory: string,
 ): string[] {
   const reviewer = input.role === 'reviewer';
-  const allowedTools = reviewer ? 'Read,Glob,Grep' : 'Read,Edit,Write,Glob,Grep,Bash';
+  const allowedTools = reviewer ? 'Read,Glob,Grep,Bash' : 'Read,Edit,Write,Glob,Grep,Bash';
   const disallowedTools = [
     'WebFetch', 'WebSearch', 'Bash(git push *)', 'Bash(gh *)', 'Bash(git worktree *)', 'Bash(git -C *)',
     'Bash(cd /*)', 'Bash(rm -rf /*)',
   ];
-  if (reviewer) disallowedTools.push('Bash');
   const args = [
     '-p',
     '--model', spec.model,
@@ -104,7 +127,7 @@ export function claudeArgs(
     '--restricted', '--safe-mode',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--setting-sources', '', '--permission-prompts', 'none',
-    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory),
+    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory, reviewer),
     '--permission-mode', reviewer ? 'plan' : 'acceptEdits',
     '--tools', allowedTools,
     ...disallowedTools.flatMap((tool) => ['--disallowedTools', tool]),
@@ -152,11 +175,14 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
       const spec = parseClaudeModel(input.model);
       if (!spec) throw new Error(`claude worker: model "${input.model}" is not ${CLAUDE_PREFIX}<model>[:<effort>]`);
       await mkdir(input.sessionDir, { recursive: true });
+      const temporaryDirectory = input.tempDir ?? workerTempDir(input);
+      await mkdir(temporaryDirectory, { recursive: true });
+      const childEnv = { ...env, TMPDIR: temporaryDirectory, TMP: temporaryDirectory, TEMP: temporaryDirectory };
       let sessionId = input.sessionFile?.startsWith(CLAUDE_SESSION_PREFIX) ? input.sessionFile.slice(CLAUDE_SESSION_PREFIX.length) : null;
 
       const turn = async (prompt: string): Promise<string> => {
         hooks.emit('turn.start', { message: prompt });
-        const child = spawn(bin, claudeArgs(input, spec, sessionId, tmpdir()), { cwd: input.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn(bin, claudeArgs(input, spec, sessionId, temporaryDirectory), { cwd: input.worktree, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
         let spawnError: Error | null = null;
         child.on('error', (err) => { spawnError = err; });
         child.stdin.on('error', () => undefined);
@@ -165,7 +191,14 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
         child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4000); });
         let lastText = '';
         let usageRecorded = false;
-        const stopIfAsked = (): boolean => { if (hooks.shouldContinue()) return false; child.kill('SIGTERM'); return true; };
+        let stopSent = false;
+        let resultError: string | null = null;
+        const stopIfAsked = (): boolean => {
+          if (hooks.shouldContinue() || stopSent) return false;
+          stopSent = true;
+          stopChild(child);
+          return true;
+        };
         const poll = setInterval(stopIfAsked, 500);
         const lines = createInterface({ input: child.stdout });
         lines.on('line', (line) => {
@@ -188,6 +221,7 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
             }
           } else if (event.type === 'result') {
             if (typeof event.result === 'string') lastText = event.result;
+            if (event.is_error) resultError = typeof event.result === 'string' && event.result.trim() ? event.result : 'Claude reported an error';
             if (event.usage && !usageRecorded) {
               usageRecorded = true;
               hooks.onUsage(usageEvent(input, event.usage));
@@ -201,6 +235,7 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
         hooks.emit('turn.end', { exitCode: code });
         if (spawnError) throw new Error(`claude could not start (${bin}): ${(spawnError as Error).message}`);
         if (!hooks.shouldContinue()) return '';
+        if (resultError) throw new Error(`claude reported an error: ${resultError}`);
         if (code !== 0) {
           const tail = stderr.trim().split('\n').at(-1) ?? '';
           throw new Error(`claude exited ${code ?? 'by signal'}${lastText.trim() ? ' after answering' : ''}: ${tail}`.trim());

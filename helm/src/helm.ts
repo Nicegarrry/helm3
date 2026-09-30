@@ -1,6 +1,7 @@
 /** Helm service: composes the runtime and implements the worker, budget, and lifecycle tools. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -945,6 +946,14 @@ export class Helm {
     });
   }
 
+  private workerTempDir(workerId: string): string {
+    return join(this.config.home, 'tmp', workerId);
+  }
+
+  private async cleanupWorkerTemp(workerId: string): Promise<void> {
+    await rm(this.workerTempDir(workerId), { recursive: true, force: true });
+  }
+
   private spendCapExceeded(): boolean {
     return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;
   }
@@ -1025,7 +1034,7 @@ export class Helm {
     const runInput: WorkerRunInput = {
       workerId, role: row.role, model: row.model, worktree: row.worktree, objective: row.objective,
       acceptance: row.acceptance, contextPaths: row.contextPaths, allowWorkflows: row.allowWorkflows,
-      sessionFile: row.sessionFile, sessionDir: join(this.config.home, 'sessions', workerId),
+      sessionFile: row.sessionFile, sessionDir: join(this.config.home, 'sessions', workerId), tempDir: this.workerTempDir(workerId),
     };
     const hooks: WorkerHooks = {
       emit: (kind, data) => {
@@ -1085,6 +1094,7 @@ export class Helm {
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
       if (nextState === 'succeeded' || nextState === 'failed' || nextState === 'idle' || nextState === 'stopped') {
         await this.cleanupWorkerNodeModules(row);
+        await this.cleanupWorkerTemp(workerId).catch(() => undefined);
       }
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
@@ -1105,6 +1115,7 @@ export class Helm {
     } catch (err) {
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
+      await this.cleanupWorkerTemp(workerId).catch(() => undefined);
       this.store.updateWorker(workerId, { state: 'unknown' });
       this.store.appendEvent(workerId, 'error', { message: errMessage(err) });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: 'unknown' });

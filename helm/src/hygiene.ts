@@ -181,6 +181,7 @@ export function createHygiene(options: Options): HygieneService {
 
   async function removeWorkerWorktree(worker: WorkerRow): Promise<void> {
     await options.workspace.remove(worker.repo, worker.worktree);
+    await fs.rm(join(options.home, 'tmp', worker.workerId), { recursive: true, force: true }).catch(() => undefined);
     if (options.workspace.prune) await options.workspace.prune(worker.repo);
     else await git(worker.repo, ['worktree', 'prune']);
     if (options.workspace.deleteBranch) await options.workspace.deleteBranch(worker.repo, worker.branch);

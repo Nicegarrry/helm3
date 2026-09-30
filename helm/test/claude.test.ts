@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,38 +10,45 @@ import { RESULT_INSTRUCTION } from '../src/prompt.js';
 import { laneRunner } from '../src/codex.js';
 import type { EventRow, WorkerHooks, WorkerRunInput, WorkerRunner } from '../src/types.js';
 
-const FAKE_CLAUDE = `#!${process.execPath}
+function fakeClaude(mode: string, record: string): string {
+  return `#!${process.execPath}
 import { appendFileSync, readFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const stdin = readFileSync(0, 'utf8');
-appendFileSync(process.env.FAKE_CLAUDE_RECORD, JSON.stringify({ args, stdin, cwd: process.cwd(), env: process.env }) + '\\n');
-const mode = process.env.FAKE_CLAUDE_MODE ?? 'ok';
+const record = ${JSON.stringify(record)};
+const mode = ${JSON.stringify(mode)};
+appendFileSync(record, JSON.stringify({ args, stdin, cwd: process.cwd(), env: process.env }) + '\\n');
 const resume = args.includes('--resume');
 const session = resume ? args[args.indexOf('--resume') + 1] : 'session-1';
 const emit = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
 emit({ type: 'system', subtype: 'init', session_id: session });
 emit({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } });
-if (mode === 'hang') { setTimeout(() => {}, 60000); }
+if (mode === 'hang' || mode === 'ignore-term') {
+  if (mode === 'ignore-term') process.on('SIGTERM', () => {});
+  setTimeout(() => {}, 60000);
+}
 else if (mode === 'fail') { process.stderr.write('claude: not logged in\\n'); process.exit(2); }
+else if (mode === 'error-result') {
+  emit({ type: 'result', subtype: 'error', session_id: session, is_error: true, result: 'provider failed' });
+}
 else {
   const ok = JSON.stringify({ status: 'succeeded', summary: 'did it', changedFiles: ['a.ts'], commandsRun: ['npm test'] });
   const text = mode === 'malformed-first' && !resume ? 'not json at all' : ok;
   emit({ type: 'result', subtype: 'success', session_id: session, result: text, usage: { input_tokens: 1000, output_tokens: 50, cache_read_input_tokens: 400, cache_creation_input_tokens: 10 } });
 }
 `;
+}
 
 async function fixture(mode: string, extraEnv: Record<string, string> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'helm-claude-test-'));
   const bin = join(root, 'claude.mjs');
-  await writeFile(bin, FAKE_CLAUDE);
-  await chmod(bin, 0o755);
   const worktree = join(root, 'wt');
   await mkdir(worktree);
   const record = join(root, 'record.jsonl');
+  await writeFile(bin, fakeClaude(mode, record));
+  await chmod(bin, 0o755);
   const env = {
     ...process.env,
-    FAKE_CLAUDE_RECORD: record,
-    FAKE_CLAUDE_MODE: mode,
     HELM_HOME: '/secret/helm',
     HELM_SPEND_CAP_USD: '99',
     CG_API_KEY: 'cg-secret',
@@ -95,10 +103,13 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
   assert.deepEqual(settings.sandbox.excludedCommands, []);
   assert.deepEqual(settings.sandbox.filesystem, {
+    allowRead: ['/wt'],
     allowWrite: ['/wt', '/tmp/helm-claude'],
     denyRead: [
-      join(homedir(), '.config', 'helm'), join(homedir(), '.ssh'), join(homedir(), '.codex'), join(homedir(), '.pi'),
-      join(homedir(), '.claude.json'), join(homedir(), '.appstoreconnect'), join(homedir(), 'Library', 'Application Support', 'com.vercel.cli'), join(homedir(), '.convex'),
+      join(homedir(), '.config'), join(homedir(), '.ssh'), join(homedir(), '.aws'), join(homedir(), '.gnupg'), join(homedir(), '.netrc'),
+      join(homedir(), '.npmrc'), join(homedir(), '.yarnrc*'), join(homedir(), '.docker'), join(homedir(), '.kube'), join(homedir(), '.stripe'),
+      join(homedir(), '.convex'), join(homedir(), '.codex'), join(homedir(), '.pi'), join(homedir(), '.claude'), join(homedir(), '.claude.json'),
+      join(homedir(), '.appstoreconnect'), join(homedir(), 'Library', 'Keychains'), join(homedir(), 'Library', 'Application Support'), join(homedir(), '.helm'),
     ],
   });
   assert.deepEqual(settings.sandbox.network, { allowedDomains: [], deniedDomains: ['*'] });
@@ -106,12 +117,15 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.equal(build[build.indexOf('--add-dir') + 1], '/wt');
   assert.ok(!build.some((arg) => /bypass|skip-permissions|dangerously/i.test(arg)));
 
-  const review = claudeArgs({ role: 'reviewer', worktree: '/wt' }, { model: 'opus' }, 'session-1');
+  const review = claudeArgs({ role: 'reviewer', worktree: '/wt' }, { model: 'opus' }, 'session-1', '/tmp/review-temp');
   assert.ok(review.includes('--resume') && review[review.indexOf('--resume') + 1] === 'session-1');
   assert.equal(review[review.indexOf('--permission-mode') + 1], 'plan');
-  assert.equal(review[review.indexOf('--tools') + 1], 'Read,Glob,Grep');
+  assert.equal(review[review.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash');
   assert.ok(!review[review.indexOf('--tools') + 1]!.includes('Edit'));
-  assert.ok(review.includes('Bash'), 'reviewer Bash is explicitly disallowed, not allowed');
+  const reviewSettings = JSON.parse(review[review.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[] } } };
+  assert.deepEqual(reviewSettings.sandbox.filesystem.allowRead, ['/wt']);
+  assert.deepEqual(reviewSettings.sandbox.filesystem.allowWrite, ['/tmp/review-temp']);
+  assert.ok(!review.slice(review.indexOf('--disallowedTools')).includes('Bash'));
 });
 
 test('run: stream-json result, session id, subscription usage and sanitized environment are recorded', async () => {
@@ -130,6 +144,12 @@ test('run: stream-json result, session id, subscription usage and sanitized envi
   assert.equal(call!.env.HELM_SPEND_CAP_USD, undefined);
   assert.equal(call!.env.CG_API_KEY, undefined);
   assert.equal(call!.env.DISCORD_WEBHOOK_URL, undefined);
+  assert.equal(call!.env.FAKE_CLAUDE_RECORD, undefined);
+  assert.equal(call!.env.FAKE_CLAUDE_MODE, undefined);
+  assert.equal(call!.env.TMPDIR, join(f.root, 'tmp', 'w-1'));
+  assert.equal(call!.env.TMP, join(f.root, 'tmp', 'w-1'));
+  assert.equal(call!.env.TEMP, join(f.root, 'tmp', 'w-1'));
+  assert.equal(existsSync(join(f.root, 'tmp', 'w-1')), true);
 });
 
 test('run: a recorded Claude session resumes with --resume', async () => {
@@ -153,6 +173,13 @@ test('run: malformed final message gets one correction turn on the same session'
   assert.equal(events.filter((event) => event.kind === 'turn.start').length, 2);
 });
 
+test('run: an is_error result is an error and does not trigger correction', async () => {
+  const f = await fixture('error-result');
+  const { hooks } = collectHooks();
+  await assert.rejects(f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks), /claude reported an error: provider failed/);
+  assert.equal((await f.calls()).length, 1);
+});
+
 test('run: stop interrupts a silent Claude process without producing an error', async () => {
   const f = await fixture('hang');
   let asked = false;
@@ -163,6 +190,17 @@ test('run: stop interrupts a silent Claude process without producing an error', 
   assert.ok(Date.now() - started < 5000);
   assert.equal(outcome.result, null);
   assert.ok(events.some((event) => event.kind === 'result.invalid'));
+});
+
+test('run: stop escalates to SIGKILL when Claude ignores SIGTERM', async () => {
+  const f = await fixture('ignore-term');
+  let asked = false;
+  setTimeout(() => { asked = true; }, 800);
+  const { hooks } = collectHooks(() => !asked);
+  const started = Date.now();
+  const outcome = await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir }), 'Add the flag', hooks);
+  assert.ok(Date.now() - started < 5000);
+  assert.equal(outcome.result, null);
 });
 
 test('laneRunner routes claude/ models to Claude and preserves Codex/Pi routing', async () => {

@@ -235,6 +235,7 @@ export type WorkerRunInput = Readonly<{
   allowWorkflows: boolean;
   sessionFile: string | null; // resume when set
   sessionDir: string;         // where new session files go
+  tempDir?: string;            // per-worker temp directory for sandboxed CLI processes
 }>;
 
 export type WorkerRunOutcome = Readonly<{

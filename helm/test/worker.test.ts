@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { piWorkerRunner, parseWorkerResult, classifyBash, defaultModelRuntime } from '../src/worker.js';
+import { CORRECTION_MESSAGE, correctionMessage, piWorkerRunner, parseWorkerResult, classifyBash, defaultModelRuntime } from '../src/worker.js';
 import type { EventRow, WorkerHooks, WorkerRunInput, WorkerResult } from '../src/types.js';
 
 const exec = promisify(execFile);
@@ -75,6 +75,62 @@ const validResult: WorkerResult = {
   changedFiles: ['hello.txt'],
   commandsRun: [],
 };
+
+test('Pi fresh and resumed workers refuse daemon token paths and shell reads under custom HELM_HOME', async () => {
+  const { root, worktree } = await makeWorktree();
+  try {
+    const helmHome = join(worktree, 'daemon');
+    await mkdir(helmHome);
+    await writeFile(join(helmHome, 'serve.json'), 'synthetic token');
+    await writeFile(join(helmHome, 'serve.json.123.tmp'), 'synthetic token');
+    await symlink(join(helmHome, 'serve.json'), join(worktree, 'alias'));
+    const denied = [
+      ...['read', 'grep', 'find', 'ls'].flatMap((tool) => ['serve.json', 'serve.json.123.tmp'].map((name) =>
+        ({ tool, args: { path: join(helmHome, name), pattern: 'token' } }))),
+      { tool: 'read', args: { path: 'alias' } },
+      ...['cat daemon/serve.json', 'cat alias', 'cat "$HELM_HOME/serve.json"',
+        'cat ${HELM_HOME}/serve.json.*.tmp', `cat '${helmHome}/serve.json.123.tmp'`].map((command) =>
+        ({ tool: 'bash', args: { command } })),
+    ];
+    for (const role of ['builder', 'reviewer'] as const) {
+      const { modelRuntime, ai, faux, model } = await makeFaux(`helm-token-${role}`);
+      const runner = piWorkerRunner({ modelRuntime, helmHome });
+      let sessionFile: string | null = null;
+      for (let turn = 0; turn < 2; turn++) {
+        faux.setResponses([
+          ...denied.map(({ tool, args }) => ai.fauxAssistantMessage([ai.fauxToolCall(tool, args)])),
+          ai.fauxAssistantMessage(JSON.stringify(validResult)),
+        ]);
+        const { hooks, events } = collectHooks();
+        const outcome = await runner.run(baseInput({ role, worktree, model, sessionDir: join(root, role), sessionFile }), 'check token guards', hooks);
+        sessionFile = outcome.sessionFile;
+        assert.ok(sessionFile);
+        const refused = events.filter((event) => event.kind === 'tool.refused');
+        assert.equal(refused.length, denied.length);
+        assert.ok(refused.every((event) => event.data.reason === 'refusing daemon token read'));
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Pi token guard allows other daemon files and serve.json outside HELM_HOME', async () => {
+  const { root, worktree } = await makeWorktree();
+  try {
+    const helmHome = join(worktree, 'daemon');
+    await mkdir(helmHome);
+    await writeFile(join(helmHome, 'serve.json.bak'), 'ordinary fixture');
+    await writeFile(join(worktree, 'serve.json'), 'ordinary fixture');
+    const { modelRuntime, ai, faux, model } = await makeFaux('helm-token-allowed');
+    faux.setResponses([
+      ai.fauxAssistantMessage([ai.fauxToolCall('bash', { command: `cat '${helmHome}/serve.json.bak' daemon/serve.json.bak serve.json` })]),
+      ai.fauxAssistantMessage(JSON.stringify(validResult)),
+    ]);
+    const { hooks, events } = collectHooks();
+    await piWorkerRunner({ modelRuntime, helmHome }).run(baseInput({ worktree, model, sessionDir: join(root, 'sessions') }), 'read fixtures', hooks);
+    assert.equal(events.filter((event) => event.kind === 'tool.refused').length, 0);
+    assert.equal(events.filter((event) => event.kind === 'tool.call').length, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test('valid JSON result parses and usage is emitted with numeric tokens', async () => {
   const { root, worktree } = await makeWorktree();
@@ -311,6 +367,15 @@ test('parseWorkerResult: strict JSON, fenced JSON (last wins), and invalid input
   assert.equal(parseWorkerResult('not json at all'), null);
   assert.equal(parseWorkerResult('{"status":"succeeded"}'), null);
   assert.equal(parseWorkerResult(JSON.stringify({ ...validResult, extra: 'field' })), null);
+});
+
+test('correctionMessage lists the zod issue paths and messages', () => {
+  const claims = Array.from({ length: 13 }, (_, i) => (i === 3 ? 'x'.repeat(301) : 'ok'));
+  const message = correctionMessage(JSON.stringify({ ...validResult, claims }));
+  assert.ok(message.startsWith(CORRECTION_MESSAGE));
+  assert.match(message, /^claims: at most 12$/m);
+  assert.match(message, /^claims\[3\]: at most 300 chars$/m);
+  assert.equal(correctionMessage('not json at all'), CORRECTION_MESSAGE);
 });
 
 test('parseWorkerResult accepts a question result and requires its question', () => {

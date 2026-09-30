@@ -57,7 +57,7 @@ function usage(): void {
   doctor [--repo path] [--json]
   init [--repo path] [--force]
   spawn --repo <path> --objective <text> [--issue n] [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
-        [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k]
+        [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k] [--priority low|normal|high|urgent] [--requested-by owner|auto]
   ps [--repo path] [--state s] [--json]
   logs <id> [-f] [--json]
   inspect <id> [--tail n] [--json]
@@ -194,11 +194,12 @@ const cmdSpawn = (args: string[]) =>
   simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective
     ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, issue: v.issue ? Number(v.issue) : undefined, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
         baseRef: v['base-ref'], role: v.role, contextPaths: v.context ?? [], allowWorkflows: v['allow-workflows'] ?? false,
-        idempotencyKey: v['idempotency-key'], lanes: v.lanes }
+        idempotencyKey: v['idempotency-key'], lanes: v.lanes, priority: v.priority, requestedBy: v['requested-by'] }
     : undefined), {
     repo: { type: 'string' }, objective: { type: 'string' }, issue: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
     'base-ref': { type: 'string' }, role: { type: 'string' }, context: { type: 'string', multiple: true },
     'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' }, lanes: { type: 'string', multiple: true },
+    priority: { type: 'string' }, 'requested-by': { type: 'string' },
   });
 
 const cmdPs = (args: string[]) =>
@@ -443,14 +444,15 @@ export async function startSupervisor(input: StartSupervisorInput, deps: StartSu
   const hosts = deps.hosts ?? { herdr: herdrHost(exec), tmux: tmuxHost(exec) };
   const host = deps.host ?? hosts[hostName];
   const command = supervisorCommand(input.project, label, settings, env);
-  let pane = await host.resolve(label);
+  const hostCall = <T>(fn: () => Promise<T>) => fn().catch((err: NodeJS.ErrnoException) => { throw err.code === 'ENOENT' ? new Error(`supervisor host ${hostName} is not installed; install it or pass --host herdr|tmux`) : err; });
+  let pane = await hostCall(() => host.resolve(label));
   let launched = false;
   if (pane) {
     const status = await host.status(pane);
     if (status === 'unknown') { await host.send(pane, command); launched = true; }
     else if (!input.json) console.log(`attached ${label} ${pane.id}`);
   } else {
-    pane = await host.create(label, repo, command);
+    pane = await hostCall(() => host.create(label, repo, command));
     if (!pane) throw new Error(`host did not create a pane for ${label}`);
     launched = true;
   }

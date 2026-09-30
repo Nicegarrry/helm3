@@ -34,9 +34,9 @@ export function createPrTicker(options: { store: Store; github: GitHub; now?: ()
           if (!workerId || options.store.getWorker(workerId)?.repoSlug !== repoSlug || !['OPEN', 'MERGED'].includes(remote.state)) continue;
           inferPrIssue(options.store, workerId, remote.body);
           const existing = options.store.getPrByNumber(repoSlug, remote.number);
-          const pr: PrRow = { repoSlug, number: remote.number, workerId, url: `https://github.com/${repoSlug}/pull/${remote.number}`, head: remote.headRefOid, createdAt: existing?.createdAt ?? now().toISOString(), state: remote.state === 'MERGED' ? 'merged' : 'open', checkedAt: now().toISOString() };
+          const pr: PrRow = { repoSlug, number: remote.number, workerId, url: `https://github.com/${repoSlug}/pull/${remote.number}`, head: remote.headRefOid, createdAt: existing?.createdAt ?? now().toISOString(), state: remote.state === 'MERGED' ? 'merged' : 'open', checkedAt: existing?.checkedAt ?? null };
           if (!existing) options.store.insertPr(pr);
-          if (pr.state === 'merged' && existing?.state !== 'merged') {
+          if (pr.state === 'merged' && (!existing || (existing.state && existing.state !== 'merged'))) {
             recordPrMerge(options.store, pr, { external: true, adopted: !existing }, remote.mergedAt ?? undefined);
           }
           if (!existing || existing.state !== 'merged') options.store.updatePr(pr);

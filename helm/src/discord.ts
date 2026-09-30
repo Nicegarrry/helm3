@@ -3,6 +3,7 @@ import { appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { consumer } from './daemon.js';
+import { NO_TAP_CHANNEL } from './envelope.js';
 import { loadEnvFile } from './settings.js';
 import type { EventRow, Store } from './types.js';
 import type { Settings } from './settings.js';
@@ -94,7 +95,7 @@ function milestone(event: EventRow, projectCount: number): string | null {
     const values = event.data.values && typeof event.data.values === 'object' ? Object.entries(event.data.values).map(([name, value]) => `${name}=${String(value)}`).join(', ') : '';
     return `Spend changed: ${event.data.ignored ? 'raise ignored' : text(event.data.source, 'updated')}${values ? `: ${values}` : ''}`;
   }
-  if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
+  if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs owner: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
   if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;
   if (event.kind === 'gate.sandbox.opt_out') return `Gate sandbox disabled: ${text(event.data.project, 'project')} (${text(event.data.reason, 'repo opt-out')})`;
@@ -174,7 +175,7 @@ export function createDiscord(options: Options): DiscordService {
 
   async function postTap(content: string): Promise<{ ok: true } | { ok: false; reason: string }> {
     const url = tapWebhook();
-    if (!url) return { ok: false, reason: 'no tap channel configured' };
+    if (!url) return { ok: false, reason: NO_TAP_CHANNEL };
     if (isMilestoneWebhook(url)) return { ok: false, reason: 'tap channel must differ from the milestone channel' };
     try {
       const response = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, username: 'Helm', allowed_mentions: { parse: [] } }) });
@@ -296,10 +297,10 @@ export function createDiscord(options: Options): DiscordService {
 
   async function notifyNick(project: string, content: string): Promise<{ ok: true; sent: true } | { ok: false; reason: string }> {
     const url = webhook(project);
-    if (!url) return { ok: false, reason: 'no webhook configured' };
+    if (!url) return { ok: false, reason: `no notify channel: set discord.projects["${project}"].webhookEnv in helm.json` };
     const current = now().getTime();
     const previous = nickAt.get(project);
-    if (previous !== undefined && current - previous < 60_000) return { ok: false, reason: 'notify.nick is rate-limited to once per minute' };
+    if (previous !== undefined && current - previous < 60_000) return { ok: false, reason: 'notify.owner is rate-limited to once per minute' };
     const result = await post(project, content.slice(0, 2000));
     if (result !== 'sent') return { ok: false, reason: 'Discord post failed' };
     nickAt.set(project, current);

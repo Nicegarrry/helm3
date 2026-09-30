@@ -69,11 +69,11 @@ import { Lifecycle } from './lifecycle.js';
 import { loadSettings, updateSpendSettings, type Settings } from './settings.js';
 import { createEffectiveSpendReader, spendLimitRaises, type EffectiveSpend, type EffectiveSpendReader } from './config.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
+import { NO_TAP_CHANNEL, checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
-import { verdictLine } from './review.js';
+import { isQuoted, verdictLine } from './review.js';
 import { inferPrIssue, recordPrMerge } from './pr-watch.js';
 import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
@@ -91,6 +91,7 @@ import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTa
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
 import { askLoadClass } from './capacity/classify.js';
+import { admissionRank, effectivePriority, quickCheck, type QuickCheck } from './capacity/priority.js';
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 import { sandboxEnabled } from './gate.js';
@@ -423,7 +424,7 @@ export class Helm {
       const action = spendCapAction(current, input);
       let reservation: TapReservation | undefined;
       if (raising) {
-        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}`);
+        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}${this.settings.discord.tapWebhookEnv ? '' : ` (${NO_TAP_CHANNEL})`}`);
         const reserved = reserveTap(this.store, this.taps, SPEND_CAP_TAP_PROJECT, SPEND_CAP_TAP_KIND, actionHash(action), input.tapId, this.nowDate());
         if (typeof reserved === 'string') return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${reserved}`);
         reservation = reserved;
@@ -576,7 +577,8 @@ export class Helm {
       if (reason) return refuse(reason);
       let selection: Selection;
       try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
-      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
+      const check = await quickCheck(this.jev, { objective: chosen.input.objective, project: chosen.input.repo });
+      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice, check));
       if (outcome.ok) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice).catch((error) => {
         try { this.store.appendEvent(outcome.workerId, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
       });
@@ -589,7 +591,7 @@ export class Helm {
     input: SpawnInput,
     onDone?: OnDone,
     selection: Selection = { guidance: '', skills: [] },
-    choice?: ModelChoice,
+    choice?: ModelChoice, check: QuickCheck = {},
   ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string; queued?: true; loadClass?: LoadClass }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
@@ -606,6 +608,8 @@ export class Helm {
     if (baseline && baseline.repoSlug !== repoSlug) return refuse(`baseline belongs to ${baseline.repoSlug}, not ${repoSlug}`);
     const baseRef = baseline?.testCommit ?? input.baseRef ?? (await this.workspace.defaultBranch(repo));
     const baseSha = await this.workspace.resolveSha(repo, baseRef);
+    const stated = input.priority ?? (await loadRepoConfig(repo, baseSha, true, { timeout: 5_000 }).catch(() => undefined))?.priority ?? 'normal';
+    const effective = effectivePriority(stated, check), rank = admissionRank(effective, input.requestedBy ?? 'auto', check.size);
     const workerId = genId('w');
     const branch = `helm/${workerId}`;
     const worktree = join(this.config.home, 'worktrees', repoSlug.replace(/\//g, '__'), workerId);
@@ -640,10 +644,11 @@ export class Helm {
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
+    this.store.appendEvent(workerId, 'admission.priority', { stated, requestedBy: input.requestedBy ?? 'auto', class: check.class ?? null, size: check.size ?? null, effective, score: rank.base, reasons: rank.reasons });
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
-    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
+    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, rank, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
     const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
     if ('queued' in admitted) warnings.push('queued: capacity');
     return { ok: true, workerId, branch, worktree, loadClass, ...(warnings.length ? { warning: warnings.join('; ') } : {}), ...('queued' in admitted ? { queued: true as const } : {}) };
@@ -944,6 +949,7 @@ export class Helm {
       must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
         `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
       const head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      try { await this.workspace.fetch(sourceWorker.repo, `pull-${pr.number}`, `refs/pull/${pr.number}/head`); } catch { /* offline: use local objects */ }
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {
         repo: sourceWorker.repo, objective, model, baseRef: head,
@@ -960,10 +966,15 @@ export class Helm {
   }
 
   private async finishReview(workerId: string, result: WorkerResult | null, project: string, number: number, head: string, reviewer: string): Promise<void> {
-    const raw = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
+    if (!result) {
+      this.store.appendEvent(workerId, 'review.warning', { project, number, summary: 'reviewer produced no result; no review recorded' });
+      return;
+    }
+    const raw = `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}`;
     let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
     // Move verdict lines or trailing verdict sentences below the summary and notes.
-    const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (_match, prefix: string, line: string) => {
+    const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (match, prefix: string, line: string, offset: number, whole: string) => {
+      if (isQuoted(whole, offset + prefix.length)) return match;
       lastVerdict = line.trim();
       return prefix.trimEnd();
     }).trim();
@@ -1108,7 +1119,7 @@ export class Helm {
         randomInt: this.tapRandomInt,
         taps: this.taps,
         pepper: this.tapPepper,
-        post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: 'no tap channel configured' }),
+        post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: NO_TAP_CHANNEL }),
       });
       return result;
     });
@@ -1175,8 +1186,8 @@ export class Helm {
     });
   }
 
-  async notifyNick(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
-    if (!this.discord) return { ok: false, reason: 'Discord is not configured' };
+  async notifyOwner(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
+    if (!this.discord) return { ok: false, reason: 'no notify channel: set discord.projects.<project>.webhookEnv in helm.json' };
     const result = await this.discord.notifyNick(input.project, input.text);
     return result.ok ? { ok: true, sent: true } : result;
   }

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { WorkerRunInput, WorkerRunOutcome, WorkerRunner, WorkerHooks } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
-import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
+import { correctionMessage, parseWorkerResult } from './worker.js';
 import { parseClaudeModel } from './claude.js';
 
 export const CODEX_PREFIX = 'codex/';
@@ -131,7 +131,7 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
       let rawText = await turn(message);
       let result = parseWorkerResult(rawText);
       if (!result && hooks.shouldContinue()) {
-        rawText = await turn(CORRECTION_MESSAGE);
+        rawText = await turn(correctionMessage(rawText));
         result = parseWorkerResult(rawText);
       }
       if (result) hooks.emit('result', { ...result });

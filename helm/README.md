@@ -107,7 +107,7 @@ blobs. Pass `verbose: true` in the target input to opt into the full response.
 
 | Tool | What it does |
 | --- | --- |
-| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`), or `claude/<model>[:<effort>]` for the Claude CLI (`claude/sonnet:high`). |
+| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`), or `claude/<model>[:<effort>]` for the Claude CLI (`claude/sonnet:high`). Optional `priority` (`low|normal|high|urgent`, default from `<repo>/helm.json` `priority`, else `normal`) and `requestedBy` (`owner|auto`, default `auto`) order the capacity queue: same-kind jobs score base 0/10/20/40 by effective priority, +15 owner, +10 when a Jev quick check sizes the objective xs or s, +1 per 5 minutes queued; highest score first, ties FIFO. A security classification raises the effective priority to at least `high`; if Jev is unavailable the stated priority is used. `admission.priority`, `capacity.queued` and `capacity.started` events record the inputs, score and reasons. |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | Compact active/recent worker lines; call through `helm.call` in core. |
 | `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
@@ -198,6 +198,10 @@ denials, and only the worker worktree is added with `--add-dir`. The child recei
 environment, not Helm configuration, provider keys or webhooks. Claude subscription usage is
 recorded with `costUsd: 0`.
 
+For fresh and resumed Claude workers in both roles, the OS sandbox's `denyRead` includes
+`$HELM_HOME/serve.json` and the glob `$HELM_HOME/serve.json.*.tmp`, including a custom
+daemon home. These are sandbox rules, rather than Pi's cooperative shell checks.
+
 ## What a worker can and cannot do
 
 Workers get Pi's built-in tools: read, bash, edit, write, grep, find, ls. A `tool_call` hook
@@ -207,8 +211,12 @@ touch worktrees, check out other refs, or `rm -rf /`. Git commands are tokenised
 inserting flags such as `git -C .. push` does not get past the check. Reviewers additionally
 cannot write. Refusals are logged as events and shown to the model as the tool result.
 
-This is a cooperative deny list, not an OS sandbox. A worker's shell can still read files
-outside the worktree. Run the daemon under whatever OS-level isolation you need.
+Pi's cooperative hook also refuses paths resolving to `$HELM_HOME/serve.json` and
+`serve.json.*.tmp` siblings, including symlink aliases and a custom daemon home. It checks
+direct shell path arguments and literal `$HELM_HOME`/`${HELM_HOME}` references on fresh
+and resumed turns. This is not an OS sandbox: computed shell paths or arbitrary scripts
+can bypass the checks and read outside the worktree. Run the daemon under whatever
+OS-level isolation you need.
 
 A worker's final message must be one JSON object: `status`, `summary`, `changedFiles`,
 `commandsRun`, optional `notes`. One correction turn is allowed; after that the worker is
@@ -232,14 +240,20 @@ not add a daemon-port firewall rule to that lane. Reviewers retain `read-only` a
 receive Helm's network opt-in. Offline installs work from the local store.
 
 The Codex worker sandbox permits filesystem reads outside the worktree, including
-`$HELM_HOME/serve.json`; mode `0600` does not hide it from a worker running as the same
-user. The token is not passed in worker environments, but it is not unreadable by workers.
+`$HELM_HOME/serve.json` and `serve.json.*.tmp` siblings, on fresh and resumed turns;
+mode `0600` does not hide them from a worker running as the same user.
 A network-enabled Codex worker that reads it can authenticate to the daemon. Follow-up:
 migrate the Codex lane to a permission profile that denies this file and its temporary
 siblings, and prove the denial for fresh and resumed workers. Codex's
 [permission profiles](https://learn.chatgpt.com/docs/permissions) support read denials but
 cannot be combined with Helm's current `sandbox_mode` / `sandbox_workspace_write`
-settings; adding a deny key to those settings would not establish protection.
+settings; adding a deny key to those settings would not establish protection. Checked with
+codex-cli **0.159.2** (`codex --help`, `codex exec --help`, `codex debug --help`, and
+`codex sandbox --help`): the legacy modes are `read-only`, `workspace-write`, and
+`danger-full-access`; none provides a per-file read-deny option. Permission profiles are
+a separate configuration model, not an additive deny list for `codexArgs`. Helm therefore
+adds no ineffective read-deny key to its existing sandbox settings. Unlike Claude, this
+lane currently provides no token-file read isolation; network-off is a separate boundary.
 
 The `:effort` suffix sets `model_reasoning_effort` (`low`, `medium`, `high`, `xhigh`);
 without it Codex uses its config default. A turn's session is the Codex thread id, recorded
@@ -394,6 +408,25 @@ kind so the supervisor can call `tap.request` with the exact action returned by 
 | `HELM_CODEX_BIN` | `~/.local/bin/codex`, else `codex` | The Codex CLI the `codex/…` lane runs |
 | `HELM_CODEX_NETWORK` | unset | `1` lets Codex builders reach the network inside their sandbox |
 | `HELM_CLAUDE_BIN` | `~/.local/bin/claude`, else `claude` | The Claude CLI the `claude/…` lane runs |
+
+## Optional integrations
+
+A fresh install with an empty `$HELM_HOME` and no environment variables runs the core loop
+(`worker.spawn`, `gate.run`, `run.status`, `pr.open`) on its own. Every integration below is off
+until configured, attempts no network calls and writes no warnings while absent. When a tool
+needs one that is missing, it refuses and names the `helm.json` key to set.
+
+| Integration | Turn it on with | Without it |
+| --- | --- | --- |
+| Milestone and `notify.owner` messages (Discord) | `discord.projects.<project>.webhookEnv`, or `discord.globalWebhookEnv`: the name of an env var (or `~/.config/helm/env` entry) holding a webhook URL | `notify.owner` refuses with `no notify channel: set discord.projects["<project>"].webhookEnv in helm.json`; milestones are dropped |
+| Taps (one-time approval codes) | `discord.tapWebhookEnv`, a webhook that differs from the milestone channel | `tap.request` refuses with `no tap channel: set discord.tapWebhookEnv in helm.json`; `spend.set` raises that need a tap say the same |
+| Common Ground memory sync | `memory.cg` with `url`, `keyEnv` and `enabled: true` | Memory stays local under `$HELM_HOME/memory`; the sync ticker returns immediately |
+| Deploys and TestFlight | `deploy.targets` in the target repo's `helm.json`, plus the operator's Vercel, Convex or Fastlane credentials | `deploy.run` refuses with `deploy target not found`; nothing deploys on its own |
+| Supervisor host | `herdr` or `tmux` on `PATH`, then `helm supervisor start` | The command refuses with `supervisor host <name> is not installed`; wakes stay queued for `wake.list` |
+
+`notify.owner` sends a message to the operator through the project's configured notify channel
+(at most one a minute per project). `notify.nick` is kept as an alias with the same input and
+behaviour.
 
 ## Development
 

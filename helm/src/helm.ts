@@ -605,6 +605,7 @@ export class Helm {
   async gate(input: z.infer<typeof gateInput>): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> {
     return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+      must(!this.running.has(input.workerId), 'worker turn running; wait');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
       const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
@@ -625,10 +626,11 @@ export class Helm {
   }
 
   async baseline(input: z.infer<typeof baselineInput>): Promise<ToolOutcome<BaselineRow>> {
-    return runGuard(async () => {
+    return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+      must(!this.running.has(input.workerId), 'worker turn running; wait');
       return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, now: this.nowIso() });
-    });
+    }));
   }
 
   async prOpen(input: z.infer<typeof prOpenInput>): Promise<ToolOutcome<{ number: number; url: string; head: string; updated?: true }>> {
@@ -1054,6 +1056,9 @@ export class Helm {
       // Only report 'stopped' when this turn actually observed the stop request (via
       // hooks.shouldContinue()); a turn that completed on its own keeps its real outcome.
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
+      if (nextState === 'succeeded' || nextState === 'failed' || nextState === 'idle' || nextState === 'stopped') {
+        await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules);
+      }
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
       // `row` was read before the turn, so its sessionFile predates hooks.onSession; fall back to
@@ -1076,11 +1081,6 @@ export class Helm {
       this.store.updateWorker(workerId, { state: 'unknown' });
       this.store.appendEvent(workerId, 'error', { message: errMessage(err) });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: 'unknown' });
-    } finally {
-      const finalState = this.store.getWorker(workerId)?.state;
-      if (finalState === 'succeeded' || finalState === 'failed' || finalState === 'idle' || finalState === 'stopped') {
-        await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules);
-      }
     }
   }
 }

@@ -116,7 +116,7 @@ export function claudeSandboxSettings(
       autoAllowBashIfSandboxed: true,
       excludedCommands: [],
       filesystem: {
-        allowRead: [...new Set([worktree, gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
+        allowRead: [...new Set([worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
         allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
         denyRead: CLAUDE_DENY_READ,
       },

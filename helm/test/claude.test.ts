@@ -106,7 +106,7 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
   assert.deepEqual(settings.sandbox.excludedCommands, []);
   assert.deepEqual(settings.sandbox.filesystem, {
-    allowRead: ['/wt', '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/helm-claude'],
+    allowRead: ['/wt', join(homedir(), '.config', 'git'), '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/helm-claude'],
     allowWrite: ['/wt', '/tmp/helm-claude'],
     denyRead: [
       join(homedir(), '.config'), join(homedir(), '.ssh'), join(homedir(), '.aws'), join(homedir(), '.gnupg'), join(homedir(), '.netrc'),
@@ -126,7 +126,7 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.equal(review[review.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash');
   assert.ok(!review[review.indexOf('--tools') + 1]!.includes('Edit'));
   const reviewSettings = JSON.parse(review[review.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[] } } };
-  assert.deepEqual(reviewSettings.sandbox.filesystem.allowRead, ['/wt', '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/review-temp']);
+  assert.deepEqual(reviewSettings.sandbox.filesystem.allowRead, ['/wt', join(homedir(), '.config', 'git'), '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/review-temp']);
   assert.deepEqual(reviewSettings.sandbox.filesystem.allowWrite, ['/tmp/review-temp']);
   assert.ok(!review.slice(review.indexOf('--disallowedTools')).includes('Bash'));
 });
@@ -148,7 +148,7 @@ test('resolveClaudeGitDirs: linked worktree exposes its git dir and ~/.helm comm
   const gitDirs = await resolveClaudeGitDirs(worktree);
   assert.equal(gitDirs.commonDir, join(repo, '.git'));
   const settings = JSON.parse(claudeSandboxSettings(worktree, join(root, '.helm', 'tmp', 'w-1'), gitDirs)) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[] } } };
-  assert.deepEqual(settings.sandbox.filesystem.allowRead, [worktree, gitDirs.gitDir, gitDirs.commonDir, join(root, '.helm', 'tmp', 'w-1')]);
+  assert.deepEqual(settings.sandbox.filesystem.allowRead, [worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, join(root, '.helm', 'tmp', 'w-1')]);
   assert.deepEqual(settings.sandbox.filesystem.allowWrite, [worktree, join(root, '.helm', 'tmp', 'w-1')]);
   assert.ok(!settings.sandbox.filesystem.allowWrite.includes(gitDirs.commonDir));
 });

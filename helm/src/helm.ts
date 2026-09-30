@@ -17,6 +17,7 @@ import type {
   PrStatus,
   Store,
   ToolOutcome,
+  WorkerMeta,
   WorkerHooks,
   WorkerResult,
   WorkerRow,
@@ -155,6 +156,7 @@ const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set(['success', 'neutral', 
 
 type OnDone = (workerId: string, result: WorkerResult | null, outcome: WorkerRunOutcome) => Promise<void>;
 type GateToolResult = { head: string; passed: boolean; checks: GateRow['checks']; gateId?: string; queued?: true };
+export type GatePolicy = Readonly<{ configRef: string; baseSha: string; source: 'current-base' | 'spawn-base' }>;
 
 function refuse(reason: string): { ok: false; reason: string } {
   return { ok: false, reason };
@@ -162,6 +164,30 @@ function refuse(reason: string): { ok: false; reason: string } {
 
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function gateBranch(value: string | null | undefined): string | undefined {
+  const branch = value?.trim().replace(/^origin\//, '');
+  if (!branch || branch.startsWith('refs/') || /^[0-9a-f]{7,64}$/i.test(branch) || branch.startsWith('-')) return undefined;
+  return branch;
+}
+
+export async function resolveGatePolicy(options: { workspace: Pick<Workspace, 'fetch' | 'resolveSha' | 'defaultBranch'>; row: WorkerRow; meta?: WorkerMeta; baseline?: BaselineRow }): Promise<GatePolicy> {
+  const candidates = [options.meta?.prBase, options.baseline?.baseRef];
+  try { candidates.push(await options.workspace.defaultBranch(options.row.repo)); } catch { /* recorded spawn base is the safe fallback */ }
+  let fetched = false;
+  for (const candidate of candidates) {
+    const branch = gateBranch(candidate);
+    if (!branch) continue;
+    try {
+      if (!fetched) { await options.workspace.fetch(options.row.repo); fetched = true; }
+      const configRef = `origin/${branch}`;
+      return { configRef, baseSha: await options.workspace.resolveSha(options.row.repo, configRef), source: 'current-base' };
+    } catch {
+      // Try the next configured branch before falling back to the spawn-time SHA.
+    }
+  }
+  return { configRef: options.row.baseSha, baseSha: options.row.baseSha, source: 'spawn-base' };
 }
 
 /** Turns thrown errors into the harness's stable refusal shape. */
@@ -756,19 +782,17 @@ export class Helm {
         const head = await this.workspace.head(row.worktree);
         const existing = this.capacity.findQueued(input.workerId, 'gate', head);
         if (existing) return { row, head, checks: [] as Array<{ name: string; command: string }>, sandbox: undefined, loadClass: existing.loadClass, gateId: existing.id, duplicate: true as const };
-        await this.workspace.fetch(row.repo);
-        const baseRef = `origin/${row.baseRef}`;
-        const baseSha = await this.workspace.resolveSha(row.repo, baseRef);
-        const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, baseRef)))];
-        const sandbox = await sandboxEnabled(row.repo, baseRef);
-        if (!sandbox) this.store.appendEvent(row.workerId, 'gate.sandbox.opt_out', { project: row.repoSlug, head, reason: 'base helm.json sets gate.sandbox=false' });
         const meta = this.store.getMeta(row.workerId);
         const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
+        const policy = await resolveGatePolicy({ workspace: this.workspace, row, meta, baseline });
+        const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, policy.configRef)))];
+        const sandbox = await sandboxEnabled(row.repo, policy.configRef);
+        if (!sandbox) this.store.appendEvent(row.workerId, 'gate.sandbox.opt_out', { project: row.repoSlug, head, reason: 'base helm.json sets gate.sandbox=false' });
         if (baseline) {
           const command = (await loadRepoConfig(row.repo, baseline.baseSha, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
           checks.push({ name: 'acceptance', command });
         }
-        return { row, head, checks, sandbox, baseSha, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };
+        return { row, head, checks, sandbox, policy, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };
       });
       if (prepared.duplicate) return { ok: true, queued: true, gateId: prepared.gateId } as ToolOutcome<GateToolResult>;
 
@@ -805,7 +829,7 @@ export class Helm {
           onRefused: (reason) => this.store.appendEvent(input.workerId, 'gate.refused', { project: current.repoSlug, head: prepared.head, reason }),
         });
         if (!outcome.passed && attempt === 0 && isInfrastructureGateFailure(outcome.checks)) {
-          this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head: prepared.head, baseSha: prepared.baseSha, reason: 'process or memory resource exhaustion', checks: outcome.checks });
+          this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head: prepared.head, baseSha: prepared.policy.baseSha, configRef: prepared.policy.configRef, configSource: prepared.policy.source, reason: 'process or memory resource exhaustion', checks: outcome.checks });
           const retryId = `${prepared.gateId}:infra`;
           this.capacity.finish(runId);
           let resolveRetry!: (result: GateOutcome) => void;
@@ -826,7 +850,7 @@ export class Helm {
           }
           const gateRow: GateRow = { gateId: runId, workerId: input.workerId, head: prepared.head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
           this.store.insertGate(gateRow);
-          this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head: prepared.head, baseSha: prepared.baseSha });
+          this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head: prepared.head, baseSha: prepared.policy.baseSha, configRef: prepared.policy.configRef, configSource: prepared.policy.source });
           return { ok: true, head: prepared.head, passed: outcome.passed, checks: outcome.checks };
         });
       };

@@ -73,7 +73,7 @@ import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGua
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
-import { verdictLine } from './review.js';
+import { isQuoted, verdictLine } from './review.js';
 import { inferPrIssue, recordPrMerge } from './pr-watch.js';
 import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
@@ -969,8 +969,7 @@ export class Helm {
     let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
     // Move verdict lines or trailing verdict sentences below the summary and notes.
     const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (match, prefix: string, line: string, offset: number, whole: string) => {
-      // A verdict inside an open quotation is quoted text, not the reviewer's verdict.
-      if ((whole.slice(whole.lastIndexOf('\n', offset) + 1, offset).match(/["“”]/g)?.length ?? 0) % 2) return match;
+      if (isQuoted(whole, offset + prefix.length)) return match;
       lastVerdict = line.trim();
       return prefix.trimEnd();
     }).trim();

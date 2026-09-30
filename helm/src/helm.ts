@@ -433,7 +433,7 @@ export class Helm {
       timeoutFor: async (row) => {
         try {
           const repo = requireValue(await this.resolveRepo(row.project), `project not found: ${row.project}`);
-          const config = await loadRepoConfig(repo, row.sha, false);
+          const config = await loadRepoConfig(repo, row.sha, false, { timeout: 5_000 });
           return config.deploy?.targets.find((target) => target.name === row.target)?.timeoutMin;
         } catch {
           return undefined;
@@ -632,7 +632,7 @@ export class Helm {
       const outcome = await this.gates.run(row.worktree, checks, logDir, {
         timeoutMs: this.config.gateTimeoutMs,
         nodeModulesRoot: this.workerWorktreeRoot(row),
-        onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'error', { message }),
+        onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
       });
       const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
       this.store.insertGate(gateRow);

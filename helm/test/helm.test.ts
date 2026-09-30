@@ -299,6 +299,28 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
 });
 
+test('gate node_modules cleanup failures are hygiene warnings', async () => {
+  let cleanupError: ((message: string) => void) | undefined;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      cleanupError = options?.onNodeModulesError;
+      cleanupError?.('permission denied');
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-cleanup-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  assert.ok(cleanupError);
+  assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'hygiene.warning' && event.data.message === 'permission denied'));
+  assert.equal(store.listEvents(spawned.workerId).some((event) => event.kind === 'error' && event.data.message === 'permission denied'), false);
+});
+
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
   const { helm, store, cloned, fetched, config } = makeHelm();
   const first = await helm.spawn(spawnBody('acme/widgets'));

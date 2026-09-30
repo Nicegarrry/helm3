@@ -756,16 +756,19 @@ export class Helm {
         const head = await this.workspace.head(row.worktree);
         const existing = this.capacity.findQueued(input.workerId, 'gate', head);
         if (existing) return { row, head, checks: [] as Array<{ name: string; command: string }>, sandbox: undefined, loadClass: existing.loadClass, gateId: existing.id, duplicate: true as const };
-        const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
-        const sandbox = await sandboxEnabled(row.repo, row.baseSha);
+        await this.workspace.fetch(row.repo);
+        const baseRef = `origin/${row.baseRef}`;
+        const baseSha = await this.workspace.resolveSha(row.repo, baseRef);
+        const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, baseRef)))];
+        const sandbox = await sandboxEnabled(row.repo, baseRef);
         if (!sandbox) this.store.appendEvent(row.workerId, 'gate.sandbox.opt_out', { project: row.repoSlug, head, reason: 'base helm.json sets gate.sandbox=false' });
         const meta = this.store.getMeta(row.workerId);
         const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
         if (baseline) {
-          const command = (await loadRepoConfig(row.repo, baseline.baseSha, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
+          const command = (await loadRepoConfig(row.repo, baseRef, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
           checks.push({ name: 'acceptance', command });
         }
-        return { row, head, checks, sandbox, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };
+        return { row, head, checks, sandbox, baseSha, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };
       });
       if (prepared.duplicate) return { ok: true, queued: true, gateId: prepared.gateId } as ToolOutcome<GateToolResult>;
 
@@ -802,7 +805,7 @@ export class Helm {
           onRefused: (reason) => this.store.appendEvent(input.workerId, 'gate.refused', { project: current.repoSlug, head: prepared.head, reason }),
         });
         if (!outcome.passed && attempt === 0 && isInfrastructureGateFailure(outcome.checks)) {
-          this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head: prepared.head, reason: 'process or memory resource exhaustion', checks: outcome.checks });
+          this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head: prepared.head, baseSha: prepared.baseSha, reason: 'process or memory resource exhaustion', checks: outcome.checks });
           const retryId = `${prepared.gateId}:infra`;
           this.capacity.finish(runId);
           let resolveRetry!: (result: GateOutcome) => void;
@@ -823,7 +826,7 @@ export class Helm {
           }
           const gateRow: GateRow = { gateId: runId, workerId: input.workerId, head: prepared.head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
           this.store.insertGate(gateRow);
-          this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head: prepared.head });
+          this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head: prepared.head, baseSha: prepared.baseSha });
           return { ok: true, head: prepared.head, passed: outcome.passed, checks: outcome.checks };
         });
       };

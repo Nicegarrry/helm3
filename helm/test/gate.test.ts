@@ -143,6 +143,32 @@ test('defaultChecks: a worker helm.json change cannot remove base gates', async 
   }
 });
 
+test('defaultChecks reads the current origin base head after spawn, not the worker branch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-current-base-'));
+  const runner = gateRunner({ allowUnsandboxed: true });
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    disableGitMaintenance(dir);
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'spawn', command: 'echo spawn' }] }));
+    execFileSync('git', ['add', 'helm.json'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'spawn base'], { cwd: dir });
+    const spawnSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'current', command: 'echo current' }] }));
+    execFileSync('git', ['add', 'helm.json'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'current base'], { cwd: dir });
+    const currentSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', currentSha], { cwd: dir });
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [{ name: 'worker', command: 'echo worker' }] }));
+
+    assert.deepEqual(await runner.defaultChecks(dir, 'origin/main'), [{ name: 'current', command: 'echo current' }]);
+    assert.notDeepEqual(await runner.defaultChecks(dir, spawnSha), [{ name: 'current', command: 'echo current' }]);
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
 test('sandbox opt-out is read from the base helm.json, never the worker copy', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-policy-'));
   try {
@@ -156,6 +182,29 @@ test('sandbox opt-out is read from the base helm.json, never the worker copy', a
     const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
     writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gates: [], gate: { sandbox: true } }));
     assert.equal(await sandboxEnabled(dir, baseSha), false);
+  } finally {
+    removeTempDir(dir);
+  }
+});
+
+test('sandbox policy follows the current origin base head', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'helm-gate-current-policy-'));
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    disableGitMaintenance(dir);
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gate: { sandbox: true } }));
+    execFileSync('git', ['add', 'helm.json'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'spawn policy'], { cwd: dir });
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gate: { sandbox: false } }));
+    execFileSync('git', ['add', 'helm.json'], { cwd: dir });
+    execFileSync('git', ['commit', '-qm', 'current policy'], { cwd: dir });
+    const currentSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', currentSha], { cwd: dir });
+    writeFileSync(join(dir, 'helm.json'), JSON.stringify({ gate: { sandbox: true } }));
+
+    assert.equal(await sandboxEnabled(dir, 'origin/main'), false);
   } finally {
     removeTempDir(dir);
   }

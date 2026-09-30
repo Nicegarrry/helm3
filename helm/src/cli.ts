@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { EventRow, HelmConfig, InboxState, Store, WorkerRow } from './types.js';
-import { ensureHome, loadConfig } from './config.js';
+import { createEffectiveSpendReader, ensureHome, loadConfig } from './config.js';
 import { openStore } from './store.js';
 import { listBudgetStatuses } from './budget.js';
 import { gitWorkspace } from './workspace.js';
@@ -56,6 +56,7 @@ function usage(): void {
   review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
   status [--json]
+  cap --usd N [--warn N] [--workers N] [--tap <id>] [--json]
   budget open <project> <label> <capUsd> [--codex-tokens n]
   budget close <project>
   budget [project] [--json]
@@ -263,13 +264,21 @@ const cmdStatus = (args: string[]) =>
   readCmd(args, (_p, v, store, config) => {
     const total = store.spendTotal();
     const activeWorkers = store.listWorkers().filter((w) => w.state === 'queued' || w.state === 'running').length;
-    const payload = { spendUsd: total.spendUsd, spendCapUsd: config.spendCapUsd, activeWorkers, maxWorkers: config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(store) };
+    const spend = createEffectiveSpendReader(config, store, loadSettings(config.home))();
+    const payload = { spendUsd: total.spendUsd, spendCapUsd: spend.capUsd, spendWarnUsd: spend.warnUsd, activeWorkers, maxWorkers: spend.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(store), spendSources: spend.sources, spendCapSource: spend.sources.capUsd, spendWarnSource: spend.sources.warnUsd, maxWorkersSource: spend.sources.maxWorkers, ...(spend.warning ? { warning: spend.warning } : {}) };
     if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
     console.log(`spend:    $${payload.spendUsd.toFixed(4)}${payload.spendCapUsd > 0 ? ` / $${payload.spendCapUsd.toFixed(2)} cap` : ' (no cap)'}`);
+    console.log(`warn:     $${payload.spendWarnUsd.toFixed(2)}`);
     console.log(`workers:  ${payload.activeWorkers} / ${payload.maxWorkers} active`);
+    if (payload.warning) console.error(`warning:  ${payload.warning}`);
     console.log(`unknown-cost events: ${payload.unknownCostEvents}`);
     for (const project of payload.projects) console.log(`budget:   ${project.project} ${project.label} $${project.spentUsd.toFixed(2)} / $${project.capUsd.toFixed(2)}${project.exhausted ? ' exhausted' : ''}`);
   });
+const cmdCap = (args: string[]) =>
+  simpleCmd('spend.set', args, (_p, v) => {
+    if (v.usd === undefined || !Number.isFinite(Number(v.usd))) return undefined;
+    return { capUsd: Number(v.usd), ...(v.warn !== undefined ? { warnUsd: Number(v.warn) } : {}), ...(v.workers !== undefined ? { maxWorkers: Number(v.workers) } : {}), ...(v.tap ? { tapId: v.tap } : {}) };
+  }, { usd: { type: 'string' }, warn: { type: 'string' }, workers: { type: 'string' }, tap: { type: 'string' } });
 
 async function cmdBudget(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { json: { type: 'boolean' }, 'codex-tokens': { type: 'string' } } });
@@ -507,6 +516,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const helm = new Helm({
     config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules }), github,
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
+    spendStartup: true,
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),
     discord,
     review: createReview({ store, github, workspace, jev, settings }),
@@ -590,7 +600,7 @@ const cmdDeploy = async (args: string[]): Promise<void> => {
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
-  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
+  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
   inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, deploy: cmdDeploy,
 };
 

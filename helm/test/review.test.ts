@@ -27,7 +27,7 @@ function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchI
   const github = {
     async openPr() { return { number: 1, url: worker.repoSlug }; },
     async prStatus(_repo: string, number: number): Promise<PrStatus> { return { number, state: 'open', head: currentHead, mergeable: true, draft: false, checks: [], reviews: [], url: worker.repoSlug }; },
-    async comment() { return { body: options.body ?? 'APPROVE: ok', issueNumber: options.issueNumber ?? 1 }; },
+    async comment() { return { body: options.body ?? posted.at(-1) ?? 'APPROVE: ok', issueNumber: options.issueNumber ?? 1 }; },
     async postComment(_repo: string, _number: number, body: string) { posted.push(body); return 'https://github.com/owner/repo/pull/1#issuecomment-1'; },
     async merge() { merges += 1; },
   } as unknown as GitHub;
@@ -218,3 +218,49 @@ test('review.request does not record an approval if the PR head changes during r
     assert.ok(d.store.listAllEvents().some((event) => event.kind === 'review.record.failed'));
   } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
 });
+
+for (const example of [
+  {
+    summary: 'Reviewed PR #280’s diff ... are unavailable. APPROVE: No correctness issue found in the reviewed diff.',
+    notes: 'The PR head ref and current checkout HEAD resolve to the same commit.',
+    line: 'APPROVE: No correctness issue found in the reviewed diff.',
+    verdict: 'approve',
+  },
+  {
+    summary: 'Reviewed the diff. REQUEST_CHANGES: Fix the missing validation.',
+    notes: 'The checkout matches the PR head.',
+    line: 'REQUEST_CHANGES: Fix the missing validation.',
+    verdict: 'changes',
+  },
+  {
+    summary: 'APPROVE: Checks passed.',
+    notes: 'Verified the PR head.',
+    line: 'APPROVE: Checks passed.',
+    verdict: 'approve',
+  },
+  {
+    summary: 'Reviewed the diff without a verdict.',
+    notes: 'Checks are unavailable.',
+    line: 'REQUEST_CHANGES: reviewer gave no verdict',
+    verdict: 'changes',
+  },
+]) {
+  test(`review.request moves the verdict below notes: ${example.summary}`, async () => {
+    const home = mkdtempSync(join(tmpdir(), 'helm-verdict-comment-'));
+    const d = setup({ home, jev: { shadow: false, async ask() { return { ok: false as const, reason: 'no key' }; } }, runner: { async run() { return { result: { status: 'succeeded', summary: example.summary, notes: example.notes, changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } } });
+    try {
+      const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+      assert.equal(result.ok, true); if (!result.ok) return;
+      await d.helm.settle(result.reviewWorkerId);
+      const body = d.posted[0]!;
+      assert.equal(body.split('\n').at(-1), example.line);
+      assert.ok(body.indexOf(example.notes) < body.lastIndexOf(example.line));
+      assert.equal(body.split(example.line).length, 2);
+      if (example.summary.startsWith('Reviewed PR #280')) {
+        assert.equal(body, `Reviewed PR #280’s diff ... are unavailable.\n\n${example.notes}\n\n${example.line}`);
+      }
+      const reviews = d.store.sql.prepare('SELECT stated,verdict FROM reviews').all() as Record<string, unknown>[];
+      assert.deepEqual(reviews.map((row) => ({ ...row })), [{ stated: example.verdict === 'approve' ? 'approve' : 'request_changes', verdict: example.verdict }]);
+    } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+  });
+}

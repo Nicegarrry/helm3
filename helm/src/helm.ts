@@ -957,10 +957,18 @@ export class Helm {
   }
 
   private async finishReview(workerId: string, result: WorkerResult | null, project: string, number: number, head: string, reviewer: string): Promise<void> {
-    const body = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
+    const raw = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
+    let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
+    // Move verdict lines or trailing verdict sentences below the summary and notes.
+    const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (_match, prefix: string, line: string) => {
+      lastVerdict = line.trim();
+      return prefix.trimEnd();
+    }).trim();
+    const body = [content, lastVerdict].filter(Boolean).join('\n\n');
+    const verdict = verdictLine(body) === 'approve' ? 'approve' : 'request_changes';
     const commentUrl = await this.github.postComment(project, number, body);
     this.store.appendEvent(workerId, 'review.posted', { number, commentUrl });
-    const recorded = await this.reviewRecord({ project, number, head, reviewer, commentUrl, verdict: verdictLine(body) === 'approve' ? 'approve' : 'request_changes' });
+    const recorded = await this.reviewRecord({ project, number, head, reviewer, commentUrl, verdict });
     if (!recorded.ok) this.store.appendEvent(workerId, 'review.record.failed', { project, number, head, reason: recorded.reason });
   }
 

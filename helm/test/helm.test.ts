@@ -8,6 +8,7 @@ import { createModelCatalog } from '../src/routing/catalog.js';
 import { openStore } from '../src/store.js';
 import { createToolRegistry } from '../src/tools.js';
 import { loadSettings, type Settings } from '../src/settings.js';
+import type { Jev } from '../src/jev.js';
 import type {
   GateRow,
   GateRunner,
@@ -223,7 +224,7 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
+type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number; jev: Jev; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
   settings?: Omit<Partial<Settings>, 'budgets'> & { budgets?: Partial<Settings['budgets']> };
 };
 
@@ -249,6 +250,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     prompts: FAKE_PROMPTS,
     routingCatalog,
     settings,
+    jev: overrides.jev,
     statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
@@ -282,6 +284,57 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   assert.equal(row?.state, 'succeeded');
   assert.ok(row?.head, 'head should be recorded after a successful commit');
   assert.equal(row?.result?.status, 'succeeded');
+});
+
+function priorityJev(choices: { class?: string; size?: string } | Error): Jev {
+  return { shadow: false, async ask(_purpose, input) {
+    if (!('class' in input.questions)) return { ok: false, reason: 'unexpected question' };
+    if (choices instanceof Error) throw choices;
+    return { ok: true, answers: { class: { choice: choices.class }, size: { choice: choices.size } } };
+  } };
+}
+
+function admissionEvent(store: Store, workerId: string) {
+  return store.listEvents(workerId, { limit: 100 }).find((event) => event.kind === 'admission.priority')?.data;
+}
+
+test('a security-classified objective is bumped to high and recorded in admission.priority', async () => {
+  const { helm, store } = makeHelm({ jev: priorityJev({ class: 'security', size: 's' }) });
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-priority-security-'), { priority: 'low', requestedBy: 'owner' }));
+  assert.ok(outcome.ok);
+  if (!outcome.ok) return;
+  assert.deepEqual(admissionEvent(store, outcome.workerId), {
+    stated: 'low', requestedBy: 'owner', class: 'security', size: 's', effective: 'high', score: 45,
+    reasons: ['priority high +20', 'requested by owner +15', 'quick win (s) +10'],
+  });
+  const urgent = await helm.spawn(spawnBody(mkTempDir('helm-priority-urgent-'), { priority: 'urgent' }));
+  assert.ok(urgent.ok);
+  if (urgent.ok) assert.equal(admissionEvent(store, urgent.workerId)?.effective, 'urgent');
+});
+
+test('a Jev failure or unusable answer falls back to the stated priority without blocking the spawn', async () => {
+  for (const jev of [priorityJev(new Error('jev down')), priorityJev({ class: 'nonsense', size: 'huge' }), undefined]) {
+    const { helm, store } = makeHelm({ jev });
+    const outcome = await helm.spawn(spawnBody(mkTempDir('helm-priority-fallback-'), { priority: 'high' }));
+    assert.ok(outcome.ok);
+    if (!outcome.ok) return;
+    assert.deepEqual(admissionEvent(store, outcome.workerId), { stated: 'high', requestedBy: 'auto', class: null, size: null, effective: 'high', score: 20, reasons: ['priority high +20'] });
+  }
+});
+
+test('a repo helm.json priority is the project default and an explicit priority overrides it', async () => {
+  const { helm, store } = makeHelm();
+  const repo = mkTempDir('helm-priority-default-');
+  writeFileSync(join(repo, 'helm.json'), JSON.stringify({ priority: 'urgent' }));
+  const defaulted = await helm.spawn(spawnBody(repo));
+  const explicit = await helm.spawn(spawnBody(repo, { priority: 'low' }));
+  assert.ok(defaulted.ok && explicit.ok);
+  if (!defaulted.ok || !explicit.ok) return;
+  assert.equal(admissionEvent(store, defaulted.workerId)?.stated, 'urgent');
+  assert.equal(admissionEvent(store, explicit.workerId)?.stated, 'low');
+  const plain = await helm.spawn(spawnBody(mkTempDir('helm-priority-none-')));
+  assert.ok(plain.ok);
+  if (plain.ok) assert.equal(admissionEvent(store, plain.workerId)?.stated, 'normal');
 });
 
 test('dispatched issue-title lookup runs after spawn admission and falls back on failure', async () => {

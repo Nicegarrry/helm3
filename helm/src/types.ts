@@ -33,6 +33,7 @@ export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
 export const LOAD_CLASSES = ['light', 'medium', 'heavy'] as const;
 export type LoadClass = (typeof LOAD_CLASSES)[number];
+export const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const; export type Priority = (typeof PRIORITIES)[number];
 export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
 export type InboxState = (typeof INBOX_STATES)[number];
 export type InboxRow = Readonly<{
@@ -170,7 +171,6 @@ export interface Store {
   close(): void;
 }
 
-
 export type WorktreeInfo = Readonly<{ path: string; branch: string; baseSha: string }>;
 
 export interface Workspace {
@@ -200,7 +200,6 @@ export interface Workspace {
   fetch(repo: string, branch?: string): Promise<void>;
 }
 
-
 export type GateCheck = Readonly<{ name: string; command: string }>;
 
 export interface GateRunner {
@@ -209,7 +208,6 @@ export interface GateRunner {
   /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
   defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }
-
 
 export type PrStatus = Readonly<{
   number: number;
@@ -318,6 +316,8 @@ export const spawnInput = z.object({
   idempotencyKey: z.string().min(1).max(200).optional(),
   skills: z.array(z.string().min(1)).optional(),
   loadClass: z.enum(LOAD_CLASSES).optional(),
+  priority: z.enum(PRIORITIES).optional(),
+  requestedBy: z.enum(['owner', 'auto']).optional(),
   lanes: z.array(z.enum(['codex', 'pi', 'claude'])).max(3).optional(),
 }).strict();
 export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(5), verbose: z.boolean().optional() }).strict();

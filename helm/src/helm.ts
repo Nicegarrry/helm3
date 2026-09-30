@@ -128,6 +128,8 @@ export type HelmDeps = Readonly<{
   stopTimeoutMs?: number;
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
+  /** Install dependencies before builder/validator turns (the daemon enables it; off keeps turn start synchronous for fake runners). */
+  workerInstall?: boolean;
   settings?: Settings;
   spendStartup?: boolean;
   supervisor?: SupervisorService;
@@ -262,6 +264,7 @@ export class Helm {
   private readonly installedLocks = new Map<string, string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
+  private readonly workerInstall: boolean;
   private readonly settings: Settings;
   private readonly spendSettings: EffectiveSpendReader;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
@@ -302,6 +305,7 @@ export class Helm {
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
+    this.workerInstall = deps.workerInstall === true;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
     this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog, skipStartup: deps.routingSkipStartup });
@@ -1367,7 +1371,7 @@ export class Helm {
       },
     };
     try {
-      if (row.role !== 'reviewer') await this.installWorkerDeps(row);
+      if (this.workerInstall && row.role !== 'reviewer') await this.installWorkerDeps(row);
       const outcome = await this.runner.run(runInput, message, hooks);
       const result = outcome.result;
       if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {

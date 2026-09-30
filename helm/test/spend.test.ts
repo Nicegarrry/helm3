@@ -74,11 +74,11 @@ test('lowering does not need a tap and atomic spend update preserves other setti
   writeFileSync(join(root, 'helm.json'), JSON.stringify({ supervisor: { command: 'keep-me' }, spend: { capUsd: 5 } }));
   const { helm, store } = makeHelm(root);
   try {
-    const result = await createToolRegistry(helm).call('spend.set', { capUsd: 2 });
-    assert.deepEqual(result, { ok: true, spend: { capUsd: 2 } });
+    const result = await createToolRegistry(helm).call('spend.set', { capUsd: 2, warnUsd: 1 });
+    assert.deepEqual(result, { ok: true, spend: { capUsd: 2, warnUsd: 1 } });
     const saved = JSON.parse(readFileSync(join(root, 'helm.json'), 'utf8')) as Record<string, unknown>;
     assert.deepEqual(saved.supervisor, { command: 'keep-me' });
-    assert.deepEqual(saved.spend, { capUsd: 2 });
+    assert.deepEqual(saved.spend, { capUsd: 2, warnUsd: 1 });
     assert.deepEqual(updateSpendSettings(root, { warnUsd: 1 }).spend, { capUsd: 2, warnUsd: 1 });
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -88,8 +88,8 @@ test('raising cap without a spend.cap tap is refused; a granted tap is consumed 
   const { helm, store } = makeHelm(root);
   try {
     const tools = createToolRegistry(helm);
-    const action = spendCapAction({ capUsd: 8 });
-    const refused = await tools.call('spend.set', { capUsd: 8 });
+    const action = spendCapAction({ capUsd: 5, warnUsd: 4, maxWorkers: 2 }, { capUsd: 8, maxWorkers: 4 });
+    const refused = await tools.call('spend.set', { capUsd: 8, maxWorkers: 4 });
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.match(refused.reason, new RegExp(`${SPEND_CAP_TAP_KIND}.*${action.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     const requested = await tools.call('tap.request', { project: SPEND_CAP_TAP_PROJECT, kind: SPEND_CAP_TAP_KIND, action });
@@ -97,7 +97,7 @@ test('raising cap without a spend.cap tap is refused; a granted tap is consumed 
     if (!requested.ok) return;
     const tap = requested as { ok: true; id: string };
     assert.deepEqual(await tools.call('tap.confirm', { id: tap.id, code: CODE }), { ok: true, granted: true });
-    assert.deepEqual(await tools.call('spend.set', { capUsd: 8, tapId: tap.id }), { ok: true, spend: { capUsd: 8 } });
+    assert.deepEqual(await tools.call('spend.set', { capUsd: 8, maxWorkers: 4, tapId: tap.id }), { ok: true, spend: { capUsd: 8, maxWorkers: 4 } });
     const reused = await tools.call('spend.set', { capUsd: 9, tapId: tap.id });
     assert.equal(reused.ok, false);
     assert.equal((store.sql.prepare('SELECT state FROM taps WHERE id = ?').get(tap.id) as { state: string }).state, 'used');
@@ -112,7 +112,7 @@ test('raising cap to no cap requires and consumes a spend.cap tap', async () => 
     const refused = await tools.call('spend.set', { capUsd: 0 });
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.match(refused.reason, /spend\.cap/);
-    const action = spendCapAction({ capUsd: 0 });
+    const action = spendCapAction({ capUsd: 5, warnUsd: 4, maxWorkers: 2 }, { capUsd: 0 });
     const requested = await tools.call('tap.request', { project: SPEND_CAP_TAP_PROJECT, kind: SPEND_CAP_TAP_KIND, action });
     assert.equal(requested.ok, true);
     if (!requested.ok) return;
@@ -120,6 +120,15 @@ test('raising cap to no cap requires and consumes a spend.cap tap', async () => 
     assert.deepEqual(await tools.call('tap.confirm', { id: tap.id, code: CODE }), { ok: true, granted: true });
     assert.deepEqual(await tools.call('spend.set', { capUsd: 0, tapId: tap.id }), { ok: true, spend: { capUsd: 0 } });
     assert.equal((store.sql.prepare('SELECT state FROM taps WHERE id = ?').get(tap.id) as { state: string }).state, 'used');
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('spend.set rejects a warning above a set cap', async () => {
+  const root = home();
+  const { helm, store } = makeHelm(root);
+  try {
+    const result = await createToolRegistry(helm).call('spend.set', { warnUsd: 6 });
+    assert.deepEqual(result, { ok: false, reason: 'warnUsd 6 exceeds capUsd 5' });
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

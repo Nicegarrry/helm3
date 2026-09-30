@@ -6,11 +6,13 @@ import type { HelmConfig, SpendLimitName, SpendLimitRow, SpendLimitSource, Store
 import { loadSettings, readSettingsFile, type Settings } from './settings.js';
 export type SpendSource = SpendLimitSource;
 export type EffectiveSpend = Readonly<{ capUsd: number; warnUsd: number; maxWorkers: number; sources: Readonly<{ capUsd: SpendSource; warnUsd: SpendSource; maxWorkers: SpendSource }>; warning?: string }>;
+
 function num(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === '') return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
+
 function optionalNum(value: string | undefined): number | undefined { if (value === undefined || value.trim() === '') return undefined; const parsed = Number(value); return Number.isFinite(parsed) ? parsed : undefined; }
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): HelmConfig {
   const home = env.HELM_HOME && env.HELM_HOME.trim() !== '' ? env.HELM_HOME : join(homedir(), '.helm');

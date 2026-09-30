@@ -328,9 +328,11 @@ export class Helm {
       if (input.capUsd === undefined && input.warnUsd === undefined && input.maxWorkers === undefined) return refuse('at least one spend setting is required');
       const current = this.effectiveSpend();
       const nextCapUsd = input.capUsd ?? current.capUsd;
+      const nextWarnUsd = input.warnUsd ?? current.warnUsd;
       const nextMaxWorkers = input.maxWorkers ?? current.maxWorkers;
+      if (nextCapUsd > 0 && nextWarnUsd > nextCapUsd) return refuse(`warnUsd ${nextWarnUsd} exceeds capUsd ${nextCapUsd}`);
       const raising = spendLimitRaises(nextCapUsd, current.capUsd) || spendLimitRaises(nextMaxWorkers, current.maxWorkers);
-      const action = spendCapAction(input);
+      const action = spendCapAction(current, input);
       let reservation: TapReservation | undefined;
       if (raising) {
         if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}`);

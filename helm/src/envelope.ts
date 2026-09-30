@@ -20,9 +20,9 @@ export const defaultEnvelope = (): Envelope => ({ rules: [DEFAULT_RULES], budget
 export const BUDGET_TAP_ACTION = 'budget.open';
 export const SPEND_CAP_TAP_KIND = 'spend.cap';
 export const SPEND_CAP_TAP_PROJECT = 'global';
-export function spendCapAction(input: { capUsd?: number; warnUsd?: number; maxWorkers?: number }): string {
-  const requested = Object.fromEntries(Object.entries({ capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }).filter(([, value]) => value !== undefined));
-  return `spend.cap:${JSON.stringify(requested)}`;
+export function spendCapAction(current: { capUsd: number; warnUsd: number; maxWorkers: number }, input: { capUsd?: number; warnUsd?: number; maxWorkers?: number }): string {
+  const changes = Object.entries({ capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }).filter(([, value]) => value !== undefined).map(([name, value]) => `${name} ${current[name as keyof typeof current]} → ${value}`);
+  return `spend.cap: ${changes.join(', ')}`;
 }
 export type TapPostResult = { ok: true } | { ok: false; reason: string };
 export type TapReservation = Readonly<{ tapId: string; token: string }>;

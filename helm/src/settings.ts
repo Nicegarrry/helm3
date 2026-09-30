@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+
 const JEV_DEFAULTS = { shadow: true, model: 'jev-latest', triageHumanAt: 0.3, attentionAt: 0.4, timeoutMs: 5000 };
 const WAKE_DEFAULTS = { minIntervalSec: 120, maxPerHour: 20 };
 const WATCH_DEFAULTS = { tickSec: 60, silenceMin: 15, sameRefusal: 5, attentionEverySec: 180, cooldownMin: 15 };
@@ -16,6 +17,7 @@ const ROUTING_DEFAULTS = {
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
 const HYGIENE_DEFAULTS = { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 };
+
 const settingsSchema = z.object({
   jev: z.object({
     shadow: z.boolean().default(true),
@@ -86,6 +88,7 @@ const settingsSchema = z.object({
     minFreeGb: z.number().positive().default(15),
   }).default(HYGIENE_DEFAULTS),
 });
+
 type ParsedSettings = z.infer<typeof settingsSchema>;
 export type Settings = Omit<ParsedSettings, 'deploy'> & { deploy?: ParsedSettings['deploy'] };
 const DEFAULT_SETTINGS = settingsSchema.parse({});

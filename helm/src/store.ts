@@ -256,6 +256,7 @@ export function openStore(path: string): Store {
   const spendTotalStmt = db.prepare('SELECT inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd FROM spend');
   const spendSeriesStmt = db.prepare('SELECT at, costUsd FROM spend ORDER BY at DESC, id DESC LIMIT ?');
   const runningWorkersStmt = db.prepare("SELECT workerId FROM workers WHERE state = 'running'");
+
   const getSpendLimitsStmt = db.prepare('SELECT name, value, source, at, tapId FROM spend_limits ORDER BY name');
   const setSpendLimitStmt = db.prepare('INSERT INTO spend_limits (name, value, source, at, tapId) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, source = excluded.source, at = excluded.at, tapId = excluded.tapId');
   return {
@@ -404,6 +405,7 @@ export function openStore(path: string): Store {
     },
     getSpendLimits(): SpendLimitRow[] { const rows = getSpendLimitsStmt.all() as Array<Record<string, unknown>>; return rows.map((row) => ({ name: String(row.name) as SpendLimitRow['name'], value: Number(row.value), source: String(row.source) as SpendLimitRow['source'], at: String(row.at), tapId: (row.tapId as string | null) ?? null })); },
     setSpendLimits(rows: readonly SpendLimitRow[]): void { for (const row of rows) setSpendLimitStmt.run(row.name, row.value, row.source, row.at, row.tapId); },
+
     markInterrupted(): string[] {
       const rows = runningWorkersStmt.all() as { workerId: string }[];
       const ids = rows.map((row) => row.workerId);

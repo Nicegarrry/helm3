@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import { loadRepoConfig } from '../src/repoconfig.js';
 import { openStore } from '../src/store.js';
 import { loadSettings } from '../src/settings.js';
 import type { GateRunner, GitHub, HelmConfig, PrStatus, WorkerHooks, WorkerRow, WorkerRunner, Workspace } from '../src/types.js';
+import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
 function deps() {
   const home = mkdtempSync(join(tmpdir(), 'helm-b0-home-'));
@@ -44,7 +45,7 @@ test('registered guard refuses pr.merge with its reason', async () => {
     d.store.insertPr({ number: 1, workerId: 'w-guard', url: 'https://example.invalid/1', head: 'a'.repeat(40), createdAt: new Date().toISOString() });
     d.helm.guard('pr.merge', () => 'merge paused');
     assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: 'a'.repeat(40) }), { ok: false, reason: 'merge paused' });
-  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
+  } finally { d.store.close(); removeTempDir(d.home); }
 });
 
 test('spawn defaults to the Codex normal model before any chooser is registered', async () => {
@@ -57,7 +58,7 @@ test('spawn defaults to the Codex normal model before any chooser is registered'
       await d.helm.settle(result.workerId);
       assert.equal(d.store.getWorker(result.workerId)?.model, 'codex/gpt-5.6-luna:high');
     }
-  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+  } finally { d.store.close(); removeTempDir(d.home); removeTempDir(repo); }
 });
 
 test('a model chooser runs only for an unclassified spawn', async () => {
@@ -81,13 +82,13 @@ test('a model chooser runs only for an unclassified spawn', async () => {
       await d.helm.settle(unclassified.workerId);
     }
     assert.equal(calls, 1);
-  } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
+  } finally { d.store.close(); removeTempDir(d.home); removeTempDir(repo); }
 });
 
 test('review.request without a model names review.record', async () => {
   const d = deps();
   try { assert.deepEqual(await d.helm.reviewRequest({ workerId: 'w-missing', allowSameFamily: false }), { ok: false, reason: 'record Claude reviews with review.record' }); }
-  finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); }
+  finally { d.store.close(); removeTempDir(d.home); }
 });
 
 test('loadRepoConfig at a sha ignores uncommitted worktree edits', async () => {
@@ -95,6 +96,7 @@ test('loadRepoConfig at a sha ignores uncommitted worktree edits', async () => {
   try {
     const git = (args: string[], encoding?: BufferEncoding) => execFileSync('git', ['--git-dir', join(repo, '.git'), '--work-tree', repo, ...args], { encoding });
     execFileSync('git', ['init', '-q', repo]);
+    disableGitMaintenance(repo);
     writeFileSync(join(repo, 'helm.json'), JSON.stringify({ gates: [{ name: 'old', command: 'echo old' }] }));
     git(['add', 'helm.json']);
     git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'config']);
@@ -102,7 +104,7 @@ test('loadRepoConfig at a sha ignores uncommitted worktree edits', async () => {
     writeFileSync(join(repo, 'helm.json'), JSON.stringify({ gates: [{ name: 'new', command: 'echo new' }] }));
     const config = await loadRepoConfig(repo, sha);
     assert.equal(config.gates[0]?.name, 'old');
-  } finally { rmSync(repo, { recursive: true, force: true }); }
+  } finally { removeTempDir(repo); }
 });
 
 test('worker_meta round-trips and projectOf maps project worker ids', () => {

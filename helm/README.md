@@ -380,6 +380,25 @@ kind so the supervisor can call `tap.request` with the exact action returned by 
 | `HELM_CODEX_NETWORK` | unset | `1` lets Codex builders reach the network inside their sandbox |
 | `HELM_CLAUDE_BIN` | `~/.local/bin/claude`, else `claude` | The Claude CLI the `claude/…` lane runs |
 
+## Optional integrations
+
+A fresh install with an empty `$HELM_HOME` and no environment variables runs the core loop
+(`worker.spawn`, `gate.run`, `run.status`, `pr.open`) on its own. Every integration below is off
+until configured, attempts no network calls and writes no warnings while absent. When a tool
+needs one that is missing, it refuses and names the `helm.json` key to set.
+
+| Integration | Turn it on with | Without it |
+| --- | --- | --- |
+| Milestone and `notify.owner` messages (Discord) | `discord.projects.<project>.webhookEnv`, or `discord.globalWebhookEnv`: the name of an env var (or `~/.config/helm/env` entry) holding a webhook URL | `notify.owner` refuses with `no notify channel: set discord.projects["<project>"].webhookEnv in helm.json`; milestones are dropped |
+| Taps (one-time approval codes) | `discord.tapWebhookEnv`, a webhook that differs from the milestone channel | `tap.request` refuses with `no tap channel: set discord.tapWebhookEnv in helm.json`; `spend.set` raises that need a tap say the same |
+| Common Ground memory sync | `memory.cg` with `url`, `keyEnv` and `enabled: true` | Memory stays local under `$HELM_HOME/memory`; the sync ticker returns immediately |
+| Deploys and TestFlight | `deploy.targets` in the target repo's `helm.json`, plus the operator's Vercel, Convex or Fastlane credentials | `deploy.run` refuses with `deploy target not found`; nothing deploys on its own |
+| Supervisor host | `herdr` or `tmux` on `PATH`, then `helm supervisor start` | The command refuses with `supervisor host <name> is not installed`; wakes stay queued for `wake.list` |
+
+`notify.owner` sends a message to the operator through the project's configured notify channel
+(at most one a minute per project). `notify.nick` is kept as an alias with the same input and
+behaviour.
+
 ## Development
 
 ```sh

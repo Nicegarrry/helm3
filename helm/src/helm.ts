@@ -91,7 +91,7 @@ import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTa
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
 import { askLoadClass } from './capacity/classify.js';
-import { admissionRank, effectivePriority, quickCheck } from './capacity/priority.js';
+import { admissionRank, effectivePriority, quickCheck, type QuickCheck } from './capacity/priority.js';
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 import { sandboxEnabled } from './gate.js';
@@ -577,7 +577,8 @@ export class Helm {
       if (reason) return refuse(reason);
       let selection: Selection;
       try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
-      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
+      const check = await quickCheck(this.jev, { objective: chosen.input.objective, project: chosen.input.repo });
+      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice, check));
       if (outcome.ok) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice).catch((error) => {
         try { this.store.appendEvent(outcome.workerId, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
       });
@@ -590,7 +591,7 @@ export class Helm {
     input: SpawnInput,
     onDone?: OnDone,
     selection: Selection = { guidance: '', skills: [] },
-    choice?: ModelChoice,
+    choice?: ModelChoice, check: QuickCheck = {},
   ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string; queued?: true; loadClass?: LoadClass }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
@@ -608,7 +609,6 @@ export class Helm {
     const baseRef = baseline?.testCommit ?? input.baseRef ?? (await this.workspace.defaultBranch(repo));
     const baseSha = await this.workspace.resolveSha(repo, baseRef);
     const stated = input.priority ?? (await loadRepoConfig(repo, baseSha, true, { timeout: 5_000 }).catch(() => undefined))?.priority ?? 'normal';
-    const check = await quickCheck(this.jev, { objective: input.objective, project: repoSlug });
     const effective = effectivePriority(stated, check), rank = admissionRank(effective, input.requestedBy ?? 'auto', check.size);
     const workerId = genId('w');
     const branch = `helm/${workerId}`;

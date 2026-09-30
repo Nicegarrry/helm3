@@ -370,6 +370,32 @@ rewrite the database can also forge the limit state, with the same trust boundar
 The daemon's startup Discord line always reports the effective spend limits so such a forge is visible
 to Nick.
 
+## Portfolio report
+
+`helm portfolio [--json] [--since <iso>]` reads this daemon's store without requiring a
+running daemon. The default window is the last 24 hours. Each project has a compact block
+with window USD/Codex tokens, current sprint spend against its budget, merged tickets,
+scorecard clean and first-pass gate rates, open PRs awaiting review/merge, workers waiting/running/queued for over two hours,
+or idle builders with open PRs and no activity for over two hours, open inbox asks, and taps requested in the window.
+The last line totals fleet activity and backlogs. PR review status reflects locally recorded
+reviews at the current head; the command does not query GitHub.
+
+For a daily Discord-compatible webhook push, add to the operator `$HELM_HOME/helm.json`:
+
+```json
+{ "report": { "at": "06:00", "webhookEnv": "HELM_REPORT_WEBHOOK" } }
+```
+
+The ticker uses local machine time and records the successful send date in SQLite, so a
+restart retains the daily marker and downtime is caught up on the next tick that day.
+If the report env name is missing or its value is empty, it tries the Discord global webhook
+env, then the first configured project webhook env. With neither value available, reporting is silently off. Without a
+report block, the fallback route uses 06:00. Webhook values come from the daemon environment
+or `~/.config/helm/env`. Reports above 2,000 characters are truncated at a line boundary
+with a marker and the fleet total retained. Reports run on a separate minute ticker with settings cached for one minute. Failed sends
+retry after 5 then 15 minutes, up to three attempts per local day. Attempts and the last
+attempt time persist across restarts; exhausting attempts logs once and gives up for that day.
+
 ## Configuration
 
 The live spend settings can be placed alongside the other daemon settings in `$HELM_HOME/helm.json`:

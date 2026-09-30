@@ -63,7 +63,7 @@ import { loadRepoConfig } from './repoconfig.js';
 
 import { Lifecycle } from './lifecycle.js';
 import { loadSettings, updateSpendSettings, type Settings } from './settings.js';
-import { createEffectiveSpendReader, spendLimitRaises, type EffectiveSpend } from './config.js';
+import { createEffectiveSpendReader, spendLimitRaises, type EffectiveSpend, type EffectiveSpendReader } from './config.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
 import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
@@ -208,7 +208,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
-  private spendSettings: () => EffectiveSpend;
+  private readonly spendSettings: EffectiveSpendReader;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
   private readonly jev?: Jev;
   private readonly tapRandomInt?: (min: number, max: number) => number;
@@ -342,8 +342,7 @@ export class Helm {
       }
       const at = this.nowIso();
       const changed = (['capUsd', 'warnUsd', 'maxWorkers'] as const).filter((name) => input[name] !== undefined && input[name] !== current[name]);
-      const limits = this.store.getSpendLimits().map((row) => changed.includes(row.name) ? { ...row, value: input[row.name]!, source: 'spend.set' as const, at, tapId: reservation?.tapId ?? null } : row);
-      try { const updated = updateSpendSettings(this.config.home, { capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }); this.store.setSpendLimits(limits); if (changed.length > 0) this.store.appendEvent('project:global', 'spend.changed', { project: 'global', source: 'spend.set', ...(reservation?.tapId ? { tapId: reservation.tapId } : {}), ...Object.fromEntries(changed.map((name) => [name, input[name]])) }); if (reservation) commitTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()); this.spendSettings = createEffectiveSpendReader(this.config, this.store, this.settings, () => this.nowDate()); return { ok: true, spend: updated.spend }; }
+      try { updateSpendSettings(this.config.home, { capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }); this.spendSettings.applySpendSet(input, at, reservation?.tapId ?? null); if (changed.length > 0) this.store.appendEvent('project:global', 'spend.changed', { project: 'global', source: 'spend.set', ...(reservation?.tapId ? { tapId: reservation.tapId } : {}), ...Object.fromEntries(changed.map((name) => [name, input[name]])) }); if (reservation) commitTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()); const effective = this.effectiveSpend(); return { ok: true, spend: Object.fromEntries(Object.keys(input).filter((name): name is 'capUsd' | 'warnUsd' | 'maxWorkers' => name !== 'tapId').map((name) => [name, effective[name]])) }; }
       catch (error) { if (reservation) rollbackTap(this.taps, reservation.tapId, reservation.token); throw error; }
     }));
   }

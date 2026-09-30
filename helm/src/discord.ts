@@ -41,7 +41,10 @@ function milestone(event: EventRow): string | null {
   if (event.kind === 'pr.merged') return `Merged: #${text(event.data.number, 'unknown')}`;
   if (event.kind === 'watch.alert') return `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
-  if (event.kind === 'spend.changed') return `Spend changed: ${event.data.ignored ? 'raise ignored' : text(event.data.source, 'updated')}`;
+  if (event.kind === 'spend.changed') {
+    const values = event.data.values && typeof event.data.values === 'object' ? Object.entries(event.data.values).map(([name, value]) => `${name}=${String(value)}`).join(', ') : '';
+    return `Spend changed: ${event.data.ignored ? 'raise ignored' : text(event.data.source, 'updated')}${values ? `: ${values}` : ''}`;
+  }
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
   if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;

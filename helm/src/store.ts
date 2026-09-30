@@ -2,7 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendLimitRow, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
+import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendLimitRow, SpendLimitState, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
@@ -221,6 +221,7 @@ export function openStore(path: string): Store {
       skills TEXT NOT NULL DEFAULT '[]'
     );
     CREATE TABLE IF NOT EXISTS spend_limits (name TEXT PRIMARY KEY, value REAL NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL, tapId TEXT);
+    CREATE TABLE IF NOT EXISTS spend_limit_state (id INTEGER PRIMARY KEY CHECK (id = 1), checksum TEXT NOT NULL, rows TEXT NOT NULL, at TEXT NOT NULL);
   `);
   migratePrs(db);
   db.exec('CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);');
@@ -259,6 +260,8 @@ export function openStore(path: string): Store {
 
   const getSpendLimitsStmt = db.prepare('SELECT name, value, source, at, tapId FROM spend_limits ORDER BY name');
   const setSpendLimitStmt = db.prepare('INSERT INTO spend_limits (name, value, source, at, tapId) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, source = excluded.source, at = excluded.at, tapId = excluded.tapId');
+  const getSpendLimitStateStmt = db.prepare('SELECT checksum, rows, at FROM spend_limit_state WHERE id = 1');
+  const setSpendLimitStateStmt = db.prepare('INSERT INTO spend_limit_state (id, checksum, rows, at) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET checksum = excluded.checksum, rows = excluded.rows, at = excluded.at');
   return {
     sql: db,
     insertWorker(row: WorkerRow): void {
@@ -405,6 +408,12 @@ export function openStore(path: string): Store {
     },
     getSpendLimits(): SpendLimitRow[] { const rows = getSpendLimitsStmt.all() as Array<Record<string, unknown>>; return rows.map((row) => ({ name: String(row.name) as SpendLimitRow['name'], value: Number(row.value), source: String(row.source) as SpendLimitRow['source'], at: String(row.at), tapId: (row.tapId as string | null) ?? null })); },
     setSpendLimits(rows: readonly SpendLimitRow[]): void { for (const row of rows) setSpendLimitStmt.run(row.name, row.value, row.source, row.at, row.tapId); },
+    getSpendLimitState(): SpendLimitState | undefined {
+      const row = getSpendLimitStateStmt.get() as { checksum: string; rows: string; at: string } | undefined;
+      if (!row) return undefined;
+      try { const rows = JSON.parse(row.rows) as SpendLimitRow[]; return Array.isArray(rows) ? { checksum: row.checksum, rows, at: row.at } : undefined; } catch { return undefined; }
+    },
+    setSpendLimitState(state: SpendLimitState): void { setSpendLimitStateStmt.run(state.checksum, JSON.stringify(state.rows), state.at); },
 
     markInterrupted(): string[] {
       const rows = runningWorkersStmt.all() as { workerId: string }[];

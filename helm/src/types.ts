@@ -123,8 +123,9 @@ export type SpendSummary = Readonly<{
 }>;
 export const SPEND_LIMIT_NAMES = ['capUsd', 'warnUsd', 'maxWorkers'] as const;
 export type SpendLimitName = (typeof SPEND_LIMIT_NAMES)[number];
-export type SpendLimitSource = 'settings' | 'env' | 'default' | 'spend.set';
+export type SpendLimitSource = 'settings' | 'env' | 'default' | 'spend.set' | 'file';
 export type SpendLimitRow = Readonly<{ name: SpendLimitName; value: number; source: SpendLimitSource; at: string; tapId: string | null }>;
+export type SpendLimitState = Readonly<{ checksum: string; rows: readonly SpendLimitRow[]; at: string }>;
 export interface Store {
   sql: DatabaseSync;
   insertWorker(row: WorkerRow): void;
@@ -154,6 +155,8 @@ export interface Store {
   spendSeries(limit: number): Array<{ at: string; costUsd: number | null }>;
   getSpendLimits(): SpendLimitRow[];
   setSpendLimits(rows: readonly SpendLimitRow[]): void;
+  getSpendLimitState(): SpendLimitState | undefined;
+  setSpendLimitState(state: SpendLimitState): void;
   /** Mark every `running` worker as `interrupted`. Called once on daemon start. Returns affected ids. */
   markInterrupted(): string[];
   close(): void;

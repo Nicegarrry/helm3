@@ -15,9 +15,9 @@ const PEPPER = Buffer.from('spend-test-tap-pepper-32-bytes!!');
 
 function home(): string { return mkdtempSync(join(tmpdir(), 'helm-spend-')); }
 
-function makeHelm(root: string): { helm: Helm; store: ReturnType<typeof openStore> } {
-  const store = openStore(':memory:');
-  const config = loadConfig({ HELM_HOME: root, HELM_SPEND_CAP_USD: '5', HELM_SPEND_WARN_USD: '4', HELM_MAX_WORKERS: '2' });
+function makeHelm(root: string, db = ':memory:', env: { cap?: string; warn?: string; workers?: string } = {}): { helm: Helm; store: ReturnType<typeof openStore> } {
+  const store = openStore(db);
+  const config = loadConfig({ HELM_HOME: root, HELM_SPEND_CAP_USD: env.cap ?? '5', HELM_SPEND_WARN_USD: env.warn ?? '4', HELM_MAX_WORKERS: env.workers ?? '2' });
   const helm = new Helm({
     config, store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never,
     prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, settings: loadSettings(root),
@@ -54,8 +54,8 @@ test('spend settings hot reload after helm.json edit without restarting Helm', a
     writeFileSync(join(root, 'helm.json'), JSON.stringify({ spend: { capUsd: 2 } }));
     const result = await helm.runStatus();
     assert.equal(result.ok && result.spendCapUsd, 2);
-    assert.equal(result.ok && result.spendSources.capUsd, 'settings');
-    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.changed' && !event.data.ignored).length, 1);
+    assert.equal(result.ok && result.spendSources.capUsd, 'file');
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.changed' && event.data.source === 'file').length, 1);
     writeFileSync(join(root, 'helm.json'), JSON.stringify({ spend: { capUsd: 9 } }));
     const ignored = await helm.runStatus();
     assert.equal(ignored.ok && ignored.spendCapUsd, 2);
@@ -67,6 +67,59 @@ test('spend settings hot reload after helm.json edit without restarting Helm', a
     await helm.runStatus();
     assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.warning').length, 1);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('file lowering stays authoritative through later spend.set and restart', async () => {
+  const root = home(), db = join(root, 'helm.sqlite');
+  const first = makeHelm(root, db, { cap: '100', warn: '80', workers: '3' });
+  try {
+    writeFileSync(join(root, 'helm.json'), JSON.stringify({ spend: { capUsd: 10, warnUsd: 8, maxWorkers: 3 } }));
+    const lowered = await first.helm.runStatus();
+    assert.equal(lowered.ok && lowered.spendCapUsd, 10);
+    writeFileSync(join(root, 'helm.json'), JSON.stringify({ spend: { capUsd: 150, warnUsd: 8, maxWorkers: 3 } }));
+    const raised = await first.helm.runStatus();
+    assert.equal(raised.ok && raised.spendCapUsd, 10);
+    assert.deepEqual(await createToolRegistry(first.helm).call('spend.set', { warnUsd: 5 }), { ok: true, spend: { warnUsd: 5 } });
+    const afterSet = await first.helm.runStatus();
+    assert.equal(afterSet.ok && afterSet.spendCapUsd, 10);
+  } finally { first.store.close(); }
+  const restarted = makeHelm(root, db, { cap: '100', warn: '80', workers: '3' });
+  try {
+    const status = await restarted.helm.runStatus();
+    assert.equal(status.ok && status.spendCapUsd, 10);
+  } finally { restarted.store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('startup detects a direct spend limit edit as tampered', async () => {
+  const root = home(), db = join(root, 'helm.sqlite');
+  const first = makeHelm(root, db);
+  first.store.close();
+  const tampered = openStore(db);
+  tampered.sql.prepare("UPDATE spend_limits SET value = 0 WHERE name = 'capUsd'").run();
+  tampered.close();
+  const restarted = makeHelm(root, db);
+  try {
+    const status = await restarted.helm.runStatus();
+    assert.equal(status.ok && status.spendCapUsd, 5);
+    const event = restarted.store.listAllEvents().find((row) => row.kind === 'spend.changed' && row.data.source === 'startup' && row.data.tampered);
+    assert.deepEqual(event?.data.values, { capUsd: 5, warnUsd: 4, maxWorkers: 2 });
+  } finally { restarted.store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('deleting a stored limit does not re-bootstrap a raised file value', async () => {
+  const root = home(), db = join(root, 'helm.sqlite');
+  const first = makeHelm(root, db);
+  first.store.close();
+  writeFileSync(join(root, 'helm.json'), JSON.stringify({ spend: { capUsd: 9 } }));
+  const deleted = openStore(db);
+  deleted.sql.prepare("DELETE FROM spend_limits WHERE name = 'capUsd'").run();
+  deleted.close();
+  const restarted = makeHelm(root, db);
+  try {
+    const status = await restarted.helm.runStatus();
+    assert.equal(status.ok && status.spendCapUsd, 5);
+    assert.equal(restarted.store.listAllEvents().some((row) => row.kind === 'spend.changed' && row.data.source === 'startup' && row.data.tampered), true);
+  } finally { restarted.store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('lowering does not need a tap and atomic spend update preserves other settings', async () => {

@@ -104,6 +104,8 @@ test('GC keeps a TTL-eligible worker with unpushed commits and records the reaso
     await service.gc();
     assert.deepEqual(removed, []);
     assert.equal(store.listEvents(row.workerId).some((event) => event.kind === 'worktree.kept' && event.data.reason === 'unpushed commits'), true);
+    await service.gc();
+    assert.equal(store.listEvents(row.workerId).filter((event) => event.kind === 'worktree.kept').length, 1);
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 

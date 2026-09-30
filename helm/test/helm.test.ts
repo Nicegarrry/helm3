@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -274,6 +274,26 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   assert.equal(row?.state, 'succeeded');
   assert.ok(row?.head, 'head should be recorded after a successful commit');
   assert.equal(row?.result?.status, 'succeeded');
+});
+
+test('a settled worker turn removes node_modules from every top-level package', async () => {
+  const runner = createFakeRunner(async (input) => {
+    mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });
+    mkdirSync(join(input.worktree, 'helm', 'node_modules'), { recursive: true });
+    mkdirSync(join(input.worktree, 'app', 'node_modules'), { recursive: true });
+    writeFileSync(join(input.worktree, 'app', 'package.json'), '{}');
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const { helm, store } = makeHelm({ runner });
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-repo-cleanup-')));
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  await helm.settle(outcome.workerId);
+  const row = store.getWorker(outcome.workerId)!;
+  assert.equal(row.state, 'succeeded');
+  assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
+  assert.equal(existsSync(join(row.worktree, 'helm', 'node_modules')), false);
+  assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
 });
 
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {

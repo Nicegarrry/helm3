@@ -78,8 +78,8 @@ import type { Jev } from './jev.js';
 import type { PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
-import { createDeploy, type DeployExec, type DeployService } from './deploy.js';
-import { freeSpaceGb, type StatfsResult } from './hygiene.js';
+import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
+import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
 
 const exec = promisify(execFile);
 
@@ -427,6 +427,7 @@ export class Helm {
 
   /** Called once on daemon start: every `running` worker becomes `interrupted`. */
   markInterruptedOnStart(): string[] {
+    markDeploysInterrupted(this.store);
     return this.store.markInterrupted();
   }
 
@@ -602,7 +603,7 @@ export class Helm {
   }
 
   async gate(input: z.infer<typeof gateInput>): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> {
-    return runGuard(async () => {
+    return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
@@ -620,7 +621,7 @@ export class Helm {
       this.store.insertGate(gateRow);
       this.store.appendEvent(input.workerId, 'gate', { gateId, passed: outcome.passed, head });
       return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
-    });
+    }));
   }
 
   async baseline(input: z.infer<typeof baselineInput>): Promise<ToolOutcome<BaselineRow>> {
@@ -631,7 +632,7 @@ export class Helm {
   }
 
   async prOpen(input: z.infer<typeof prOpenInput>): Promise<ToolOutcome<{ number: number; url: string; head: string; updated?: true }>> {
-    return runGuard(async () => {
+    return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const reason = await this.refusal('pr.open', input);
       if (reason) {
         const worker = this.store.getWorker(input.workerId);
@@ -671,7 +672,7 @@ export class Helm {
       this.store.insertPr(prRow);
       this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url });
       return { ok: true, number: opened.number, url: opened.url, head };
-    });
+    }));
   }
 
   async prStatus(input: z.infer<typeof prStatusInput>): Promise<ToolOutcome<PrStatus>> {
@@ -1075,6 +1076,11 @@ export class Helm {
       this.store.updateWorker(workerId, { state: 'unknown' });
       this.store.appendEvent(workerId, 'error', { message: errMessage(err) });
       this.store.appendEvent(workerId, 'state', { from: 'running', to: 'unknown' });
+    } finally {
+      const finalState = this.store.getWorker(workerId)?.state;
+      if (finalState === 'succeeded' || finalState === 'failed' || finalState === 'idle' || finalState === 'stopped') {
+        await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules);
+      }
     }
   }
 }

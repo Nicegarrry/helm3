@@ -62,7 +62,7 @@ test('run: a timeout produces a null exit code', async () => {
   }
 });
 
-test('run: removes node_modules created by the gate on pass and fail, but preserves existing or opted-in modules', async () => {
+test('run: removes all package node_modules on pass and fail, but preserves opted-in modules', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-hygiene-'));
   const logDir = join(dir, 'logs');
   try {
@@ -75,14 +75,18 @@ test('run: removes node_modules created by the gate on pass and fail, but preser
     mkdirSync(join(dir, 'node_modules'), { recursive: true });
     mkdirSync(join(dir, 'helm', 'node_modules'), { recursive: true });
     await gateRunner().run(dir, [{ name: 'pass', command: 'exit 0' }], logDir);
-    assert.equal(existsSync(join(dir, 'node_modules')), true);
-    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
+    assert.equal(existsSync(join(dir, 'node_modules')), false);
+    assert.equal(existsSync(join(dir, 'helm', 'node_modules')), false);
 
-    rmSync(join(dir, 'node_modules'), { recursive: true, force: true });
-    rmSync(join(dir, 'helm', 'node_modules'), { recursive: true, force: true });
+    mkdirSync(join(dir, 'app', 'node_modules'), { recursive: true });
+    writeFileSync(join(dir, 'app', 'package.json'), '{}');
+    await gateRunner().run(dir, [{ name: 'package', command: 'exit 0' }], logDir);
+    assert.equal(existsSync(join(dir, 'app', 'node_modules')), false);
+    mkdirSync(join(dir, 'app', 'node_modules'), { recursive: true });
     await gateRunner({ keepNodeModules: true }).run(dir, [{ name: 'keep', command: 'mkdir -p node_modules helm/node_modules' }], logDir);
     assert.equal(existsSync(join(dir, 'node_modules')), true);
     assert.equal(existsSync(join(dir, 'helm', 'node_modules')), true);
+    assert.equal(existsSync(join(dir, 'app', 'node_modules')), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

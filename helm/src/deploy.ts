@@ -14,7 +14,7 @@ import { runTestFlight, withTempHome } from './testflight.js';
 export type DeployInput = Readonly<{ project: string; target: string; sha?: string; tapId?: string }>;
 export type DeployStatusInput = Readonly<{ project?: string; id?: string }>;
 export type DeployRollbackInput = Readonly<{ id: string; tapId?: string }>;
-export type DeployRow = Readonly<{ id: string; project: string; target: string; kind: string; env: string; sha: string; state: string; url: string | null; deploymentId: string | null; previousId: string | null; smoke: Record<string, unknown>; tapId: string | null; at: string }>;
+export type DeployRow = Readonly<{ id: string; project: string; target: string; kind: string; env: string; sha: string; state: string; reason: string | null; url: string | null; deploymentId: string | null; previousId: string | null; smoke: Record<string, unknown>; tapId: string | null; at: string }>;
 export type DeployExec = (file: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number }) => Promise<{ stdout: string; stderr?: string; code?: number }>;
 type Target = NonNullable<RepoConfig['deploy']>['targets'][number];
 type TapReservation = Readonly<{ tapId: string; token: string }>;
@@ -40,10 +40,18 @@ const defaultExec: DeployExec = async (file, args, options) => {
 };
 
 export function ensureDeployTable(store: Store): void {
-  store.sql.exec(`CREATE TABLE IF NOT EXISTS deploys (id TEXT PRIMARY KEY, project TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, env TEXT NOT NULL, sha TEXT NOT NULL, state TEXT NOT NULL, url TEXT, deploymentId TEXT, previousId TEXT, smoke JSON NOT NULL, tapId TEXT, at TEXT NOT NULL)`);
+  store.sql.exec(`CREATE TABLE IF NOT EXISTS deploys (id TEXT PRIMARY KEY, project TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL, env TEXT NOT NULL, sha TEXT NOT NULL, state TEXT NOT NULL, reason TEXT, url TEXT, deploymentId TEXT, previousId TEXT, smoke JSON NOT NULL, tapId TEXT, at TEXT NOT NULL)`);
+  const columns = store.sql.prepare('PRAGMA table_info(deploys)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'reason')) store.sql.exec('ALTER TABLE deploys ADD COLUMN reason TEXT');
 }
 
-function row(value: Record<string, unknown>): DeployRow { return { id: String(value.id), project: String(value.project), target: String(value.target), kind: String(value.kind), env: String(value.env), sha: String(value.sha), state: String(value.state), url: (value.url as string | null) ?? null, deploymentId: (value.deploymentId as string | null) ?? null, previousId: (value.previousId as string | null) ?? null, smoke: JSON.parse(String(value.smoke ?? '{}')) as Record<string, unknown>, tapId: (value.tapId as string | null) ?? null, at: String(value.at) }; }
+function row(value: Record<string, unknown>): DeployRow { return { id: String(value.id), project: String(value.project), target: String(value.target), kind: String(value.kind), env: String(value.env), sha: String(value.sha), state: String(value.state), reason: (value.reason as string | null) ?? null, url: (value.url as string | null) ?? null, deploymentId: (value.deploymentId as string | null) ?? null, previousId: (value.previousId as string | null) ?? null, smoke: JSON.parse(String(value.smoke ?? '{}')) as Record<string, unknown>, tapId: (value.tapId as string | null) ?? null, at: String(value.at) }; }
+
+export function markDeploysInterrupted(store: Store): number {
+  ensureDeployTable(store);
+  const result = store.sql.prepare("UPDATE deploys SET state = 'failed', reason = ? WHERE state = 'deploying'").run('interrupted (daemon restart)');
+  return Number(result.changes);
+}
 function redactor(secrets: string[]): (value: unknown) => string { const values = [...new Set(secrets.filter(Boolean))].sort((a, b) => b.length - a.length); return (value) => values.reduce((text, secret) => text.split(secret).join('[REDACTED]'), String(value)); }
 function tokens(command: string): string[] {
   if (/[;&|<>`$()]|\n|\r/.test(command)) throw new Error('smoke command contains shell syntax');

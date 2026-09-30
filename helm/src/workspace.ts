@@ -91,7 +91,9 @@ export function gitWorkspace(): Workspace {
 
     async reachableFromOrigin(repo: string, head: string): Promise<boolean> {
       try {
-        return (await git(repo, ['branch', '-r', '--contains', head])).trim().length > 0;
+        return (await git(repo, ['branch', '-r', '--contains', head])).split(/\r?\n/)
+          .map((line) => line.replace(/^\s*\*?\s*/, '').trim())
+          .some((ref) => ref.startsWith('origin/') || ref.startsWith('refs/remotes/origin/'));
       } catch {
         return false;
       }

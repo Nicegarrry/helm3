@@ -41,6 +41,22 @@ const defaultExec: HygieneExec = async (file, args, options) => {
 
 const defaultFs: HygieneFs = { readdir, stat, rm };
 
+/** Remove dependencies from the root and each first-level package in a worktree. */
+export async function cleanupNodeModules(worktree: string, keepNodeModules = false): Promise<void> {
+  if (keepNodeModules) return;
+  const packageRoots = [worktree, join(worktree, 'helm')];
+  try {
+    for (const entry of await readdir(worktree, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      try {
+        await stat(join(worktree, entry.name, 'package.json'));
+        packageRoots.push(join(worktree, entry.name));
+      } catch { /* not a top-level package */ }
+    }
+  } catch { /* a removed worktree is already clean */ }
+  await Promise.all([...new Set(packageRoots)].map((root) => rm(join(root, 'node_modules'), { recursive: true, force: true }).catch(() => {})));
+}
+
 export async function freeSpaceGb(path: string, statfs: (path: string) => Promise<StatfsResult> = fsStatfs): Promise<number | null> {
   try {
     const value = await statfs(path);
@@ -116,7 +132,9 @@ export function createHygiene(options: Options): HygieneService {
     if (!head) return false;
     try {
       if (options.workspace.reachableFromOrigin) return await options.workspace.reachableFromOrigin(worker.repo, head);
-      return (await git(worker.repo, ['branch', '-r', '--contains', head])).trim().length > 0;
+      return (await git(worker.repo, ['branch', '-r', '--contains', head])).split(/\r?\n/)
+        .map((line) => line.replace(/^\s*\*?\s*/, '').trim())
+        .some((ref) => ref.startsWith('origin/') || ref.startsWith('refs/remotes/origin/'));
     } catch {
       return false;
     }
@@ -154,6 +172,11 @@ export function createHygiene(options: Options): HygieneService {
     return before.state === after.state && before.updatedAt === after.updatedAt && before.worktree === after.worktree && before.branch === after.branch && before.head === after.head;
   }
 
+  function keptForState(workerId: string, state: string): boolean {
+    return options.store.listEvents(workerId, { limit: 1_000_000 })
+      .some((event) => event.kind === 'worktree.kept' && event.data.state === state);
+  }
+
   async function gcWorker(candidate: WorkerRow): Promise<void> {
     if (!inside(worktreeRoot, candidate.worktree)) return;
     await withWorkerLock(candidate.workerId, async () => {
@@ -164,7 +187,9 @@ export function createHygiene(options: Options): HygieneService {
       const latest = options.store.getWorker(worker.workerId);
       if (!latest || !sameWorker(worker, latest) || !settled(latest) || options.isRunning?.(latest.workerId)) return;
       if (!pushed) {
-        options.store.appendEvent(worker.workerId, 'worktree.kept', { reason: 'unpushed commits', worktree: worker.worktree, branch: worker.branch });
+        if (!keptForState(worker.workerId, worker.state)) {
+          options.store.appendEvent(worker.workerId, 'worktree.kept', { reason: 'unpushed commits', state: worker.state, worktree: worker.worktree, branch: worker.branch });
+        }
         return;
       }
       try { await removeWorkerWorktree(latest); } catch { /* leave the row for a later conservative retry */ }

@@ -517,7 +517,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const predecessorBootId = process.env.HELM_UPGRADE_ID && pending?.id === process.env.HELM_UPGRADE_ID && pending.phase === 'starting'
     ? String((pending.source as Record<string, unknown> | undefined)?.bootId ?? '') || undefined
     : undefined;
-  helm.markInterruptedOnStart(predecessorBootId);
+  await helm.markInterruptedOnStart(predecessorBootId);
   const hygiene = createHygiene({ home: config.home, store, settings, workspace, github, isRunning: (workerId) => helm.isWorkerRunning(workerId), withWorkerLock: (workerId, fn) => helm.withWorkerLock(workerId, fn), deployInProgress: (project, target) => helm.deploy.isInProgress(project, target) });
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);

@@ -426,8 +426,20 @@ export class Helm {
   }
 
   /** Called once on daemon start: every `running` worker becomes `interrupted`. */
-  markInterruptedOnStart(predecessorBootId?: string): string[] {
-    markDeploysInterrupted(this.store, { currentBootId: this.lifecycle.bootId, predecessorBootId });
+  async markInterruptedOnStart(predecessorBootId?: string): Promise<string[]> {
+    await markDeploysInterrupted(this.store, {
+      currentBootId: this.lifecycle.bootId,
+      predecessorBootId,
+      timeoutFor: async (row) => {
+        try {
+          const repo = requireValue(await this.resolveRepo(row.project), `project not found: ${row.project}`);
+          const config = await loadRepoConfig(repo, row.sha, false);
+          return config.deploy?.targets.find((target) => target.name === row.target)?.timeoutMin;
+        } catch {
+          return undefined;
+        }
+      },
+    });
     return this.store.markInterrupted();
   }
 
@@ -633,7 +645,7 @@ export class Helm {
     return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
       must(!this.running.has(input.workerId), 'worker turn running; wait');
-      return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, now: this.nowIso() });
+      return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, nodeModulesRoot: this.workerWorktreeRoot(row), now: this.nowIso() });
     }));
   }
 
@@ -929,7 +941,7 @@ export class Helm {
   private async cleanupWorkerNodeModules(row: WorkerRow): Promise<void> {
     await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules, {
       allowedRoot: this.workerWorktreeRoot(row),
-      onError: (message) => this.store.appendEvent(row.workerId, 'error', { message }),
+      onError: (message) => this.store.appendEvent(row.workerId, 'hygiene.warning', { message }),
     });
   }
 

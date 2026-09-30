@@ -1357,3 +1357,18 @@ test('drain waits for the review callback even after the reviewer state is succe
   assert.equal(helm.lifecycle.status().phase, 'ready');
   assert.ok(store.listEvents(review.reviewWorkerId).some((e) => e.kind === 'review.posted'));
 });
+
+test('constructing and closing Helm leaves no capacity timer or child process resource', { timeout: 0 }, async () => {
+  const before = process.getActiveResourcesInfo();
+  const { helm } = makeHelm();
+  await helm.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const remaining = before.slice();
+  const extra = process.getActiveResourcesInfo().filter((resource) => {
+    const index = remaining.indexOf(resource);
+    if (index < 0) return true;
+    remaining.splice(index, 1);
+    return false;
+  });
+  assert.deepEqual(extra.filter((resource) => resource === 'Timeout' || resource === 'ChildProcess'), [], `new active resources: ${extra.join(', ')}`);
+});

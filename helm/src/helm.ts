@@ -1216,9 +1216,17 @@ export class Helm {
     const running = this.running.get(workerId);
     if (!running) return true;
     let timedOut = false;
-    const timer = new Promise<void>((resolve) => setTimeout(() => { timedOut = true; resolve(); }, timeoutMs));
-    await Promise.race([running, timer]);
-    return !timedOut;
+    let timeout: NodeJS.Timeout | undefined;
+    const timer = new Promise<void>((resolve) => {
+      timeout = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs);
+      timeout.unref();
+    });
+    try {
+      await Promise.race([running, timer]);
+      return !timedOut;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   /** Start (or resume) one turn in the background. Tracked in `running` so stop/settle can wait on it. */
@@ -1234,6 +1242,8 @@ export class Helm {
   async capacityTick(): Promise<void> { await this.capacity.tick(); }
 
   async capacityStatus(): Promise<CapacityStatus> { return this.capacity.status(); }
+
+  async close(): Promise<void> { await this.capacity.close(); }
 
   private async runTurn(workerId: string, message: string, onDone?: OnDone): Promise<void> {
     const row = this.store.getWorker(workerId);

@@ -101,8 +101,6 @@ export function createCapacityAdmission(options: Readonly<{
   for (const column of ['payload TEXT', 'pid INTEGER', 'dedupeKey TEXT']) {
     try { options.store.sql.exec(`ALTER TABLE capacity_jobs ADD COLUMN ${column}`); } catch { /* already present */ }
   }
-  sampler.start();
-
   function unit(loadClass: LoadClass): number { return settings().units[loadClass]; }
 
   function projects(): string[] {

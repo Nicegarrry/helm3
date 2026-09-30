@@ -564,7 +564,7 @@ async function cmdServe(args: string[]): Promise<void> {
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();
-    await helm.capacity.close();
+    await helm.close();
     await handle.close();
     store.close();
     releaseOwner();

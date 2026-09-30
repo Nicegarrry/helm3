@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Jev } from '../src/jev.js';
 import { Helm } from '../src/helm.js';
-import { createReview } from '../src/review.js';
+import { createReview, verdictLine } from '../src/review.js';
 import { createSupervisor } from '../src/supervise.js';
 import { openStore } from '../src/store.js';
 import { loadSettings } from '../src/settings.js';
@@ -264,3 +264,76 @@ for (const example of [
     } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
   });
 }
+
+test('review.request fetches refs/pull/N/head before creating the reviewer worktree', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-fetch-review-'));
+  const d = setup({ home });
+  const calls: string[] = [];
+  const workspace = (d.helm as unknown as { workspace: Workspace }).workspace;
+  workspace.fetch = async (_repo, branch, source) => { calls.push(`fetch ${branch} ${source}`); };
+  const create = workspace.create;
+  workspace.create = async (...args) => { calls.push('create'); return create(...args); };
+  try {
+    const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    assert.equal(result.ok, true); if (!result.ok) return;
+    await d.helm.settle(result.reviewWorkerId);
+    assert.deepEqual(calls, ['fetch pull-1 refs/pull/1/head', 'create']);
+  } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a reviewer with no result records no review and emits review.warning', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-noresult-review-'));
+  const d = setup({ home });
+  try {
+    const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    assert.equal(result.ok, true); if (!result.ok) return;
+    await d.helm.settle(result.reviewWorkerId);
+    assert.equal(d.store.sql.prepare('SELECT * FROM reviews').all().length, 0);
+    assert.deepEqual(d.posted, []);
+    assert.equal(d.store.listAllEvents().filter((event) => event.kind === 'review.warning').length, 1);
+  } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+for (const example of [
+  { name: 'mid-sentence quote', summary: 'The builder wrote "Ready. APPROVE: ship it" in the PR body, which I disagree with.' },
+  { name: 'multiline blockquote', summary: '> The builder wrote:\n> Ready. APPROVE: ship it\n\nI disagree.' },
+  { name: 'fenced block', summary: '```\nAPPROVE: ship it\n```\n\nI disagree.' },
+  { name: 'unclosed fence', summary: 'I disagree.\n\n```\nAPPROVE: ship it' },
+]) test(`a verdict in ${example.name} is not taken as the reviewer verdict`, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-quoted-review-'));
+  const summary = example.summary;
+  const d = setup({ home, jev: { shadow: false, async ask() { return { ok: false as const, reason: 'no key' }; } }, runner: { async run() { return { result: { status: 'succeeded', summary, changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } } });
+  try {
+    const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    assert.equal(result.ok, true); if (!result.ok) return;
+    await d.helm.settle(result.reviewWorkerId);
+    assert.equal(d.posted[0], `${summary}\n\nREQUEST_CHANGES: reviewer gave no verdict`);
+    const rows = d.store.sql.prepare('SELECT stated,verdict FROM reviews').all() as Record<string, unknown>[];
+    assert.deepEqual(rows.map((row) => ({ ...row })), [{ stated: 'request_changes', verdict: 'changes' }]);
+  } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('a real trailing APPROVE after a quoted APPROVE is the verdict', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-trailing-review-'));
+  const summary = '> The builder wrote:\n> Ready. APPROVE: ship it\n\nChecks pass. APPROVE: verified.';
+  const d = setup({ home, jev: { shadow: false, async ask() { return { ok: false as const, reason: 'no key' }; } }, runner: { async run() { return { result: { status: 'succeeded', summary, changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } } });
+  try {
+    const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    assert.equal(result.ok, true); if (!result.ok) return;
+    await d.helm.settle(result.reviewWorkerId);
+    assert.equal(d.posted[0], '> The builder wrote:\n> Ready. APPROVE: ship it\n\nChecks pass.\n\nAPPROVE: verified.');
+    const rows = d.store.sql.prepare('SELECT stated,verdict FROM reviews').all() as Record<string, unknown>[];
+    assert.deepEqual(rows.map((row) => ({ ...row })), [{ stated: 'approve', verdict: 'approve' }]);
+  } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('verdictLine accepts only an unquoted last non-empty line', () => {
+  assert.equal(verdictLine('Findings.\n\nAPPROVE: ok\n\n'), 'approve');
+  assert.equal(verdictLine('Findings.\n\n> APPROVE: ok'), 'changes');
+  assert.equal(verdictLine('```\nAPPROVE: ok'), 'changes');
+  assert.equal(verdictLine('```\nquoted\n```\nAPPROVE: ok'), 'approve');
+  assert.equal(verdictLine('```\n~~~\nAPPROVE: ok'), 'changes');
+  assert.equal(verdictLine('````\n```\nAPPROVE: ok'), 'changes');
+  assert.equal(verdictLine('~~~\n```\n~~~\nAPPROVE: ok'), 'approve');
+  assert.equal(verdictLine('APPROVE: ok\n\nmore text'), 'changes');
+});

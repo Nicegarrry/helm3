@@ -56,7 +56,7 @@ const capacityExec: CapacityExec = async (file, args, options) => {
 function usage(): void {
   console.error(`usage: helm <command> [options]
   spawn --repo <path> --objective <text> [--issue n] [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
-        [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k]
+        [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k] [--priority low|normal|high|urgent] [--requested-by owner|auto]
   ps [--repo path] [--state s] [--json]
   logs <id> [-f] [--json]
   inspect <id> [--tail n] [--json]
@@ -192,11 +192,12 @@ const cmdSpawn = (args: string[]) =>
   simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective
     ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, issue: v.issue ? Number(v.issue) : undefined, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
         baseRef: v['base-ref'], role: v.role, contextPaths: v.context ?? [], allowWorkflows: v['allow-workflows'] ?? false,
-        idempotencyKey: v['idempotency-key'], lanes: v.lanes }
+        idempotencyKey: v['idempotency-key'], lanes: v.lanes, priority: v.priority, requestedBy: v['requested-by'] }
     : undefined), {
     repo: { type: 'string' }, objective: { type: 'string' }, issue: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
     'base-ref': { type: 'string' }, role: { type: 'string' }, context: { type: 'string', multiple: true },
     'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' }, lanes: { type: 'string', multiple: true },
+    priority: { type: 'string' }, 'requested-by': { type: 'string' },
   });
 
 const cmdPs = (args: string[]) =>

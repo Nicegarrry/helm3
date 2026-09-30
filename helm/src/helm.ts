@@ -151,6 +151,7 @@ const ACTIVE_STATES: ReadonlySet<WorkerState> = new Set(['queued', 'running']);
 const PASSING_CONCLUSIONS: ReadonlySet<string> = new Set(['success', 'neutral', 'skipped']);
 
 type OnDone = (workerId: string, result: WorkerResult | null, outcome: WorkerRunOutcome) => Promise<void>;
+type GateToolResult = { head: string; passed: boolean; checks: GateRow['checks']; gateId?: string; queued?: true };
 
 function refuse(reason: string): { ok: false; reason: string } {
   return { ok: false, reason };
@@ -282,6 +283,7 @@ export class Helm {
       home: this.config.home, maxWorkers: () => this.effectiveSpend().maxWorkers, store: this.store, settings: this.settings,
       sampler: deps.capacitySampler, exec: deps.capacityExec, statfs: this.statfs, now: () => this.nowDate(),
     });
+    this.capacity.rehydrate((job) => this.rehydrateCapacityJob(job));
     this.guard('pr.open', async (raw) => {
       const input = raw as z.infer<typeof prOpenInput>;
       const worker = this.store.getWorker(input.workerId);
@@ -341,6 +343,31 @@ export class Helm {
     });
     this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
     registerRouting({ chooseModel: (chooser) => this.chooseModel(chooser), settings: this.settings, settingsHome: this.config.home, store: this.store, jev: deps.jev, now: () => this.now ? new Date(this.now()) : new Date(), resolveProject: async (repo) => isAbsolute(repo) ? this.repoSlugFor(repo) : undefined, catalog: routingCatalog });
+  }
+
+  private rehydrateCapacityJob(job: import('./capacity/admit.js').CapacityJob): (() => void | Promise<void>) | undefined {
+    if (job.kind === 'gate') {
+      const payload = job.payload as { workerId?: unknown; checks?: Array<{ name: string; command: string }> } | undefined;
+      const workerId = typeof payload?.workerId === 'string' ? payload.workerId : job.workerId;
+      const worker = this.store.getWorker(workerId);
+      if (!worker || worker.state === 'stopped' || worker.state === 'failed') return undefined;
+      return async () => {
+        this.capacity.finish(job.id);
+        await this.gate({ workerId, ...(payload?.checks ? { checks: payload.checks } : {}) });
+      };
+    }
+    const worker = this.store.getWorker(job.workerId);
+    if (!worker || worker.state !== 'queued') return undefined;
+    const promptInput: PromptInput = { objective: worker.objective, acceptance: worker.acceptance, contextPaths: worker.contextPaths };
+    const message = worker.role === 'reviewer' ? this.prompts.reviewer(promptInput) : worker.role === 'validator' ? this.prompts.validator(promptInput) : this.prompts.builder(promptInput);
+    const reviewPayload = job.payload as { type?: unknown; repoSlug?: unknown; number?: unknown } | undefined;
+    const onDone: OnDone | undefined = reviewPayload?.type === 'review' && typeof reviewPayload.repoSlug === 'string' && typeof reviewPayload.number === 'number'
+      ? async (workerId, result) => {
+        const body = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
+        await this.github.postComment(String(reviewPayload.repoSlug), Number(reviewPayload.number), body);
+        this.store.appendEvent(workerId, 'review.posted', { number: Number(reviewPayload.number) });
+      } : undefined;
+    return () => this.startRun(worker.workerId, message, onDone);
   }
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
   async memoryLog(input: import('./memory.js').MemoryLogInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.log(input); }
@@ -439,7 +466,6 @@ export class Helm {
       if (typeof selected === 'string') chosen = { ...chosen, model: selected };
       else {
         chosen = selected.model ? { ...chosen, model: selected.model } : chosen;
-        if (selected.loadClass) chosen = { ...chosen, loadClass: selected.loadClass };
         const asked = selected.loadClassAsked;
         choice = { ...choice, ...selected };
         if (asked !== undefined) Object.defineProperty(choice, 'loadClassAsked', { value: asked, enumerable: false });
@@ -538,13 +564,11 @@ export class Helm {
       if (existing) return { ok: true, workerId: existing.workerId, branch: existing.branch, worktree: existing.worktree };
     }
     const model = requireValue(input.model, 'routing did not select a model');
-    const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
     const spend = this.effectiveSpend();
-    must(spend.maxWorkers === 0 || active < spend.maxWorkers, `max workers reached (${spend.maxWorkers})`);
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
-    const loadClass = await askLoadClass({ jev: this.jev, repo, role: input.role, explicit: input.loadClass, alreadyAsked: choice?.loadClassAsked === true || input.model !== undefined, state: { objective: input.objective, acceptance: input.acceptance ?? null } });
+    const loadClass = await askLoadClass({ jev: this.jev, repo, role: input.role, explicit: input.loadClass, jevAnswer: choice?.loadClass ? { choice: choice.loadClass } : undefined, alreadyAsked: choice?.loadClassAsked === true || input.model !== undefined, state: { objective: input.objective, acceptance: input.acceptance ?? null } });
     const admittedBudget = this.assertBudget(repoSlug);
     const baseline = input.baselineId ? requireValue(getBaseline(this.store, input.baselineId), `baseline not found: ${input.baselineId}`) : undefined;
     if (baseline && baseline.repoSlug !== repoSlug) return refuse(`baseline belongs to ${baseline.repoSlug}, not ${repoSlug}`);
@@ -587,7 +611,7 @@ export class Helm {
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
-    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass }, () => { this.startRun(workerId, message, onDone); });
+    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
     const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
     if ('queued' in admitted) warnings.push('queued: capacity');
     return { ok: true, workerId, branch, worktree, loadClass, ...(warnings.length ? { warning: warnings.join('; ') } : {}), ...('queued' in admitted ? { queued: true as const } : {}) };
@@ -698,6 +722,12 @@ export class Helm {
   async stop(input: z.infer<typeof stopInput>): Promise<ToolOutcome<{ state: WorkerState }>> {
     return runGuard(async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+      if (row.state === 'queued') {
+        this.capacity.cancel(input.workerId, 'stopped while queued');
+        this.store.updateWorker(input.workerId, { state: 'stopped' });
+        this.store.appendEvent(input.workerId, 'state', { from: 'queued', to: 'stopped' });
+        return { ok: true, state: 'stopped' };
+      }
       must(row.state === 'running', `worker is not running (state: ${row.state})`);
       this.stopRequested.add(input.workerId);
       this.store.appendEvent(input.workerId, 'stop.requested');
@@ -714,51 +744,89 @@ export class Helm {
     });
   }
 
-  async gate(input: z.infer<typeof gateInput>): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> {
-    return runGuard(() => this.withWorkerLock(input.workerId, async () => {
-      const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
-      must(!this.running.has(input.workerId), 'worker turn running; wait');
-      must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
-      const head = await this.workspace.head(row.worktree);
-      const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
-      const meta = this.store.getMeta(row.workerId);
-      const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
-      if (baseline) {
-        const command = (await loadRepoConfig(row.repo, baseline.baseSha, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
-        checks.push({ name: 'acceptance', command });
-      }
-      const gateId = genId('g');
-      const loadClass = await askLoadClass({ repo: row.repo, role: 'gate' });
-      const runGate = async (runId: string, attempt: 0 | 1): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> => {
+  async gate(input: z.infer<typeof gateInput>): Promise<ToolOutcome<GateToolResult>> {
+    return runGuard(async () => {
+      const prepared = await this.withWorkerLock(input.workerId, async () => {
+        const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+        must(!this.running.has(input.workerId), 'worker turn running; wait');
+        must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
+        const head = await this.workspace.head(row.worktree);
+        const existing = this.capacity.findQueued(input.workerId, 'gate', head);
+        if (existing) return { row, head, checks: [] as Array<{ name: string; command: string }>, loadClass: existing.loadClass, gateId: existing.id, duplicate: true as const };
+        const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
+        const meta = this.store.getMeta(row.workerId);
+        const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
+        if (baseline) {
+          const command = (await loadRepoConfig(row.repo, baseline.baseSha, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
+          checks.push({ name: 'acceptance', command });
+        }
+        return { row, head, checks, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };
+      });
+      if (prepared.duplicate) return { ok: true, queued: true, gateId: prepared.gateId } as ToolOutcome<GateToolResult>;
+
+      type GateOutcome = ToolOutcome<GateToolResult>;
+      const runGate = async (runId: string, attempt: 0 | 1): Promise<GateOutcome> => {
+        const current = await this.withWorkerLock(input.workerId, async () => {
+          const value = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+          if (this.running.has(input.workerId) || value.state === 'queued' || value.state === 'running') {
+            const reason = 'queued gate cancelled: worker is not settled';
+            this.store.appendEvent(input.workerId, 'capacity.cancelled', { reason });
+            throw new Error(reason);
+          }
+          if (!(await this.workspace.isClean(value.worktree))) {
+            const reason = 'queued gate cancelled: worktree is not clean';
+            this.store.appendEvent(input.workerId, 'capacity.cancelled', { reason });
+            throw new Error(reason);
+          }
+          const currentHead = await this.workspace.head(value.worktree);
+          if (currentHead !== prepared.head) {
+            const reason = `queued gate cancelled: head changed from ${prepared.head} to ${currentHead}`;
+            this.store.appendEvent(input.workerId, 'capacity.cancelled', { reason });
+            throw new Error(reason);
+          }
+          return value;
+        }).catch((error) => { throw error; });
         const logDir = join(this.config.home, 'logs', input.workerId, `gate-${runId}`);
-        let outcome;
-        try {
-          outcome = await this.gates.run(row.worktree, checks, logDir, {
-            timeoutMs: this.config.gateTimeoutMs,
-            nodeModulesRoot: this.workerWorktreeRoot(row),
-            onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
-          });
-        } finally {
-          this.capacity.finish(runId);
-        }
+        const outcome = await this.gates.run(current.worktree, prepared.checks, logDir, {
+          timeoutMs: this.config.gateTimeoutMs,
+          nodeModulesRoot: this.workerWorktreeRoot(current),
+          onPid: (pid) => this.capacity.setPid(runId, pid),
+          onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
+        });
         if (!outcome.passed && attempt === 0 && isInfrastructureGateFailure(outcome.checks)) {
-          this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head, reason: 'process or memory resource exhaustion', checks: outcome.checks });
-          const retryId = `${gateId}:infra`;
-          let retryResult: ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>> | undefined;
-          const admitted = await this.capacity.admit({ id: retryId, workerId: input.workerId, kind: 'gate', loadClass }, async () => { retryResult = await runGate(retryId, 1); });
-          if ('queued' in admitted) return refuse('queued: capacity');
-          return retryResult ?? refuse('gate did not produce a result');
+          this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head: prepared.head, reason: 'process or memory resource exhaustion', checks: outcome.checks });
+          const retryId = `${prepared.gateId}:infra`;
+          this.capacity.finish(runId);
+          let resolveRetry!: (result: GateOutcome) => void;
+          const retryResult = new Promise<GateOutcome>((resolve) => { resolveRetry = resolve; });
+          const retry = await this.capacity.admit({ id: retryId, workerId: input.workerId, kind: 'gate', loadClass: prepared.loadClass, dedupeKey: prepared.head, payload: { type: 'gate', gateId: retryId, head: prepared.head } }, async () => {
+            try { resolveRetry(await runGate(retryId, 1)); } catch (error) { resolveRetry(refuse(errMessage(error))); }
+          });
+          if ('queued' in retry) return { ok: true, queued: true, gateId: retryId } as ToolOutcome<GateToolResult>;
+          return retryResult;
         }
-        const gateRow: GateRow = { gateId: runId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
-        this.store.insertGate(gateRow);
-        this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head });
-        return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
+        return this.withWorkerLock(input.workerId, async () => {
+          const latest = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+          const latestHead = await this.workspace.head(latest.worktree);
+          if (latestHead !== prepared.head || !(await this.workspace.isClean(latest.worktree))) {
+            const reason = 'queued gate cancelled: worktree changed while gate ran';
+            this.store.appendEvent(input.workerId, 'capacity.cancelled', { reason });
+            return refuse(reason);
+          }
+          const gateRow: GateRow = { gateId: runId, workerId: input.workerId, head: prepared.head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
+          this.store.insertGate(gateRow);
+          this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head: prepared.head });
+          return { ok: true, head: prepared.head, passed: outcome.passed, checks: outcome.checks };
+        });
       };
-      let result: ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>> | undefined;
-      const admitted = await this.capacity.admit({ id: gateId, workerId: input.workerId, kind: 'gate', loadClass }, async () => { result = await runGate(gateId, 0); });
-      if ('queued' in admitted) return refuse('queued: capacity');
-      return result ?? refuse('gate did not produce a result');
-    }));
+      let resolveResult!: (result: GateOutcome) => void;
+      const result = new Promise<GateOutcome>((resolve) => { resolveResult = resolve; });
+      const admitted = await this.capacity.admit({ id: prepared.gateId, workerId: input.workerId, kind: 'gate', loadClass: prepared.loadClass, dedupeKey: prepared.head, payload: { type: 'gate', gateId: prepared.gateId, head: prepared.head, checks: prepared.checks } }, async () => {
+        try { resolveResult(await runGate(prepared.gateId, 0)); } catch (error) { resolveResult(refuse(errMessage(error))); }
+      });
+      if ('queued' in admitted) return { ok: true, queued: true, gateId: prepared.gateId } as ToolOutcome<GateToolResult>;
+      return result;
+    });
   }
 
   async baseline(input: z.infer<typeof baselineInput>): Promise<ToolOutcome<BaselineRow>> {
@@ -847,6 +915,7 @@ export class Helm {
       };
       const outcome = await runGuard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
       if (!outcome.ok) return outcome;
+      this.capacity.updatePayload(outcome.workerId, { type: 'review', workerId: outcome.workerId, repoSlug: sourceWorker.repoSlug, number: pr.number });
       return { ok: true, reviewWorkerId: outcome.workerId, ...(outcome.queued ? { queued: true as const, warning: 'queued: capacity' as const } : {}) };
     });
   }
@@ -1143,12 +1212,13 @@ export class Helm {
   }
 
   /** Start (or resume) one turn in the background. Tracked in `running` so stop/settle can wait on it. */
-  private startRun(workerId: string, message: string, onDone?: OnDone): void {
+  private startRun(workerId: string, message: string, onDone?: OnDone): Promise<void> {
     const promise = this.runTurn(workerId, message, onDone).catch((err) => {
       this.store.appendEvent(workerId, 'error', { message: `unhandled: ${errMessage(err)}` });
-    }).finally(() => { this.capacity.finish(workerId); });
+    });
     this.running.set(workerId, promise);
     void promise.finally(() => { if (this.running.get(workerId) === promise) this.running.delete(workerId); });
+    return promise;
   }
 
   async capacityTick(): Promise<void> { await this.capacity.tick(); }
@@ -1173,6 +1243,7 @@ export class Helm {
       onSession: (sessionFile) => {
         this.store.updateWorker(workerId, { sessionFile });
       },
+      onPid: (pid) => { this.capacity.setPid(workerId, pid); },
       onUsage: (usage) => {
         const before = this.store.spendTotal().spendUsd;
         this.store.addSpend({ ...usage, workerId, at: this.nowIso() });

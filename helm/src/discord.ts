@@ -84,6 +84,10 @@ function milestone(event: EventRow, projectCount: number): string | null {
     ? `Process headroom low: ${processAlertText(event.data.detail)}`
     : `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
+  if (event.kind === 'capacity.waiting') {
+    const waited = Math.max(0, Math.round(Number(event.data.waitedMs ?? 0) / 60_000));
+    return `Waiting for capacity: ${text(event.data.kind, 'job')} ${text(event.data.loadClass, 'unknown')}, ${waited} min`;
+  }
   if (event.kind === 'spend.invalid') return 'helm.json invalid; keeping last good limits';
   if (event.kind === 'spend.changed') {
     if (event.data.source === 'startup') return spendStartupLine(event.data);

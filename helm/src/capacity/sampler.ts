@@ -37,9 +37,9 @@ const defaultExec: CapacityExec = async (file, args, options) => {
   }
 };
 
-function pagesFromVmStat(output: string): number | null {
+export function availableRamGbFromVmStat(output: string): number | null {
   const pageSize = Number(output.match(/page size of (\d+) bytes/i)?.[1] ?? 4096);
-  const labels = /^(?:Pages free|Pages speculative|Pages purgeable):\s+(\d+)/gim;
+  const labels = /^(?:Pages free|Pages inactive|Pages speculative|Pages purgeable):\s+(\d+)/gim;
   let pages = 0;
   let match: RegExpExecArray | null;
   while ((match = labels.exec(output))) pages += Number(match[1]);
@@ -130,7 +130,7 @@ export function createCapacitySampler(options: Readonly<{
       const processCount = uid ? lineCount(processes.stdout) : undefined;
       const max = Number(maxProcesses.stdout.trim().split(/\s+/)[0]);
       const maxCount = Number.isFinite(max) && max > 0 ? max : null;
-      const freeRamGb = pagesFromVmStat(vm.stdout) ?? freemem() / GB;
+      const freeRamGb = availableRamGbFromVmStat(vm.stdout) ?? freemem() / GB;
       const result: CapacitySnapshot = {
         sampledAt: now().toISOString(),
         freeRamGb,

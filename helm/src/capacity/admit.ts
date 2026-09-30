@@ -4,12 +4,14 @@ import type { Store, LoadClass } from '../types.js';
 import { createCapacitySampler, type CapacityExec, type CapacitySampler, type CapacitySnapshot } from './sampler.js';
 
 export type CapacityJobKind = 'builder' | 'review' | 'gate' | 'validator';
-export type CapacityJob = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; priority?: number }>;
-export type CapacityQueueEntry = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; queuedAt: string; waitMs: number }>;
+export type CapacityJob = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; priority?: number; dedupeKey?: string; payload?: unknown; pid?: number }>;
+export type CapacityQueueEntry = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; queuedAt: string; waitMs: number; priority: number; dedupeKey?: string }>;
 export type CapacityStatus = Readonly<{
   budget: number;
   usedUnits: number;
   availableUnits: number;
+  runningJobs: number;
+  maxWorkers: number;
   processLimited: boolean;
   runningClasses: Readonly<Record<LoadClass, number>>;
   queue: readonly CapacityQueueEntry[];
@@ -18,8 +20,10 @@ export type CapacityStatus = Readonly<{
 
 type SettingsLoader = () => Settings['capacity'];
 type Callback = () => void | Promise<void>;
+type Rehydrator = (job: CapacityJob) => Callback | undefined;
 
 const DEFAULT_CAPACITY = { sampleSec: 5, reserveGb: 4, gbPerUnit: 2, units: { light: 1, medium: 2, heavy: 4 }, pressureWarnPenalty: 1, pressureCriticalPenalty: 2, simulatorPenalty: 1, processHeadroomMinPct: 0.15, waitMilestoneMin: 10 };
+const AGING_MS = 60_000;
 
 function priority(kind: CapacityJobKind): number {
   return kind === 'gate' ? 0 : kind === 'review' ? 1 : 2;
@@ -42,6 +46,11 @@ function rssMb(output: string, rootPid = process.pid): number {
 export type CapacityAdmission = Readonly<{
   admit(job: CapacityJob, callback: Callback): Promise<{ started: true } | { queued: true }>;
   finish(id: string): void;
+  cancel(id: string, reason?: string): void;
+  setPid(id: string, pid: number): void;
+  updatePayload(id: string, payload: unknown): void;
+  rehydrate(factory: Rehydrator): void;
+  findQueued(workerId: string, kind: CapacityJobKind, dedupeKey?: string): CapacityQueueEntry | undefined;
   tick(): Promise<void>;
   status(): Promise<CapacityStatus>;
   sampler: CapacitySampler;
@@ -67,6 +76,7 @@ export function createCapacityAdmission(options: Readonly<{
   const sampler = options.sampler ?? createCapacitySampler({ home: options.home, store: options.store, sampleSec: settings().sampleSec, exec: options.exec, statfs: options.statfs, now });
   const callbacks = new Map<string, Callback>();
   const timers = new Map<string, ReturnType<typeof setInterval>>();
+  let ticking: Promise<void> | undefined;
   const testWithoutCapacityOverrides = (process.argv.includes('--test') || process.env.NODE_TEST_CONTEXT !== undefined) && !options.sampler && !options.exec;
 
   options.store.sql.exec(`
@@ -85,6 +95,9 @@ export function createCapacityAdmission(options: Readonly<{
     );
     CREATE INDEX IF NOT EXISTS capacity_jobs_queue ON capacity_jobs (endedAt, startedAt, priority, queuedAt);
   `);
+  for (const column of ['payload TEXT', 'pid INTEGER', 'dedupeKey TEXT']) {
+    try { options.store.sql.exec(`ALTER TABLE capacity_jobs ADD COLUMN ${column}`); } catch { /* already present */ }
+  }
   sampler.start();
 
   function unit(loadClass: LoadClass): number { return settings().units[loadClass]; }
@@ -116,7 +129,36 @@ export function createCapacityAdmission(options: Readonly<{
     }
   }
 
+  function pidAlive(pid: number | null | undefined): boolean {
+    if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+    try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+  }
+
+  function jobFromRow(row: Record<string, unknown>): CapacityJob {
+    let payload: unknown;
+    try { payload = row.payload ? JSON.parse(String(row.payload)) : undefined; } catch { payload = undefined; }
+    return {
+      id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind,
+      loadClass: String(row.loadClass) as LoadClass, priority: Number(row.priority),
+      ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}), ...(payload === undefined ? {} : { payload }),
+      ...(row.pid === null || row.pid === undefined ? {} : { pid: Number(row.pid) }),
+    };
+  }
+
+  function releaseDeadProcesses(includeUnknown = false): void {
+    const rows = options.store.sql.prepare(`SELECT id,pid FROM capacity_jobs WHERE endedAt IS NULL AND startedAt IS NOT NULL${includeUnknown ? '' : ' AND pid IS NOT NULL'}`).all() as Array<{ id?: unknown; pid?: unknown }>;
+    for (const row of rows) {
+      const pid = row.pid === null || row.pid === undefined ? undefined : Number(row.pid);
+      if (pidAlive(pid)) continue;
+      options.store.sql.prepare('UPDATE capacity_jobs SET endedAt = ?, durationMs = MAX(0, ? - CAST(strftime(\'%s\', startedAt) AS INTEGER) * 1000) WHERE id = ? AND endedAt IS NULL').run(now().toISOString(), now().getTime(), String(row.id));
+      callbacks.delete(String(row.id));
+    }
+  }
+
+  releaseDeadProcesses(true);
+
   async function status(): Promise<CapacityStatus> {
+    releaseDeadProcesses();
     const snapshot = await sampler.sample();
     const current = settings() ?? DEFAULT_CAPACITY;
     processAlert(snapshot, current);
@@ -124,70 +166,92 @@ export function createCapacityAdmission(options: Readonly<{
     const rows = options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE endedAt IS NULL').all() as Array<Record<string, unknown>>;
     const running = rows.filter((row) => row.startedAt !== null && row.startedAt !== undefined);
     const usedUnits = running.reduce((total, row) => total + unit(String(row.loadClass) as LoadClass), 0);
-    const telemetryUnavailable = snapshot.memoryPressure === 'unknown' && snapshot.freeRamGb < current.reserveGb;
     const ceiling = maxWorkers();
-    const ramUnits = testWithoutCapacityOverrides ? ceiling : telemetryUnavailable ? ceiling : Math.floor(Math.max(0, snapshot.freeRamGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
+    const ramUnits = testWithoutCapacityOverrides ? Number.MAX_SAFE_INTEGER : Math.floor(Math.max(0, snapshot.freeRamGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
     const pressurePenalty = snapshot.memoryPressure === 'critical' ? current.pressureCriticalPenalty : snapshot.memoryPressure === 'warn' ? current.pressureWarnPenalty : 0;
-    const resourceBudget = Math.max(0, Math.min(ceiling, ramUnits) - pressurePenalty - snapshot.bootedSimulators * current.simulatorPenalty);
+    const resourceBudget = Math.max(0, ramUnits - pressurePenalty - snapshot.bootedSimulators * current.simulatorPenalty);
     const budget = processLimited ? 0 : resourceBudget;
     const queue = rows.filter((row) => row.startedAt === null || row.startedAt === undefined).sort((a, b) => Number(a.priority) - Number(b.priority) || String(a.queuedAt).localeCompare(String(b.queuedAt))).map((row) => ({
-      id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))),
+      id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))), priority: Number(row.priority), ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}),
     }));
     const runningClasses: Record<LoadClass, number> = { light: 0, medium: 0, heavy: 0 };
     for (const row of running) { const loadClass = String(row.loadClass) as LoadClass; if (loadClass in runningClasses) runningClasses[loadClass] += 1; }
-    return { budget, usedUnits, availableUnits: Math.max(0, budget - usedUnits), processLimited, runningClasses, queue, snapshot };
+    return { budget, usedUnits, availableUnits: Math.max(0, budget - usedUnits), runningJobs: running.length, maxWorkers: ceiling, processLimited, runningClasses, queue, snapshot };
   }
 
   async function sampleRss(id: string): Promise<void> {
     if (!options.exec) return;
     try {
+      const row = options.store.sql.prepare('SELECT pid FROM capacity_jobs WHERE id = ?').get(id) as { pid?: unknown } | undefined;
+      const pid = row?.pid === null || row?.pid === undefined ? undefined : Number(row.pid);
+      if (!pid) return;
       const result = await options.exec('ps', ['-axo', 'pid=,ppid=,rss='], { timeoutMs: 1000 });
-      const peak = rssMb(result.stdout);
+      const peak = rssMb(result.stdout, pid);
       options.store.sql.prepare('UPDATE capacity_jobs SET peakRssMb = MAX(COALESCE(peakRssMb, 0), ?) WHERE id = ?').run(peak, id);
     } catch { /* telemetry must never affect the job */ }
   }
 
-  async function start(row: CapacityJob): Promise<void> {
+  function start(row: CapacityJob): void {
     const startedAt = now().toISOString();
-    const changed = options.store.sql.prepare('UPDATE capacity_jobs SET startedAt = ? WHERE id = ? AND startedAt IS NULL AND endedAt IS NULL').run(startedAt, row.id);
+    const changed = options.store.sql.prepare('UPDATE capacity_jobs SET startedAt = ?, pid = ? WHERE id = ? AND startedAt IS NULL AND endedAt IS NULL').run(startedAt, row.pid ?? null, row.id);
     if (!Number(changed.changes)) return;
     options.store.appendEvent(row.workerId, 'capacity.started', { kind: row.kind, loadClass: row.loadClass, units: unit(row.loadClass) });
     const timer = setInterval(() => { void sampleRss(row.id); }, 1000);
     timer.unref?.();
     timers.set(row.id, timer);
-    await sampleRss(row.id);
-    await callbacks.get(row.id)?.();
+    void sampleRss(row.id);
+    try {
+      const result = callbacks.get(row.id)?.();
+      if (result && typeof (result as Promise<void>).then === 'function') {
+        void Promise.resolve(result).catch((error) => {
+          options.store.appendEvent(row.workerId, 'capacity.error', { message: error instanceof Error ? error.message : String(error) });
+        }).finally(() => finish(row.id));
+      }
+    } catch (error) {
+      options.store.appendEvent(row.workerId, 'capacity.error', { message: error instanceof Error ? error.message : String(error) });
+      finish(row.id);
+    }
   }
 
   async function tick(): Promise<void> {
-    const current = settings() ?? DEFAULT_CAPACITY;
-    const currentStatus = await status();
-    for (const entry of currentStatus.queue) {
-      if (entry.waitMs >= current.waitMilestoneMin * 60_000) {
-        const changed = options.store.sql.prepare('UPDATE capacity_jobs SET notifiedAt = ? WHERE id = ? AND notifiedAt IS NULL').run(now().toISOString(), entry.id);
-        if (Number(changed.changes)) options.store.appendEvent(entry.workerId, 'capacity.waiting', { kind: entry.kind, loadClass: entry.loadClass, waitedMs: entry.waitMs });
+    if (ticking) return ticking;
+    ticking = (async () => {
+      const current = settings() ?? DEFAULT_CAPACITY;
+      const currentStatus = await status();
+      for (const entry of currentStatus.queue) {
+        if (entry.waitMs >= current.waitMilestoneMin * 60_000) {
+          const changed = options.store.sql.prepare('UPDATE capacity_jobs SET notifiedAt = ? WHERE id = ? AND notifiedAt IS NULL').run(now().toISOString(), entry.id);
+          if (Number(changed.changes)) options.store.appendEvent(entry.workerId, 'capacity.waiting', { kind: entry.kind, loadClass: entry.loadClass, waitedMs: entry.waitMs });
+        }
       }
-    }
-    for (const entry of currentStatus.queue) {
-      const fresh = await status();
-      if (fresh.processLimited && processSensitive(entry.kind)) continue;
-      if (fresh.availableUnits < unit(entry.loadClass)) continue;
-      const row = { id: entry.id, workerId: entry.workerId, kind: entry.kind, loadClass: entry.loadClass } as CapacityJob;
-      if (!callbacks.has(row.id)) continue;
-      await start(row);
-    }
+      let statusNow = currentStatus;
+      while (statusNow.queue.length) {
+        const head = statusNow.queue[0]!;
+        const fits = (entry: CapacityQueueEntry) => !(statusNow.processLimited && processSensitive(entry.kind)) && (statusNow.maxWorkers === 0 || statusNow.runningJobs < statusNow.maxWorkers) && (statusNow.runningJobs === 0 || statusNow.availableUnits >= unit(entry.loadClass));
+        let entry = fits(head) ? head : undefined;
+        if (!entry && head.waitMs >= AGING_MS) entry = statusNow.queue.slice(1).find((candidate) => unit(candidate.loadClass) < unit(head.loadClass) && fits(candidate));
+        if (!entry || !callbacks.has(entry.id)) break;
+        start(jobFromRow(options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE id = ?').get(entry.id) as Record<string, unknown>));
+        statusNow = await status();
+      }
+    })().finally(() => { ticking = undefined; });
+    return ticking;
   }
 
   async function admit(job: CapacityJob, callback: Callback): Promise<{ started: true } | { queued: true }> {
     callbacks.set(job.id, callback);
-    options.store.sql.prepare(`INSERT OR IGNORE INTO capacity_jobs (id, workerId, kind, loadClass, priority, queuedAt) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(job.id, job.workerId, job.kind, job.loadClass, job.priority ?? priority(job.kind), now().toISOString());
+    options.store.sql.prepare(`INSERT OR IGNORE INTO capacity_jobs (id, workerId, kind, loadClass, priority, queuedAt, payload, pid, dedupeKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(job.id, job.workerId, job.kind, job.loadClass, job.priority ?? priority(job.kind), now().toISOString(), job.payload === undefined ? null : JSON.stringify(job.payload), job.pid ?? null, job.dedupeKey ?? null);
     const current = await status();
-    if ((current.processLimited && processSensitive(job.kind)) || current.availableUnits < unit(job.loadClass)) {
+    const countFits = current.maxWorkers === 0 || current.runningJobs < current.maxWorkers;
+    const resourceFits = current.runningJobs === 0 || current.availableUnits >= unit(job.loadClass);
+    const newPriority = job.priority ?? priority(job.kind);
+    const hasEarlierJob = current.queue.some((entry) => entry.id !== job.id && (entry.priority < newPriority || entry.priority === newPriority && entry.queuedAt <= String(now().toISOString())));
+    if ((current.processLimited && processSensitive(job.kind)) || !countFits || !resourceFits || hasEarlierJob) {
       options.store.appendEvent(job.workerId, 'capacity.queued', { kind: job.kind, loadClass: job.loadClass, units: unit(job.loadClass), budget: current.budget, usedUnits: current.usedUnits });
       return { queued: true };
     }
-    await start(job);
+    start(job);
     return { started: true };
   }
 
@@ -202,5 +266,43 @@ export function createCapacityAdmission(options: Readonly<{
     void tick().catch(() => undefined);
   }
 
-  return { admit, finish, tick, status, sampler };
+  function cancel(id: string, reason = 'cancelled'): void {
+    const row = options.store.sql.prepare('SELECT workerId FROM capacity_jobs WHERE id = ? AND endedAt IS NULL').get(id) as { workerId?: unknown } | undefined;
+    if (!row) return;
+    options.store.sql.prepare('UPDATE capacity_jobs SET endedAt = ?, durationMs = 0 WHERE id = ? AND startedAt IS NULL AND endedAt IS NULL').run(now().toISOString(), id);
+    callbacks.delete(id);
+    options.store.appendEvent(String(row.workerId), 'capacity.cancelled', { reason });
+  }
+
+  function setPid(id: string, pid: number): void {
+    if (!Number.isInteger(pid) || pid <= 0) return;
+    options.store.sql.prepare('UPDATE capacity_jobs SET pid = ? WHERE id = ? AND endedAt IS NULL').run(pid, id);
+    void sampleRss(id);
+  }
+
+  function updatePayload(id: string, payload: unknown): void {
+    options.store.sql.prepare('UPDATE capacity_jobs SET payload = ? WHERE id = ? AND endedAt IS NULL').run(JSON.stringify(payload), id);
+  }
+
+  function rehydrate(factory: Rehydrator): void {
+    const rows = options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE endedAt IS NULL AND startedAt IS NULL').all() as Array<Record<string, unknown>>;
+    for (const raw of rows) {
+      const job = jobFromRow(raw);
+      const callback = factory(job);
+      if (callback) callbacks.set(job.id, callback);
+      else cancel(job.id, 'no longer resumable');
+    }
+  }
+
+  function findQueued(workerId: string, kind: CapacityJobKind, dedupeKey?: string): CapacityQueueEntry | undefined {
+    return statusRows().find((row) => String(row.workerId) === workerId && row.kind === kind && (dedupeKey === undefined || row.dedupeKey === dedupeKey));
+  }
+
+  function statusRows(): CapacityQueueEntry[] {
+    return (options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE endedAt IS NULL AND startedAt IS NULL ORDER BY priority, queuedAt').all() as Array<Record<string, unknown>>).map((row) => ({
+      id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))), priority: Number(row.priority), ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}),
+    }));
+  }
+
+  return { admit, finish, cancel, setPid, updatePayload, rehydrate, findQueued, tick, status, sampler };
 }

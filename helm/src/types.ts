@@ -205,7 +205,7 @@ export type GateCheck = Readonly<{ name: string; command: string }>;
 
 export interface GateRunner {
   /** Run each check in `cwd` sequentially; capture output to files under `logDir`. */
-  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; onNodeModulesError?: (message: string) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
+  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; onNodeModulesError?: (message: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
   /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
   defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }
@@ -268,6 +268,8 @@ export type WorkerHooks = Readonly<{
   onUsage(usage: Omit<SpendRow, 'workerId' | 'at'>): void;
   /** The Pi session file, reported as soon as it is opened rather than when the turn returns. */
   onSession(sessionFile: string): void;
+  /** The process tree root for the current turn, for capacity/RSS accounting. */
+  onPid?(pid: number): void;
   /** Return false to stop the turn (spend cap hit or stop requested). Checked at tool-call boundaries. */
   shouldContinue(): boolean;
 }>;

@@ -54,6 +54,7 @@ export async function askLoadClass(options: Readonly<{
   repo?: string;
   role?: WorkerRole | 'gate';
   explicit?: LoadClass;
+  jevAnswer?: JevAnswer;
   alreadyAsked?: boolean;
   state?: unknown;
 }>): Promise<LoadClass> {

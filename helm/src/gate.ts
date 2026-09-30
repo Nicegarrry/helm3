@@ -20,11 +20,11 @@ function slugifyCheckName(name: string): string {
   return slug.length > 0 ? slug : 'check';
 }
 
-function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: string, timeoutMs: number): Promise<CheckResult> {
+function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: string, timeoutMs: number, onPid?: (pid: number) => void): Promise<CheckResult> {
   return new Promise((resolve) => {
     const start = Date.now();
     const outputPath = join(logDir, `${outputSlug}.log`);
-    execFile('/bin/sh', ['-c', check.command], { cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const child = execFile('/bin/sh', ['-c', check.command], { cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       const durationMs = Date.now() - start;
       const err = error as ExecFileError | null;
       // Exit code is null when the process was killed by a signal (e.g. timeout).
@@ -33,12 +33,13 @@ function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: str
         .catch(() => {})
         .finally(() => resolve({ name: check.name, command: check.command, exitCode, outputPath, durationMs }));
     });
+    if (child.pid) onPid?.(child.pid);
   });
 }
 
 export function gateRunner(options: { keepNodeModules?: boolean } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; onNodeModulesError?: (message: string) => void }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; onNodeModulesError?: (message: string) => void; onPid?: (pid: number) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const results: CheckResult[] = [];
@@ -49,7 +50,7 @@ export function gateRunner(options: { keepNodeModules?: boolean } = {}): GateRun
           const seen = usedSlugs.get(base) ?? 0;
           usedSlugs.set(base, seen + 1);
           const outputSlug = seen === 0 ? base : `${base}-${seen}`;
-          const result = await runCheck(cwd, check, outputSlug, logDir, timeoutMs);
+          const result = await runCheck(cwd, check, outputSlug, logDir, timeoutMs, opts?.onPid);
           results.push(result);
         }
       } finally {

@@ -421,15 +421,15 @@ test('spawn is idempotent via idempotencyKey', async () => {
   if (first.ok && second.ok) assert.equal(second.workerId, first.workerId);
 });
 
-test('spawn refuses once active workers reach maxWorkers', async () => {
+test('spawn queues once active workers reach maxWorkers', async () => {
   const { runner } = createControllableRunner();
   const { helm } = makeHelm({ config: { maxWorkers: 1 }, runner });
   const repo = mkTempDir('helm-repo-');
   const first = await helm.spawn(spawnBody(repo));
   assert.equal(first.ok, true);
   const second = await helm.spawn(spawnBody(repo));
-  assert.equal(second.ok, false);
-  if (!second.ok) assert.match(second.reason, /max workers/);
+  assert.equal(second.ok, true);
+  if (second.ok) assert.equal(second.queued, true);
 });
 
 test('spawn refuses when free disk is below half the hygiene threshold', async () => {
@@ -447,7 +447,8 @@ test('two concurrent spawns respect maxWorkers via the admission mutex (F6)', as
     helm.spawn(spawnBody(repo)),
   ]);
   const oks = [first, second].filter((o) => o.ok);
-  assert.equal(oks.length, 1, 'exactly one concurrent spawn should be admitted under maxWorkers=1');
+  assert.equal(oks.length, 2, 'both concurrent spawns are accepted, with one queued under maxWorkers=1');
+  assert.equal([first, second].filter((o) => o.ok && o.queued).length, 1);
 });
 
 test('two concurrent spawns with the same idempotencyKey share one workerId and one worktree create (F6)', async () => {

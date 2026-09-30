@@ -58,6 +58,7 @@ export function codexWorkerRunner(opts: CodexWorkerRunnerOptions = {}): WorkerRu
         const lastFile = join(input.sessionDir, `last-${Date.now()}.md`);
         hooks.emit('turn.start', { message: prompt });
         const child = spawn(bin, codexArgs(input, spec, threadId, lastFile, network), { cwd: input.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] });
+        if (child.pid) hooks.onPid?.(child.pid);
         // A missing or non-executable binary surfaces as an 'error' event on the child, not as an
         // exception from spawn(); left unhandled it would take the daemon down.
         let spawnError: Error | null = null;

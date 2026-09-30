@@ -44,6 +44,64 @@ test('capacity admits light work, limits heavy work, and respects the ceiling', 
   } finally { store.close(); }
 });
 
+test('idle capacity admits one heavy job even when the live unit budget is below four', async () => {
+  const { store, capacity } = admission(snapshot({ freeRamGb: 4 }), 8);
+  try {
+    assert.deepEqual(await capacity.admit({ id: 'heavy', workerId: 'heavy', kind: 'builder', loadClass: 'heavy' }, () => {}), { started: true });
+    assert.equal((await capacity.status()).usedUnits, 4);
+    assert.deepEqual(await capacity.admit({ id: 'second', workerId: 'second', kind: 'builder', loadClass: 'light' }, () => {}), { queued: true });
+  } finally { store.close(); }
+});
+
+test('priority and bounded aging select gates first and let a smaller aged builder bypass a heavy head', async () => {
+  let clock = new Date('2026-09-30T00:00:00.000Z');
+  const store = openStore(':memory:');
+  const capacity = createCapacityAdmission({ home: '/tmp/helm-capacity-priority', maxWorkers: 0, store, settings: { capacity: loadSettings('/missing').capacity }, sampler: fakeSampler(snapshot({ freeRamGb: 12 })), now: () => clock });
+  try {
+    const started: string[] = [];
+    await capacity.admit({ id: 'running', workerId: 'running', kind: 'builder', loadClass: 'light' }, () => { started.push('running'); });
+    await capacity.admit({ id: 'heavy', workerId: 'heavy', kind: 'builder', loadClass: 'heavy' }, () => { started.push('heavy'); });
+    await capacity.admit({ id: 'gate', workerId: 'gate', kind: 'gate', loadClass: 'medium' }, () => { started.push('gate'); });
+    assert.deepEqual(started, ['running', 'gate']);
+    capacity.finish('gate');
+    await capacity.admit({ id: 'aged', workerId: 'aged', kind: 'builder', loadClass: 'medium' }, () => { started.push('aged'); });
+    clock = new Date(clock.getTime() + 61_000);
+    await capacity.tick();
+    assert.ok(started.includes('aged'));
+    assert.equal(started.includes('heavy'), false);
+  } finally { store.close(); }
+});
+
+test('queued jobs survive an admission restart and rehydrate with their callback', async () => {
+  const store = openStore(':memory:');
+  try {
+    const first = createCapacityAdmission({ home: '/tmp/helm-capacity-restart', maxWorkers: 1, store, settings: { capacity: loadSettings('/missing').capacity }, sampler: fakeSampler(snapshot({ freeRamGb: 8 })) });
+    const callbacks: string[] = [];
+    await first.admit({ id: 'running', workerId: 'running', kind: 'builder', loadClass: 'light', pid: process.pid }, () => { callbacks.push('running'); });
+    await first.admit({ id: 'queued', workerId: 'queued', kind: 'builder', loadClass: 'light', payload: { type: 'worker', workerId: 'queued' } }, () => { callbacks.push('queued'); });
+    const restarted = createCapacityAdmission({ home: '/tmp/helm-capacity-restart', maxWorkers: 1, store, settings: { capacity: loadSettings('/missing').capacity }, sampler: fakeSampler(snapshot({ freeRamGb: 8 })) });
+    restarted.rehydrate((job) => job.payload ? () => { callbacks.push(String(job.workerId)); } : undefined);
+    restarted.finish('running');
+    await restarted.tick();
+    assert.deepEqual(callbacks, ['running', 'queued']);
+  } finally { store.close(); }
+});
+
+test('finish-triggered ticks are single-flight and do not start a queued job twice', async () => {
+  const { store, capacity } = admission(snapshot({ freeRamGb: 16 }), 2);
+  try {
+    let starts = 0;
+    await capacity.admit({ id: 'one', workerId: 'one', kind: 'builder', loadClass: 'light' }, () => {});
+    await capacity.admit({ id: 'two', workerId: 'two', kind: 'builder', loadClass: 'light' }, () => {});
+    await capacity.admit({ id: 'three', workerId: 'three', kind: 'builder', loadClass: 'light' }, () => { starts += 1; });
+    capacity.finish('one');
+    capacity.finish('two');
+    await capacity.tick();
+    assert.equal(starts, 1);
+    assert.equal((await capacity.status()).runningJobs, 1);
+  } finally { store.close(); }
+});
+
 test('pressure and booted simulators shrink the live budget and queued work starts automatically', async () => {
   const current = snapshot({ freeRamGb: 20, memoryPressure: 'critical', bootedSimulators: 1 });
   const { store, capacity } = admission(current, 8);
@@ -104,7 +162,7 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
       statfs: async () => ({ bavail: 1024, bsize: 1024 ** 3 }),
       exec: async (file, args, options) => {
         calls.push(`${file}:${options.timeoutMs}`);
-        if (file === 'vm_stat') return { stdout: 'page size of 4096 bytes\nPages free: 1048576\n' };
+        if (file === 'vm_stat') return { stdout: 'page size of 4096 bytes\nPages free: 1048576\nPages inactive: 524288\nPages speculative: 262144\nPages purgeable: 262144\n' };
         if (file === 'memory_pressure') return { stdout: 'System-wide memory free percentage: 20%\n' };
         if (file === 'xcrun') return { stdout: JSON.stringify({ devices: { iOS: [{ state: 'Booted' }, { state: 'Shutdown' }] } }), code: 0 };
         if (file === 'ps' && args.includes('comm=')) return { stdout: 'xcodebuild\nxcodebuild\nnode\n', code: 0 };
@@ -117,6 +175,7 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
     const second = await sampler.sample();
     assert.equal(first, second);
     assert.equal(first.memoryPressure, 'normal');
+    assert.equal(first.freeRamGb, 8);
     assert.equal(first.bootedSimulators, 1);
     assert.equal(first.freeDiskGb, 1024);
     assert.equal(first.processCount, 3);

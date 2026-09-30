@@ -54,7 +54,7 @@ test('maps milestone events, batches them, and never leaks the webhook URL', asy
       fetch: async (url, init) => { calls.push({ url: String(url), body: String(init?.body) }); return new Response('{}', { status: 200 }); }, log: (line) => logs.push(line) });
     const events = [
       ['pr', { number: 7 }], ['pr.merged', { number: 7 }], ['watch.alert', { rule: 'silence' }],
-      ['spend.warning', { spendUsd: 8 }], ['spend.invalid', { reason: 'helm.json invalid; keeping last good limits' }], ['spend.changed', { source: 'file' }], ['spend.changed', { source: 'startup', values: { capUsd: 10, warnUsd: 8, maxWorkers: 3 } }], ['inbox.triage', { inboxId: 'q-1', route: 'needs_human', shadow: true, question: 'approve it' }], ['state', { to: 'failed' }],
+      ['spend.warning', { spendUsd: 8 }], ['capacity.waiting', { kind: 'gate', loadClass: 'heavy', waitedMs: 120_000 }], ['spend.invalid', { reason: 'helm.json invalid; keeping last good limits' }], ['spend.changed', { source: 'file' }], ['spend.changed', { source: 'startup', values: { capUsd: 10, warnUsd: 8, maxWorkers: 3 } }], ['inbox.triage', { inboxId: 'q-1', route: 'needs_human', shadow: true, question: 'approve it' }], ['state', { to: 'failed' }],
     ] as const;
     for (const [kind, data] of events) store.appendEvent('w-1', kind, { ...data, project: 'o/r' }, clock.toISOString());
     await discord.tick();
@@ -65,6 +65,7 @@ test('maps milestone events, batches them, and never leaks the webhook URL', asy
     const payload = JSON.parse(calls[0]!.body) as { content: string; username: string; allowed_mentions: { parse: string[] } };
     assert.match(payload.content, /#7/);
     assert.match(payload.content, /Needs Nick/);
+    assert.match(payload.content, /Waiting for capacity: gate heavy, 2 min/);
     assert.match(payload.content, /helm\.json invalid; keeping last good limits/);
     assert.match(payload.content, /Spend changed: file/);
     assert.match(payload.content, /Helm started: spend cap \$10, warn \$8, max workers 3/);

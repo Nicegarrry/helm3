@@ -43,7 +43,7 @@ export function codexArgs(input: Pick<WorkerRunInput, 'role' | 'worktree'>, spec
   const sandbox = input.role === 'reviewer' ? 'read-only' : 'workspace-write';
   const common = ['--json', '-m', spec.model, '-c', 'approval_policy="never"', '-c', `sandbox_mode="${sandbox}"`, '-o', lastFile, '--skip-git-repo-check'];
   if (spec.effort) common.push('-c', `model_reasoning_effort="${spec.effort}"`);
-  if (network && sandbox === 'workspace-write') common.push('-c', 'sandbox_workspace_write.network_access=true');
+  if (sandbox === 'workspace-write') common.push('-c', `sandbox_workspace_write.network_access=${network}`);
   // `exec resume` takes neither -C nor -s: the session remembers its cwd and the sandbox rides -c.
   return threadId ? ['exec', 'resume', threadId, ...common, '-'] : ['exec', ...common, '-C', input.worktree, '-'];
 }

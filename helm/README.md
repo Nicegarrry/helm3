@@ -37,6 +37,15 @@ the full harness catalog on every session.
    and cap, give it its own `HELM_HOME` in `env`.
 
    For Codex or anything that speaks Streamable HTTP, point it at `http://127.0.0.1:<port>/mcp`
+   with `Authorization: Bearer <token>` on every request. The daemon generates a new
+   random token at startup and stores it with port/pid in `$HELM_HOME/serve.json`, created
+   with mode `0600`. CLI, stdio, upgrade and fleet clients read it at each call; keep this
+   file private and never copy the token into worker environments or logs.
+   An HTTP MCP client such as Codex must read `port` and `token` from `serve.json` at
+   connect time and use the token in that header; re-read it whenever reconnecting after
+   a restart. A fixed token in client configuration becomes stale on restart. Prefer
+   `helm serve --stdio` when the client supports stdio: its proxy re-reads the token on
+   every call, so no token needs to be copied into the client's configuration.
    (the port is in `$HELM_HOME/serve.json`; start the daemon by hand with
    `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http --port 4747` if nothing has yet).
 
@@ -200,9 +209,22 @@ session, on whatever account `codex login` holds. Codex's own sandbox is the pol
 lane, not the deny list above: builders run `workspace-write` (files inside the worktree
 only; Codex refuses writes under `.git/`, so a Codex worker cannot commit, and Helm commits
 its changes after the turn exactly as it does for Pi workers), reviewers run `read-only`.
-Network is off inside the sandbox unless the daemon has `HELM_CODEX_NETWORK=1`, so a worker
-cannot push or call GitHub either way; `pnpm install --prefer-offline` and friends work from
-the local store.
+Helm explicitly passes `sandbox_workspace_write.network_access=false` to builders unless
+its daemon has `HELM_CODEX_NETWORK=1`. Codex's native network restriction blocks TCP,
+including loopback daemon calls; local Unix sockets are a separate sandbox allowance.
+With `HELM_CODEX_NETWORK=1`, builders get network access, including loopback: Helm does
+not add a daemon-port firewall rule to that lane. Reviewers retain `read-only` and never
+receive Helm's network opt-in. Offline installs work from the local store.
+
+The Codex worker sandbox permits filesystem reads outside the worktree, including
+`$HELM_HOME/serve.json`; mode `0600` does not hide it from a worker running as the same
+user. The token is not passed in worker environments, but it is not unreadable by workers.
+A network-enabled Codex worker that reads it can authenticate to the daemon. Follow-up:
+migrate the Codex lane to a permission profile that denies this file and its temporary
+siblings, and prove the denial for fresh and resumed workers. Codex's
+[permission profiles](https://learn.chatgpt.com/docs/permissions) support read denials but
+cannot be combined with Helm's current `sandbox_mode` / `sandbox_workspace_write`
+settings; adding a deny key to those settings would not establish protection.
 
 The `:effort` suffix sets `model_reasoning_effort` (`low`, `medium`, `high`, `xhigh`);
 without it Codex uses its config default. A turn's session is the Codex thread id, recorded
@@ -223,7 +245,18 @@ reviews on the Pi lane, or rely on the gate.
 
 ## Safe updates (v1.5 and later)
 
-Keep the running daemon on its existing release while you prepare an update:
+**One-time bearer-token migration (this version):** wait for current work to settle, then
+stop the pre-auth daemon with its existing CLI (`helm shutdown`) and start this version
+with `helm serve --http --port <same-port>` and the same `HELM_HOME` and environment.
+Use stop/start for this transition, not `helm update`. The first upgrade's helper runs
+from the OLD daemon's `update.mjs`; that pre-auth helper cannot authenticate its new
+daemon status checks, so it never sends `resume` and leaves the new daemon draining.
+If you already performed that first token-enabled upgrade and the new daemon is healthy,
+use this version's CLI to inspect it (`helm daemon --action status --json`) and run
+`helm daemon --action resume`. HTTP authentication remains strict during recovery.
+Later upgrades between token-enabled versions use a token-aware helper.
+
+Keep the running daemon on its existing release while you prepare subsequent updates:
 
 ```sh
 helm update --stage <commit-or-tag> --repo /path/to/helm3

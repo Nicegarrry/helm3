@@ -121,7 +121,9 @@ function printOutcome(outcome: unknown, json: boolean): void {
 /** Reads serve.json and confirms its pid is actually alive, deleting a stale file if not. */
 function readLiveServeJson(serveJsonPath: string): { port: number; pid: number } | undefined {
   if (!existsSync(serveJsonPath)) return undefined;
-  const parsed = JSON.parse(readFileSync(serveJsonPath, 'utf8')) as { port: number; pid: number };
+  let parsed: { port: number; pid: number };
+  try { parsed = JSON.parse(readFileSync(serveJsonPath, 'utf8')); }
+  catch { throw new Error('daemon metadata unavailable'); }
   try {
     process.kill(parsed.pid, 0);
     return parsed;
@@ -144,7 +146,7 @@ async function postTool(name: string, body: unknown): Promise<unknown> {
     process.exitCode = 2;
     return undefined;
   }
-  return callDaemon(live.port, name, body);
+  return callDaemon(live.port, name, body, false, undefined, config.home);
 }
 
 function toWorkerRowSummary(r: WorkerRow) {
@@ -512,7 +514,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const port = values.port ? Number(values.port) : 0;
   if (values.stdio && !values.http) {
     const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port, tools));
-    const handle = await serveStdioProxy(live.port, tools);
+    const handle = await serveStdioProxy(live.port, tools, config.home);
     console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);
     await handle.closed;
     await handle.close();

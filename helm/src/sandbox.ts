@@ -18,6 +18,7 @@ export type GateSandboxOptions = Readonly<{
   cwd: string;
   allowNetwork: boolean;
   operatorHome?: string;
+  daemonHome?: string;
   denyLocalPorts?: readonly number[];
   denyLocalSocketPaths?: readonly string[];
 }>;
@@ -88,7 +89,7 @@ async function canonicalPath(path: string): Promise<string> {
 }
 
 /** The deny list shared by every worker-facing macOS sandbox. */
-export function credentialPaths(home: string): readonly string[] {
+export function credentialPaths(home: string, helmHome = join(home, '.helm')): readonly string[] {
   return [
     join(home, '.config'),
     join(home, '.ssh'),
@@ -110,6 +111,7 @@ export function credentialPaths(home: string): readonly string[] {
     join(home, 'Library', 'Keychains'),
     join(home, 'Library', 'Application Support'),
     join(home, '.helm'),
+    join(helmHome, 'serve.json'),
   ];
 }
 
@@ -119,6 +121,7 @@ export function buildSandboxProfile(options: {
   tempDir: string;
   operatorHomes: readonly string[];
   gateHome?: string;
+  daemonHomes?: readonly string[];
   toolchainPaths?: readonly string[];
   npmCachePaths?: readonly string[];
   gitDir?: string;
@@ -197,6 +200,12 @@ export function buildSandboxProfile(options: {
   // These are read-only exceptions; the write rules above still exclude .git.
   for (const path of readOnlyExceptions) lines.push(`(allow file-read* ${subpath(path)})`);
   for (const gitDir of gitDirs) lines.push(`(deny file-write* ${subpath(gitDir)})`);
+  // Apply after read exceptions, including caches and worktrees under HELM_HOME.
+  for (const home of unique(options.daemonHomes ?? [process.env.HELM_HOME || join(homedir(), '.helm')])) {
+    const path = join(home, 'serve.json');
+    lines.push(`(deny file-read* ${literal(path)})`);
+    lines.push(`(deny file-read* ${regex(`${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\..*\\.tmp$`)})`);
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -291,6 +300,7 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
       tempDir: profileTempDir,
       operatorHomes: profileOperatorHomes,
       gateHome: profileHome,
+      daemonHomes: await canonicalPaths([options.daemonHome || process.env.HELM_HOME || join(homedir(), '.helm')]),
       toolchainPaths: toolchains,
       npmCachePaths: npmCaches,
       gitDirs: await worktreeGitDirs(profileCwd),

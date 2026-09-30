@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { daemonAuthorization } from '../bin/daemon-auth.mjs';
 import { promisify } from 'node:util';
 import { gateRunner } from '../src/gate.ts';
 import { Helm } from '../src/helm.ts';
@@ -113,12 +114,12 @@ test('e2e: spawn -> faux Pi writes a file -> commit -> gate -> pr.open -> daemon
     assert.ok((status as { spendUsd: number }).spendUsd > 0, 'faux usage priced');
 
     const port = daemon.port!;
-    const listed = await fetch(`http://127.0.0.1:${port}/tools/worker.list`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const listed = await fetch(`http://127.0.0.1:${port}/tools/worker.list`, { method: 'POST', headers: { authorization: daemonAuthorization(home), 'content-type': 'application/json' }, body: '{}' });
     const body = (await listed.json()) as { ok: boolean; workers: Array<{ workerId: string; state: string }> };
     assert.equal(body.ok, true);
     assert.equal(body.workers[0]?.workerId, spawned.workerId);
     assert.equal(body.workers[0]?.state, 'succeeded');
-    const table = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+    const table = await (await fetch(`http://127.0.0.1:${port}/`, { headers: { authorization: daemonAuthorization(home) } })).text();
     assert.match(table, new RegExp(spawned.workerId));
     assert.ok(existsSync(join(home, 'serve.json')));
   } finally {

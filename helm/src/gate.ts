@@ -142,7 +142,7 @@ async function refuseEscapingSymlinks(worktree: string, logDir: string): Promise
   return { reason, result: { name: 'gate.refused', command: 'symlink preflight', exitCode: 1, outputPath, durationMs: 0 } };
 }
 
-async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; denyLocalPorts: readonly number[]; denyLocalSocketPaths: readonly string[]; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<CheckResult> {
+async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; daemonHome?: string; denyLocalPorts: readonly number[]; denyLocalSocketPaths: readonly string[]; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<CheckResult> {
   const start = Date.now();
   const outputPath = join(logDir, `${outputSlug}.log`);
   let sandbox: Awaited<ReturnType<typeof prepareGateSandbox>> | Awaited<ReturnType<typeof prepareUnsandboxedGate>> | undefined;
@@ -160,7 +160,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
       options.onUnsandboxed?.(`sandbox-exec is unavailable on ${process.platform}; running gate unsandboxed because allowUnsandboxed is enabled`);
     }
     sandbox = options.sandbox && executable
-      ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome, denyLocalPorts: options.denyLocalPorts, denyLocalSocketPaths: options.denyLocalSocketPaths })
+      ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome, daemonHome: options.daemonHome, denyLocalPorts: options.denyLocalPorts, denyLocalSocketPaths: options.denyLocalSocketPaths })
       : await prepareUnsandboxedGate();
     if (sandbox.executable && sandbox.profilePath && /^(1|true)$/i.test(process.env.HELM_DEBUG_SANDBOX ?? '')) {
       await copyFile(sandbox.profilePath, join(logDir, `${outputSlug}.profile.sb`)).catch(() => {});
@@ -222,6 +222,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
             sandbox: opts?.sandbox !== false,
             allowUnsandboxed: options.allowUnsandboxed === true,
             operatorHome: options.operatorHome,
+            daemonHome: options.daemonHome,
             denyLocalPorts,
             denyLocalSocketPaths,
             onUnsandboxed: opts?.onUnsandboxed,

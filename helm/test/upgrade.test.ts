@@ -1,3 +1,4 @@
+/** Real daemon handover and recovery checks for the standalone upgrade helper. */
 import assert from 'node:assert/strict';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -6,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
+import { daemonAuthorization } from '../bin/daemon-auth.mjs';
 import { control, digestRelease, stageRelease, launchUpgrade } from '../bin/update.mjs';
 import { openStore } from '../src/store.js';
 import { Lifecycle } from '../src/lifecycle.js';
@@ -93,24 +95,24 @@ const timer = setInterval(() => {
 `);
   chmodSync(fakeCodex, 0o755);
   const old = await start(home, { HELM_CODEX_BIN: fakeCodex });
-  const before = await control(old.port, { action: 'status' });
-  const post = async (name: string, body: object) => (await (await fetch(`http://127.0.0.1:${old.port}/tools/${name}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json()) as any;
+  const before = await control(old.port, { action: 'status' }, home);
+  const post = async (name: string, body: object) => (await (await fetch(`http://127.0.0.1:${old.port}/tools/${name}`, { method: 'POST', headers: { authorization: daemonAuthorization(home), 'content-type': 'application/json' }, body: JSON.stringify(body) })).json()) as any;
   const spawned = await post('worker.spawn', { repo, objective: 'synthetic task', model: 'codex/gpt-6-luna:medium', difficulty: 'easy' });
   assert.ok(spawned.ok, JSON.stringify(spawned));
   await eventually(() => post('worker.inspect', { workerId: spawned.workerId }), (s) => s.state === 'running' && s.events.some((e: any) => e.kind === 'turn.start'));
-  await control(old.port, { action: 'upgrade', timeoutMs: 10000 });
-  assert.equal((await control(old.port, { action: 'status' })).phase, 'draining');
+  await control(old.port, { action: 'upgrade', timeoutMs: 10000 }, home);
+  assert.equal((await control(old.port, { action: 'status' }, home)).phase, 'draining');
   assert.match((await post('worker.spawn', { repo, objective: 'must wait' })).reason, /draining/);
   writeFileSync(proceed, 'finish');
   const done = await eventually(() => read(join(home, 'upgrade.json')), (s) => ['completed', 'failed', 'timed_out'].includes(s.phase));
   assert.equal(done.phase, 'completed', JSON.stringify(done) + '\n' + old.errors());
-  const after = await control(old.port, { action: 'status' });
+  const after = await control(old.port, { action: 'status' }, home);
   assert.equal(after.phase, 'accepting');
   assert.equal(after.version, staged.version);
   assert.equal(after.revision, staged.revision);
   assert.notEqual(after.bootId, before.bootId);
   assert.notEqual(after.pid, before.pid);
-  const status = await (await fetch(`http://127.0.0.1:${old.port}/tools/run.status`, { method: 'POST', body: '{}' })).json() as Record<string, unknown>;
+  const status = await (await fetch(`http://127.0.0.1:${old.port}/tools/run.status`, { method: 'POST', headers: { authorization: daemonAuthorization(home) }, body: '{}' })).json() as Record<string, unknown>;
   assert.equal(status.spendCapUsd, 3.75);
   assert.equal(status.maxWorkers, 2);
   assert.deepEqual(read(join(home, 'current-release.json')), staged);
@@ -120,7 +122,7 @@ const timer = setInterval(() => {
   assert.match(worker.head, /^[a-f0-9]{40}$/);
   assert.equal(readFileSync(join(spawned.worktree, 'completed.txt'), 'utf8'), 'synthetic worker finished before restart');
   assert.equal(existsSync(join(packageRoot, 'completed.txt')), false);
-  await control(old.port, { action: 'shutdown' });
+  await control(old.port, { action: 'shutdown' }, home);
   await eventually(() => existsSync(join(home, 'daemon.lock')), (locked) => !locked);
   const store = openStore(join(home, 'helm.sqlite'));
   assert.equal(store.getWorker(spawned.workerId)?.sessionFile, 'codex-thread:synthetic-session');
@@ -136,13 +138,13 @@ test('drain timeout leaves the daemon and worker alive, records blockers, and pe
   t.after(() => server.close());
   const { launchUpgrade } = await import('../bin/update.mjs');
   lifecycle.upgrade = (timeout) => launchUpgrade(home, server.port!, lifecycle.status(), timeout);
-  await control(server.port!, { action: 'upgrade', timeoutMs: 20 });
+  await control(server.port!, { action: 'upgrade', timeoutMs: 20 }, home);
   const done = await eventually(() => read(join(home, 'upgrade.json')), (s) => s.phase === 'timed_out' || s.phase === 'failed');
   assert.equal(done.phase, 'timed_out', JSON.stringify(done));
   assert.deepEqual(done.blockers, ['worker:still-working']);
-  assert.equal((await control(server.port!, { action: 'status' })).phase, 'draining');
+  assert.equal((await control(server.port!, { action: 'status' }, home)).phase, 'draining');
   await eventually(() => existsSync(join(home, 'upgrade.lock')), (locked) => !locked);
-  assert.equal((await control(server.port!, { action: 'resume' })).phase, 'accepting');
+  assert.equal((await control(server.port!, { action: 'resume' }, home)).phase, 'accepting');
 });
 
 test('changed release is refused before shutdown', async (t) => {
@@ -151,13 +153,13 @@ test('changed release is refused before shutdown', async (t) => {
   write(join(home, 'staged-release.json'), staged);
   writeFileSync(join(staged.root, 'helm', 'src', 'cli.ts'), 'changed');
   const old = await start(home);
-  const before = await control(old.port, { action: 'status' });
-  await control(old.port, { action: 'upgrade', timeoutMs: 1000 });
+  const before = await control(old.port, { action: 'status' }, home);
+  await control(old.port, { action: 'upgrade', timeoutMs: 1000 }, home);
   const done = await eventually(() => read(join(home, 'upgrade.json')), (s) => s.phase === 'failed');
   assert.match(done.error, /changed after validation/);
-  assert.equal((await control(old.port, { action: 'status' })).bootId, before.bootId);
-  assert.equal((await control(old.port, { action: 'status' })).phase, 'ready');
-  await control(old.port, { action: 'shutdown' });
+  assert.equal((await control(old.port, { action: 'status' }, home)).bootId, before.bootId);
+  assert.equal((await control(old.port, { action: 'status' }, home)).phase, 'ready');
+  await control(old.port, { action: 'shutdown' }, home);
   await eventually(() => existsSync(join(home, 'daemon.lock')), (locked) => !locked);
 });
 
@@ -168,7 +170,7 @@ test('failed candidate startup leaves admissions closed and does not change the 
   staged.digest = digestRelease(staged.root);
   write(join(home, 'staged-release.json'), staged);
   const old = await start(home);
-  await control(old.port, { action: 'upgrade', timeoutMs: 1000 });
+  await control(old.port, { action: 'upgrade', timeoutMs: 1000 }, home);
   const done = await eventually(() => read(join(home, 'upgrade.json')), (s) => s.phase === 'failed');
   assert.match(done.error, /new daemon exited 42/);
   assert.ok(existsSync(join(home, 'drain.json')));
@@ -208,7 +210,7 @@ test('staging pins an archive, isolates validation, and preserves prior selectio
 test('a second real daemon is refused without interrupting the first owner', async (t) => {
   const home = testHome(t);
   const old = await start(home);
-  const before = await control(old.port, { action: 'status' });
+  const before = await control(old.port, { action: 'status' }, home);
   const second = spawn(process.execPath, ['--import', 'tsx', join(packageRoot, 'src', 'cli.ts'), 'serve', '--http'], {
     cwd: packageRoot, env: { ...process.env, HELM_HOME: home }, stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -217,8 +219,8 @@ test('a second real daemon is refused without interrupting the first owner', asy
   const code = await new Promise((resolve) => second.on('exit', resolve));
   assert.notEqual(code, 0);
   assert.match(stderr, /already running/);
-  assert.equal((await control(old.port, { action: 'status' })).bootId, before.bootId);
-  await control(old.port, { action: 'shutdown' });
+  assert.equal((await control(old.port, { action: 'status' }, home)).bootId, before.bootId);
+  await control(old.port, { action: 'shutdown' }, home);
   await eventually(() => existsSync(join(home, 'daemon.lock')), (locked) => !locked);
 });
 
@@ -226,14 +228,14 @@ test('a second real daemon is refused without interrupting the first owner', asy
 test('signal metadata failure leaves the daemon alive', async (t) => {
   const home = testHome(t);
   const old = await start(home);
-  const before = await control(old.port, { action: 'status' });
+  const before = await control(old.port, { action: 'status' }, home);
   mkdirSync(join(home, 'drain.json'));
   old.child.kill('SIGTERM');
   await eventually(old.errors, (errors) => errors.includes('EISDIR'));
   assert.equal(old.child.exitCode, null);
-  assert.equal((await control(old.port, { action: 'status' })).bootId, before.bootId);
+  assert.equal((await control(old.port, { action: 'status' }, home)).bootId, before.bootId);
   rmSync(join(home, 'drain.json'), { recursive: true });
-  await control(old.port, { action: 'shutdown' });
+  await control(old.port, { action: 'shutdown' }, home);
   await eventually(() => existsSync(join(home, 'daemon.lock')), (locked) => !locked);
 });
 
@@ -258,4 +260,21 @@ test('release digest covers installed and linked dependencies', (t) => {
   assert.notEqual(digestRelease(root), before);
   symlinkSync(root, join(dependency, 'cycle'), 'dir');
   assert.throws(() => digestRelease(root), /symlink cycle/);
+});
+
+test('token-aware upgrade helper checks and resumes a token-requiring daemon', async (t) => {
+  const home = testHome(t);
+  const lifecycle = new Lifecycle(home, () => []);
+  lifecycle.drain();
+  const server = await serve({ helm: { config: { home }, lifecycle } as unknown as Helm });
+  t.after(() => server.close());
+  assert.match(read(join(home, 'serve.json')).token, /^[a-f0-9]{64}$/);
+  const unauthenticated = await fetch(`http://127.0.0.1:${server.port}/tools/daemon.control`, {
+    method: 'POST', body: JSON.stringify({ action: 'resume' }),
+  });
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(await unauthenticated.text(), '');
+  assert.equal((await control(server.port!, { action: 'status' }, home)).phase, 'ready');
+  assert.equal((await control(server.port!, { action: 'resume' }, home)).phase, 'accepting');
+  assert.equal((await control(server.port!, { action: 'status' }, home)).phase, 'accepting');
 });

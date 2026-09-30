@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
 
+import { daemonAuthorization } from './daemon-auth.mjs';
+
 const script = fileURLToPath(import.meta.url);
 const read = (path) => JSON.parse(readFileSync(path, 'utf8'));
 const write = (path, data) => {
@@ -36,9 +38,9 @@ export function digestRelease(root) {
   return hash.digest('hex');
 }
 
-export async function control(port, input) {
+export async function control(port, input, home) {
   const res = await fetch(`http://127.0.0.1:${port}/tools/daemon.control`, {
-    method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' }, body: JSON.stringify(input), signal: AbortSignal.timeout(5000),
+    method: 'POST', headers: { authorization: daemonAuthorization(home), 'content-type': 'application/json', connection: 'close' }, body: JSON.stringify(input), signal: AbortSignal.timeout(5000),
   });
   const result = await res.json();
   if (!result.ok || result.protocol !== 1) throw new Error(result.reason ?? 'daemon has no safe upgrade protocol; arrange a quiet-window installation');
@@ -125,20 +127,20 @@ export async function applyUpgrade(home, id) {
   let stopped = false;
   try {
     if (digestRelease(job.staged.root) !== job.staged.digest) throw new Error('staged release changed after validation');
-    let status = await control(job.port, { action: 'status' });
+    let status = await control(job.port, { action: 'status' }, home);
     if (status.bootId !== job.source.bootId) throw new Error('daemon identity changed; refusing handover');
-    status = await control(job.port, { action: 'drain', expectedBootId: job.source.bootId });
+    status = await control(job.port, { action: 'drain', expectedBootId: job.source.bootId }, home);
     const deadline = Date.now() + job.timeoutMs;
     while (status.phase !== 'ready') {
       if (Date.now() >= deadline) { save('timed_out', { blockers: status.blockers }); return; }
       await sleep(200);
-      status = await control(job.port, { action: 'status' });
+      status = await control(job.port, { action: 'status' }, home);
       if (status.bootId !== job.source.bootId) throw new Error('daemon identity changed while draining');
     }
     if (digestRelease(job.staged.root) !== job.staged.digest) throw new Error('staged release changed while draining');
     save('stopping', { handoverStarted: true });
     stopped = true; // An interrupted response does not prove shutdown was absent.
-    await control(job.port, { action: 'shutdown', expectedBootId: job.source.bootId });
+    await control(job.port, { action: 'shutdown', expectedBootId: job.source.bootId }, home);
     // The old process releases its ownership lock only after closing HTTP and SQLite.
     for (let i = 0; existsSync(join(home, 'daemon.lock')); i++) {
       if (i >= 150) throw new Error('old daemon has not released ownership; no new daemon started');
@@ -157,14 +159,14 @@ export async function applyUpgrade(home, id) {
     child.unref();
     for (let i = 0; i < 150; i++) {
       if (startError || child.exitCode !== null) throw startError ?? new Error(`new daemon exited ${child.exitCode}`);
-      try { status = await control(job.port, { action: 'status' }); } catch { status = null; }
+      try { status = await control(job.port, { action: 'status' }, home); } catch { status = null; }
       if (status?.pid === child.pid && status.version === job.staged.version && status.revision === job.staged.revision && status.phase === 'ready') break;
       if (i === 149) throw new Error('new daemon health/identity check failed; admissions remain closed');
       await sleep(100);
     }
     write(join(home, 'current-release.json'), job.staged);
     save('healthy');
-    await control(job.port, { action: 'resume', upgradeId: id, expectedBootId: status.bootId });
+    await control(job.port, { action: 'resume', upgradeId: id, expectedBootId: status.bootId }, home);
     save('completed');
   } catch (err) { save('failed', { error: `${err.message}${stopped ? '; inspect daemon.log before manual recovery' : '; old daemon left running'}` }); }
   finally { releaseLock(home, id); }
@@ -177,7 +179,9 @@ async function main(args) {
   const home = resolve(process.env.HELM_HOME || join(homedir(), '.helm'));
   if (values.stage) { console.log(JSON.stringify(stageRelease(home, resolve(values.repo ?? process.cwd()), values.stage), null, 2)); return; }
   if (!values['when-idle']) throw new Error('usage: helm update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]');
-  const live = read(join(home, 'serve.json'));
-  console.log(JSON.stringify(await control(live.port, { action: 'upgrade', timeoutMs: Number(values.timeout ?? 600000) }), null, 2));
+  let live;
+  try { live = read(join(home, 'serve.json')); }
+  catch { throw new Error('daemon metadata unavailable'); }
+  console.log(JSON.stringify(await control(live.port, { action: 'upgrade', timeoutMs: Number(values.timeout ?? 600000) }, home), null, 2));
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === script) main(process.argv.slice(2)).catch((err) => { console.error(err.message); process.exitCode = 1; });

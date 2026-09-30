@@ -69,6 +69,15 @@ one-shot-brief.md section 3.
 
 An MCP front-end over stdio that forwards every tool call to the daemon on `port`. It owns nothing: no store, no workers. Any number of these can attach to one daemon, one per orchestrator session, and each exits with its client. Calls go over `node:http` rather than `fetch` because undici gives up on a response after five silent minutes, and `worker.wait` may hold a response open for twenty-five.
 
+Every daemon HTTP route requires `Authorization: Bearer <token>` as well as the Host
+check. The token rotates at startup and is stored with port/pid in the private `0600`
+`$HELM_HOME/serve.json`. CLI, stdio, fleet and upgrade clients read it at each call.
+HTTP MCP clients read it at connect/reconnect time; prefer stdio to handle rotation
+without copying the secret into client configuration. Authentication failures are empty
+401 responses. Gate profiles deny metadata reads; Codex's worker read boundary does not.
+The first pre-auth upgrade helper cannot resume the token-enabled daemon: use the
+README.md one-time stop/start migration or recover with the new CLI's `daemon --action resume`.
+
 ## worker.ts
 
 Pi session runtime: creates one in-process Pi coding-agent session per turn inside a worktree, with Pi's built-in tools enabled, guarded by a `tool_call` extension hook that is the entire protected-path policy. Parses the model's final message into a `WorkerResult`, with one correction turn on malformed output. See DESIGN.md and docs/one-shot-brief.md section 5.  Pi packages are imported lazily, inside functions, never at module load time.

@@ -1,10 +1,11 @@
 /** Claude CLI per turn, native permissions and subscription usage; see README.md. */
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import { promisify } from 'node:util';
 import type { WorkerHooks, WorkerRunInput, WorkerRunOutcome, WorkerRunner } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
 import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
@@ -72,6 +73,21 @@ const CLAUDE_DENY_READ = [
 ];
 
 const STOP_GRACE_MS = 1_000;
+const execFileAsync = promisify(execFile);
+
+export type ClaudeGitDirs = Readonly<{ gitDir: string; commonDir: string }>;
+
+/** Resolve both git paths so a ~/.helm deny rule does not hide linked-worktree metadata. */
+export async function resolveClaudeGitDirs(worktree: string): Promise<ClaudeGitDirs> {
+  const { stdout } = await execFileAsync(
+    'git',
+    ['-C', worktree, 'rev-parse', '--absolute-git-dir', '--git-common-dir'],
+    { cwd: worktree },
+  );
+  const paths = stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (paths.length !== 2) throw new Error(`git rev-parse returned no git paths for ${worktree}`);
+  return { gitDir: resolve(worktree, paths[0]!), commonDir: resolve(worktree, paths[1]!) };
+}
 
 function stopChild(child: ChildProcess): void {
   child.kill('SIGTERM');
@@ -86,7 +102,12 @@ function workerTempDir(input: Pick<WorkerRunInput, 'workerId' | 'sessionDir'>): 
 }
 
 /** Claude Code's OS sandbox policy; fail closed if the sandbox backend is unavailable. */
-export function claudeSandboxSettings(worktree: string, temporaryDirectory: string, reviewer = false): string {
+export function claudeSandboxSettings(
+  worktree: string,
+  temporaryDirectory: string,
+  gitDirs: ClaudeGitDirs,
+  reviewer = false,
+): string {
   return JSON.stringify({
     sandbox: {
       enabled: true,
@@ -95,7 +116,7 @@ export function claudeSandboxSettings(worktree: string, temporaryDirectory: stri
       autoAllowBashIfSandboxed: true,
       excludedCommands: [],
       filesystem: {
-        allowRead: [worktree],
+        allowRead: [...new Set([worktree, gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
         allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
         denyRead: CLAUDE_DENY_READ,
       },
@@ -112,6 +133,7 @@ export function claudeArgs(
   spec: { model: string; effort?: string },
   sessionId: string | null,
   temporaryDirectory: string,
+  gitDirs: ClaudeGitDirs,
 ): string[] {
   const reviewer = input.role === 'reviewer';
   const allowedTools = reviewer ? 'Read,Glob,Grep,Bash' : 'Read,Edit,Write,Glob,Grep,Bash';
@@ -127,7 +149,7 @@ export function claudeArgs(
     '--restricted', '--safe-mode',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--setting-sources', '', '--permission-prompts', 'none',
-    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory, reviewer),
+    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory, gitDirs, reviewer),
     '--permission-mode', reviewer ? 'plan' : 'acceptEdits',
     '--tools', allowedTools,
     ...disallowedTools.flatMap((tool) => ['--disallowedTools', tool]),
@@ -148,7 +170,11 @@ type ClaudeEvent = Readonly<{
   is_error?: boolean;
 }>;
 
-export type ClaudeWorkerRunnerOptions = Readonly<{ bin?: string; env?: NodeJS.ProcessEnv }>;
+export type ClaudeWorkerRunnerOptions = Readonly<{
+  bin?: string;
+  env?: NodeJS.ProcessEnv;
+  resolveGitDirs?: (worktree: string) => Promise<ClaudeGitDirs>;
+}>;
 
 function usageEvent(input: WorkerRunInput, usage: Readonly<Record<string, number>>): Parameters<WorkerHooks['onUsage']>[0] {
   return {
@@ -170,6 +196,7 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
   const sourceEnv = opts.env ?? process.env;
   const env = minimalClaudeEnv(sourceEnv);
   const bin = opts.bin ?? defaultClaudeBin(sourceEnv);
+  const resolveGitDirs = opts.resolveGitDirs ?? resolveClaudeGitDirs;
   return {
     async run(input: WorkerRunInput, message: string, hooks: WorkerHooks): Promise<WorkerRunOutcome> {
       const spec = parseClaudeModel(input.model);
@@ -177,12 +204,13 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
       await mkdir(input.sessionDir, { recursive: true });
       const temporaryDirectory = input.tempDir ?? workerTempDir(input);
       await mkdir(temporaryDirectory, { recursive: true });
+      const gitDirs = await resolveGitDirs(input.worktree);
       const childEnv = { ...env, TMPDIR: temporaryDirectory, TMP: temporaryDirectory, TEMP: temporaryDirectory };
       let sessionId = input.sessionFile?.startsWith(CLAUDE_SESSION_PREFIX) ? input.sessionFile.slice(CLAUDE_SESSION_PREFIX.length) : null;
 
       const turn = async (prompt: string): Promise<string> => {
         hooks.emit('turn.start', { message: prompt });
-        const child = spawn(bin, claudeArgs(input, spec, sessionId, temporaryDirectory), { cwd: input.worktree, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn(bin, claudeArgs(input, spec, sessionId, temporaryDirectory, gitDirs), { cwd: input.worktree, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] });
         let spawnError: Error | null = null;
         child.on('error', (err) => { spawnError = err; });
         child.stdin.on('error', () => undefined);

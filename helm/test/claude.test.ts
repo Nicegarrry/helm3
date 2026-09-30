@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_SESSION_PREFIX, available, claudeArgs, claudeWorkerRunner, parseClaudeModel } from '../src/claude.js';
+import { CLAUDE_SESSION_PREFIX, available, claudeArgs, claudeSandboxSettings, claudeWorkerRunner, parseClaudeModel, resolveClaudeGitDirs } from '../src/claude.js';
 import { CORRECTION_MESSAGE } from '../src/worker.js';
 import { RESULT_INSTRUCTION } from '../src/prompt.js';
 import { laneRunner } from '../src/codex.js';
@@ -55,7 +56,8 @@ async function fixture(mode: string, extraEnv: Record<string, string> = {}) {
     DISCORD_WEBHOOK_URL: 'https://secret.invalid/webhook',
     ...extraEnv,
   };
-  const runner = claudeWorkerRunner({ bin, env });
+  const gitDirs = { gitDir: join(root, 'git-dir'), commonDir: join(root, 'common-dir') };
+  const runner = claudeWorkerRunner({ bin, env, resolveGitDirs: async () => gitDirs });
   const calls = async () => (await readFile(record, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { args: string[]; stdin: string; cwd: string; env: NodeJS.ProcessEnv });
   return { root, bin, worktree, runner, calls, sessionDir: join(root, 'sessions', 'w-1') };
 }
@@ -85,7 +87,8 @@ test('parseClaudeModel: claude/<model>[:<effort>], anything else is not this lan
 });
 
 test('claudeArgs: permissions, worktree directory, model effort, and resume are explicit', () => {
-  const build = claudeArgs({ role: 'builder', worktree: '/wt' }, { model: 'sonnet', effort: 'high' }, null, '/tmp/helm-claude');
+  const gitDirs = { gitDir: '/home/.helm/worktrees/repo/w-1/.git', commonDir: '/home/.helm/repos/repo/.git' };
+  const build = claudeArgs({ role: 'builder', worktree: '/wt' }, { model: 'sonnet', effort: 'high' }, null, '/tmp/helm-claude', gitDirs);
   assert.deepEqual(build.slice(0, 5), ['-p', '--model', 'sonnet', '--effort', 'high']);
   assert.ok(build.includes('--output-format') && build[build.indexOf('--output-format') + 1] === 'stream-json');
   assert.ok(build.includes('--verbose'));
@@ -103,7 +106,7 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
   assert.deepEqual(settings.sandbox.excludedCommands, []);
   assert.deepEqual(settings.sandbox.filesystem, {
-    allowRead: ['/wt'],
+    allowRead: ['/wt', '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/helm-claude'],
     allowWrite: ['/wt', '/tmp/helm-claude'],
     denyRead: [
       join(homedir(), '.config'), join(homedir(), '.ssh'), join(homedir(), '.aws'), join(homedir(), '.gnupg'), join(homedir(), '.netrc'),
@@ -117,15 +120,37 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.equal(build[build.indexOf('--add-dir') + 1], '/wt');
   assert.ok(!build.some((arg) => /bypass|skip-permissions|dangerously/i.test(arg)));
 
-  const review = claudeArgs({ role: 'reviewer', worktree: '/wt' }, { model: 'opus' }, 'session-1', '/tmp/review-temp');
+  const review = claudeArgs({ role: 'reviewer', worktree: '/wt' }, { model: 'opus' }, 'session-1', '/tmp/review-temp', gitDirs);
   assert.ok(review.includes('--resume') && review[review.indexOf('--resume') + 1] === 'session-1');
   assert.equal(review[review.indexOf('--permission-mode') + 1], 'plan');
   assert.equal(review[review.indexOf('--tools') + 1], 'Read,Glob,Grep,Bash');
   assert.ok(!review[review.indexOf('--tools') + 1]!.includes('Edit'));
   const reviewSettings = JSON.parse(review[review.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[] } } };
-  assert.deepEqual(reviewSettings.sandbox.filesystem.allowRead, ['/wt']);
+  assert.deepEqual(reviewSettings.sandbox.filesystem.allowRead, ['/wt', '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/review-temp']);
   assert.deepEqual(reviewSettings.sandbox.filesystem.allowWrite, ['/tmp/review-temp']);
   assert.ok(!review.slice(review.indexOf('--disallowedTools')).includes('Bash'));
+});
+
+test('resolveClaudeGitDirs: linked worktree exposes its git dir and ~/.helm common dir as read-only paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helm-claude-git-test-'));
+  const repo = join(root, '.helm', 'repos', 'owner__repo');
+  const worktree = join(root, '.helm', 'worktrees', 'owner__repo', 'w-1');
+  await mkdir(repo, { recursive: true });
+  await writeFile(join(repo, 'README.md'), 'fixture\n');
+  const runGit = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'ignore' });
+  runGit('init', '-q');
+  runGit('config', 'user.email', 'test@example.invalid');
+  runGit('config', 'user.name', 'Test');
+  runGit('add', 'README.md');
+  runGit('commit', '-qm', 'fixture');
+  await mkdir(join(root, '.helm', 'worktrees', 'owner__repo'), { recursive: true });
+  runGit('worktree', 'add', '-q', '-b', 'worker', worktree, 'HEAD');
+  const gitDirs = await resolveClaudeGitDirs(worktree);
+  assert.equal(gitDirs.commonDir, join(repo, '.git'));
+  const settings = JSON.parse(claudeSandboxSettings(worktree, join(root, '.helm', 'tmp', 'w-1'), gitDirs)) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[] } } };
+  assert.deepEqual(settings.sandbox.filesystem.allowRead, [worktree, gitDirs.gitDir, gitDirs.commonDir, join(root, '.helm', 'tmp', 'w-1')]);
+  assert.deepEqual(settings.sandbox.filesystem.allowWrite, [worktree, join(root, '.helm', 'tmp', 'w-1')]);
+  assert.ok(!settings.sandbox.filesystem.allowWrite.includes(gitDirs.commonDir));
 });
 
 test('run: stream-json result, session id, subscription usage and sanitized environment are recorded', async () => {

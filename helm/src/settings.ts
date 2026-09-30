@@ -78,6 +78,7 @@ const settingsSchema = z.object({
     projects: z.record(z.string(), z.object({ webhookEnv: z.string() })).default({}),
     digestSec: z.number().default(60),
     maxPerHour: z.number().default(20),
+    globalWebhookEnv: z.string().optional(),
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),

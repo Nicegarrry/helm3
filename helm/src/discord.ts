@@ -36,12 +36,19 @@ function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+function spendStartupLine(data: EventRow['data']): string {
+  const values = data.values && typeof data.values === 'object' ? data.values as Record<string, unknown> : {};
+  const cap = values.capUsd === 0 ? 'NO spend cap' : `spend cap $${text(values.capUsd, 'unknown')}`;
+  return `Helm started: ${cap}, warn $${text(values.warnUsd, 'unknown')}, max workers ${text(values.maxWorkers, 'unknown')}${data.tampered ? ' (tampered)' : ''}`;
+}
+
 function milestone(event: EventRow): string | null {
   if (event.kind === 'pr') return `PR opened: #${text(event.data.number, 'unknown')}`;
   if (event.kind === 'pr.merged') return `Merged: #${text(event.data.number, 'unknown')}`;
   if (event.kind === 'watch.alert') return `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
   if (event.kind === 'spend.changed') {
+    if (event.data.source === 'startup') return spendStartupLine(event.data);
     const values = event.data.values && typeof event.data.values === 'object' ? Object.entries(event.data.values).map(([name, value]) => `${name}=${String(value)}`).join(', ') : '';
     return `Spend changed: ${event.data.ignored ? 'raise ignored' : text(event.data.source, 'updated')}${values ? `: ${values}` : ''}`;
   }
@@ -66,6 +73,8 @@ export function createDiscord(options: Options): DiscordService {
   });
 
   function webhook(project: string): string | undefined {
+    const global = globalWebhooks().find((route) => route.project === project)?.url;
+    if (global) return global;
     const name = options.settings.discord.projects[project]?.webhookEnv;
     return name ? env[name] : undefined;
   }
@@ -75,8 +84,28 @@ export function createDiscord(options: Options): DiscordService {
     return name ? env[name] : undefined;
   }
 
+  function configuredGlobalWebhook(): string | undefined {
+    const name = options.settings.discord.globalWebhookEnv;
+    return name ? env[name] : undefined;
+  }
+
+  function globalWebhooks(): Array<{ project: string; url: string }> {
+    const tap = normalizeWebhook(tapWebhook());
+    const global = configuredGlobalWebhook();
+    if (global) return normalizeWebhook(global) !== tap ? [{ project: 'global', url: global }] : [];
+    const routes = new Map<string, { project: string; url: string }>();
+    for (const [project, configured] of Object.entries(options.settings.discord.projects)) {
+      const url = env[configured.webhookEnv];
+      const normalized = normalizeWebhook(url);
+      if (url && normalized && normalized !== tap && !routes.has(normalized)) routes.set(normalized, { project: `global:${normalized}`, url });
+    }
+    return [...routes.values()];
+  }
+
   function isMilestoneWebhook(url: string): boolean {
-    return Object.values(options.settings.discord.projects).some((project) => normalizeWebhook(env[project.webhookEnv]) === normalizeWebhook(url));
+    const normalized = normalizeWebhook(url);
+    return [...Object.values(options.settings.discord.projects).map((project) => env[project.webhookEnv]), configuredGlobalWebhook()]
+      .some((milestoneUrl) => normalizeWebhook(milestoneUrl) === normalized);
   }
 
   function normalizeWebhook(url: string | undefined): string | undefined {
@@ -151,19 +180,22 @@ export function createDiscord(options: Options): DiscordService {
       if (!line) continue;
       const worker = options.store.getWorker(event.workerId);
       const project = text(event.data.project ?? worker?.repoSlug, 'unknown');
-      const existing = getPendingStmt.get(project) as Record<string, unknown> | undefined;
-      const lastSeq = Number(existing?.lastSeq ?? 0);
-      if (event.seq <= lastSeq) continue;
-      const lines = existing ? JSON.parse(String(existing.lines)) as string[] : [];
-      lines.push(line);
-      upsertPendingStmt.run(project, JSON.stringify(lines), Number(existing?.firstAt ?? now().getTime()), Number(existing?.nextAttemptAt ?? 0), event.seq);
+      const destinations = event.workerId === 'project:global' || project === 'global' ? globalWebhooks() : [{ project, url: webhook(project) ?? '' }];
+      for (const destination of destinations) {
+        const target = destination.project;
+        const existing = getPendingStmt.get(target) as Record<string, unknown> | undefined;
+        const lastSeq = Number(existing?.lastSeq ?? 0);
+        if (event.seq <= lastSeq) continue;
+        const lines = existing ? JSON.parse(String(existing.lines)) as string[] : [];
+        lines.push(line);
+        upsertPendingStmt.run(target, JSON.stringify(lines), Number(existing?.firstAt ?? now().getTime()), Number(existing?.nextAttemptAt ?? 0), event.seq);
+      }
     }
   });
 
   async function flush(row: Pending): Promise<void> {
     const project = row.project;
-    const configured = options.settings.discord.projects[project];
-    if (!configured || !webhook(project)) { deletePendingStmt.run(project); return; }
+    if (!webhook(project)) { deletePendingStmt.run(project); return; }
     const current = now().getTime();
     if (current < row.nextAttemptAt || current - row.firstAt < options.settings.discord.digestSec * 1000) return;
     const hourAgo = current - 60 * 60_000;

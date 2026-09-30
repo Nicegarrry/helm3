@@ -67,11 +67,49 @@ test('maps milestone events, batches them, and never leaks the webhook URL', asy
     assert.match(payload.content, /Merged: #7/);
     assert.match(payload.content, /Needs Nick/);
     assert.match(payload.content, /Spend changed: file/);
-    assert.match(payload.content, /Spend changed: startup: capUsd=10, warnUsd=8, maxWorkers=3/);
+    assert.match(payload.content, /Helm started: spend cap \$10, warn \$8, max workers 3/);
     assert.equal(payload.username, 'Helm');
     assert.deepEqual(payload.allowed_mentions, { parse: [] });
     assert.equal(logs.some((line) => line.includes(sentinel)), false);
     assert.equal(JSON.stringify(store.listAllEvents()).includes(sentinel), false);
+  } finally { store.close(); }
+});
+
+test('global milestones fan out to deduplicated project webhooks and state uncapped startup limits', async () => {
+  const store = openStore(':memory:');
+  const calls: Array<{ url: string; body: string }> = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: {
+      'o/one': { webhookEnv: 'HELM_ONE' }, 'o/two': { webhookEnv: 'HELM_TWO' }, 'o/duplicate': { webhookEnv: 'HELM_DUPLICATE' },
+    }, digestSec: 60, maxPerHour: 20, tapWebhookEnv: 'HELM_TAP_WEBHOOK' } }, env: {
+      HELM_ONE: 'https://discord.com/api/v10/webhooks/1/token', HELM_TWO: 'https://discord.test/two',
+      HELM_DUPLICATE: 'https://discordapp.com/api/webhooks/1/token', HELM_TAP_WEBHOOK: 'https://discord.test/taps',
+    }, now: () => clock, fetch: async (url, init) => { calls.push({ url: String(url), body: String(init?.body) }); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('project:global', 'spend.changed', { project: 'global', source: 'startup', values: { capUsd: 0, warnUsd: 80, maxWorkers: 5 } }, clock.toISOString());
+    await discord.tick();
+    clock = new Date(clock.getTime() + 60_000);
+    await discord.tick();
+    assert.deepEqual(calls.map((call) => call.url), ['https://discord.com/api/v10/webhooks/1/token', 'https://discord.test/two']);
+    assert.ok(calls.every((call) => call.body.includes('Helm started: NO spend cap, warn $80, max workers 5')));
+  } finally { store.close(); }
+});
+
+test('globalWebhookEnv receives global milestones instead of project webhooks', async () => {
+  const store = openStore(':memory:');
+  const calls: string[] = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: { discord: { projects: {
+      'o/one': { webhookEnv: 'HELM_ONE' }, 'o/two': { webhookEnv: 'HELM_TWO' },
+    }, digestSec: 60, maxPerHour: 20, globalWebhookEnv: 'HELM_GLOBAL' } }, env: {
+      HELM_ONE: 'https://discord.test/one', HELM_TWO: 'https://discord.test/two', HELM_GLOBAL: 'https://discord.test/global',
+    }, now: () => clock, fetch: async (url) => { calls.push(String(url)); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('project:global', 'spend.changed', { project: 'global', source: 'startup', values: { capUsd: 100, warnUsd: 80, maxWorkers: 5 } }, clock.toISOString());
+    await discord.tick();
+    clock = new Date(clock.getTime() + 60_000);
+    await discord.tick();
+    assert.deepEqual(calls, ['https://discord.test/global']);
   } finally { store.close(); }
 });
 

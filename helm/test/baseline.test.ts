@@ -62,13 +62,15 @@ function deps(store: Store, gates: GateRunner): Helm {
 test('gate.baseline records a red row at the validator head', async () => {
   const { repo, baseSha, head } = makeRepo({ 'test/feature.test.ts': 'assert.fail()' });
   const store = openStore(':memory:');
-  const gates: GateRunner = { async run() { return { passed: false, checks: [{ name: 'acceptance', command: 'npm test', exitCode: 1, outputPath: '/tmp/red.log', durationMs: 1 }] }; }, async defaultChecks() { return []; } };
+  let nodeModulesRoot: string | undefined;
+  const gates: GateRunner = { async run(_cwd, _checks, _logDir, options) { nodeModulesRoot = options?.nodeModulesRoot; return { passed: false, checks: [{ name: 'acceptance', command: 'npm test', exitCode: 1, outputPath: '/tmp/red.log', durationMs: 1 }] }; }, async defaultChecks() { return []; } };
   const helm = deps(store, gates);
   try {
     store.insertWorker(worker(repo, baseSha, head));
     store.setMeta('w-validator', { issue: 183 });
     const result = await helm.baseline({ workerId: 'w-validator' });
     assert.equal(result.ok, true, JSON.stringify(result));
+    assert.match(nodeModulesRoot ?? '', /\/worktrees\/owner__repo\/w-validator$/);
     assert.equal(listBaselines(store)[0]?.red, 1);
     assert.equal(listBaselines(store)[0]?.testCommit, head);
   } finally { store.close(); rmSync(repo, { recursive: true, force: true }); }

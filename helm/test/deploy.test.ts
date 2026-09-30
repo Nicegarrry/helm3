@@ -20,21 +20,21 @@ const createDeploy = (options: Parameters<typeof createDeployImpl>[0]) => create
 const target = { name: 'prod', kind: 'vercel' as const, env: { VERCEL_TOKEN: 'VERCEL_TOKEN' }, mode: 'cli' as const, smoke: { commands: [{ name: 'smoke', command: 'false' }] }, rollback: 'auto' as const };
 type DeployTarget = NonNullable<RepoConfig['deploy']>['targets'][number];
 
-test('daemon startup marks deploying rows failed with an interruption reason', () => {
+test('daemon startup marks deploying rows failed with an interruption reason', async () => {
   const store = openStore(':memory:');
   try {
     ensureDeployTable(store);
     store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, reason, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run('d-restart', 'owner/repo', 'prod', 'vercel', '{}', 'a'.repeat(40), 'deploying', null, null, null, null, '{}', null, new Date().toISOString());
-    assert.equal(markDeploysInterrupted(store), 1);
+    assert.equal(await markDeploysInterrupted(store), 1);
     const saved = store.sql.prepare('SELECT state, reason FROM deploys WHERE id = ?').get('d-restart') as { state: string; reason: string };
     assert.equal(saved.state, 'failed');
     assert.equal(saved.reason, 'interrupted (daemon restart)');
-    assert.equal(markDeploysInterrupted(store), 0);
+    assert.equal(await markDeploysInterrupted(store), 0);
   } finally { store.close(); }
 });
 
-test('daemon startup preserves current and handover-predecessor deploys until timeout', () => {
+test('daemon startup preserves current and handover-predecessor deploys until timeout', async () => {
   const store = openStore(':memory:');
   const now = new Date('2026-09-30T00:00:00.000Z');
   try {
@@ -45,10 +45,13 @@ test('daemon startup preserves current and handover-predecessor deploys until ti
     add('previous', 'boot-previous', now.toISOString());
     add('foreign', 'boot-foreign', now.toISOString());
     add('timed-out', 'boot-current', '2026-09-29T23:00:00.000Z');
-    assert.equal(markDeploysInterrupted(store, { currentBootId: 'boot-current', predecessorBootId: 'boot-previous', now, timeoutMs: 1000 }), 2);
+    add('predecessor-within-target-timeout', 'boot-previous', '2026-09-29T23:30:00.000Z');
+    add('predecessor-past-target-timeout', 'boot-previous', '2026-09-29T22:59:00.000Z');
+    assert.equal(await markDeploysInterrupted(store, { currentBootId: 'boot-current', predecessorBootId: 'boot-previous', now, timeoutMs: 1000, timeoutFor: async () => 60 }), 3);
     const states = (store.sql.prepare('SELECT id, state FROM deploys ORDER BY id').all() as Array<{ id: string; state: string }>).map((row) => ({ id: row.id, state: row.state }));
     assert.deepEqual(states, [
       { id: 'current', state: 'deploying' }, { id: 'foreign', state: 'failed' },
+      { id: 'predecessor-past-target-timeout', state: 'failed' }, { id: 'predecessor-within-target-timeout', state: 'deploying' },
       { id: 'previous', state: 'deploying' }, { id: 'timed-out', state: 'failed' },
     ]);
   } finally { store.close(); }
@@ -351,6 +354,13 @@ test('Convex migration checks both envelope kinds and consumes one granted tap',
   const c = convexRepo(); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = []; const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-convex-tap-')); insertSuccessfulConvex(store, c.oldSha); const actions: string[] = []; let committed = 0;
   const service = createDeploy({ store, home, workspace: workspace(c.newSha), resolveRepo: async () => ({ repo: c.repo, slug: 'owner/repo' }), envelope: async ({ kind, actions: currentActions }) => { actions.push(`${kind}:${currentActions[0]}`); return { ok: true, decisions: [{ decision: 'allow' }] }; }, reserveTap: (project, kind, action, tapId) => { assert.equal(kind, 'convex.migration'); assert.equal(tapId, 'tap-1'); assert.match(action, new RegExp(`${c.oldSha}:${c.newSha}$`)); return { tapId: tapId!, token: 'reservation' }; }, commitTap: () => { committed += 1; }, rollbackTap() {}, exec: convexExec(c.repo, c.newSha, 'convex/schema.ts\n', calls), env: { CONVEX_DEPLOY_KEY: token } });
   try { const result = await service.run({ project: 'owner/repo', target: 'prod', tapId: 'tap-1' }); assert.equal(result.ok, true); assert.equal(committed, 1); assert.deepEqual(calls.filter((call) => call.file === 'npm').map((call) => call.args), [['ci']]); assert.deepEqual(calls.filter((call) => call.file === 'npx').map((call) => call.args), [['--no-install', 'convex', 'deploy', '--yes']]); const install = calls.find((call) => call.file === 'npm')!; assert.ok(install.options.cwd?.includes('/deploys/owner__repo/')); assert.notEqual(install.options.env?.HOME, process.env.HOME); assert.equal(existsSync(install.options.env!.HOME!), false); assert.deepEqual(Object.keys(install.options.env ?? {}).sort(), ['HOME', 'PATH']); const deploy = calls.find((call) => call.file === 'npx')!; assert.equal(deploy.options.env?.HOME, process.env.HOME ?? homedir()); assert.equal(Object.keys(deploy.options.env ?? {}).sort().join(','), 'CONVEX_DEPLOY_KEY,HOME,LANG,LC_ALL,PATH,TMPDIR'); assert.ok(actions.every((action) => action.includes(c.oldSha) && action.includes(c.newSha))); assert.ok(!JSON.stringify(install.options.env).includes(token)); }
+  finally { store.close(); rmSync(c.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('staging Convex migrations require a migration tap even with a scoped deploy key', async () => {
+  const c = convexRepo({ ...convexTarget, name: 'staging', env: 'CONVEX_STAGING_DEPLOY_KEY' }); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = []; const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-convex-staging-tap-')); insertSuccessfulConvex(store, c.oldSha); const kinds: string[] = [];
+  const service = createDeploy({ store, home, workspace: workspace(c.newSha), resolveRepo: async () => ({ repo: c.repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { kinds.push(kind); return { ok: true, decisions: [{ decision: 'allow' }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: convexExec(c.repo, c.newSha, 'convex/schema.ts\n', calls), env: { CONVEX_STAGING_DEPLOY_KEY: token } });
+  try { const result = await service.run({ project: 'owner/repo', target: 'staging' }); assert.equal(result.ok, false); assert.match(result.reason, /convex\.migration/); assert.deepEqual(kinds, ['deploy.staging', 'convex.migration']); assert.equal(calls.some((call) => call.file === 'npx'), false); }
   finally { store.close(); rmSync(c.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
 });
 

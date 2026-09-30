@@ -151,7 +151,7 @@ test('e2e: daemon restart marks a running worker interrupted; steer resumes it',
     // Second daemon life.
     store = openStore(dbPath);
     helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner(), github: fakeGitHub([]), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt } });
-    assert.deepEqual(helm.markInterruptedOnStart(), [spawned.workerId]);
+    assert.deepEqual(await helm.markInterruptedOnStart(), [spawned.workerId]);
     assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
     assert.ok(store.getWorker(spawned.workerId)?.sessionFile, 'session file recorded for resume');
 

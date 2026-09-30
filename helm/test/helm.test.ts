@@ -902,7 +902,7 @@ test('markInterruptedOnStart flips running workers to interrupted', async () => 
   const spawned = await helm.spawn(spawnBody(repo));
   if (!spawned.ok) return;
   assert.equal(store.getWorker(spawned.workerId)?.state, 'running');
-  const ids = helm.markInterruptedOnStart();
+  const ids = await helm.markInterruptedOnStart();
   assert.deepEqual(ids, [spawned.workerId]);
   assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
 });

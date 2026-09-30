@@ -1,4 +1,6 @@
 /** The `helm` command line. */
+// tsx has registered its loader; keep its onboarding override out of daemon/worker environments.
+delete process.env.TSX_TSCONFIG_PATH;
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';

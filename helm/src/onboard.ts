@@ -54,6 +54,7 @@ export async function doctor(repo = process.cwd()) {
   const catalog = createModelCatalog({ claudeLaneRegistered: true, probe: { codex: (id) => codex && codexModels.includes(id), claude: () => claude, pi: (provider, id) => piModels.includes(`${provider}/${id}`) } });
   const tiers: Record<string, { models: string[]; available: string[] }> = {};
   if (settings) for (const [tier, models] of Object.entries(settings.routing.tiers)) {
+    if (!['1', '2', '3', '4', '5'].includes(tier)) continue;
     const available = (await Promise.all(models.map(async (m) =>
       await candidateUnavailableReason(settings, appliedPolicy(settings, {}), catalog, m) === undefined ? m : undefined))).filter((m): m is string => m !== undefined);
     tiers[tier] = { models, available };
@@ -93,7 +94,7 @@ export async function init(repo: string, force = false): Promise<string> {
       scripts = pkg.scripts ?? {};
     } catch { throw new OnboardingError('invalid package.json: expected a JSON object with an optional scripts object'); }
     const manager = files.includes('package-lock.json') ? 'npm' : files.includes('pnpm-lock.yaml') ? 'pnpm' : files.includes('yarn.lock') ? 'yarn' : 'npm';
-    const install = files.includes('package-lock.json') ? 'npm ci' : manager === 'npm' ? 'npm install' : `${manager} install --frozen-lockfile`;
+    const install = files.includes('package-lock.json') ? 'npm ci' : manager === 'npm' ? 'npm install' : manager === 'yarn' && files.includes('.yarnrc.yml') ? 'yarn install --immutable' : `${manager} install --frozen-lockfile`;
     gates.push({ name: 'install', command: install });
     for (const name of ['test', 'typecheck', 'lint']) if (typeof scripts[name] === 'string') gates.push({ name, command: `${manager} run ${name}` });
   } else if (files.includes('Package.swift')) gates.push({ name: 'swift', command: 'swift test' });

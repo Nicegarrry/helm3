@@ -19,6 +19,7 @@ configuration sets a $5 spend cap and enables subscription-only routing when no 
 keys are in the environment. Swift projects get `swift test`; Xcode and unknown
 projects get a failing TODO gate to customize. Lockfiles select npm, pnpm, or Yarn
 installation and script commands; without a lockfile, installation uses `npm install`.
+Yarn projects with `.yarnrc.yml` use `yarn install --immutable`; classic Yarn uses `--frozen-lockfile`.
 After writing its files, `init` exits successfully and prints doctor failures as next steps.
 
 `helm doctor` checks local tools, credentials, configuration, routing and daemon

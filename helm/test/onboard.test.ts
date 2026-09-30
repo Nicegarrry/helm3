@@ -220,6 +220,77 @@ test('doctor warns on empty or unavailable tiers and fails routing only without 
   assert.equal(report.checks.find((c: { name: string }) => c.name === 'routing').status, 'fail');
   assert.ok(report.checks.filter((c: { name: string }) => c.name.startsWith('tier ')).every((c: { status: string }) => c.status === 'warn'));
 });
+test('doctor ignores tier keys outside the selector range 1-5', async (t) => {
+  const f = await fixture(t);
+  for (const tiers of [{ 0: ['codex/test-model:medium'], 6: ['codex/test-model:medium'] },
+    { '01': ['codex/test-model:medium'], 1: ['codex/missing'], 7: ['codex/test-model:medium'] }]) {
+    await writeFile(join(f.home, 'helm.json'), JSON.stringify({ routing: { tiers } }));
+    const result = await f.cli('doctor', '--json');
+    assert.equal(result.code, 1);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.checks.find((c: { name: string }) => c.name === 'routing').status, 'fail');
+    assert.ok(Object.keys(report.tiers).every((tier) => ['1', '2', '3', '4', '5'].includes(tier)));
+  }
+  await writeFile(join(f.home, 'helm.json'), JSON.stringify({ routing: { tiers: { 5: ['codex/test-model:medium'], 6: ['codex/missing'] } } }));
+  const result = await f.cli('doctor', '--json');
+  assert.equal(result.code, 0);
+  assert.deepEqual(Object.keys(JSON.parse(result.stdout).tiers), ['5']);
+});
+test('init uses immutable installs for Yarn Berry and frozen lockfiles for classic Yarn', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.repo, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  await writeFile(join(f.repo, 'yarn.lock'), '# fixture');
+  for (const berry of [false, true]) {
+    if (berry) await writeFile(join(f.repo, '.yarnrc.yml'), 'nodeLinker: node-modules');
+    const result = await f.cli('init', '--force');
+    assert.equal(result.code, 0, result.stderr);
+    const config = JSON.parse(await readFile(join(f.repo, 'helm.json'), 'utf8'));
+    assert.deepEqual(config.gates, [{ name: 'install', command: berry ? 'yarn install --immutable' : 'yarn install --frozen-lockfile' }, { name: 'test', command: 'yarn run test' }]);
+  }
+});
+test('serve bootstrap, daemon composition and spawned Codex workers do not retain tsx configuration', async (t) => {
+  for (const inherited of [false, true]) {
+    const f = await fixture(t);
+    const startupRecord = join(f.root, 'startup.json'), daemonRecord = join(f.root, 'daemon.json'), workerRecord = join(f.root, 'worker.json');
+    const codex = join(f.root, 'env-codex.mjs');
+    await writeFile(codex, `#!${process.execPath}
+      import { readFileSync, writeFileSync } from 'node:fs';
+      readFileSync(0, 'utf8');
+      writeFileSync(${JSON.stringify(workerRecord)}, JSON.stringify({ hasTsconfig: Object.hasOwn(process.env, 'TSX_TSCONFIG_PATH') }));
+      const args = process.argv.slice(2);
+      writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify({ status: 'succeeded', summary: 'environment fixture', changedFiles: [], commandsRun: [] }));`);
+    await chmod(codex, 0o755);
+    const hook = join(f.root, 'serve-env-probe.mjs');
+    const runnerUrl = new URL('../src/codex.ts', import.meta.url).href;
+    await writeFile(hook, `import { Server } from 'node:http';
+      import { writeFileSync } from 'node:fs';
+      if (process.argv[1]?.endsWith('/src/cli.ts') && process.argv[2] === 'serve') {
+        writeFileSync(${JSON.stringify(startupRecord)}, JSON.stringify({ hasTsconfig: Object.hasOwn(process.env, 'TSX_TSCONFIG_PATH') }));
+        // Observe the real serve composition before binding a socket; no TCP is needed.
+        Server.prototype.listen = function () {
+          Promise.resolve().then(async () => {
+            writeFileSync(${JSON.stringify(daemonRecord)}, JSON.stringify({ hasTsconfig: Object.hasOwn(process.env, 'TSX_TSCONFIG_PATH') }));
+            const { codexWorkerRunner } = await import(${JSON.stringify(runnerUrl)});
+            const outcome = await codexWorkerRunner({ bin: ${JSON.stringify(codex)} }).run({
+              workerId: 'env-fixture', role: 'builder', model: 'codex/test-model',
+              worktree: ${JSON.stringify(f.repo)}, sessionDir: ${JSON.stringify(join(f.root, 'sessions'))},
+              objective: 'environment fixture', acceptance: null, contextPaths: [], allowWorkflows: false, sessionFile: null,
+            }, 'environment fixture', { emit() {}, onUsage() {}, onSession() {}, shouldContinue() { return true; } });
+            if (outcome.result?.status !== 'succeeded') throw new Error('worker fixture failed');
+            process.exit(0);
+          }).catch((error) => { console.error(error); process.exit(1); });
+          return this;
+        };
+      }`);
+    f.env.NODE_OPTIONS = `--import=${hook}`;
+    if (inherited) f.env.TSX_TSCONFIG_PATH = resolve(dirname(launcher), '../tsconfig.json');
+    const result = await f.cli('serve', '--http');
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(await readFile(startupRecord, 'utf8')), { hasTsconfig: inherited });
+    assert.deepEqual(JSON.parse(await readFile(daemonRecord, 'utf8')), { hasTsconfig: false });
+    assert.deepEqual(JSON.parse(await readFile(workerRecord, 'utf8')), { hasTsconfig: false });
+  }
+});
 test('launcher uses Helm tsconfig/cwd while preserving default and relative target repos', async (t) => {
   const f = await fixture(t);
   const hostile = join(f.repo, 'tsconfig.json');

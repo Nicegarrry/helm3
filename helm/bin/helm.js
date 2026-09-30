@@ -12,7 +12,9 @@ if (process.argv[2] === 'fleet') {
   process.exit(result.status ?? 1);
 }
 const args = process.argv.slice(2);
+const env = { ...process.env };
 if (['init', 'doctor'].includes(args[0])) {
+  env.TSX_TSCONFIG_PATH = join(here, '..', 'tsconfig.json');
   let hasRepo = false;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === '--repo') {
@@ -29,6 +31,6 @@ if (['init', 'doctor'].includes(args[0])) {
   if (!hasRepo) args.splice(1, 0, '--repo', process.cwd());
 }
 const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(here, '..', 'src', 'cli.ts'), ...args], {
-  stdio: 'inherit', cwd: join(here, '..'), env: { ...process.env, TSX_TSCONFIG_PATH: join(here, '..', 'tsconfig.json') },
+  stdio: 'inherit', cwd: join(here, '..'), env,
 });
 child.on('exit', (code) => process.exit(code ?? 1));

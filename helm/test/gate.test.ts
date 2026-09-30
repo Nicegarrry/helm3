@@ -64,8 +64,10 @@ test('run: a timeout produces a null exit code', async () => {
 
 test('run: removes all package node_modules on pass and fail, but preserves opted-in modules', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-gate-hygiene-'));
-  const logDir = join(dir, 'logs');
+    const logDir = join(dir, 'logs');
   try {
+    mkdirSync(join(dir, 'helm'), { recursive: true });
+    writeFileSync(join(dir, 'helm', 'package.json'), '{}');
     const createsModules = 'mkdir -p node_modules helm/node_modules; exit 3';
     const removed = await gateRunner().run(dir, [{ name: 'fail', command: createsModules }], logDir);
     assert.equal(removed.passed, false);

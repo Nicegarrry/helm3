@@ -294,7 +294,7 @@ export class Helm {
     this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
     this.scorecard = createScorecard({ store: this.store, memory: this.memory, now: () => this.now ? new Date(this.now()) : new Date() });
     this.deploy = createDeploy({
-      store: this.store, home: this.config.home, workspace: this.workspace,
+      store: this.store, home: this.config.home, workspace: this.workspace, bootId: this.lifecycle.bootId,
       resolveRepo: async (project) => { const repo = requireValue(await this.resolveRepo(project), `project not found: ${project}`); return { repo, slug: await this.repoSlugFor(repo) }; },
       envelope: (input) => this.envelopeCheck(input),
       reserveTap: (project, kind, action, tapId) => reserveDeployTap(this.store, this.taps, project, kind, actionHash(action), tapId, this.nowDate()),
@@ -426,8 +426,8 @@ export class Helm {
   }
 
   /** Called once on daemon start: every `running` worker becomes `interrupted`. */
-  markInterruptedOnStart(): string[] {
-    markDeploysInterrupted(this.store);
+  markInterruptedOnStart(predecessorBootId?: string): string[] {
+    markDeploysInterrupted(this.store, { currentBootId: this.lifecycle.bootId, predecessorBootId });
     return this.store.markInterrupted();
   }
 
@@ -617,7 +617,11 @@ export class Helm {
       }
       const gateId = genId('g');
       const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
-      const outcome = await this.gates.run(row.worktree, checks, logDir, { timeoutMs: this.config.gateTimeoutMs });
+      const outcome = await this.gates.run(row.worktree, checks, logDir, {
+        timeoutMs: this.config.gateTimeoutMs,
+        nodeModulesRoot: this.workerWorktreeRoot(row),
+        onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'error', { message }),
+      });
       const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
       this.store.insertGate(gateRow);
       this.store.appendEvent(input.workerId, 'gate', { gateId, passed: outcome.passed, head });
@@ -918,6 +922,17 @@ export class Helm {
 
   private nowDate(): Date { return this.now ? this.now() : new Date(); }
 
+  private workerWorktreeRoot(row: WorkerRow): string {
+    return join(this.config.home, 'worktrees', row.repoSlug.replace(/\//g, '__'), row.workerId);
+  }
+
+  private async cleanupWorkerNodeModules(row: WorkerRow): Promise<void> {
+    await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules, {
+      allowedRoot: this.workerWorktreeRoot(row),
+      onError: (message) => this.store.appendEvent(row.workerId, 'error', { message }),
+    });
+  }
+
   private spendCapExceeded(): boolean {
     return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;
   }
@@ -1057,7 +1072,7 @@ export class Helm {
       // hooks.shouldContinue()); a turn that completed on its own keeps its real outcome.
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
       if (nextState === 'succeeded' || nextState === 'failed' || nextState === 'idle' || nextState === 'stopped') {
-        await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules);
+        await this.cleanupWorkerNodeModules(row);
       }
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);

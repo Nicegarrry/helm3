@@ -34,6 +34,26 @@ test('daemon startup marks deploying rows failed with an interruption reason', (
   } finally { store.close(); }
 });
 
+test('daemon startup preserves current and handover-predecessor deploys until timeout', () => {
+  const store = openStore(':memory:');
+  const now = new Date('2026-09-30T00:00:00.000Z');
+  try {
+    ensureDeployTable(store);
+    const insert = store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, bootId, reason, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    const add = (id: string, bootId: string, at: string) => insert.run(id, 'owner/repo', 'prod', 'vercel', '{}', 'a'.repeat(40), 'deploying', bootId, null, null, null, null, '{}', null, at);
+    add('current', 'boot-current', now.toISOString());
+    add('previous', 'boot-previous', now.toISOString());
+    add('foreign', 'boot-foreign', now.toISOString());
+    add('timed-out', 'boot-current', '2026-09-29T23:00:00.000Z');
+    assert.equal(markDeploysInterrupted(store, { currentBootId: 'boot-current', predecessorBootId: 'boot-previous', now, timeoutMs: 1000 }), 2);
+    const states = (store.sql.prepare('SELECT id, state FROM deploys ORDER BY id').all() as Array<{ id: string; state: string }>).map((row) => ({ id: row.id, state: row.state }));
+    assert.deepEqual(states, [
+      { id: 'current', state: 'deploying' }, { id: 'foreign', state: 'failed' },
+      { id: 'previous', state: 'deploying' }, { id: 'timed-out', state: 'failed' },
+    ]);
+  } finally { store.close(); }
+});
+
 function repoWithConfig(configTarget: DeployTarget = target): { repo: string; sha: string } {
   const repo = mkdtempSync(join(tmpdir(), 'helm-deploy-repo-'));
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });

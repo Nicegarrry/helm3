@@ -38,7 +38,7 @@ function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: str
 
 export function gateRunner(options: { keepNodeModules?: boolean } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; onNodeModulesError?: (message: string) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const results: CheckResult[] = [];
@@ -53,7 +53,7 @@ export function gateRunner(options: { keepNodeModules?: boolean } = {}): GateRun
           results.push(result);
         }
       } finally {
-        await cleanupNodeModules(cwd, options.keepNodeModules);
+        await cleanupNodeModules(cwd, options.keepNodeModules, { allowedRoot: opts?.nodeModulesRoot, onError: opts?.onNodeModulesError });
       }
       const passed = results.every((result) => result.exitCode === 0);
       return { passed, checks: results };

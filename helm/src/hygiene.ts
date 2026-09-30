@@ -1,6 +1,6 @@
 /** Conservative cleanup for worker, deploy, and low-disk state. */
 import { execFile } from 'node:child_process';
-import { readdir, rm, stat, statfs as fsStatfs } from 'node:fs/promises';
+import { realpath, readdir, rm, stat, statfs as fsStatfs } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Settings } from './settings.js';
@@ -42,9 +42,18 @@ const defaultExec: HygieneExec = async (file, args, options) => {
 const defaultFs: HygieneFs = { readdir, stat, rm };
 
 /** Remove dependencies from the root and each first-level package in a worktree. */
-export async function cleanupNodeModules(worktree: string, keepNodeModules = false): Promise<void> {
+export async function cleanupNodeModules(worktree: string, keepNodeModules = false, options: { allowedRoot?: string; onError?: (message: string) => void } = {}): Promise<void> {
   if (keepNodeModules) return;
-  const packageRoots = [worktree, join(worktree, 'helm')];
+  const allowedRoot = options.allowedRoot ?? worktree;
+  let realAllowedRoot: string;
+  try {
+    realAllowedRoot = await realpath(allowedRoot);
+    if (await realpath(worktree) !== realAllowedRoot) throw new Error('worktree resolves outside its allowed root');
+  } catch (error) {
+    options.onError?.(`node_modules cleanup skipped: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  const packageRoots = [worktree];
   try {
     for (const entry of await readdir(worktree, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
@@ -54,7 +63,18 @@ export async function cleanupNodeModules(worktree: string, keepNodeModules = fal
       } catch { /* not a top-level package */ }
     }
   } catch { /* a removed worktree is already clean */ }
-  await Promise.all([...new Set(packageRoots)].map((root) => rm(join(root, 'node_modules'), { recursive: true, force: true }).catch(() => {})));
+  await Promise.all([...new Set(packageRoots)].map(async (root) => {
+    const nodeModules = join(root, 'node_modules');
+    let realNodeModules: string;
+    try { realNodeModules = await realpath(nodeModules); } catch { return; }
+    if (!inside(realAllowedRoot, realNodeModules)) {
+      options.onError?.(`node_modules cleanup skipped outside worktree: ${nodeModules}`);
+      return;
+    }
+    await rm(nodeModules, { recursive: true, force: true }).catch((error) => {
+      options.onError?.(`node_modules cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }));
 }
 
 export async function freeSpaceGb(path: string, statfs: (path: string) => Promise<StatfsResult> = fsStatfs): Promise<number | null> {

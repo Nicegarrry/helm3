@@ -279,6 +279,8 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
 test('a settled worker turn removes node_modules from every top-level package', async () => {
   const runner = createFakeRunner(async (input) => {
     mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });
+    mkdirSync(join(input.worktree, 'helm'), { recursive: true });
+    writeFileSync(join(input.worktree, 'helm', 'package.json'), '{}');
     mkdirSync(join(input.worktree, 'helm', 'node_modules'), { recursive: true });
     mkdirSync(join(input.worktree, 'app', 'node_modules'), { recursive: true });
     writeFileSync(join(input.worktree, 'app', 'package.json'), '{}');

@@ -78,7 +78,7 @@ import type { Jev } from './jev.js';
 import type { PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
 import { createRoutingCheck, type RoutingCheckService } from './routing/check.js';
-import type { CatalogProbe, ModelCatalog } from './routing/catalog.js';
+import { createModelCatalog, type CatalogProbe, type ModelCatalog } from './routing/catalog.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
@@ -186,8 +186,6 @@ export function modelFamily(model: string): string {
 }
 
 // Explicit model overrides remain available; automatic choices exclude Kimi K3 and Qwen Max.
-const TASK_MODELS = { normal: 'codex/gpt-6-luna:high', easy: 'codex/gpt-6-luna:medium', 'super-easy': 'codex/gpt-6-luna:medium' } as const;
-
 export type ToolGuard = (input: unknown) => string | null | Promise<string | null>;
 export type ModelChoice = Readonly<{ model?: string; tier?: number; score?: number; policyApplied?: Readonly<{ lanes: readonly ('codex' | 'pi' | 'claude')[]; subscriptionOnly: boolean }>; skippedCandidates?: readonly Readonly<{ model: string; reason: string; tier: number }>[]; warning?: string; refusal?: string }>;
 export type ModelChooser = (input: SpawnInput) => string | ModelChoice | null | undefined | Promise<string | ModelChoice | null | undefined>;
@@ -249,7 +247,8 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
-    this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: deps.routingCatalog, probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
+    const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
+    this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog });
     this.statfs = deps.statfs;
     this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;
@@ -317,7 +316,7 @@ export class Helm {
       retry: this.retry ? (input) => this.retry!.retry(input, (workerId, message) => this.steer({ workerId, message })) : undefined,
     });
     this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
-    registerRouting({ chooseModel: (chooser) => this.chooseModel(chooser), settings: this.settings, settingsHome: this.config.home, store: this.store, jev: deps.jev, now: () => this.now ? new Date(this.now()) : new Date(), resolveProject: async (repo) => isAbsolute(repo) ? this.repoSlugFor(repo) : undefined, catalog: deps.routingCatalog });
+    registerRouting({ chooseModel: (chooser) => this.chooseModel(chooser), settings: this.settings, settingsHome: this.config.home, store: this.store, jev: deps.jev, now: () => this.now ? new Date(this.now()) : new Date(), resolveProject: async (repo) => isAbsolute(repo) ? this.repoSlugFor(repo) : undefined, catalog: routingCatalog });
   }
 
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
@@ -390,7 +389,7 @@ export class Helm {
   }
 
   private async chosenModel(input: SpawnInput): Promise<{ input: SpawnInput; choice?: ModelChoice }> {
-    if (input.model || input.difficulty) return { input };
+    if (input.model) return { input };
     let chosen = input;
     let choice: ModelChoice | undefined;
     for (const fn of this.modelChoosers) {
@@ -398,6 +397,7 @@ export class Helm {
       if (!selected) continue;
       if (typeof selected === 'string') chosen = { ...chosen, model: selected };
       else { chosen = selected.model ? { ...chosen, model: selected.model } : chosen; choice = { ...choice, ...selected }; }
+      if (input.difficulty) break;
     }
     return { input: chosen, choice };
   }
@@ -465,7 +465,7 @@ export class Helm {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
       if (existing) return { ok: true, workerId: existing.workerId, branch: existing.branch, worktree: existing.worktree };
     }
-    const model = input.model ?? TASK_MODELS[input.difficulty ?? 'normal'];
+    const model = requireValue(input.model, 'routing did not select a model');
     const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
     must(active < this.config.maxWorkers, `max workers reached (${this.config.maxWorkers})`);
     must(!this.spendCapExceeded(), 'spend cap reached');
@@ -503,7 +503,7 @@ export class Helm {
     }
     this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
     if (choice?.model) this.store.appendEvent(workerId, 'route.selected', {
-      tier: choice.tier ?? null, score: choice.score ?? null, policyApplied: choice.policyApplied ?? null, chosenModel: choice.model,
+      tier: choice.tier ?? null, ...(choice.score === undefined ? {} : { score: choice.score }), policyApplied: choice.policyApplied ?? null, chosenModel: choice.model,
       ...(choice.skippedCandidates?.length ? { skippedCandidates: choice.skippedCandidates } : {}),
     });
     for (const skipped of choice?.skippedCandidates ?? []) this.store.appendEvent(workerId, 'route.skipped', skipped);
@@ -790,8 +790,8 @@ export class Helm {
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
       const routing = this.store.listWorkers().flatMap((worker) => {
         const meta = this.store.getMeta(worker.workerId);
-        if (!meta || meta.tier === null || meta.score === null || !meta.chosenModel) return [];
-        return [{ workerId: worker.workerId, tier: meta.tier, score: meta.score, chosenModel: meta.chosenModel, ...(meta.policyApplied ? { policyApplied: meta.policyApplied } : {}), ...(meta.skippedCandidates.length ? { skippedCandidates: meta.skippedCandidates } : {}) }];
+        if (!meta || meta.tier === null || !meta.chosenModel) return [];
+        return [{ workerId: worker.workerId, tier: meta.tier, ...(meta.score === null ? {} : { score: meta.score }), chosenModel: meta.chosenModel, ...(meta.policyApplied ? { policyApplied: meta.policyApplied } : {}), ...(meta.skippedCandidates.length ? { skippedCandidates: meta.skippedCandidates } : {}) }];
       });
       return {
         ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),

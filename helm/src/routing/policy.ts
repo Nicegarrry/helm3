@@ -13,7 +13,8 @@ export function laneForModel(model: string): RoutingLane {
 
 export function appliedPolicy(settings: Settings, input: { lanes?: readonly RoutingLane[] }): AppliedRoutingPolicy {
   const configured = settings.routing.policy ?? { subscriptionOnly: false };
-  const lanes = input.lanes ?? configured.lanes ?? ['codex', 'pi', 'claude'];
+  const configuredLanes = configured.lanes ?? ['codex', 'pi', 'claude'];
+  const lanes = input.lanes ? configuredLanes.filter((lane) => input.lanes!.includes(lane)) : configuredLanes;
   return { lanes: [...lanes], subscriptionOnly: configured.subscriptionOnly ?? false };
 }
 

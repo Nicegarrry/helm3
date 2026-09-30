@@ -55,7 +55,7 @@ test('spawn defaults to the Codex normal model before any chooser is registered'
     assert.equal(result.ok, true);
     if (result.ok) {
       await d.helm.settle(result.workerId);
-      assert.equal(d.store.getWorker(result.workerId)?.model, 'codex/gpt-6-luna:high');
+      assert.equal(d.store.getWorker(result.workerId)?.model, 'codex/gpt-5.6-terra:high');
     }
   } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });

@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createModelCatalog } from '../src/routing/catalog.js';
+import { createModelCatalog, parseCodexModelSlugs } from '../src/routing/catalog.js';
 import { createRoutingCheck } from '../src/routing/check.js';
 import { createRouter } from '../src/route.js';
 import { loadSettings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
 import type { Jev } from '../src/jev.js';
-import type { ModelChoice } from '../src/helm.js';
+import type { ModelChoice, SpawnInput } from '../src/helm.js';
 
 const baseSettings = loadSettings('/missing-routing-policy-settings');
-const input = { repo: 'acme/repo', objective: 'task', role: 'builder' as const, contextPaths: [], allowWorkflows: false };
+const input: SpawnInput = { repo: 'acme/repo', objective: 'task', role: 'builder', contextPaths: [], allowWorkflows: false };
 const jev: Jev = { shadow: true, async ask() { return { ok: true, answers: { complexity: { score: 0.2 }, too_big: { noul: false } } }; } };
 const choose = async (route: ReturnType<typeof createRouter>, value = input): Promise<ModelChoice> => await route(value) as ModelChoice;
 
@@ -38,6 +38,36 @@ test('subscriptionOnly excludes Pi candidates without changing Jev triage', asyn
     assert.equal(calls, 1);
     assert.match(result.skippedCandidates?.[0]?.reason ?? '', /subscriptionOnly/);
   } finally { store.close(); }
+});
+
+test('per-spawn lanes can narrow but never widen the configured policy', async () => {
+  const store = openStore(':memory:');
+  try {
+    const tiers = { '1': ['pi/flash', 'codex/luna'] };
+    const catalog = createModelCatalog({ probe: { pi: () => true, codex: () => true } });
+    const route = createRouter({ settings: settings(tiers, { lanes: ['codex'] }), store, jev, catalog });
+    const narrowed = await choose(route, { ...input, lanes: ['codex', 'pi'] });
+    assert.equal(narrowed.model, 'codex/luna');
+    assert.deepEqual(narrowed.policyApplied, { lanes: ['codex'], subscriptionOnly: false });
+    const widened = await choose(route, { ...input, lanes: ['pi'] });
+    assert.equal(widened.model, undefined);
+    assert.match(widened.refusal ?? '', /under lanes \[\]/);
+  } finally { store.close(); }
+});
+
+test('Codex catalog parses debug models slugs', () => {
+  assert.deepEqual(parseCodexModelSlugs({ models: [{ slug: 'gpt-6-astra' }, { slug: 'gpt-5.6-luna' }] }), ['gpt-6-astra', 'gpt-5.6-luna']);
+});
+
+test('catalog retries a failed refresh while preserving the last known result', async () => {
+  let calls = 0;
+  const catalog = createModelCatalog({ probe: { codex: () => { calls += 1; if (calls === 2) throw new Error('temporary'); return true; } } });
+  assert.equal((await catalog.availability('codex/luna')).available, true);
+  assert.equal((await catalog.availability('codex/luna')).available, true);
+  assert.equal(calls, 1);
+  await catalog.refresh?.({ ...baseSettings, routing: { ...baseSettings.routing, tiers: { '1': ['codex/luna'] } } });
+  assert.equal((await catalog.availability('codex/luna')).available, true);
+  assert.equal(calls, 3);
 });
 
 test('catalog probes are cached and routing checks report stale entries', async () => {

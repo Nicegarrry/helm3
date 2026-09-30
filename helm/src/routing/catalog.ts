@@ -27,8 +27,11 @@ export type CatalogProbe = Readonly<{
 
 export type ModelCatalog = Readonly<{
   availability(model: string): Promise<{ available: boolean; reason?: string }>;
+  refresh?(settings: Settings): Promise<void>;
   check(settings: Settings, now?: Date): Promise<RoutingCheckReport>;
 }>;
+
+export const CATALOG_CACHE_TTL_MS = 60 * 60 * 1000;
 
 function modelParts(model: string): { provider: string; id: string } | undefined {
   const separator = model.indexOf('/');
@@ -86,27 +89,31 @@ function piBuiltInModels(): string[] {
   } catch { return []; }
 }
 
+export function parseCodexModelSlugs(value: unknown): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+  const models = (value as Record<string, unknown>).models;
+  if (!Array.isArray(models)) return [];
+  return models.flatMap((model) => {
+    if (typeof model === 'string') return [model];
+    return model && typeof model === 'object' && typeof (model as Record<string, unknown>).slug === 'string'
+      ? [String((model as Record<string, unknown>).slug)] : [];
+  });
+}
+
 async function defaultCodexProbe(modelId: string): Promise<boolean> {
-  try {
-    await exec('codex', ['exec', '-m', modelId, '--help'], { timeout: 10_000 });
-    return true;
-  } catch { return false; }
+  const { stdout } = await exec('codex', ['debug', 'models'], { timeout: 10_000 });
+  const slugs = parseCodexModelSlugs(JSON.parse(stdout) as unknown);
+  return slugs.includes(modelId);
 }
 
 async function defaultCodexModels(): Promise<readonly string[]> {
-  try {
-    const { stdout } = await exec('codex', ['models', '--json'], { timeout: 10_000 });
-    const parsed = JSON.parse(stdout) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((model) => typeof model === 'string' ? [`codex/${model}`] : model && typeof model === 'object' && typeof (model as Record<string, unknown>).id === 'string' ? [`codex/${String((model as Record<string, unknown>).id)}`] : []);
-  } catch { return []; }
+  const { stdout } = await exec('codex', ['debug', 'models'], { timeout: 10_000 });
+  return parseCodexModelSlugs(JSON.parse(stdout) as unknown).map((slug) => `codex/${slug}`);
 }
 
 async function defaultPiProbe(provider: string, modelId: string): Promise<boolean> {
-  try {
-    const { defaultModelRuntime } = await import('../worker.js');
-    return Boolean((await defaultModelRuntime()).getModel(provider, modelId));
-  } catch { return false; }
+  const { defaultModelRuntime } = await import('../worker.js');
+  return Boolean((await defaultModelRuntime()).getModel(provider, modelId));
 }
 
 async function defaultClaudeProbe(): Promise<boolean> {
@@ -114,14 +121,22 @@ async function defaultClaudeProbe(): Promise<boolean> {
 }
 
 export function createModelCatalog(options: { getSettings?: () => Settings; probe?: CatalogProbe; claudeLaneRegistered?: boolean }): ModelCatalog {
-  const cache = new Map<string, Promise<{ available: boolean; reason?: string }>>();
+  type Result = { available: boolean; reason?: string };
+  type Entry = { at: number; result: Result };
+  const cache = new Map<string, Entry>();
+  const pending = new Map<string, Promise<Result>>();
+  const laneCache = new Map<RoutingLane, { at: number; models: readonly string[] }>();
+  const lanePending = new Map<RoutingLane, Promise<readonly string[]>>();
   const probe = options.probe ?? {};
   const getSettings = options.getSettings ?? (() => { throw new Error('routing catalog settings are not configured'); });
 
-  async function availability(model: string): Promise<{ available: boolean; reason?: string }> {
+  async function availability(model: string, force = false): Promise<Result> {
+    const current = Date.now();
     const cached = cache.get(model);
-    if (cached) return cached;
-    const pending = (async () => {
+    if (!force && cached && current - cached.at < CATALOG_CACHE_TTL_MS) return cached.result;
+    const active = pending.get(model);
+    if (active) return active;
+    const operation = (async () => {
       if (model.startsWith('claude/')) {
         if (!options.claudeLaneRegistered) return { available: false, reason: 'no worker lane for claude' };
         const available = await (probe.claude ?? defaultClaudeProbe)();
@@ -136,25 +151,63 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
       const available = await (probe.pi ?? defaultPiProbe)(parts.provider, parts.id);
       return available ? { available: true } : { available: false, reason: 'Pi model cannot be resolved' };
     })();
-    cache.set(model, pending);
-    return pending;
+    pending.set(model, operation);
+    try {
+      const result = await operation;
+      cache.set(model, { at: Date.now(), result });
+      return result;
+    } catch (error) {
+      if (cached) {
+        cache.set(model, { at: 0, result: cached.result });
+        return cached.result;
+      }
+      return { available: false, reason: `probe failed: ${error instanceof Error ? error.message : String(error)}` };
+    } finally {
+      pending.delete(model);
+    }
   }
 
-  async function modelsForLane(lane: RoutingLane): Promise<readonly string[]> {
-    if (probe.models) return probe.models(lane);
-    if (lane === 'codex') return defaultCodexModels();
-    if (lane === 'pi') {
-      return [...new Set([
+  async function modelsForLane(lane: RoutingLane, force = false): Promise<readonly string[]> {
+    const current = Date.now();
+    const cached = laneCache.get(lane);
+    if (!force && cached && current - cached.at < CATALOG_CACHE_TTL_MS) return cached.models;
+    const active = lanePending.get(lane);
+    if (active) return active;
+    const operation = (async () => {
+      if (probe.models) return probe.models(lane);
+      if (lane === 'codex') return defaultCodexModels();
+      if (lane === 'pi') return [...new Set([
         ...piModelsFromJson(readJson(join(homedir(), '.pi', 'agent', 'models.json'))),
         ...piBuiltInModels(),
       ])];
+      return [];
+    })();
+    lanePending.set(lane, operation);
+    try {
+      const result = await operation;
+      laneCache.set(lane, { at: Date.now(), models: result });
+      return result;
+    } catch (error) {
+      if (cached) {
+        laneCache.set(lane, { at: 0, models: cached.models });
+        return cached.models;
+      }
+      return [];
+    } finally {
+      lanePending.delete(lane);
     }
-    return [];
+  }
+
+  async function refresh(settings: Settings): Promise<void> {
+    await Promise.all(tierModels(settings).map((model) => availability(model, true)));
+    await Promise.all((['codex', 'pi', 'claude'] as const).map((lane) => modelsForLane(lane, true)));
   }
 
   return {
     availability,
+    refresh,
     async check(settings, now = new Date()) {
+      await refresh(settings);
       const candidates = tierModels(settings);
       const unavailable: CatalogUnavailable[] = [];
       for (const [index, model] of candidates.entries()) {

@@ -11,11 +11,11 @@ const FACTORY_DEFAULTS = { claims: 'block' as const, claimsAt: 0.7, verdictAt: 0
 const QUEUE_DEFAULTS = { tickSec: 30, checksTimeoutMin: 30 };
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
 const ROUTING_TIERS_DEFAULTS: Record<string, string[]> = {
-  1: ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium'],
-  2: ['google/gemini-3.8-flash', 'codex/gpt-6-luna:high'],
+  1: ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium', 'codex/gpt-5.6-luna:medium'],
+  2: ['google/gemini-3.8-flash', 'codex/gpt-6-luna:high', 'codex/gpt-5.6-luna:high'],
   3: ['claude/sonnet:high', 'codex/gpt-5.6-terra:high'],
-  4: ['codex/gpt-6.1-sol:medium', 'claude/opus:medium'],
-  5: ['codex/gpt-6-astra:high', 'claude/opus:high', 'claude/fable:high', 'codex/gpt-6.1-sol:high'],
+  4: ['codex/gpt-6.1-sol:medium', 'codex/gpt-5.6-sol:medium', 'claude/opus:medium'],
+  5: ['codex/gpt-6-astra:high', 'claude/opus:high', 'claude/fable:high', 'codex/gpt-6.1-sol:high', 'codex/gpt-5.6-sol:high'],
 };
 const ROUTING_DEFAULTS = {
   tiers: ROUTING_TIERS_DEFAULTS,

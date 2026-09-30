@@ -4,19 +4,19 @@ import { loadSettings, type Settings } from './settings.js';
 import type { Store } from './types.js';
 import type { ModelChooser, ModelChoice, SpawnInput } from './helm.js';
 import { createModelCatalog, type ModelCatalog } from './routing/catalog.js';
-import { appliedPolicy, policyAllows } from './routing/policy.js';
 import { selectCandidate } from './routing/select.js';
-
-const HIGH = 'codex/gpt-6-luna:high';
 
 function tooBig(answer: JevAnswer | undefined): boolean { return flag(answer, 'true', true); }
 function project(repo: string): string | undefined { return /^[^/\s]+\/[^/\s]+$/.test(repo) ? repo : undefined; }
+function difficultyTier(difficulty: SpawnInput['difficulty']): number | undefined {
+  return difficulty === 'super-easy' ? 1 : difficulty === 'easy' ? 2 : difficulty === 'normal' ? 3 : undefined;
+}
 
 export function createRouter(options: {
   settings: Settings;
   settingsHome?: string;
   store: Store;
-  jev: Jev;
+  jev?: Jev;
   now?: () => Date;
   resolveProject?: (repo: string) => Promise<string | undefined>;
   isAvailable?: (model: string) => boolean | Promise<boolean>;
@@ -36,45 +36,48 @@ export function createRouter(options: {
     },
     check: defaultCatalog.check,
   } : defaultCatalog);
-  const fallback = (settings: Settings, input: SpawnInput, warning?: string): ModelChoice => {
-    const policy = appliedPolicy(settings, input);
-    if (!policyAllows(policy, HIGH)) return { refusal: `routing fallback ${HIGH} is disallowed by the applied lane policy`, ...(warning ? { warning } : {}) };
-    if (settings.routing.allowed.length > 0 && !settings.routing.allowed.includes(HIGH)) return { refusal: `routing fallback ${HIGH} is not allowed by routing.allowed`, ...(warning ? { warning } : {}) };
-    return { model: HIGH, ...(warning ? { warning } : {}) };
-  };
   return async (input: SpawnInput): Promise<ModelChoice> => {
-    if (input.model || input.difficulty) return { model: input.model ?? HIGH };
+    if (input.model) return { model: input.model };
     const settings = currentSettings();
     const projectName = project(input.repo) ?? (options.resolveProject ? await options.resolveProject(input.repo).catch(() => undefined) : undefined);
-    const questions = issueQuestions();
-    let result: Awaited<ReturnType<Jev['ask']>>;
-    try {
-      result = await options.jev.ask('route', {
-        ...(projectName ? { project: projectName } : {}),
-        state: { objective: input.objective, acceptance: input.acceptance ?? null },
-        questions: { complexity: questions.complexity!, too_big: questions.too_big! },
-      });
-    } catch { return fallback(settings, input); }
-    if (!result.ok) return fallback(settings, input);
-    const splitRecommended = tooBig(result.answers.too_big);
-    const judged = scoreTier(result.answers.complexity);
-    if (!judged) return fallback(settings, input, splitRecommended ? 'split recommended' : undefined);
+    let judgedTier = difficultyTier(input.difficulty);
+    let score: number | undefined;
+    let splitRecommended = false;
+    let warning: string | undefined;
+    if (judgedTier === undefined && options.jev) {
+      const questions = issueQuestions();
+      try {
+        const result = await options.jev.ask('route', {
+          ...(projectName ? { project: projectName } : {}),
+          state: { objective: input.objective, acceptance: input.acceptance ?? null },
+          questions: { complexity: questions.complexity!, too_big: questions.too_big! },
+        });
+        if (result.ok) {
+          splitRecommended = tooBig(result.answers.too_big);
+          const judged = scoreTier(result.answers.complexity);
+          judgedTier = judged?.tier;
+          score = judged?.score;
+          if (!judged) warning = splitRecommended ? 'split recommended' : undefined;
+        } else warning = 'Jev routing failed; used tier 3 fallback';
+      } catch { warning = 'Jev routing failed; used tier 3 fallback'; }
+    }
+    judgedTier ??= 3;
     const selection = await selectCandidate({
-      settings, input, judgedTier: judged.tier, score: judged.score, project: projectName,
+      settings, input, judgedTier, score, project: projectName,
       store: options.store, catalog, now: options.now?.() ?? new Date(),
     });
     return {
       ...(selection.model ? { model: selection.model } : {}),
       tier: selection.tier,
-      score: selection.score,
+      ...(selection.score === undefined ? {} : { score: selection.score }),
       policyApplied: selection.policyApplied,
       ...(selection.skippedCandidates?.length ? { skippedCandidates: selection.skippedCandidates } : {}),
       ...(selection.refusal ? { refusal: selection.refusal } : {}),
-      ...(splitRecommended ? { warning: 'split recommended' } : {}),
+      ...(splitRecommended ? { warning: 'split recommended' } : warning ? { warning } : {}),
     };
   };
 }
 
 export function registerRouting(options: { chooseModel: (chooser: ModelChooser) => void; settings: Settings; settingsHome?: string; store: Store; jev?: Jev; now?: () => Date; resolveProject?: (repo: string) => Promise<string | undefined>; catalog?: ModelCatalog }): void {
-  if (options.jev) options.chooseModel(createRouter({ settings: options.settings, settingsHome: options.settingsHome, store: options.store, jev: options.jev, now: options.now, resolveProject: options.resolveProject, catalog: options.catalog }));
+  options.chooseModel(createRouter({ settings: options.settings, settingsHome: options.settingsHome, store: options.store, jev: options.jev, now: options.now, resolveProject: options.resolveProject, catalog: options.catalog }));
 }

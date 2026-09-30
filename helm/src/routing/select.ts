@@ -9,7 +9,7 @@ export type SkippedCandidate = Readonly<{ model: string; reason: string; tier: n
 export type CandidateSelection = Readonly<{
   model?: string;
   tier: number;
-  score: number;
+  score?: number;
   policyApplied: AppliedRoutingPolicy;
   skippedCandidates?: readonly SkippedCandidate[];
   refusal?: string;
@@ -19,7 +19,7 @@ type Options = Readonly<{
   settings: Settings;
   input: { lanes?: readonly ('codex' | 'pi' | 'claude')[] };
   judgedTier: number;
-  score: number;
+  score?: number;
   project?: string;
   store: Store;
   catalog: ModelCatalog;
@@ -50,9 +50,9 @@ export async function selectCandidate(options: Options): Promise<CandidateSelect
         skipped.push({ model, reason: `clean rate below minClean (${rate.clean}/${rate.n})`, tier });
         continue;
       }
-      return { model, tier: options.judgedTier, score: options.score, policyApplied: policy, ...(skipped.length ? { skippedCandidates: skipped } : {}) };
+      return { model, tier: options.judgedTier, ...(options.score === undefined ? {} : { score: options.score }), policyApplied: policy, ...(skipped.length ? { skippedCandidates: skipped } : {}) };
     }
   }
   const policyLanes = policy.lanes.join(', ');
-  return { tier: options.judgedTier, score: options.score, policyApplied: policy, ...(skipped.length ? { skippedCandidates: skipped } : {}), refusal: `no available routing candidate for Jev tier ${options.judgedTier} under lanes [${policyLanes}]${policy.subscriptionOnly ? ' with subscriptionOnly' : ''}` };
+  return { tier: options.judgedTier, ...(options.score === undefined ? {} : { score: options.score }), policyApplied: policy, ...(skipped.length ? { skippedCandidates: skipped } : {}), refusal: `no available routing candidate for tier ${options.judgedTier} under lanes [${policyLanes}]${policy.subscriptionOnly ? ' with subscriptionOnly' : ''}` };
 }

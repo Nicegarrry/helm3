@@ -90,11 +90,11 @@ threshold. A higher tier is tried when the current tier has no usable candidate.
 
 | Tier | Ordered candidates (cheapest first) |
 | --- | --- |
-| 1 | `openrouter/qwen/qwen3.8-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, `codex/gpt-6-luna:medium` |
-| 2 | `google/gemini-3.8-flash`, `codex/gpt-6-luna:high` |
+| 1 | `openrouter/qwen/qwen3.8-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, `codex/gpt-6-luna:medium`, `codex/gpt-5.6-luna:medium` |
+| 2 | `google/gemini-3.8-flash`, `codex/gpt-6-luna:high`, `codex/gpt-5.6-luna:high` |
 | 3 | `claude/sonnet:high`, `codex/gpt-5.6-terra:high` |
-| 4 | `codex/gpt-6.1-sol:medium`, `claude/opus:medium` |
-| 5 | `codex/gpt-6-astra:high`, `claude/opus:high`, `claude/fable:high`, `codex/gpt-6.1-sol:high` |
+| 4 | `codex/gpt-6.1-sol:medium`, `codex/gpt-5.6-sol:medium`, `claude/opus:medium` |
+| 5 | `codex/gpt-6-astra:high`, `claude/opus:high`, `claude/fable:high`, `codex/gpt-6.1-sol:high`, `codex/gpt-5.6-sol:high` |
 
 The tier-1 Qwen entry is the requested `openrouter/qwen/qwen3.8-flash` identifier. The
 current operator `models.json` exposes the older `opencode-go/qwen3.8-flash` override
@@ -113,15 +113,15 @@ silently choosing one.
 `helm routing check` (or the `routing.check` tool) probes the catalog and records the last
 check in the Helm store. The weekly ticker runs it when `checkDays` has elapsed and emits
 `routing.stale` for unavailable tier candidates or models present in a lane but absent from
-the table. The Codex probe checks known model IDs through the Codex CLI; Pi reads its
+the table. The Codex probe runs `codex debug models`; Pi reads its
 operator and built-in provider catalogs; Claude requires both a binary and a registered
 Helm lane.
 
 Retrospectives should review the 30-day model × tier scorecard, then edit the ordered
 `routing.tiers` lists or `routing.allowed` in `helm.json`. Keep the cheapest acceptable
 candidate first, and use a later candidate or higher tier when the clean rate is below
-`minClean` with at least `minN` observations. Explicit `model` and `difficulty` values
-still bypass Jev routing.
+`minClean` with at least `minN` observations. An explicit `model` bypasses routing;
+`difficulty` maps directly to tiers 1, 2, and 3 and still uses policy and availability checks.
 
 `helm review <id>` / `review.request` also accepts an omitted model. Reviews default to
 Gemini Flash; if an explicitly selected builder is Gemini, the default reviewer is Codex

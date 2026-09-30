@@ -1118,10 +1118,10 @@ test('automatic routing reaches the runner, persists, and survives steer across 
   const registry = createToolRegistry(helm);
   const repo = mkTempDir('helm-routing-');
   for (const [difficulty, expected] of [
-    [undefined, 'codex/gpt-6-luna:high'],
-    ['normal', 'codex/gpt-6-luna:high'],
-    ['easy', 'codex/gpt-6-luna:medium'],
-    ['super-easy', 'codex/gpt-6-luna:medium'],
+    [undefined, 'codex/gpt-5.6-terra:high'],
+    ['normal', 'codex/gpt-5.6-terra:high'],
+    ['easy', 'google/gemini-3.8-flash'],
+    ['super-easy', 'openrouter/qwen/qwen3.8-flash'],
   ] as const) {
     const outcome = await registry.call('worker.spawn', { repo, objective: 'task', ...(difficulty ? { difficulty } : {}) });
     assert.equal(outcome.ok, true);
@@ -1135,10 +1135,10 @@ test('automatic routing reaches the runner, persists, and survives steer across 
     assert.equal(seen.at(-1), expected);
     await helm.gate({ workerId: row.workerId });
     assert.equal((await helm.prOpen({ workerId: row.workerId, draft: true })).ok, true);
-    const review = await helm.reviewRequest({ workerId: row.workerId, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    const review = await helm.reviewRequest({ workerId: row.workerId, model: 'claude/sonnet:high', allowSameFamily: false });
     assert.ok(review.ok);
     await helm.settle(review.reviewWorkerId);
-    assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'google/gemini-3.8-flash');
+    assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'claude/sonnet:high');
   }
 });
 
@@ -1158,7 +1158,7 @@ test('explicit models override difficulty; a Gemini builder gets an independent 
   const direct = await helm.spawn(spawnBody(repo, { model: undefined, role: 'reviewer', difficulty: 'super-easy' }));
   assert.ok(direct.ok);
   await helm.settle(direct.workerId);
-  assert.equal(store.getWorker(direct.workerId)?.model, 'codex/gpt-6-luna:medium');
+    assert.equal(store.getWorker(direct.workerId)?.model, 'openrouter/qwen/qwen3.8-flash');
 });
 
 function deferred() {

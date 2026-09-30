@@ -171,7 +171,28 @@ export function createDiscord(options: Options): DiscordService {
 
   const consume = consumer(options.store, 'discord', (events) => {
     for (const event of events) {
-      const line = milestone(event, Object.keys(options.settings.discord.projects).length);
+      let milestoneEvent = event;
+      if (event.kind === 'deploy' || event.kind === 'deploy.rolledback' || event.kind === 'deploy.failed') {
+        try {
+          const id = optional(event.data.id);
+          const deployment = id ? options.store.sql.prepare('SELECT env, sha, url FROM deploys WHERE id = ?').get(id) as Record<string, unknown> | undefined : undefined;
+          if (deployment) {
+            const sha = optional(deployment.sha);
+            const project = optional(event.data.project);
+            const pr = sha && project ? options.store.listPrs().find((candidate) => candidate.repoSlug === project && candidate.head === deployment.sha) : undefined;
+            const issue = pr ? options.store.getMeta(pr.workerId)?.issue : undefined;
+            milestoneEvent = { ...event, data: {
+              ...event.data,
+              ...(deployment.env !== undefined ? { env: deployment.env } : {}),
+              ...(sha ? { sha: sha.slice(0, 7) } : {}),
+              ...(deployment.url ? { url: deployment.url } : {}),
+              ...(pr ? { pr: pr.number } : {}),
+              ...(issue !== undefined && issue !== null ? { issue } : {}),
+            } };
+          }
+        } catch { /* deployment enrichment is best effort */ }
+      }
+      const line = milestone(milestoneEvent, Object.keys(options.settings.discord.projects).length);
       if (!line) continue;
       const worker = options.store.getWorker(event.workerId);
       const project = text(event.data.project ?? worker?.repoSlug, 'unknown');

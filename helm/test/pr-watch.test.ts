@@ -15,7 +15,7 @@ test('external PR merges emit once and refresh the stored row', async () => {
     store.insertWorker(worker);
     store.insertPr({ repoSlug: 'o/r', number: 12, workerId: worker.workerId, url: 'https://github.test/12', head: 'old', createdAt: worker.createdAt });
     let calls = 0;
-    const github = { prStatus: async () => { calls += 1; return { number: 12, state: 'merged' as const, head: 'new', mergeable: true, draft: false, checks: [], reviews: [], url: 'https://github.test/12', title: 'Title', base: 'main' }; } } as GitHub;
+    const github = { prStatus: async () => { calls += 1; return { number: 12, state: 'merged' as const, head: 'new', mergeable: true, draft: false, checks: [], reviews: [], url: 'https://github.test/12', title: 'Title', base: 'main' }; } } as unknown as GitHub;
     const tick = createPrTicker({ store, github });
     await tick(); await tick();
     assert.equal(calls, 2);

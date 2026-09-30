@@ -689,9 +689,10 @@ export class Helm {
       const meta = this.store.getMeta(row.workerId);
       const savedPr = this.store.getPrByWorker(input.workerId);
       const existing = savedPr ?? await this.github.findPr?.(row.repoSlug, row.branch);
+      let prStatus: PrStatus | undefined;
       if (existing) {
-        const status = await this.github.prStatus(row.repoSlug, existing.number);
-        must(status.state === 'open', `pull request #${existing.number} is ${status.state}; refusing to push`);
+        prStatus = await this.github.prStatus(row.repoSlug, existing.number);
+        must(prStatus.state === 'open', `pull request #${existing.number} is ${prStatus.state}; refusing to push`);
       }
       await this.workspace.push(row.worktree, row.branch);
       if (existing) {
@@ -701,7 +702,7 @@ export class Helm {
         }
         const updatedPr: PrRow = { repoSlug: row.repoSlug, number: existing.number, workerId: input.workerId, url: existing.url, head, createdAt: savedPr?.createdAt ?? this.nowIso() };
         if (savedPr) this.store.updatePr(updatedPr); else this.store.insertPr(updatedPr);
-        this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true, ...(input.title ?? status.title ? { title: input.title ?? status.title } : {}), ...(status.base ? { base: status.base } : {}), project: row.repoSlug });
+        this.store.appendEvent(input.workerId, 'pr', { number: existing.number, url: existing.url, updated: true, ...(input.title ?? prStatus?.title ? { title: input.title ?? prStatus?.title } : {}), ...(prStatus?.base ? { base: prStatus.base } : {}), project: row.repoSlug });
         return { ok: true, number: existing.number, url: existing.url, head, updated: true };
       }
       const title = input.title ?? row.result?.summary?.split('\n')[0] ?? row.objective.slice(0, 72);

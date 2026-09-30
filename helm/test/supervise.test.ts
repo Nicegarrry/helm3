@@ -237,3 +237,20 @@ test('herdr host refuses dash-prefixed positional values before executing', asyn
   await assert.rejects(host.create('-label', 'cwd', 'command'), /herdr label must not start with/);
   assert.deepEqual(calls, []);
 });
+
+test('watch.alert wakes summarise object details instead of [object Object]', async () => {
+  const { store, created } = service(fakeHost().host);
+  try {
+    created.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner repo' });
+    store.insertWorker(worker());
+    store.appendEvent('w-supervise', 'watch.alert', { rule: 'result.invalid', detail: { rawText: JSON.stringify({ status: 'succeeded', summary: 's', claims: Array.from({ length: 13 }, () => 'c') }) } });
+    store.appendEvent('w-supervise', 'watch.alert', { rule: 'result.invalid', detail: { rawText: `not json ${'x'.repeat(200)}` } });
+    store.appendEvent('w-supervise', 'watch.alert', { rule: 'refusal.loop', detail: { reason: 'denied', count: 5 } });
+    await created.tick();
+    const result = created.wakes({ project: 'owner/repo', ack: false });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    const summaries = result.wakes.filter((wake) => wake.kind === 'watch.alert').map((wake) => wake.summary);
+    assert.deepEqual([...summaries].sort(), ['result.invalid: claims: at most 12', `result.invalid: not json ${'x'.repeat(111)}`, 'refusal.loop: denied'].sort());
+  } finally { store.close(); }
+});

@@ -104,6 +104,15 @@ test('codexArgs: builders get workspace-write with -C, reviewers read-only, resu
   assert.ok(resume.includes('-m') && resume[resume.indexOf('-m') + 1] === 'gpt-6-astra', 'resume must name the model or Codex falls back to its config default');
 });
 
+test('Codex token read gap: fresh and resumed builders use legacy sandbox settings, not permission-profile denials', () => {
+  for (const thread of [null, 'existing-thread']) for (const network of [false, true]) {
+    const args = codexArgs({ role: 'builder', worktree: '/wt' }, { model: 'gpt-6-astra' }, thread, '/s/last.md', network);
+    assert.ok(args.includes('sandbox_mode="workspace-write"'));
+    assert.ok(args.includes(`sandbox_workspace_write.network_access=${network}`));
+    assert.ok(!args.some((arg) => /default_permissions|permissions\.|deny_read|serve\.json/.test(arg)));
+  }
+});
+
 test('run: a builder turn maps Codex events onto Helm events, records subscription usage at $0 and returns the parsed result', async () => {
   const f = await fixture('ok');
   const { hooks, events, sessions } = collectHooks();

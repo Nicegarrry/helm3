@@ -69,7 +69,7 @@ import { Lifecycle } from './lifecycle.js';
 import { loadSettings, updateSpendSettings, type Settings } from './settings.js';
 import { createEffectiveSpendReader, spendLimitRaises, type EffectiveSpend, type EffectiveSpendReader } from './config.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
+import { NO_TAP_CHANNEL, checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -430,7 +430,7 @@ export class Helm {
       const action = spendCapAction(current, input);
       let reservation: TapReservation | undefined;
       if (raising) {
-        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}`);
+        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}${this.settings.discord.tapWebhookEnv ? '' : ` (${NO_TAP_CHANNEL})`}`);
         const reserved = reserveTap(this.store, this.taps, SPEND_CAP_TAP_PROJECT, SPEND_CAP_TAP_KIND, actionHash(action), input.tapId, this.nowDate());
         if (typeof reserved === 'string') return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${reserved}`);
         reservation = reserved;
@@ -1116,7 +1116,7 @@ export class Helm {
         randomInt: this.tapRandomInt,
         taps: this.taps,
         pepper: this.tapPepper,
-        post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: 'no tap channel configured' }),
+        post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: NO_TAP_CHANNEL }),
       });
       return result;
     });
@@ -1183,8 +1183,8 @@ export class Helm {
     });
   }
 
-  async notifyNick(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
-    if (!this.discord) return { ok: false, reason: 'Discord is not configured' };
+  async notifyOwner(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
+    if (!this.discord) return { ok: false, reason: 'no notify channel: set discord.projects.<project>.webhookEnv in helm.json' };
     const result = await this.discord.notifyNick(input.project, input.text);
     return result.ok ? { ok: true, sent: true } : result;
   }

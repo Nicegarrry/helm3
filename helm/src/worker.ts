@@ -1,5 +1,6 @@
 /** Pi session runtime: creates one in-process Pi coding-agent session per turn inside a worktree, with Pi's built-in tools enabled, guarded by a `tool_call` extension hook that is the entire protected-path policy. */
 import { mkdir, realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Model, Api } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
@@ -9,27 +10,36 @@ import { RESULT_INSTRUCTION } from './prompt.js';
 export const CORRECTION_MESSAGE =
   'Your final message must be exactly one JSON object matching the WorkerResult schema. Reply with only that JSON.';
 
-/** Parse whole-message JSON, then try fenced blocks from last to first until one validates. */
-export function parseWorkerResult(text: string): WorkerResult | null {
-  const attempt = (candidate: string): WorkerResult | null => {
+/** Parse whole-message JSON, then try fenced blocks from last to first until one validates; keeps the first parseable candidate's zod issues. */
+function checkWorkerResult(text: string): { result: WorkerResult | null; issues: string[] } {
+  let issues: string[] = [];
+  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)].reverse().map((fence) => fence[1] ?? '');
+  for (const candidate of [text, ...fences]) {
     let data: unknown;
     try {
-      data = JSON.parse(candidate);
+      data = JSON.parse(candidate.trim());
     } catch {
-      return null;
+      continue;
     }
     const parsed = workerResultSchema.safeParse(data);
-    return parsed.success ? parsed.data : null;
-  };
-  const direct = attempt(text.trim());
-  if (direct) return direct;
-  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
-  for (let i = fences.length - 1; i >= 0; i--) {
-    const candidate = fences[i]?.[1] ?? '';
-    const parsed = attempt(candidate.trim());
-    if (parsed) return parsed;
+    if (parsed.success) return { result: parsed.data, issues: [] };
+    if (!issues.length) issues = parsed.error.issues.map((issue) => `${issue.path.map((part, i) => (typeof part === 'number' ? `[${part}]` : `${i ? '.' : ''}${String(part)}`)).join('') || 'result'}: ${issue.message}`);
   }
-  return null;
+  return { result: null, issues };
+}
+
+export function parseWorkerResult(text: string): WorkerResult | null {
+  return checkWorkerResult(text).result;
+}
+
+export function workerResultIssues(text: string): string[] {
+  return checkWorkerResult(text).issues;
+}
+
+/** The correction turn: the fixed instruction plus the zod issues found in the previous reply. */
+export function correctionMessage(rawText: string): string {
+  const issues = workerResultIssues(rawText);
+  return issues.length ? `${CORRECTION_MESSAGE}\nValidation errors:\n${issues.slice(0, 10).join('\n')}` : CORRECTION_MESSAGE;
 }
 
 
@@ -147,10 +157,22 @@ function bashRefusalReason(command: string, role: WorkerRole, worktree: string, 
 async function evaluateToolCall(
   toolName: string,
   input: Record<string, unknown>,
-  ctx: Readonly<{ worktree: string; worktreeReal: string; role: WorkerRole; allowWorkflows: boolean }>,
+  ctx: Readonly<{ worktree: string; worktreeReal: string; role: WorkerRole; allowWorkflows: boolean; helmHome: string }>,
 ): Promise<Verdict> {
+  const tokenPath = async (path: string): Promise<boolean> => {
+    const resolved = await resolveGuardedPath(ctx.worktree, path);
+    return dirname(resolved) === ctx.helmHome && /^(serve\.json|serve\.json\..*\.tmp)$/.test(basename(resolved));
+  };
   if (toolName === 'bash' || toolName === 'powershell') {
     const command = typeof input.command === 'string' ? input.command : '';
+    // Cooperative detection only: computed paths and arbitrary scripts can bypass this.
+    const expanded = command.replace(/["']/g, '').replace(/\$\{?HELM_HOME\}?/g, ctx.helmHome)
+      .replace(/\$\{?HOME\}?|~/g, homedir());
+    const token = join(ctx.helmHome, 'serve.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`${token}(?:\\.[^\\s]*\\.tmp)?(?=$|[\\s;|<>])`).test(expanded)) return { allow: false, reason: 'refusing daemon token read' };
+    for (const path of tokenizeShell(expanded)) {
+      if (await tokenPath(path)) return { allow: false, reason: 'refusing daemon token read' };
+    }
     const reason = bashRefusalReason(command, ctx.role, ctx.worktree, ctx.worktreeReal);
     if (reason) return { allow: false, reason };
     return { allow: true, summary: command.slice(0, 120) };
@@ -162,6 +184,7 @@ async function evaluateToolCall(
     }
     const rawPath = typeof input.path === 'string' ? input.path : undefined;
     if (rawPath === undefined) return { allow: true, summary: toolName };
+    if (await tokenPath(rawPath)) return { allow: false, reason: 'refusing daemon token read' };
     const resolved = await resolveGuardedPath(ctx.worktree, rawPath);
     if (!isInside(resolved, ctx.worktreeReal) && !isInside(resolved, ctx.worktree)) {
       return { allow: false, reason: `path resolves outside the worktree: ${rawPath}` };
@@ -209,6 +232,7 @@ function computeCostUsd(model: Model<Api>, usage: Readonly<{ input: number; outp
 export type PiWorkerRunnerOptions = Readonly<{
   modelRuntime?: ModelRuntime;
   resolveModel?: (name: string) => Model<Api> | undefined;
+  helmHome?: string;
 }>;
 
 export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
@@ -237,6 +261,7 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
       const openedSessionFile = sessionManager.getSessionFile();
       if (openedSessionFile) hooks.onSession(openedSessionFile);
       const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
+      const helmHome = await resolveGuardedPath(input.worktree, resolve(opts.helmHome || process.env.HELM_HOME || join(homedir(), '.helm')));
 
       let worktreeReal: string;
       try {
@@ -255,6 +280,7 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
           const verdict = await evaluateToolCall(event.toolName, event.input as Record<string, unknown>, {
             worktree: input.worktree,
             worktreeReal,
+            helmHome,
             role: input.role,
             allowWorkflows: input.allowWorkflows,
           });
@@ -324,7 +350,7 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
         let rawText = await runTurn(message);
         let result = parseWorkerResult(rawText);
         if (!result && hooks.shouldContinue()) {
-          rawText = await runTurn(CORRECTION_MESSAGE);
+          rawText = await runTurn(correctionMessage(rawText));
           result = parseWorkerResult(rawText);
         }
 

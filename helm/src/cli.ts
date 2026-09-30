@@ -441,14 +441,15 @@ export async function startSupervisor(input: StartSupervisorInput, deps: StartSu
   const hosts = deps.hosts ?? { herdr: herdrHost(exec), tmux: tmuxHost(exec) };
   const host = deps.host ?? hosts[hostName];
   const command = supervisorCommand(input.project, label, settings, env);
-  let pane = await host.resolve(label);
+  const hostCall = <T>(fn: () => Promise<T>) => fn().catch((err: NodeJS.ErrnoException) => { throw err.code === 'ENOENT' ? new Error(`supervisor host ${hostName} is not installed; install it or pass --host herdr|tmux`) : err; });
+  let pane = await hostCall(() => host.resolve(label));
   let launched = false;
   if (pane) {
     const status = await host.status(pane);
     if (status === 'unknown') { await host.send(pane, command); launched = true; }
     else if (!input.json) console.log(`attached ${label} ${pane.id}`);
   } else {
-    pane = await host.create(label, repo, command);
+    pane = await hostCall(() => host.create(label, repo, command));
     if (!pane) throw new Error(`host did not create a pane for ${label}`);
     launched = true;
   }

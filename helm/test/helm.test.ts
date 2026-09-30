@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Helm, modelFamily, type HelmPrompts, type SpawnInput } from '../src/helm.js';
+import { createModelCatalog } from '../src/routing/catalog.js';
 import { openStore } from '../src/store.js';
 import { createToolRegistry } from '../src/tools.js';
 import { loadSettings, type Settings } from '../src/settings.js';
@@ -232,6 +233,11 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
   const config: HelmConfig = { home: mkTempDir('helm-home-'), spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 5000, ...overrides.config };
   const defaults = loadSettings(config.home);
   const settings: Settings = { ...defaults, ...overrides.settings, budgets: { ...defaults.budgets, ...overrides.settings?.budgets } };
+  const routingCatalog = createModelCatalog({
+    claudeLaneRegistered: false,
+    sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false },
+    probe: { codex: () => true, pi: () => true, claude: () => false },
+  });
   const helm = new Helm({
     config,
     store,
@@ -240,6 +246,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     github: overrides.github ?? githubFake.github,
     runner: overrides.runner ?? succeeded(),
     prompts: FAKE_PROMPTS,
+    routingCatalog,
     settings,
     statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,

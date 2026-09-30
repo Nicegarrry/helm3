@@ -560,10 +560,11 @@ async function cmdServe(args: string[]): Promise<void> {
   const stopPrWatch = startTicker(5 * 60_000, [createPrTicker({ store, github })]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); helm.capacity.sampler.stop(); stopDiscord(); stopPrWatch(); stopMemory(); stopHygiene(); };
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); stopDiscord(); stopPrWatch(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();
+    await helm.capacity.close();
     await handle.close();
     store.close();
     releaseOwner();

@@ -11,8 +11,8 @@ const FACTORY_DEFAULTS = { claims: 'block' as const, claimsAt: 0.7, verdictAt: 0
 const QUEUE_DEFAULTS = { tickSec: 30, checksTimeoutMin: 30 };
 const CAPACITY_DEFAULTS = {
   sampleSec: 5,
-  reserveGb: 4,
-  gbPerUnit: 2,
+  reserveGb: 2,
+  gbPerUnit: 1,
   units: { light: 1, medium: 2, heavy: 4 },
   pressureWarnPenalty: 1,
   pressureCriticalPenalty: 2,

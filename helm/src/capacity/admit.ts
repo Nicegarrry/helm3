@@ -22,7 +22,7 @@ type SettingsLoader = () => Settings['capacity'];
 type Callback = () => void | Promise<void>;
 type Rehydrator = (job: CapacityJob) => Callback | undefined;
 
-const DEFAULT_CAPACITY = { sampleSec: 5, reserveGb: 4, gbPerUnit: 2, units: { light: 1, medium: 2, heavy: 4 }, pressureWarnPenalty: 1, pressureCriticalPenalty: 2, simulatorPenalty: 1, processHeadroomMinPct: 0.15, waitMilestoneMin: 10 };
+const DEFAULT_CAPACITY = { sampleSec: 5, reserveGb: 2, gbPerUnit: 1, units: { light: 1, medium: 2, heavy: 4 }, pressureWarnPenalty: 1, pressureCriticalPenalty: 2, simulatorPenalty: 1, processHeadroomMinPct: 0.15, waitMilestoneMin: 10 };
 const AGING_MS = 60_000;
 
 function priority(kind: CapacityJobKind): number {
@@ -52,6 +52,7 @@ export type CapacityAdmission = Readonly<{
   rehydrate(factory: Rehydrator): void;
   findQueued(workerId: string, kind: CapacityJobKind, dedupeKey?: string): CapacityQueueEntry | undefined;
   tick(): Promise<void>;
+  close(): Promise<void>;
   status(): Promise<CapacityStatus>;
   sampler: CapacitySampler;
 }>;
@@ -76,7 +77,9 @@ export function createCapacityAdmission(options: Readonly<{
   const sampler = options.sampler ?? createCapacitySampler({ home: options.home, store: options.store, sampleSec: settings().sampleSec, exec: options.exec, statfs: options.statfs, now });
   const callbacks = new Map<string, Callback>();
   const timers = new Map<string, ReturnType<typeof setInterval>>();
+  const rssSamples = new Set<Promise<void>>();
   let ticking: Promise<void> | undefined;
+  let closed = false;
   const testWithoutCapacityOverrides = (process.argv.includes('--test') || process.env.NODE_TEST_CONTEXT !== undefined) && !options.sampler && !options.exec;
 
   options.store.sql.exec(`
@@ -167,9 +170,16 @@ export function createCapacityAdmission(options: Readonly<{
     const running = rows.filter((row) => row.startedAt !== null && row.startedAt !== undefined);
     const usedUnits = running.reduce((total, row) => total + unit(String(row.loadClass) as LoadClass), 0);
     const ceiling = maxWorkers();
-    const ramUnits = testWithoutCapacityOverrides ? Number.MAX_SAFE_INTEGER : Math.floor(Math.max(0, snapshot.freeRamGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
-    const pressurePenalty = snapshot.memoryPressure === 'critical' ? current.pressureCriticalPenalty : snapshot.memoryPressure === 'warn' ? current.pressureWarnPenalty : 0;
-    const resourceBudget = Math.max(0, ramUnits - pressurePenalty - snapshot.bootedSimulators * current.simulatorPenalty);
+    const pressureAvailableGb = snapshot.pressureFreePct !== undefined && snapshot.totalRamGb !== undefined
+      ? snapshot.pressureFreePct / 100 * snapshot.totalRamGb
+      : snapshot.freeRamGb;
+    const availableGb = snapshot.memoryPressure === 'critical'
+      ? 0
+      : snapshot.memoryPressure === 'warn'
+        ? Math.max(snapshot.freeRamGb, pressureAvailableGb) / 2
+        : Math.max(snapshot.freeRamGb, pressureAvailableGb);
+    const ramUnits = testWithoutCapacityOverrides ? Number.MAX_SAFE_INTEGER : Math.floor(Math.max(0, availableGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
+    const resourceBudget = Math.max(0, ramUnits - snapshot.bootedSimulators * current.simulatorPenalty);
     const budget = processLimited ? 0 : resourceBudget;
     const queue = rows.filter((row) => row.startedAt === null || row.startedAt === undefined).sort((a, b) => Number(a.priority) - Number(b.priority) || String(a.queuedAt).localeCompare(String(b.queuedAt))).map((row) => ({
       id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))), priority: Number(row.priority), ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}),
@@ -191,15 +201,21 @@ export function createCapacityAdmission(options: Readonly<{
     } catch { /* telemetry must never affect the job */ }
   }
 
+  function sampleRssTracked(id: string): void {
+    const pending = sampleRss(id);
+    rssSamples.add(pending);
+    void pending.then(() => rssSamples.delete(pending), () => rssSamples.delete(pending));
+  }
+
   function start(row: CapacityJob): void {
     const startedAt = now().toISOString();
     const changed = options.store.sql.prepare('UPDATE capacity_jobs SET startedAt = ?, pid = ? WHERE id = ? AND startedAt IS NULL AND endedAt IS NULL').run(startedAt, row.pid ?? null, row.id);
     if (!Number(changed.changes)) return;
     options.store.appendEvent(row.workerId, 'capacity.started', { kind: row.kind, loadClass: row.loadClass, units: unit(row.loadClass) });
-    const timer = setInterval(() => { void sampleRss(row.id); }, 1000);
+    const timer = setInterval(() => { sampleRssTracked(row.id); }, 1000);
     timer.unref?.();
     timers.set(row.id, timer);
-    void sampleRss(row.id);
+    sampleRssTracked(row.id);
     try {
       const result = callbacks.get(row.id)?.();
       if (result && typeof (result as Promise<void>).then === 'function') {
@@ -214,6 +230,7 @@ export function createCapacityAdmission(options: Readonly<{
   }
 
   async function tick(): Promise<void> {
+    if (closed) return;
     if (ticking) return ticking;
     ticking = (async () => {
       const current = settings() ?? DEFAULT_CAPACITY;
@@ -228,8 +245,9 @@ export function createCapacityAdmission(options: Readonly<{
       while (statusNow.queue.length) {
         const head = statusNow.queue[0]!;
         const fits = (entry: CapacityQueueEntry) => !(statusNow.processLimited && processSensitive(entry.kind)) && (statusNow.maxWorkers === 0 || statusNow.runningJobs < statusNow.maxWorkers) && (statusNow.runningJobs === 0 || statusNow.availableUnits >= unit(entry.loadClass));
-        let entry = fits(head) ? head : undefined;
-        if (!entry && head.waitMs >= AGING_MS) entry = statusNow.queue.slice(1).find((candidate) => unit(candidate.loadClass) < unit(head.loadClass) && fits(candidate));
+        const headFits = fits(head);
+        if (!headFits && head.waitMs >= AGING_MS) break;
+        const entry = headFits ? head : statusNow.queue.slice(1).find((candidate) => unit(candidate.loadClass) < unit(head.loadClass) && fits(candidate));
         if (!entry || !callbacks.has(entry.id)) break;
         start(jobFromRow(options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE id = ?').get(entry.id) as Record<string, unknown>));
         statusNow = await status();
@@ -277,7 +295,21 @@ export function createCapacityAdmission(options: Readonly<{
   function setPid(id: string, pid: number): void {
     if (!Number.isInteger(pid) || pid <= 0) return;
     options.store.sql.prepare('UPDATE capacity_jobs SET pid = ? WHERE id = ? AND endedAt IS NULL').run(pid, id);
-    void sampleRss(id);
+    sampleRssTracked(id);
+  }
+
+  async function close(): Promise<void> {
+    if (closed) {
+      if (ticking) await ticking;
+      return;
+    }
+    closed = true;
+    sampler.stop();
+    for (const timer of timers.values()) clearInterval(timer);
+    timers.clear();
+    if (ticking) await ticking;
+    await Promise.all([...rssSamples]);
+    await sampler.close?.();
   }
 
   function updatePayload(id: string, payload: unknown): void {
@@ -304,5 +336,5 @@ export function createCapacityAdmission(options: Readonly<{
     }));
   }
 
-  return { admit, finish, cancel, setPid, updatePayload, rehydrate, findQueued, tick, status, sampler };
+  return { admit, finish, cancel, setPid, updatePayload, rehydrate, findQueued, tick, close, status, sampler };
 }

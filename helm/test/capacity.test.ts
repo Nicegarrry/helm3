@@ -53,22 +53,34 @@ test('idle capacity admits one heavy job even when the live unit budget is below
   } finally { store.close(); }
 });
 
-test('priority and bounded aging select gates first and let a smaller aged builder bypass a heavy head', async () => {
+test('priority drains a blocked aged head instead of backfilling smaller builders', async () => {
   let clock = new Date('2026-09-30T00:00:00.000Z');
   const store = openStore(':memory:');
-  const capacity = createCapacityAdmission({ home: '/tmp/helm-capacity-priority', maxWorkers: 0, store, settings: { capacity: loadSettings('/missing').capacity }, sampler: fakeSampler(snapshot({ freeRamGb: 12 })), now: () => clock });
+  const capacity = createCapacityAdmission({ home: '/tmp/helm-capacity-priority', maxWorkers: 0, store, settings: { capacity: loadSettings('/missing').capacity }, sampler: fakeSampler(snapshot({ freeRamGb: 6 })), now: () => clock });
   try {
     const started: string[] = [];
-    await capacity.admit({ id: 'running', workerId: 'running', kind: 'builder', loadClass: 'light' }, () => { started.push('running'); });
-    await capacity.admit({ id: 'heavy', workerId: 'heavy', kind: 'builder', loadClass: 'heavy' }, () => { started.push('heavy'); });
-    await capacity.admit({ id: 'gate', workerId: 'gate', kind: 'gate', loadClass: 'medium' }, () => { started.push('gate'); });
-    assert.deepEqual(started, ['running', 'gate']);
-    capacity.finish('gate');
-    await capacity.admit({ id: 'aged', workerId: 'aged', kind: 'builder', loadClass: 'medium' }, () => { started.push('aged'); });
+    await capacity.admit({ id: 'light-1', workerId: 'light-1', kind: 'builder', loadClass: 'light' }, () => { started.push('light-1'); });
+    await capacity.admit({ id: 'light-2', workerId: 'light-2', kind: 'builder', loadClass: 'light' }, () => { started.push('light-2'); });
+    assert.deepEqual(started, ['light-1', 'light-2']);
+    await capacity.admit({ id: 'gate', workerId: 'gate', kind: 'gate', loadClass: 'heavy' }, () => { started.push('gate'); });
+    await capacity.admit({ id: 'light-3', workerId: 'light-3', kind: 'builder', loadClass: 'light' }, () => { started.push('light-3'); });
+    await capacity.admit({ id: 'light-4', workerId: 'light-4', kind: 'builder', loadClass: 'light' }, () => { started.push('light-4'); });
     clock = new Date(clock.getTime() + 61_000);
     await capacity.tick();
-    assert.ok(started.includes('aged'));
-    assert.equal(started.includes('heavy'), false);
+    assert.deepEqual(started, ['light-1', 'light-2']);
+    capacity.finish('light-1');
+    await capacity.tick();
+    assert.deepEqual(started, ['light-1', 'light-2']);
+    capacity.finish('light-2');
+    await capacity.tick();
+    assert.deepEqual(started, ['light-1', 'light-2', 'gate']);
+  } finally { store.close(); }
+});
+
+test('normal pressure uses pressure free memory and admits at least six units on a 16 GB Mac', async () => {
+  const { store, capacity } = admission(snapshot({ freeRamGb: 5.4, totalRamGb: 16, pressureFreePct: 58, memoryPressure: 'normal' }));
+  try {
+    assert.ok((await capacity.status()).budget >= 6);
   } finally { store.close(); }
 });
 
@@ -111,8 +123,28 @@ test('pressure and booted simulators shrink the live budget and queued work star
     assert.deepEqual(first, { started: true });
     assert.deepEqual(gate, { queued: true });
     const waiting = await capacity.status();
-    assert.equal(waiting.budget, 5);
+    assert.equal(waiting.budget, 0);
     assert.equal(waiting.queue[0]?.kind, 'gate');
+  } finally { store.close(); }
+});
+
+test('capacity close waits for an in-flight tick', async () => {
+  const store = openStore(':memory:');
+  let resolveSample!: (value: CapacitySnapshot) => void;
+  const sampler = {
+    sample: () => new Promise<CapacitySnapshot>((resolve) => { resolveSample = resolve; }),
+    invalidate() {}, start() {}, stop() {},
+  };
+  const capacity = createCapacityAdmission({ home: '/tmp/helm-capacity-close', maxWorkers: 0, store, settings: { capacity: loadSettings('/missing').capacity }, sampler });
+  try {
+    const tick = capacity.tick();
+    let closed = false;
+    const closing = capacity.close().then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, false);
+    resolveSample(snapshot());
+    await Promise.all([tick, closing]);
+    assert.equal(closed, true);
   } finally { store.close(); }
 });
 

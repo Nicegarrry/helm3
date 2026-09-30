@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { statfs as fsStatfs } from 'node:fs/promises';
-import { cpus, freemem, loadavg } from 'node:os';
+import { cpus, freemem, loadavg, totalmem } from 'node:os';
 import { promisify } from 'node:util';
 import type { Store } from '../types.js';
 import type { StatfsResult } from '../hygiene.js';
@@ -12,6 +12,8 @@ export type ProcessCount = Readonly<{ name: string; count: number }>;
 export type CapacitySnapshot = Readonly<{
   sampledAt: string;
   freeRamGb: number;
+  totalRamGb?: number;
+  pressureFreePct?: number;
   memoryPressure: MemoryPressure;
   load1: number;
   cpuCount: number;
@@ -60,10 +62,15 @@ export function parseMemoryPressure(output: string): MemoryPressure {
   const lower = output.toLowerCase();
   if (/critical|severe|red/.test(lower)) return 'critical';
   if (/warn|yellow|moderate/.test(lower)) return 'warn';
-  const percentage = Number(lower.match(/free percentage\s*:\s*(\d+(?:\.\d+)?)\s*%/)?.[1]);
-  if (Number.isFinite(percentage)) return percentage <= 5 ? 'critical' : percentage <= 15 ? 'warn' : 'normal';
+  const percentage = parseMemoryPressureFreePct(output);
+  if (percentage !== null) return percentage <= 5 ? 'critical' : percentage <= 15 ? 'warn' : 'normal';
   if (/normal|green|healthy/.test(lower)) return 'normal';
   return 'unknown';
+}
+
+export function parseMemoryPressureFreePct(output: string): number | null {
+  const percentage = Number(output.toLowerCase().match(/free percentage\s*:\s*(\d+(?:\.\d+)?)\s*%/)?.[1]);
+  return Number.isFinite(percentage) ? percentage : null;
 }
 
 export function countBootedSimulators(output: string): number {
@@ -93,6 +100,7 @@ export type CapacitySampler = Readonly<{
   invalidate(): void;
   start(): void;
   stop(): void;
+  close?: () => Promise<void>;
 }>;
 
 export function createCapacitySampler(options: Readonly<{
@@ -131,9 +139,12 @@ export function createCapacitySampler(options: Readonly<{
       const max = Number(maxProcesses.stdout.trim().split(/\s+/)[0]);
       const maxCount = Number.isFinite(max) && max > 0 ? max : null;
       const freeRamGb = availableRamGbFromVmStat(vm.stdout) ?? freemem() / GB;
+      const pressureFreePct = parseMemoryPressureFreePct(pressure.stdout);
       const result: CapacitySnapshot = {
         sampledAt: now().toISOString(),
         freeRamGb,
+        totalRamGb: totalmem() / GB,
+        ...(pressureFreePct === null ? {} : { pressureFreePct }),
         memoryPressure: parseMemoryPressure(pressure.stdout),
         load1: loadavg()[0] ?? 0,
         cpuCount: Math.max(1, cpus().length),
@@ -162,5 +173,10 @@ export function createCapacitySampler(options: Readonly<{
     invalidate: () => { cached = undefined; },
     start,
     stop: () => { if (timer) clearInterval(timer); timer = undefined; },
+    close: async () => {
+      if (timer) clearInterval(timer);
+      timer = undefined;
+      await sampling?.catch(() => undefined);
+    },
   };
 }

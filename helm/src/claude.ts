@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { WorkerHooks, WorkerRunInput, WorkerRunOutcome, WorkerRunner } from './types.js';
@@ -51,10 +51,43 @@ export function minimalClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return result;
 }
 
+const CLAUDE_DENY_READ = [
+  join(homedir(), '.config', 'helm'),
+  join(homedir(), '.ssh'),
+  join(homedir(), '.codex'),
+  join(homedir(), '.pi'),
+  join(homedir(), '.claude.json'),
+  join(homedir(), '.appstoreconnect'),
+  join(homedir(), 'Library', 'Application Support', 'com.vercel.cli'),
+  join(homedir(), '.convex'),
+];
+
+/** Claude Code's OS sandbox policy; fail closed if the sandbox backend is unavailable. */
+export function claudeSandboxSettings(worktree: string, temporaryDirectory: string = tmpdir()): string {
+  return JSON.stringify({
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      autoAllowBashIfSandboxed: true,
+      excludedCommands: [],
+      filesystem: {
+        allowWrite: [worktree, temporaryDirectory],
+        denyRead: CLAUDE_DENY_READ,
+      },
+      network: {
+        allowedDomains: [],
+        deniedDomains: ['*'],
+      },
+    },
+  });
+}
+
 export function claudeArgs(
   input: Pick<WorkerRunInput, 'role' | 'worktree'>,
   spec: { model: string; effort?: string },
   sessionId: string | null,
+  temporaryDirectory: string = tmpdir(),
 ): string[] {
   const reviewer = input.role === 'reviewer';
   const allowedTools = reviewer ? 'Read,Glob,Grep' : 'Read,Edit,Write,Glob,Grep,Bash';
@@ -68,8 +101,12 @@ export function claudeArgs(
     '--model', spec.model,
     ...(spec.effort ? ['--effort', spec.effort] : []),
     '--output-format', 'stream-json', '--verbose',
+    '--restricted', '--safe-mode',
+    '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    '--setting-sources', '', '--permission-prompts', 'none',
+    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory),
     '--permission-mode', reviewer ? 'plan' : 'acceptEdits',
-    '--allowedTools', allowedTools,
+    '--tools', allowedTools,
     ...disallowedTools.flatMap((tool) => ['--disallowedTools', tool]),
     '--add-dir', input.worktree,
   ];
@@ -119,7 +156,7 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
 
       const turn = async (prompt: string): Promise<string> => {
         hooks.emit('turn.start', { message: prompt });
-        const child = spawn(bin, claudeArgs(input, spec, sessionId), { cwd: input.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn(bin, claudeArgs(input, spec, sessionId, tmpdir()), { cwd: input.worktree, env, stdio: ['pipe', 'pipe', 'pipe'] });
         let spawnError: Error | null = null;
         child.on('error', (err) => { spawnError = err; });
         child.stdin.on('error', () => undefined);

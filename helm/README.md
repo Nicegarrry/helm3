@@ -115,12 +115,15 @@ A `claude/…` model runs `claude -p` in the worker worktree. The binary is
 `claude/<model>[:<effort>]`, for example `claude/sonnet:high`, `claude/opus:medium` and
 `claude/fable:high`; the suffix becomes Claude's `--effort` flag. Claude uses
 `--output-format stream-json --verbose`, records its session id as `claude-session:<id>`, and
-resumes steer/retry turns with `--resume <id>`. Builders receive `acceptEdits` plus explicit
-worktree tool permissions; reviewers use `plan` with read-only tools. Web search/fetch,
-`gh`, pushes, worktree changes and common outside-worktree shell escapes are disallowed, and
-only the worker worktree is added with `--add-dir`. The child receives a minimal environment,
-not Helm configuration, provider keys or webhooks. Claude subscription usage is recorded with
-`costUsd: 0`.
+resumes steer/retry turns with `--resume <id>`. Both roles use `--restricted`, `--safe-mode`,
+an empty strict MCP configuration and no permission prompts. Builders receive `acceptEdits`
+plus `Read,Edit,Write,Glob,Grep,Bash`; reviewers use `plan` with `Read,Glob,Grep` only. The
+Claude OS sandbox fails closed, permits writes only in the worker worktree and a temp directory,
+denies configured Helm/provider credential paths, and denies network access. Web search/fetch,
+`gh`, pushes, worktree changes and common outside-worktree shell escapes remain defense-in-depth
+denials, and only the worker worktree is added with `--add-dir`. The child receives a minimal
+environment, not Helm configuration, provider keys or webhooks. Claude subscription usage is
+recorded with `costUsd: 0`.
 
 ## What a worker can and cannot do
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLAUDE_SESSION_PREFIX, available, claudeArgs, claudeWorkerRunner, parseClaudeModel } from '../src/claude.js';
 import { CORRECTION_MESSAGE } from '../src/worker.js';
@@ -77,12 +77,31 @@ test('parseClaudeModel: claude/<model>[:<effort>], anything else is not this lan
 });
 
 test('claudeArgs: permissions, worktree directory, model effort, and resume are explicit', () => {
-  const build = claudeArgs({ role: 'builder', worktree: '/wt' }, { model: 'sonnet', effort: 'high' }, null);
+  const build = claudeArgs({ role: 'builder', worktree: '/wt' }, { model: 'sonnet', effort: 'high' }, null, '/tmp/helm-claude');
   assert.deepEqual(build.slice(0, 5), ['-p', '--model', 'sonnet', '--effort', 'high']);
   assert.ok(build.includes('--output-format') && build[build.indexOf('--output-format') + 1] === 'stream-json');
   assert.ok(build.includes('--verbose'));
   assert.ok(build.includes('--permission-mode') && build[build.indexOf('--permission-mode') + 1] === 'acceptEdits');
-  assert.ok(build.includes('--allowedTools') && build[build.indexOf('--allowedTools') + 1] === 'Read,Edit,Write,Glob,Grep,Bash');
+  assert.ok(build.includes('--tools') && build[build.indexOf('--tools') + 1] === 'Read,Edit,Write,Glob,Grep,Bash');
+  assert.ok(build.includes('--restricted') && build.includes('--safe-mode'));
+  assert.ok(build.includes('--strict-mcp-config'));
+  assert.deepEqual(JSON.parse(build[build.indexOf('--mcp-config') + 1]!), { mcpServers: {} });
+  assert.equal(build[build.indexOf('--setting-sources') + 1], '');
+  assert.equal(build[build.indexOf('--permission-prompts') + 1], 'none');
+  assert.ok(!build.includes('--bare'), 'subscription OAuth must remain available');
+  const settings = JSON.parse(build[build.indexOf('--settings') + 1]!) as { sandbox: Record<string, unknown> };
+  assert.equal(settings.sandbox.enabled, true);
+  assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+  assert.deepEqual(settings.sandbox.excludedCommands, []);
+  assert.deepEqual(settings.sandbox.filesystem, {
+    allowWrite: ['/wt', '/tmp/helm-claude'],
+    denyRead: [
+      join(homedir(), '.config', 'helm'), join(homedir(), '.ssh'), join(homedir(), '.codex'), join(homedir(), '.pi'),
+      join(homedir(), '.claude.json'), join(homedir(), '.appstoreconnect'), join(homedir(), 'Library', 'Application Support', 'com.vercel.cli'), join(homedir(), '.convex'),
+    ],
+  });
+  assert.deepEqual(settings.sandbox.network, { allowedDomains: [], deniedDomains: ['*'] });
   assert.equal(build.filter((arg) => arg === '--add-dir').length, 1);
   assert.equal(build[build.indexOf('--add-dir') + 1], '/wt');
   assert.ok(!build.some((arg) => /bypass|skip-permissions|dangerously/i.test(arg)));
@@ -90,8 +109,8 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   const review = claudeArgs({ role: 'reviewer', worktree: '/wt' }, { model: 'opus' }, 'session-1');
   assert.ok(review.includes('--resume') && review[review.indexOf('--resume') + 1] === 'session-1');
   assert.equal(review[review.indexOf('--permission-mode') + 1], 'plan');
-  assert.equal(review[review.indexOf('--allowedTools') + 1], 'Read,Glob,Grep');
-  assert.ok(!review[review.indexOf('--allowedTools') + 1]!.includes('Edit'));
+  assert.equal(review[review.indexOf('--tools') + 1], 'Read,Glob,Grep');
+  assert.ok(!review[review.indexOf('--tools') + 1]!.includes('Edit'));
   assert.ok(review.includes('Bash'), 'reviewer Bash is explicitly disallowed, not allowed');
 });
 

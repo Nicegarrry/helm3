@@ -359,7 +359,7 @@ export const supervisorRegisterInput = z.object({ project: z.string().min(1), re
 export const supervisorListInput = emptyInput;
 export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boolean().default(false), verbose: z.boolean().optional() }).strict();
 export const supervisorRotateInput = z.object({ project: z.string().min(1), focus: z.string().min(1).max(4000) }).strict();
-export const notifyNickInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
+export const notifyOwnerInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
 export { memoryWriteInput, memoryLogInput, memoryListInput } from './memory.js';
@@ -376,7 +376,7 @@ export const spendSetInput = z.object({
   capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().nonnegative().optional(),
   tapId: z.string().regex(/^t-[0-9a-f]+$/).optional(),
 }).strict();
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'spend.set', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback', 'routing.check'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'spend.set', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.owner', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback', 'routing.check'] as const;
 export type ToolName = string;
 export type HelmConfig = Readonly<{
   home: string;            // $HELM_HOME, default ~/.helm

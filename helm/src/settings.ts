@@ -17,6 +17,7 @@ const CAPACITY_DEFAULTS = {
   pressureWarnPenalty: 1,
   pressureCriticalPenalty: 2,
   simulatorPenalty: 1,
+  processHeadroomMinPct: 0.15,
   waitMilestoneMin: 10,
 };
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
@@ -79,6 +80,7 @@ const settingsSchema = z.object({
     pressureWarnPenalty: z.number().nonnegative().default(1),
     pressureCriticalPenalty: z.number().nonnegative().default(2),
     simulatorPenalty: z.number().nonnegative().default(1),
+    processHeadroomMinPct: z.number().min(0).max(1).default(0.15),
     waitMilestoneMin: z.number().positive().default(10),
   }).default(CAPACITY_DEFAULTS),
   memory: z.object({

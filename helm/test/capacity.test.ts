@@ -58,6 +58,22 @@ test('pressure and booted simulators shrink the live budget and queued work star
   } finally { store.close(); }
 });
 
+test('low process-table headroom queues builders and emits one hourly procs.low alert', async () => {
+  const { store, capacity } = admission(snapshot({ processCount: 86, maxProcesses: 100, processHeadroomPct: 0.14, topProcesses: [{ name: 'xcodebuild', count: 80 }, { name: 'node', count: 4 }, { name: 'git', count: 2 }] }));
+  try {
+    store.sql.exec('CREATE TABLE supervisors (project TEXT PRIMARY KEY, repo TEXT, host TEXT, label TEXT, createdAt TEXT, lastWakeAt TEXT)');
+    store.sql.prepare('INSERT INTO supervisors VALUES (?, ?, ?, ?, ?, NULL)').run('acme/widgets', '/repo', 'tmux', 'helm', '2026-09-30T00:00:00.000Z');
+    const result = await capacity.admit({ id: 'builder', workerId: 'builder', kind: 'builder', loadClass: 'light' }, () => {});
+    assert.deepEqual(result, { queued: true });
+    const status = await capacity.status();
+    assert.equal(status.processLimited, true);
+    assert.equal(status.budget, 0);
+    const alerts = store.listEvents('project:acme/widgets').filter((event) => event.kind === 'watch.alert' && event.data.rule === 'procs.low');
+    assert.equal(alerts.length, 1);
+    assert.deepEqual(alerts[0]?.data.detail, { processCount: 86, maxProcesses: 100, headroomPct: 0.14, topProcesses: [{ name: 'xcodebuild', count: 80 }, { name: 'node', count: 4 }, { name: 'git', count: 2 }] });
+  } finally { store.close(); }
+});
+
 test('capacity classifies iOS repositories upward, honors explicit load, and defaults without Jev', async () => {
   const repo = mkdtempSync(join(tmpdir(), 'helm-capacity-ios-'));
   mkdirSync(join(repo, 'Example.xcodeproj'));
@@ -91,6 +107,9 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
         if (file === 'vm_stat') return { stdout: 'page size of 4096 bytes\nPages free: 1048576\n' };
         if (file === 'memory_pressure') return { stdout: 'System-wide memory free percentage: 20%\n' };
         if (file === 'xcrun') return { stdout: JSON.stringify({ devices: { iOS: [{ state: 'Booted' }, { state: 'Shutdown' }] } }), code: 0 };
+        if (file === 'ps' && args.includes('comm=')) return { stdout: 'xcodebuild\nxcodebuild\nnode\n', code: 0 };
+        if (file === 'ps') return { stdout: '1\n2\n3\n', code: 0 };
+        if (file === 'sysctl') return { stdout: '100\n', code: 0 };
         return { stdout: '', code: 1 };
       },
     });
@@ -100,7 +119,11 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
     assert.equal(first.memoryPressure, 'normal');
     assert.equal(first.bootedSimulators, 1);
     assert.equal(first.freeDiskGb, 1024);
-    assert.deepEqual(calls.sort(), ['memory_pressure:500', 'vm_stat:500', 'xcrun:300']);
+    assert.equal(first.processCount, 3);
+    assert.equal(first.maxProcesses, 100);
+    assert.equal(first.processHeadroomPct, 0.97);
+    assert.deepEqual(first.topProcesses, [{ name: 'xcodebuild', count: 2 }, { name: 'node', count: 1 }]);
+    assert.deepEqual(calls.sort(), ['memory_pressure:500', 'ps:500', 'ps:500', 'sysctl:500', 'vm_stat:500', 'xcrun:300']);
     sampler.stop();
   } finally { store.close(); }
 });

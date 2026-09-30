@@ -1,6 +1,6 @@
 /** Helm service: composes the runtime and implements the worker, budget, and lifecycle tools. See DESIGN.md. */
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -86,6 +86,13 @@ import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } 
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 
 const exec = promisify(execFile);
+const INFRA_GATE_FAILURE = /EAGAIN|ENOMEM|resource temporarily unavailable/i;
+
+function isInfrastructureGateFailure(checks: ReadonlyArray<{ outputPath: string }>): boolean {
+  return checks.some((check) => {
+    try { return INFRA_GATE_FAILURE.test(readFileSync(check.outputPath, 'utf8')); } catch { return false; }
+  });
+}
 
 export type SpawnInput = z.infer<typeof spawnInput>;
 export type { PromptInput } from './prompt.js';
@@ -654,24 +661,34 @@ export class Helm {
         checks.push({ name: 'acceptance', command });
       }
       const gateId = genId('g');
-      const runGate = async (): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> => {
-        const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
+      const loadClass = await askLoadClass({ repo: row.repo, role: 'gate' });
+      const runGate = async (runId: string, attempt: 0 | 1): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> => {
+        const logDir = join(this.config.home, 'logs', input.workerId, `gate-${runId}`);
+        let outcome;
         try {
-          const outcome = await this.gates.run(row.worktree, checks, logDir, {
+          outcome = await this.gates.run(row.worktree, checks, logDir, {
             timeoutMs: this.config.gateTimeoutMs,
             nodeModulesRoot: this.workerWorktreeRoot(row),
             onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
           });
-          const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
-          this.store.insertGate(gateRow);
-          this.store.appendEvent(input.workerId, 'gate', { gateId, passed: outcome.passed, head });
-          return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
         } finally {
-          this.capacity.finish(gateId);
+          this.capacity.finish(runId);
         }
+        if (!outcome.passed && attempt === 0 && isInfrastructureGateFailure(outcome.checks)) {
+          this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head, reason: 'process or memory resource exhaustion', checks: outcome.checks });
+          const retryId = `${gateId}:infra`;
+          let retryResult: ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>> | undefined;
+          const admitted = await this.capacity.admit({ id: retryId, workerId: input.workerId, kind: 'gate', loadClass }, async () => { retryResult = await runGate(retryId, 1); });
+          if ('queued' in admitted) return refuse('queued: capacity');
+          return retryResult ?? refuse('gate did not produce a result');
+        }
+        const gateRow: GateRow = { gateId: runId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
+        this.store.insertGate(gateRow);
+        this.store.appendEvent(input.workerId, 'gate', { gateId: runId, passed: outcome.passed, head });
+        return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
       };
       let result: ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>> | undefined;
-      const admitted = await this.capacity.admit({ id: gateId, workerId: input.workerId, kind: 'gate', loadClass: (await askLoadClass({ repo: row.repo, role: 'gate' })) }, async () => { result = await runGate(); });
+      const admitted = await this.capacity.admit({ id: gateId, workerId: input.workerId, kind: 'gate', loadClass }, async () => { result = await runGate(gateId, 0); });
       if ('queued' in admitted) return refuse('queued: capacity');
       return result ?? refuse('gate did not produce a result');
     }));

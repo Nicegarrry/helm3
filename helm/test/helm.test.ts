@@ -321,6 +321,35 @@ test('gate node_modules cleanup failures are hygiene warnings', async () => {
   assert.equal(store.listEvents(spawned.workerId).some((event) => event.kind === 'error' && event.data.message === 'permission denied'), false);
 });
 
+test('an infrastructure gate failure is retried once instead of steering the worker', async () => {
+  let attempts = 0;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, logDir) {
+      attempts += 1;
+      const outputPath = join(logDir, 'test.log');
+      mkdirSync(logDir, { recursive: true });
+      if (attempts === 1) {
+        writeFileSync(outputPath, 'spawnSync git EAGAIN: resource temporarily unavailable');
+        return { passed: false, checks: [{ name: 'test', command: 'npm test', exitCode: 1, outputPath, durationMs: 1 }] };
+      }
+      writeFileSync(outputPath, 'all clear');
+      return { passed: true, checks: [{ name: 'test', command: 'npm test', exitCode: 0, outputPath, durationMs: 1 }] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-infra-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.passed, true);
+  assert.equal(attempts, 2);
+  assert.equal(store.listEvents(spawned.workerId).filter((event) => event.kind === 'gate.infra').length, 1);
+  assert.equal(store.listGates(spawned.workerId).at(-1)?.passed, true);
+});
+
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
   const { helm, store, cloned, fetched, config } = makeHelm();
   const first = await helm.spawn(spawnBody('acme/widgets'));

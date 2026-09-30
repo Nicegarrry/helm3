@@ -8,6 +8,7 @@ import type { StatfsResult } from '../hygiene.js';
 export type MemoryPressure = 'normal' | 'warn' | 'critical' | 'unknown';
 export type CapacityExec = (file: string, args: string[], options: { timeoutMs: number }) => Promise<{ stdout: string; stderr?: string; code?: number }>;
 export type CapacityRunning = Readonly<{ gates: number; builds: number; reviews: number }>;
+export type ProcessCount = Readonly<{ name: string; count: number }>;
 export type CapacitySnapshot = Readonly<{
   sampledAt: string;
   freeRamGb: number;
@@ -16,6 +17,10 @@ export type CapacitySnapshot = Readonly<{
   cpuCount: number;
   freeDiskGb: number | null;
   bootedSimulators: number;
+  processCount?: number;
+  maxProcesses?: number | null;
+  processHeadroomPct?: number | null;
+  topProcesses?: readonly ProcessCount[];
   running: CapacityRunning;
 }>;
 
@@ -39,6 +44,16 @@ function pagesFromVmStat(output: string): number | null {
   let match: RegExpExecArray | null;
   while ((match = labels.exec(output))) pages += Number(match[1]);
   return pages > 0 && Number.isFinite(pageSize) ? (pages * pageSize) / GB : null;
+}
+
+function lineCount(output: string): number {
+  return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
+}
+
+function topProcesses(output: string): ProcessCount[] {
+  const counts = new Map<string, number>();
+  for (const line of output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) counts.set(line, (counts.get(line) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 3).map(([name, count]) => ({ name, count }));
 }
 
 export function parseMemoryPressure(output: string): MemoryPressure {
@@ -106,6 +121,15 @@ export function createCapacitySampler(options: Readonly<{
         statfs(options.home).catch(() => null),
         safeExec('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], 300),
       ]);
+      const uid = typeof process.getuid === 'function' ? String(process.getuid()) : undefined;
+      const [processes, names, maxProcesses] = uid ? await Promise.all([
+        safeExec('ps', ['-U', uid, '-o', 'pid='], 500),
+        safeExec('ps', ['-U', uid, '-o', 'comm='], 500),
+        safeExec('sysctl', ['-n', 'kern.maxprocperuid'], 500),
+      ]) : [{ stdout: '', code: 1 }, { stdout: '', code: 1 }, { stdout: '', code: 1 }];
+      const processCount = uid ? lineCount(processes.stdout) : undefined;
+      const max = Number(maxProcesses.stdout.trim().split(/\s+/)[0]);
+      const maxCount = Number.isFinite(max) && max > 0 ? max : null;
       const freeRamGb = pagesFromVmStat(vm.stdout) ?? freemem() / GB;
       const result: CapacitySnapshot = {
         sampledAt: now().toISOString(),
@@ -115,6 +139,10 @@ export function createCapacitySampler(options: Readonly<{
         cpuCount: Math.max(1, cpus().length),
         freeDiskGb: disk ? (disk.bavail * disk.bsize) / GB : null,
         bootedSimulators: simulators.code === 0 ? countBootedSimulators(simulators.stdout) : 0,
+        ...(processCount !== undefined ? { processCount } : {}),
+        maxProcesses: maxCount,
+        processHeadroomPct: processCount !== undefined && maxCount ? Math.max(0, (maxCount - processCount) / maxCount) : null,
+        topProcesses: topProcesses(names.stdout),
         running: runningFromStore(options.store),
       };
       cached = result;

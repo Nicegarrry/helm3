@@ -10,6 +10,7 @@ export type CapacityStatus = Readonly<{
   budget: number;
   usedUnits: number;
   availableUnits: number;
+  processLimited: boolean;
   runningClasses: Readonly<Record<LoadClass, number>>;
   queue: readonly CapacityQueueEntry[];
   snapshot: CapacitySnapshot;
@@ -18,10 +19,14 @@ export type CapacityStatus = Readonly<{
 type SettingsLoader = () => Settings['capacity'];
 type Callback = () => void | Promise<void>;
 
-const DEFAULT_CAPACITY = { sampleSec: 5, reserveGb: 4, gbPerUnit: 2, units: { light: 1, medium: 2, heavy: 4 }, pressureWarnPenalty: 1, pressureCriticalPenalty: 2, simulatorPenalty: 1, waitMilestoneMin: 10 };
+const DEFAULT_CAPACITY = { sampleSec: 5, reserveGb: 4, gbPerUnit: 2, units: { light: 1, medium: 2, heavy: 4 }, pressureWarnPenalty: 1, pressureCriticalPenalty: 2, simulatorPenalty: 1, processHeadroomMinPct: 0.15, waitMilestoneMin: 10 };
 
 function priority(kind: CapacityJobKind): number {
   return kind === 'gate' ? 0 : kind === 'review' ? 1 : 2;
+}
+
+function processSensitive(kind: CapacityJobKind): boolean {
+  return kind === 'builder' || kind === 'validator' || kind === 'gate';
 }
 
 function rssMb(output: string, rootPid = process.pid): number {
@@ -83,22 +88,52 @@ export function createCapacityAdmission(options: Readonly<{
 
   function unit(loadClass: LoadClass): number { return settings().units[loadClass]; }
 
+  function projects(): string[] {
+    const values = new Set(options.store.listWorkers().map((worker) => worker.repoSlug));
+    try {
+      for (const row of options.store.sql.prepare('SELECT project FROM supervisors').all() as Array<{ project?: unknown }>) {
+        if (typeof row.project === 'string' && row.project) values.add(row.project);
+      }
+    } catch { /* the optional supervisor service may not have initialized its table */ }
+    return [...values];
+  }
+
+  function processAlert(snapshot: CapacitySnapshot, current: NonNullable<Settings['capacity']>): void {
+    const headroom = snapshot.processHeadroomPct;
+    if (typeof headroom !== 'number' || headroom >= current.processHeadroomMinPct) return;
+    const at = now();
+    const top = snapshot.topProcesses ?? [];
+    for (const project of projects()) {
+      const workerId = `project:${project}`;
+      const previous = options.store.listEvents(workerId, { limit: 1_000_000 }).reverse().find((event) => event.kind === 'watch.alert' && event.data.rule === 'procs.low');
+      if (previous && at.getTime() - Date.parse(previous.at) < 60 * 60_000) continue;
+      options.store.appendEvent(workerId, 'watch.alert', {
+        rule: 'procs.low',
+        detail: { processCount: snapshot.processCount, maxProcesses: snapshot.maxProcesses, headroomPct: headroom, topProcesses: top },
+        project,
+      }, at.toISOString());
+    }
+  }
+
   async function status(): Promise<CapacityStatus> {
     const snapshot = await sampler.sample();
     const current = settings() ?? DEFAULT_CAPACITY;
+    processAlert(snapshot, current);
+    const processLimited = typeof snapshot.processHeadroomPct === 'number' && snapshot.processHeadroomPct < current.processHeadroomMinPct;
     const rows = options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE endedAt IS NULL').all() as Array<Record<string, unknown>>;
     const running = rows.filter((row) => row.startedAt !== null && row.startedAt !== undefined);
     const usedUnits = running.reduce((total, row) => total + unit(String(row.loadClass) as LoadClass), 0);
     const telemetryUnavailable = snapshot.memoryPressure === 'unknown' && snapshot.freeRamGb < current.reserveGb;
     const ramUnits = testWithoutCapacityOverrides ? options.maxWorkers : telemetryUnavailable ? options.maxWorkers : Math.floor(Math.max(0, snapshot.freeRamGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
     const pressurePenalty = snapshot.memoryPressure === 'critical' ? current.pressureCriticalPenalty : snapshot.memoryPressure === 'warn' ? current.pressureWarnPenalty : 0;
-    const budget = Math.max(0, Math.min(options.maxWorkers, ramUnits) - pressurePenalty - snapshot.bootedSimulators * current.simulatorPenalty);
+    const resourceBudget = Math.max(0, Math.min(options.maxWorkers, ramUnits) - pressurePenalty - snapshot.bootedSimulators * current.simulatorPenalty);
+    const budget = processLimited ? 0 : resourceBudget;
     const queue = rows.filter((row) => row.startedAt === null || row.startedAt === undefined).sort((a, b) => Number(a.priority) - Number(b.priority) || String(a.queuedAt).localeCompare(String(b.queuedAt))).map((row) => ({
       id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))),
     }));
     const runningClasses: Record<LoadClass, number> = { light: 0, medium: 0, heavy: 0 };
     for (const row of running) { const loadClass = String(row.loadClass) as LoadClass; if (loadClass in runningClasses) runningClasses[loadClass] += 1; }
-    return { budget, usedUnits, availableUnits: Math.max(0, budget - usedUnits), runningClasses, queue, snapshot };
+    return { budget, usedUnits, availableUnits: Math.max(0, budget - usedUnits), processLimited, runningClasses, queue, snapshot };
   }
 
   async function sampleRss(id: string): Promise<void> {
@@ -133,6 +168,7 @@ export function createCapacityAdmission(options: Readonly<{
     }
     for (const entry of currentStatus.queue) {
       const fresh = await status();
+      if (fresh.processLimited && processSensitive(entry.kind)) continue;
       if (fresh.availableUnits < unit(entry.loadClass)) continue;
       const row = { id: entry.id, workerId: entry.workerId, kind: entry.kind, loadClass: entry.loadClass } as CapacityJob;
       if (!callbacks.has(row.id)) continue;
@@ -145,7 +181,7 @@ export function createCapacityAdmission(options: Readonly<{
     options.store.sql.prepare(`INSERT OR IGNORE INTO capacity_jobs (id, workerId, kind, loadClass, priority, queuedAt) VALUES (?, ?, ?, ?, ?, ?)`)
       .run(job.id, job.workerId, job.kind, job.loadClass, job.priority ?? priority(job.kind), now().toISOString());
     const current = await status();
-    if (current.availableUnits < unit(job.loadClass)) {
+    if ((current.processLimited && processSensitive(job.kind)) || current.availableUnits < unit(job.loadClass)) {
       options.store.appendEvent(job.workerId, 'capacity.queued', { kind: job.kind, loadClass: job.loadClass, units: unit(job.loadClass), budget: current.budget, usedUnits: current.usedUnits });
       return { queued: true };
     }

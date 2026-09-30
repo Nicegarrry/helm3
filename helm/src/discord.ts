@@ -36,10 +36,22 @@ function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+function processAlertText(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'process headroom is low';
+  const detail = value as { headroomPct?: unknown; topProcesses?: unknown };
+  const names = Array.isArray(detail.topProcesses)
+    ? detail.topProcesses.map((item) => item && typeof item === 'object' ? `${String((item as { name?: unknown }).name ?? 'unknown')} (${String((item as { count?: unknown }).count ?? 0)})` : '').filter(Boolean).slice(0, 3).join(', ')
+    : '';
+  const headroom = typeof detail.headroomPct === 'number' ? ` (${(detail.headroomPct * 100).toFixed(1)}% headroom)` : '';
+  return `${names || 'process headroom is low'}${headroom}`;
+}
+
 function milestone(event: EventRow): string | null {
   if (event.kind === 'pr') return `PR opened: #${text(event.data.number, 'unknown')}`;
   if (event.kind === 'pr.merged') return `Merged: #${text(event.data.number, 'unknown')}`;
-  if (event.kind === 'watch.alert') return `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
+  if (event.kind === 'watch.alert') return event.data.rule === 'procs.low'
+    ? `Process headroom low: ${processAlertText(event.data.detail)}`
+    : `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
   if (event.kind === 'capacity.waiting') return `Capacity wait: ${text(event.data.kind, 'job')} has waited ${text(event.data.waitedMs, 'too long')}ms`;
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;

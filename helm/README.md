@@ -12,6 +12,18 @@ the full harness catalog on every session.
 
 ## Five-minute start
 
+Run `helm init` in a target repo (or `helm init --repo /path/to/repo`) to generate
+package-script gates and print the `.mcp.json` snippet. Existing repo configuration
+requires `--force`; existing operator configuration is preserved. A new operator
+configuration sets a $5 spend cap and enables subscription-only routing when no API
+keys are in the environment. Swift projects get `swift test`; Xcode and unknown
+projects get a failing TODO gate to customize.
+
+`helm doctor` checks local tools, credentials, configuration, routing and daemon
+health without starting a daemon or writing state. It prints one next command,
+returns nonzero for failed checks, and supports `--json`. Missing optional lanes
+or an absent daemon produce warnings; a tier without an available allowed model fails.
+
 1. Install Node 22 and Pi, then log in to the providers you want workers to use:
 
    ```sh

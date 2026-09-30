@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import test from 'node:test';
 import { gateRunner } from '../src/gate.js';
-import { buildSandboxProfile, sandboxExecutable } from '../src/sandbox.js';
+import { buildSandboxProfile, operatorHomePaths, sandboxExecutable, worktreeGitDirs } from '../src/sandbox.js';
 
 const sandboxUsable = process.platform === 'darwin' && Boolean(sandboxExecutable()) && (() => {
   try { execFileSync('/usr/bin/sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true']); return true; } catch { return false; }
@@ -37,6 +37,26 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const tempRead = profile.indexOf(`(allow file-read* (subpath "${tempDir}"))`);
   const homeDeny = profile.indexOf(`(deny file-read* (subpath "${home}"))`);
   assert.ok(tempRead >= 0 && homeDeny >= 0 && homeDeny < tempRead, 'HOME deny must precede disposable temp HOME re-allow');
+});
+
+test('operatorHome adds a fixture to the real operator HOME deny list', () => {
+  const fixtureHome = '/private/tmp/helm-gate-fixture-home';
+  assert.deepEqual(operatorHomePaths(fixtureHome), [homedir(), fixtureHome]);
+  assert.deepEqual(operatorHomePaths(), [homedir()]);
+});
+
+test('git sandbox directories come from git rev-parse', async () => {
+  const root = fixture('helm-gate-git-');
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    const expected = [...new Set(
+      execFileSync('git', ['rev-parse', '--absolute-git-dir', '--git-common-dir'], { cwd: root, encoding: 'utf8' })
+        .trim().split(/\r?\n/).map((path) => realpathSync(path.startsWith('/') ? path : join(root, path))),
+    )].sort();
+    assert.deepEqual((await worktreeGitDirs(root)).sort(), expected);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('gate cannot read the temporary HOME credential fixture or write outside the worktree', macOnly, async () => {

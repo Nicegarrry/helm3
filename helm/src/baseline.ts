@@ -59,7 +59,7 @@ export async function createBaseline(input: { store: Store; gates: GateRunner; c
   await mkdir(logDir, { recursive: true });
   const sandbox = await sandboxEnabled(worker.repo, worker.baseSha);
   if (!sandbox) store.appendEvent(worker.workerId, 'gate.sandbox.opt_out', { project: worker.repoSlug, head: worker.head, reason: 'base helm.json sets gate.sandbox=false' });
-  const outcome = await gates.run(worker.worktree, [{ name: 'acceptance', command: acceptance.command }], logDir, { timeoutMs: config.gateTimeoutMs, nodeModulesRoot: input.nodeModulesRoot, sandbox });
+  const outcome = await gates.run(worker.worktree, [{ name: 'acceptance', command: acceptance.command }], logDir, { timeoutMs: config.gateTimeoutMs, nodeModulesRoot: input.nodeModulesRoot, sandbox, onUnsandboxed: (reason) => store.appendEvent(worker.workerId, 'gate.unsandboxed', { project: worker.repoSlug, head: worker.head, reason }) });
   const check = outcome.checks[0];
   if (outcome.passed || check?.exitCode === 0) return { ok: false, reason: 'test already passes' };
   if (check?.exitCode === null || check?.exitCode === undefined) return { ok: false, reason: 'test did not exit non-zero' };

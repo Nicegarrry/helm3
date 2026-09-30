@@ -1,8 +1,10 @@
 /** macOS Seatbelt profiles and the minimal environment used by gate commands. */
-import { existsSync, readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 
 export type GateSandbox = Readonly<{
   executable: string;
@@ -21,7 +23,7 @@ export type GateSandboxOptions = Readonly<{
 export type InstallManager = 'npm' | 'pnpm' | 'yarn';
 
 const FALLBACK_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
-const GIT_DIR_PREFIX = /^gitdir:\s*(.+)$/;
+const exec = promisify(execFile);
 
 function quote(value: string): string {
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}` + '"';
@@ -134,14 +136,15 @@ export function buildSandboxProfile(options: {
   return `${lines.join('\n')}\n`;
 }
 
-function worktreeGitDirs(cwd: string): string[] {
+export function operatorHomePaths(operatorHome?: string): string[] {
+  return unique([homedir(), resolve(operatorHome ?? homedir())]);
+}
+
+export async function worktreeGitDirs(cwd: string): Promise<string[]> {
   try {
-    const dotGit = join(cwd, '.git');
-    const stat = readFileSync(dotGit, 'utf8');
-    const match = GIT_DIR_PREFIX.exec(stat.trim());
-    if (!match) return [dotGit];
-    const gitDir = isAbsolute(match[1]!) ? resolve(match[1]!) : resolve(cwd, match[1]!);
-    return [gitDir, resolve(gitDir, '..', '..')];
+    const { stdout } = await exec('git', ['rev-parse', '--absolute-git-dir', '--git-common-dir'], { cwd, timeout: 10_000 });
+    const paths = stdout.split(/\r?\n/).map((path) => path.trim()).filter(Boolean).map((path) => isAbsolute(path) ? path : resolve(cwd, path));
+    return unique(await Promise.all(paths.map((path) => canonicalPath(path))));
   } catch {
     return [];
   }
@@ -182,10 +185,6 @@ export function installManager(command: string): InstallManager | undefined {
   return 'yarn';
 }
 
-export function isInstallCommand(command: string): boolean {
-  return installManager(command) !== undefined;
-}
-
 async function canonicalPaths(paths: readonly string[]): Promise<string[]> {
   const values = await Promise.all(paths.map(async (path) => [resolve(path), await canonicalPath(path)]));
   return unique(values.flat());
@@ -214,22 +213,22 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
     // macOS exposes temporary paths through /var, while Seatbelt matches the
     // canonical /private/var paths. Generate rules for the paths the kernel
     // evaluates, or temporary worktrees and credential fixtures bypass them.
-    const [profileCwd, profileTempDir, profileHome, operatorHome] = await Promise.all([
+    const [profileCwd, profileTempDir, profileHome, ...profileOperatorHomes] = await Promise.all([
       canonicalPath(options.cwd),
       canonicalPath(tempDir),
       canonicalPath(home),
-      canonicalPath(resolve(options.operatorHome ?? homedir())),
+      ...operatorHomePaths(options.operatorHome).map((path) => canonicalPath(path)),
     ]);
     const toolchains = await toolchainPaths(process.env.PATH ?? FALLBACK_PATH);
-    const npmCaches = await canonicalPaths([join(operatorHome, '.npm')]);
+    const npmCaches = await canonicalPaths(profileOperatorHomes.map((operatorHome) => join(operatorHome, '.npm')));
     const profile = buildSandboxProfile({
       cwd: profileCwd,
       tempDir: profileTempDir,
-      operatorHomes: [operatorHome],
+      operatorHomes: profileOperatorHomes,
       gateHome: profileHome,
       toolchainPaths: toolchains,
       npmCachePaths: npmCaches,
-      gitDirs: worktreeGitDirs(profileCwd),
+      gitDirs: await worktreeGitDirs(profileCwd),
       allowNetwork: options.allowNetwork,
     });
     const profilePath = join(tempDir, 'profile.sb');

@@ -6,9 +6,10 @@ import { join } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
 import { cleanupNodeModules } from './hygiene.js';
-import { disposeGateSandbox, installManager, isInstallCommand, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason, type InstallManager } from './sandbox.js';
+import { disposeGateSandbox, installManager, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason, type InstallManager } from './sandbox.js';
 
 type CheckResult = { name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number };
+type PreparedGateCheck = GateCheck & { allowNetwork?: boolean };
 
 type ExecFileError = NodeJS.ErrnoException & { code?: number | string; signal?: string | null; killed?: boolean };
 
@@ -53,16 +54,16 @@ function offlineLifecycleCommand(manager: InstallManager, prepare: boolean): str
 }
 
 /** Turn a package install into a networked dependency-only step and an offline lifecycle step. */
-export async function expandInstallChecks(cwd: string, checks: readonly GateCheck[]): Promise<GateCheck[]> {
+export async function expandInstallChecks(cwd: string, checks: readonly GateCheck[]): Promise<PreparedGateCheck[]> {
   const prepare = await hasPrepareScript(cwd);
-  const expanded: GateCheck[] = [];
+  const expanded: PreparedGateCheck[] = [];
   for (const check of checks) {
     const manager = installManager(check.command);
     if (!manager) {
-      expanded.push(check);
+      expanded.push({ name: check.name, command: check.command });
       continue;
     }
-    expanded.push({ ...check, command: withIgnoreScripts(check.command) });
+    expanded.push({ name: check.name, command: withIgnoreScripts(check.command), allowNetwork: true });
     expanded.push({ name: `${check.name} (offline scripts)`, command: offlineLifecycleCommand(manager, prepare) });
   }
   return expanded;
@@ -76,7 +77,7 @@ function withGateCache(command: string, tempDir: string): string {
   return `${command} ${flag} ${JSON.stringify(join(tempDir, `${manager}-cache`))}`;
 }
 
-async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string }): Promise<CheckResult> {
+async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; onUnsandboxed?: (reason: string) => void }): Promise<CheckResult> {
   const start = Date.now();
   const outputPath = join(logDir, `${outputSlug}.log`);
   let sandbox: Awaited<ReturnType<typeof prepareGateSandbox>> | Awaited<ReturnType<typeof prepareUnsandboxedGate>> | undefined;
@@ -90,7 +91,7 @@ async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDi
     const unavailable = sandboxUnavailableReason(options.allowUnsandboxed);
     if (unavailable && (options.sandbox || process.platform !== 'darwin')) throw new Error(unavailable);
     sandbox = options.sandbox && sandboxExecutable()
-      ? await prepareGateSandbox({ cwd, allowNetwork: isInstallCommand(check.command), operatorHome: options.operatorHome })
+      ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome })
       : await prepareUnsandboxedGate();
     if (sandbox.executable && sandbox.profilePath && /^(1|true)$/i.test(process.env.HELM_DEBUG_SANDBOX ?? '')) {
       await copyFile(sandbox.profilePath, join(logDir, `${outputSlug}.profile.sb`)).catch(() => {});
@@ -110,7 +111,10 @@ async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDi
 
   try {
     let result = await execute(sandbox);
-    if (sandbox.executable && options.allowUnsandboxed && String(result.error?.code) === '71' && /sandbox_apply/i.test(result.stderr)) {
+    const applyFailure = sandbox.executable && result.error !== null && (String(result.error.code) === '71' || /sandbox_apply/i.test(`${result.stderr}\n${result.error.message ?? ''}`));
+    if (applyFailure && options.allowUnsandboxed) {
+      const reason = `sandbox-exec failed to apply profile${result.stderr.trim() ? `: ${result.stderr.trim()}` : ''}`;
+      options.onUnsandboxed?.(reason);
       await disposeGateSandbox(sandbox.tempDir);
       sandbox = await prepareUnsandboxedGate();
       result = await execute(sandbox);
@@ -125,7 +129,7 @@ async function runCheck(cwd: string, check: GateCheck, outputSlug: string, logDi
 
 export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const results: CheckResult[] = [];
@@ -140,6 +144,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
             sandbox: opts?.sandbox !== false,
             allowUnsandboxed: options.allowUnsandboxed === true,
             operatorHome: options.operatorHome,
+            onUnsandboxed: opts?.onUnsandboxed,
           });
           results.push(result);
         }

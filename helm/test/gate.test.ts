@@ -112,8 +112,11 @@ test('install checks ignore scripts online and run lifecycle scripts in a separa
   try {
     writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { prepare: 'node prepare.js' } }));
     assert.deepEqual(await expandInstallChecks(dir, [{ name: 'install', command: 'npm ci --no-audit --no-fund' }]), [
-      { name: 'install', command: 'npm ci --ignore-scripts --no-audit --no-fund' },
+      { name: 'install', command: 'npm ci --ignore-scripts --no-audit --no-fund', allowNetwork: true },
       { name: 'install (offline scripts)', command: 'npm rebuild --offline && npm run prepare --if-present --offline' },
+    ]);
+    assert.deepEqual(await expandInstallChecks(dir, [{ name: 'combined', command: 'npm ci && npm test' }]), [
+      { name: 'combined', command: 'npm ci && npm test' },
     ]);
   } finally {
     removeTempDir(dir);

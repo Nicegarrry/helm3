@@ -102,7 +102,12 @@ test('line-count and line-cap claims answered says_nothing are process claims', 
 });
 
 test('ordinary code claims are not treated as line-count process claims', async () => {
-  const codeClaims = ['server.ts writes serve.json with mode 0600', 'helm/src contains the claims module'];
+  const codeClaims = [
+    'server.ts writes serve.json with mode 0600',
+    'helm/src contains the claims module',
+    'the diff contains 12 lines.',
+    'this change adds 40 lines to server.ts',
+  ];
   const { store, worker } = seed({ status: 'succeeded', summary: 'summary', changedFiles: ['src/a.ts'], commandsRun: [], claims: codeClaims });
   try {
     const result = await createClaims({ jev: jevFor(() => answer(0, 'says_nothing')), store, settings: settings(), git: fakeGit(['src/a.ts'], 'diff') }).check({ workerId: worker.workerId });

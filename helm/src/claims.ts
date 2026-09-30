@@ -25,8 +25,10 @@ const supports = 'The diff contains changes that make the claim true.';
 const contradicts = 'The diff touches the relevant code but it differs from the claim (different name, value, file, count, or the opposite change).';
 const saysNothing = 'The diff contains no evidence about this claim either way.';
 const processClaim = /^(?:(?:all\s+\d+\s+)?(?:tests?|test suite|type-?check|lint|build|checks?)\s+(?:pass(?:es|ed)?|succeed(?:s|ed)?|are green|is green)|committed|no push performed|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|typecheck|lint))\s*[.!?]?$/i;
-// A reported source line count / line-cap result is a process fact (it comes from a command run), not a diff fact.
-const lineCountClaim = /^(?:[a-z0-9_./-]+[ \t]+)*(?:contain(?:s|ed)?|total(?:s|ed)?|count(?:s|ed)?|report(?:s|ed)?|is|are|was|were|=)[ \t]+[\d,]+[ \t]*lines?\b(?:[ \t]+(?:per|against|from|via|in|of|according[ \t]+to)[^.!?]{0,60})?[ \t]*[.!?]?$/i;
+// A reported source-tree line count / line-cap result is a process fact (it comes from a command run), not a diff fact.
+// The subject is restricted to a src path, "source count"/"source total" or "line-cap", so diff-verifiable counts such as
+// "the diff contains 12 lines." stay checkable.
+const lineCountClaim = /^(?:(?:[a-z0-9_.-]+\/)?src(?:\/[a-z0-9_.-]+)*|source[ \t]+(?:count|total)s?|(?:npm|pnpm|yarn|bun)[ \t]+run[ \t]+line-cap|line-cap)[ \t]+(?:contain(?:s|ed)?|total(?:s|ed)?|count(?:s|ed)?|report(?:s|ed)?|is|are|was|were)[ \t]+[\d,]+[ \t]*lines?\b(?:[ \t]+(?:per|against|from|via|in|of|according[ \t]+to)[^.!?]{0,60})?[ \t]*[.!?]?$/i;
 function isProcessClaim(claim: string): boolean { return processClaim.test(claim) || lineCountClaim.test(claim); }
 
 export type ClaimsCheckInput = Readonly<{ workerId: string }>;

@@ -217,3 +217,21 @@ test('discovery leaves checkedAt alone so open Helm PRs are still polled, and ba
     assert.equal(store.listAllEvents().filter((event) => event.kind === 'pr.merged').length, 0);
   } finally { store.close(); }
 });
+
+test('discovery records pr.merged once when a tracked closed PR is seen merged', async () => {
+  const store = openStore(':memory:');
+  try {
+    store.insertWorker(makeWorker('w-03d20cc7'));
+    store.insertPr({ repoSlug: 'o/r', number: 277, workerId: 'w-03d20cc7', url: 'https://github.com/o/r/pull/277', head: 'old', createdAt: '2026-09-30T00:00:00Z', state: 'closed', checkedAt: '2026-09-30T00:00:00Z' });
+    const github = ghGitHub(async () => ({ stdout: captured, stderr: '', code: 0 }));
+    let current = new Date('2026-10-01T00:00:00Z');
+    const tick = createPrTicker({ store, github, now: () => current });
+    await tick();
+    current = new Date(current.getTime() + 5 * 60_000);
+    await tick();
+    assert.equal(store.getPrByNumber('o/r', 277)?.state, 'merged');
+    const merges = store.listAllEvents().filter((event) => event.kind === 'pr.merged' && event.data.number === 277);
+    assert.equal(merges.length, 1);
+    assert.equal(merges[0]?.data.adopted, false);
+  } finally { store.close(); }
+});

@@ -36,7 +36,7 @@ export function createPrTicker(options: { store: Store; github: GitHub; now?: ()
           const existing = options.store.getPrByNumber(repoSlug, remote.number);
           const pr: PrRow = { repoSlug, number: remote.number, workerId, url: `https://github.com/${repoSlug}/pull/${remote.number}`, head: remote.headRefOid, createdAt: existing?.createdAt ?? now().toISOString(), state: remote.state === 'MERGED' ? 'merged' : 'open', checkedAt: existing?.checkedAt ?? null };
           if (!existing) options.store.insertPr(pr);
-          if (pr.state === 'merged' && (!existing || existing.state === 'open')) {
+          if (pr.state === 'merged' && (!existing || (existing.state && existing.state !== 'merged'))) {
             recordPrMerge(options.store, pr, { external: true, adopted: !existing }, remote.mergedAt ?? undefined);
           }
           if (!existing || existing.state !== 'merged') options.store.updatePr(pr);

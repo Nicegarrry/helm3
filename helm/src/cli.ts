@@ -516,6 +516,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const github = ghGitHub();
   const helm = new Helm({
     config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules }), github,
+    claudeLaneRegistered: claudeAvailable(),
     runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner(), claude: claudeAvailable() ? claudeWorkerRunner() : undefined }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
     spendStartup: true,
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),

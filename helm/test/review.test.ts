@@ -14,7 +14,7 @@ const head2 = 'b'.repeat(40);
 function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchIds?: Record<string, string> } = {}) {
   const store = openStore(':memory:');
   const now = new Date().toISOString();
-  const worker: WorkerRow = { workerId: 'w-review', repo: '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-5.6-luna:high', objective: 'work', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: 'helm/review', worktree: '/repo', state: 'succeeded', head: head1, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
+  const worker: WorkerRow = { workerId: 'w-review', repo: '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-6-luna:high', objective: 'work', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: 'helm/review', worktree: '/repo', state: 'succeeded', head: head1, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
   store.insertWorker(worker);
   store.insertPr({ number: 1, workerId: worker.workerId, url: 'https://github.com/owner/repo/pull/1', head: head1, createdAt: now });
   let currentHead = head1;
@@ -140,7 +140,7 @@ test('review.record refuses a stale head', async () => {
 test('pr.merge refuses a review from the builder model family', async () => {
   const d = setup();
   try {
-    const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-14', reviewer: 'codex/gpt-5.6-luna:high', verdict: 'approve' });
+  const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-14', reviewer: 'codex/gpt-6-luna:high', verdict: 'approve' });
     assert.equal(recorded.ok, true);
     assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: "reviewer model family 'gpt' matches the builder's" });
   } finally { d.store.close(); }

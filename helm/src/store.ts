@@ -2,7 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
+import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendLimitRow, SpendLimitState, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
@@ -65,6 +65,8 @@ function toPrRow(row: Record<string, unknown>): PrRow {
     url: row.url as string,
     head: row.head as string,
     createdAt: row.createdAt as string,
+    state: (row.state as PrRow['state']) ?? null,
+    checkedAt: (row.checkedAt as string | null) ?? null,
   };
 }
 
@@ -78,7 +80,11 @@ function migratePrs(db: DatabaseSync): void {
   const repoColumn = columns.find((column) => column.name === 'repoSlug');
   const numberColumn = columns.find((column) => column.name === 'number');
   const isComposite = repoColumn?.pk === 1 && numberColumn?.pk === 2;
-  if (isComposite) return;
+  if (isComposite) {
+    if (!columns.some((column) => column.name === 'state')) db.exec('ALTER TABLE prs ADD COLUMN state TEXT');
+    if (!columns.some((column) => column.name === 'checkedAt')) db.exec('ALTER TABLE prs ADD COLUMN checkedAt TEXT');
+    return;
+  }
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -91,11 +97,13 @@ function migratePrs(db: DatabaseSync): void {
         url TEXT NOT NULL,
         head TEXT NOT NULL,
         createdAt TEXT NOT NULL,
+        state TEXT,
+        checkedAt TEXT,
         PRIMARY KEY (repoSlug, number)
       );
     `);
     const rows = db.prepare('SELECT number, workerId, url, head, createdAt FROM prs').all() as Array<Record<string, unknown>>;
-    const insert = db.prepare('INSERT INTO prs_v2 (repoSlug, number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
+    const insert = db.prepare('INSERT INTO prs_v2 (repoSlug, number, workerId, url, head, createdAt, state, checkedAt) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)');
     const workerRepo = db.prepare('SELECT repoSlug FROM workers WHERE workerId = ?');
     for (const row of rows) {
       const fromUrl = repoSlugFromPrUrl(String(row.url));
@@ -117,10 +125,20 @@ function toWorkerMeta(row: Record<string, unknown>): WorkerMeta {
     issue: (row.issue as number | null) ?? null,
     prBase: (row.prBase as string | null) ?? null,
     baselineId: (row.baselineId as string | null) ?? null,
-    band: (row.band as string | null) ?? null,
-    complexity: (row.complexity as number | null) ?? null,
+    tier: (row.tier as number | null) ?? null,
+    score: (row.score as number | null) ?? null,
+    chosenModel: (row.chosenModel as string | null) ?? null,
+    policyApplied: row.policyApplied ? JSON.parse(row.policyApplied as string) : null,
+    skippedCandidates: row.skippedCandidates ? JSON.parse(row.skippedCandidates as string) : [],
     skills: row.skills ? JSON.parse(row.skills as string) : [],
   };
+}
+
+function ensureWorkerMetaColumns(db: DatabaseSync): void {
+  const existing = new Set((db.prepare('PRAGMA table_info(worker_meta)').all() as Array<{ name: string }>).map((row) => row.name));
+  for (const [name, definition] of [['tier', 'INTEGER'], ['score', 'REAL'], ['chosenModel', 'TEXT'], ['policyApplied', "TEXT"], ['skippedCandidates', "TEXT NOT NULL DEFAULT '[]'"]] as const) {
+    if (!existing.has(name)) db.exec(`ALTER TABLE worker_meta ADD COLUMN ${name} ${definition}`);
+  }
 }
 
 function summarize(rows: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number | null }[]): SpendSummary {
@@ -196,6 +214,8 @@ export function openStore(path: string): Store {
       url TEXT NOT NULL,
       head TEXT NOT NULL,
       createdAt TEXT NOT NULL,
+      state TEXT,
+      checkedAt TEXT,
       PRIMARY KEY (repoSlug, number)
     );
     CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);
@@ -218,9 +238,17 @@ export function openStore(path: string): Store {
       baselineId TEXT,
       band TEXT,
       complexity REAL,
+      tier INTEGER,
+      score REAL,
+      chosenModel TEXT,
+      policyApplied TEXT,
+      skippedCandidates TEXT NOT NULL DEFAULT '[]',
       skills TEXT NOT NULL DEFAULT '[]'
     );
+    CREATE TABLE IF NOT EXISTS spend_limits (name TEXT PRIMARY KEY, value REAL NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL, tapId TEXT);
+    CREATE TABLE IF NOT EXISTS spend_limit_state (id INTEGER PRIMARY KEY CHECK (id = 1), checksum TEXT NOT NULL, rows TEXT NOT NULL, at TEXT NOT NULL);
   `);
+  ensureWorkerMetaColumns(db);
   migratePrs(db);
   db.exec('CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);');
 
@@ -230,10 +258,11 @@ export function openStore(path: string): Store {
   const getWorkerStmt = db.prepare('SELECT * FROM workers WHERE workerId = ?');
   const getMetaStmt = db.prepare('SELECT * FROM worker_meta WHERE workerId = ?');
   const setMetaStmt = db.prepare(`
-    INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, skills)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, tier, score, chosenModel, policyApplied, skippedCandidates, skills)
+    VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(workerId) DO UPDATE SET issue = excluded.issue, prBase = excluded.prBase,
-      baselineId = excluded.baselineId, band = excluded.band, complexity = excluded.complexity, skills = excluded.skills
+      tier = excluded.tier, score = excluded.score, chosenModel = excluded.chosenModel, policyApplied = excluded.policyApplied,
+      skippedCandidates = excluded.skippedCandidates, skills = excluded.skills
   `);
   const findByIdempotencyKeyStmt = db.prepare('SELECT * FROM workers WHERE idempotencyKey = ?');
   const appendEventStmt = db.prepare('INSERT INTO events (workerId, at, kind, data) VALUES (?, ?, ?, ?)');
@@ -243,11 +272,12 @@ export function openStore(path: string): Store {
   const setCursorStmt = db.prepare('INSERT INTO cursors (name, seq) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET seq = excluded.seq');
   const insertGateStmt = db.prepare('INSERT INTO gates (gateId, workerId, head, passed, checks, at) VALUES (?, ?, ?, ?, ?, ?)');
   const listGatesStmt = db.prepare('SELECT * FROM gates WHERE workerId = ? ORDER BY at ASC');
-  const insertPrStmt = db.prepare('INSERT INTO prs (repoSlug, number, workerId, url, head, createdAt) VALUES (?, ?, ?, ?, ?, ?)');
-  const updatePrStmt = db.prepare('UPDATE prs SET workerId = ?, url = ?, head = ?, createdAt = ? WHERE repoSlug = ? AND number = ?');
+  const insertPrStmt = db.prepare('INSERT INTO prs (repoSlug, number, workerId, url, head, createdAt, state, checkedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+  const updatePrStmt = db.prepare('UPDATE prs SET workerId = ?, url = ?, head = ?, createdAt = ?, state = ?, checkedAt = ? WHERE repoSlug = ? AND number = ?');
   const getPrByWorkerStmt = db.prepare('SELECT * FROM prs WHERE workerId = ? ORDER BY number DESC LIMIT 1');
   const getPrByNumberStmt = db.prepare('SELECT * FROM prs WHERE repoSlug = ? AND number = ?');
   const resolvePrByNumberStmt = db.prepare('SELECT * FROM prs WHERE number = ? ORDER BY repoSlug ASC');
+  const listPrsStmt = db.prepare('SELECT * FROM prs ORDER BY repoSlug ASC, number ASC');
   const addSpendStmt = db.prepare(
     'INSERT INTO spend (workerId, model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
   );
@@ -256,6 +286,10 @@ export function openStore(path: string): Store {
   const spendSeriesStmt = db.prepare('SELECT at, costUsd FROM spend ORDER BY at DESC, id DESC LIMIT ?');
   const runningWorkersStmt = db.prepare("SELECT workerId FROM workers WHERE state = 'running'");
 
+  const getSpendLimitsStmt = db.prepare('SELECT name, value, source, at, tapId FROM spend_limits ORDER BY name');
+  const setSpendLimitStmt = db.prepare('INSERT INTO spend_limits (name, value, source, at, tapId) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, source = excluded.source, at = excluded.at, tapId = excluded.tapId');
+  const getSpendLimitStateStmt = db.prepare('SELECT checksum, rows, at FROM spend_limit_state WHERE id = 1');
+  const setSpendLimitStateStmt = db.prepare('INSERT INTO spend_limit_state (id, checksum, rows, at) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET checksum = excluded.checksum, rows = excluded.rows, at = excluded.at');
   return {
     sql: db,
     insertWorker(row: WorkerRow): void {
@@ -293,9 +327,9 @@ export function openStore(path: string): Store {
     },
 
     setMeta(workerId: string, patch: Partial<Omit<WorkerMeta, 'workerId'>>): void {
-      const current = this.getMeta(workerId) ?? { workerId, issue: null, prBase: null, baselineId: null, band: null, complexity: null, skills: [] };
+      const current = this.getMeta(workerId) ?? { workerId, issue: null, prBase: null, baselineId: null, tier: null, score: null, chosenModel: null, policyApplied: null, skippedCandidates: [], skills: [] };
       const next = { ...current, ...patch };
-      setMetaStmt.run(next.workerId, next.issue, next.prBase, next.baselineId, next.band, next.complexity, JSON.stringify(next.skills));
+      setMetaStmt.run(next.workerId, next.issue, next.prBase, next.baselineId, next.tier, next.score, next.chosenModel, next.policyApplied ? JSON.stringify(next.policyApplied) : null, JSON.stringify(next.skippedCandidates), JSON.stringify(next.skills));
     },
 
     findByIdempotencyKey(key: string): WorkerRow | undefined {
@@ -356,11 +390,11 @@ export function openStore(path: string): Store {
     insertPr(row: PrInput): void {
       const worker = db.prepare('SELECT repoSlug FROM workers WHERE workerId = ?').get(row.workerId) as { repoSlug?: string } | undefined;
       const repoSlug = row.repoSlug ?? repoSlugFromPrUrl(row.url) ?? worker?.repoSlug ?? `unknown/${row.workerId}`;
-      insertPrStmt.run(repoSlug, row.number, row.workerId, row.url, row.head, row.createdAt);
+      insertPrStmt.run(repoSlug, row.number, row.workerId, row.url, row.head, row.createdAt, row.state ?? 'open', row.checkedAt ?? null);
     },
 
     updatePr(row: PrRow): void {
-      updatePrStmt.run(row.workerId, row.url, row.head, row.createdAt, row.repoSlug, row.number);
+      updatePrStmt.run(row.workerId, row.url, row.head, row.createdAt, row.state, row.checkedAt, row.repoSlug, row.number);
     },
 
     getPrByWorker(workerId: string): PrRow | undefined {
@@ -371,6 +405,10 @@ export function openStore(path: string): Store {
     getPrByNumber(repoSlug: string, number: number): PrRow | undefined {
       const row = getPrByNumberStmt.get(repoSlug, number) as Record<string, unknown> | undefined;
       return row ? toPrRow(row) : undefined;
+    },
+
+    listPrs(): PrRow[] {
+      return (listPrsStmt.all() as Record<string, unknown>[]).map(toPrRow);
     },
 
     resolvePrByNumber(number: number, project?: string): PrResolution {
@@ -400,6 +438,14 @@ export function openStore(path: string): Store {
       const rows = spendSeriesStmt.all(Math.max(limit, 0)) as { at: string; costUsd: number | null }[];
       return rows.reverse();
     },
+    getSpendLimits(): SpendLimitRow[] { const rows = getSpendLimitsStmt.all() as Array<Record<string, unknown>>; return rows.map((row) => ({ name: String(row.name) as SpendLimitRow['name'], value: Number(row.value), source: String(row.source) as SpendLimitRow['source'], at: String(row.at), tapId: (row.tapId as string | null) ?? null })); },
+    setSpendLimits(rows: readonly SpendLimitRow[]): void { for (const row of rows) setSpendLimitStmt.run(row.name, row.value, row.source, row.at, row.tapId); },
+    getSpendLimitState(): SpendLimitState | undefined {
+      const row = getSpendLimitStateStmt.get() as { checksum: string; rows: string; at: string } | undefined;
+      if (!row) return undefined;
+      try { const rows = JSON.parse(row.rows) as SpendLimitRow[]; return Array.isArray(rows) ? { checksum: row.checksum, rows, at: row.at } : undefined; } catch { return undefined; }
+    },
+    setSpendLimitState(state: SpendLimitState): void { setSpendLimitStateStmt.run(state.checksum, JSON.stringify(state.rows), state.at); },
 
     markInterrupted(): string[] {
       const rows = runningWorkersStmt.all() as { workerId: string }[];

@@ -1,5 +1,5 @@
 /** Daemon-level v4 settings and env-file loading. */
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -21,9 +21,17 @@ const CAPACITY_DEFAULTS = {
   waitMilestoneMin: 10,
 };
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
+const ROUTING_TIERS_DEFAULTS: Record<string, string[]> = {
+  1: ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium', 'codex/gpt-5.6-luna:medium'],
+  2: ['google/gemini-3.8-flash', 'codex/gpt-6-luna:high', 'codex/gpt-5.6-luna:high'],
+  3: ['claude/sonnet:high', 'codex/gpt-5.6-terra:high'],
+  4: ['codex/gpt-6.1-sol:medium', 'codex/gpt-5.6-sol:medium', 'claude/opus:medium'],
+  5: ['codex/gpt-6-astra:high', 'claude/opus:high', 'claude/fable:high', 'codex/gpt-6.1-sol:high', 'codex/gpt-5.6-sol:high'],
+};
 const ROUTING_DEFAULTS = {
-  table: { trivial: 'codex/gpt-5.6-luna:medium', small: 'codex/gpt-5.6-luna:medium', medium: 'codex/gpt-5.6-luna:medium', large: 'codex/gpt-5.6-luna:high' },
-  allowed: ['codex/gpt-5.6-luna:medium', 'codex/gpt-5.6-luna:high'], minClean: 0.5, minN: 8,
+  tiers: ROUTING_TIERS_DEFAULTS,
+  allowed: Object.values(ROUTING_TIERS_DEFAULTS).flat(), minClean: 0.5, minN: 8,
+  policy: { subscriptionOnly: false }, checkDays: 7,
 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
@@ -56,6 +64,7 @@ const settingsSchema = z.object({
     defaultCapUsd: z.number().default(25),
     defaultCodexTokens: z.number().int().default(20_000_000),
   }).default(BUDGET_DEFAULTS),
+  spend: z.object({ capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().nonnegative().optional() }).default({}),
   factory: z.object({
     claims: z.enum(['off', 'shadow', 'block']).default('block'),
     claimsAt: z.number().default(0.7),
@@ -94,15 +103,21 @@ const settingsSchema = z.object({
     lessons: z.enum(['off', 'shadow', 'on']).default('shadow'),
   }).default(SELECT_DEFAULTS),
   routing: z.object({
-    table: z.record(z.string(), z.string()).default(ROUTING_DEFAULTS.table),
+    tiers: z.record(z.string(), z.array(z.string().min(1))).default(ROUTING_DEFAULTS.tiers),
     allowed: z.array(z.string()).default(ROUTING_DEFAULTS.allowed),
     minClean: z.number().default(0.5),
     minN: z.number().int().default(8),
+    policy: z.object({
+      lanes: z.array(z.enum(['codex', 'pi', 'claude'])).optional(),
+      subscriptionOnly: z.boolean().default(false),
+    }).default(ROUTING_DEFAULTS.policy),
+    checkDays: z.number().positive().default(7),
   }).default(ROUTING_DEFAULTS),
   discord: z.object({
     projects: z.record(z.string(), z.object({ webhookEnv: z.string() })).default({}),
     digestSec: z.number().default(60),
     maxPerHour: z.number().default(20),
+    globalWebhookEnv: z.string().optional(),
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
@@ -115,35 +130,53 @@ const settingsSchema = z.object({
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
-export type Settings = Omit<ParsedSettings, 'deploy' | 'capacity'> & { deploy?: ParsedSettings['deploy']; capacity?: ParsedSettings['capacity'] };
+export type Settings = Omit<ParsedSettings, 'deploy' | 'capacity' | 'routing'> & {
+  deploy?: ParsedSettings['deploy'];
+  capacity?: ParsedSettings['capacity'];
+  routing: Omit<ParsedSettings['routing'], 'policy' | 'checkDays'> & {
+    policy?: { lanes?: ('codex' | 'pi' | 'claude')[]; subscriptionOnly?: boolean };
+    checkDays?: number;
+  };
+};
 
-function normalizeSettings(value: ParsedSettings): Settings {
+function normalizeSettings(value: ParsedSettings | Settings, capacity?: ParsedSettings['capacity']): Settings {
   // Keep the newly added section available by property access without changing
   // the legacy enumerable shape consumed by older callers and snapshots.
-  Object.defineProperty(value, 'capacity', { value: value.capacity, enumerable: false, configurable: true });
-  return value;
+  Object.defineProperty(value, 'capacity', { value: capacity ?? value.capacity, enumerable: false, configurable: true });
+  return value as Settings;
 }
 
 const DEFAULT_SETTINGS = normalizeSettings(settingsSchema.parse({}));
-
-export function loadSettings(home: string): Settings {
-  const path = join(home, 'helm.json');
-  let raw: unknown;
-  try {
-    raw = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_SETTINGS;
-    console.error(`invalid ${path}; using defaults`);
-    return DEFAULT_SETTINGS;
+/** A routing block without `allowed` allows every configured tier candidate. */
+function withRoutingDefaults(settings: Settings, raw: unknown): Settings {
+  const routingRaw = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).routing : undefined;
+  if (routingRaw && typeof routingRaw === 'object' && !Array.isArray(routingRaw) && !Object.hasOwn(routingRaw, 'allowed')) {
+    return { ...settings, routing: { ...settings.routing, allowed: Object.values(settings.routing.tiers).flat() } };
   }
-  const parsed = settingsSchema.safeParse(raw);
-  if (!parsed.success) {
-    console.error(`invalid ${path}; using defaults`);
-    return DEFAULT_SETTINGS;
-  }
-  return normalizeSettings(parsed.data);
+  return settings;
 }
-
+export function loadSettings(home: string): Settings { const result = readSettingsFile(home); if (result.error) console.error(`invalid ${join(home, 'helm.json')}; using defaults`); return result.settings ?? DEFAULT_SETTINGS; }
+function fileSignature(path: string): string { try { const stat = statSync(path); return `${stat.mtimeMs}:${stat.size}:${stat.ino}`; } catch (err) { return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unavailable'; } }
+export type SettingsFile = Readonly<{ signature: string; settings?: Settings; error?: string }>;
+export function readSettingsFile(home: string): SettingsFile {
+  const path = join(home, 'helm.json');
+  try { const raw: unknown = JSON.parse(readFileSync(path, 'utf8')); const parsed = settingsSchema.safeParse(raw); if (!parsed.success) return { signature: fileSignature(path), error: 'schema validation failed' }; const settings = withRoutingDefaults(parsed.data as Settings, raw); return { signature: fileSignature(path), settings: normalizeSettings(settings, parsed.data.capacity) }; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { signature: 'missing', settings: DEFAULT_SETTINGS } : { signature: fileSignature(path), error: 'invalid JSON' }; }
+}
+export type SpendSettingsUpdate = Readonly<{ capUsd?: number; warnUsd?: number; maxWorkers?: number }>;
+/** Merge spend settings into helm.json and replace it with a same-directory atomic rename. */
+export function updateSpendSettings(home: string, update: SpendSettingsUpdate): Settings {
+  mkdirSync(home, { recursive: true }); const path = join(home, 'helm.json'); let raw: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`invalid ${path}; expected an object`);
+    raw = { ...(parsed as Record<string, unknown>) };
+  } catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err; }
+  const spend = raw.spend && typeof raw.spend === 'object' && !Array.isArray(raw.spend) ? { ...(raw.spend as Record<string, unknown>) } : {}; for (const [key, value] of Object.entries(update)) if (value !== undefined) spend[key] = value; raw.spend = spend; const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try { writeFileSync(temporary, `${JSON.stringify(raw, null, 2)}\n`, 'utf8'); renameSync(temporary, path); }
+  catch (err) { try { unlinkSync(temporary); } catch { /* best effort */ } throw err; }
+  return loadSettings(home);
+}
 export function loadEnvFile(path: string): Record<string, string> {
   try {
     const values: Record<string, string> = {};

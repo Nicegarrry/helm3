@@ -20,12 +20,12 @@ test('issue flags use the exact 0.5 boundaries', async () => {
     assert.deepEqual((calls[0]?.input as { questions: unknown }).questions, {
       testable: { type: 'noul', instructions: 'Does this ticket state a concrete, checkable definition of done (specific commands, tests, files or observable behaviour an automated gate or reviewer can verify)?', criteria: { true: 'done is objectively checkable', false: 'done is vague or left to judgement' } },
       too_big: { type: 'noul', instructions: 'Is this ticket too big or too multi-part for one coding worker in one session, such that it should have been split into smaller tickets?', criteria: { true: 'should be split', false: 'fits one worker' } },
-      complexity: { type: 'score', instructions: 'How much engineering work will a competent coding agent need to complete this ticket (reading, editing, testing), judged from its scope and number of moving parts?', criteria: ['trivial: a mechanical copy, one-line change or read-only check', 'small: one file or one focused function plus a test', 'medium: several files or one subsystem, needs design judgement', 'large: many files across subsystems, UI plus backend, or several loosely related items'] },
+      complexity: { type: 'score', instructions: 'How much engineering capability does a coding agent need to complete this ticket correctly (reading, editing, testing), judged from its scope, risk and number of moving parts?', criteria: ['trivial: a mechanical copy, rename, one-line change, config or doc edit', 'small: one file or one focused function plus a test', 'medium: several files or one subsystem; needs design judgement', 'hard: cross-subsystem change, or concurrency, security or data-migration risk', 'challenging: novel architecture, ambiguous requirements, or deep debugging across many components'] },
     });
     const boundary = createJevCheck({ jev: fakeJev({ testable: { noul: 0.5 }, too_big: { noul: 0.49 }, complexity: { score: 0.5 } }), store });
     const second = await boundary.check({ preset: 'issue', input: 'ticket' });
     assert.deepEqual(second.ok && second.flags, { testable: false, too_big: false });
-    assert.deepEqual(second.ok && second.complexity, { score: 0.5, band: 'trivial' });
+    assert.deepEqual(second.ok && second.complexity, { score: 0.5, tier: 1, label: 'trivial' });
   } finally { store.close(); }
 });
 

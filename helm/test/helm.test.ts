@@ -276,6 +276,48 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   assert.equal(row?.result?.status, 'succeeded');
 });
 
+test('dispatched issue-title lookup runs after spawn admission and falls back on failure', async () => {
+  let resolveTitle!: (title: string) => void;
+  const lookup = new Promise<string>((resolve) => { resolveTitle = resolve; });
+  const seed = makeHelm();
+  const first = makeHelm({ github: { ...seed.github.github, issueTitle: async () => lookup } });
+  const repo = mkTempDir('helm-dispatched-title-');
+  const started = Date.now();
+  const outcome = await first.helm.spawn(spawnBody(repo, { issue: 42, objective: 'first objective line\nmore detail' }));
+  assert.ok(outcome.ok);
+  assert.ok(Date.now() - started < 500, 'spawn should not wait for issue title lookup');
+  if (!outcome.ok) return;
+  resolveTitle('Issue title');
+  await new Promise((resolve) => setImmediate(resolve));
+  const dispatched = first.store.listEvents(outcome.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched');
+  assert.equal(dispatched?.data.issue, 42);
+  assert.equal(dispatched?.data.title, 'Issue title');
+  assert.equal(dispatched?.data.model, 'acme/model-1');
+
+  const second = makeHelm({ github: { ...seed.github.github, issueTitle: async () => { throw new Error('unavailable'); } } });
+  const fallback = await second.helm.spawn(spawnBody(mkTempDir('helm-dispatched-fallback-'), { issue: 43, objective: 'fallback title\nother detail' }));
+  assert.ok(fallback.ok);
+  if (fallback.ok) {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(second.store.listEvents(fallback.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched')?.data.title, 'fallback title');
+  }
+});
+
+test('dispatch milestone rejection becomes a warning event instead of an unhandled rejection', async () => {
+  const { helm, store } = makeHelm();
+  const appendEvent = store.appendEvent.bind(store);
+  store.appendEvent = (workerId, kind, data, at) => {
+    if (kind === 'dispatched') throw new Error('milestone write failed');
+    return appendEvent(workerId, kind, data, at);
+  };
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-dispatched-warning-'), { issue: 44 }));
+  assert.ok(outcome.ok);
+  if (!outcome.ok) return;
+  await new Promise((resolve) => setImmediate(resolve));
+  const warning = store.listEvents(outcome.workerId).find((event) => event.kind === 'dispatched.warning');
+  assert.equal(warning?.data.message, 'dispatch milestone failed: milestone write failed');
+});
+
 test('a settled worker turn removes node_modules from every top-level package', async () => {
   const runner = createFakeRunner(async (input) => {
     mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });
@@ -571,7 +613,7 @@ test('modelFamily strips provider and vendor prefixes', () => {
   assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'glm');
   assert.equal(modelFamily('google/gemini-3.8-flash'), 'gemini');
   assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nemotron');
-  assert.equal(modelFamily('openai-codex/gpt-5.6-luna'), 'gpt');
+  assert.equal(modelFamily('openai-codex/gpt-6-luna'), 'gpt');
   assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'claude');
 });
 
@@ -1182,10 +1224,10 @@ test('automatic routing reaches the runner, persists, and survives steer across 
   const registry = createToolRegistry(helm);
   const repo = mkTempDir('helm-routing-');
   for (const [difficulty, expected] of [
-    [undefined, 'codex/gpt-5.6-luna:high'],
-    ['normal', 'codex/gpt-5.6-luna:high'],
-    ['easy', 'codex/gpt-5.6-luna:medium'],
-    ['super-easy', 'codex/gpt-5.6-luna:medium'],
+    [undefined, 'codex/gpt-5.6-terra:high'],
+    ['normal', 'codex/gpt-5.6-terra:high'],
+    ['easy', 'google/gemini-3.8-flash'],
+    ['super-easy', 'openrouter/qwen/qwen3.8-flash'],
   ] as const) {
     const outcome = await registry.call('worker.spawn', { repo, objective: 'task', ...(difficulty ? { difficulty } : {}) });
     assert.equal(outcome.ok, true);
@@ -1199,10 +1241,10 @@ test('automatic routing reaches the runner, persists, and survives steer across 
     assert.equal(seen.at(-1), expected);
     await helm.gate({ workerId: row.workerId });
     assert.equal((await helm.prOpen({ workerId: row.workerId, draft: true })).ok, true);
-    const review = await helm.reviewRequest({ workerId: row.workerId, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    const review = await helm.reviewRequest({ workerId: row.workerId, model: 'claude/sonnet:high', allowSameFamily: false });
     assert.ok(review.ok);
     await helm.settle(review.reviewWorkerId);
-    assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'google/gemini-3.8-flash');
+    assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'claude/sonnet:high');
   }
 });
 
@@ -1215,14 +1257,14 @@ test('explicit models override difficulty; a Gemini builder gets an independent 
   assert.equal(store.getWorker(build.workerId)?.model, 'google/gemini-3.8-flash');
   await helm.gate({ workerId: build.workerId });
   await helm.prOpen({ workerId: build.workerId, draft: true });
-  const review = await helm.reviewRequest({ workerId: build.workerId, model: 'codex/gpt-5.6-luna:high', allowSameFamily: false });
+  const review = await helm.reviewRequest({ workerId: build.workerId, model: 'codex/gpt-6-luna:high', allowSameFamily: false });
   assert.ok(review.ok);
   await helm.settle(review.reviewWorkerId);
-  assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'codex/gpt-5.6-luna:high');
+  assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'codex/gpt-6-luna:high');
   const direct = await helm.spawn(spawnBody(repo, { model: undefined, role: 'reviewer', difficulty: 'super-easy' }));
   assert.ok(direct.ok);
   await helm.settle(direct.workerId);
-  assert.equal(store.getWorker(direct.workerId)?.model, 'codex/gpt-5.6-luna:medium');
+    assert.equal(store.getWorker(direct.workerId)?.model, 'openrouter/qwen/qwen3.8-flash');
 });
 
 function deferred() {

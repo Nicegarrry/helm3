@@ -49,7 +49,7 @@ export type CapacityAdmission = Readonly<{
 
 export function createCapacityAdmission(options: Readonly<{
   home: string;
-  maxWorkers: number;
+  maxWorkers: number | (() => number);
   store: Store;
   settings: Pick<Settings, 'capacity'>;
   sampler?: CapacitySampler;
@@ -59,6 +59,7 @@ export function createCapacityAdmission(options: Readonly<{
   reload?: SettingsLoader;
 }>): CapacityAdmission {
   const now = options.now ?? (() => new Date());
+  const maxWorkers = (): number => typeof options.maxWorkers === 'function' ? options.maxWorkers() : options.maxWorkers;
   const baseSettings = options.settings.capacity ?? loadSettings('/missing-capacity-settings').capacity!;
   const settings = (): NonNullable<Settings['capacity']> => {
     try { return options.reload?.() ?? (existsSync(`${options.home}/helm.json`) ? loadSettings(options.home).capacity! : baseSettings); } catch { return baseSettings; }
@@ -124,9 +125,10 @@ export function createCapacityAdmission(options: Readonly<{
     const running = rows.filter((row) => row.startedAt !== null && row.startedAt !== undefined);
     const usedUnits = running.reduce((total, row) => total + unit(String(row.loadClass) as LoadClass), 0);
     const telemetryUnavailable = snapshot.memoryPressure === 'unknown' && snapshot.freeRamGb < current.reserveGb;
-    const ramUnits = testWithoutCapacityOverrides ? options.maxWorkers : telemetryUnavailable ? options.maxWorkers : Math.floor(Math.max(0, snapshot.freeRamGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
+    const ceiling = maxWorkers();
+    const ramUnits = testWithoutCapacityOverrides ? ceiling : telemetryUnavailable ? ceiling : Math.floor(Math.max(0, snapshot.freeRamGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
     const pressurePenalty = snapshot.memoryPressure === 'critical' ? current.pressureCriticalPenalty : snapshot.memoryPressure === 'warn' ? current.pressureWarnPenalty : 0;
-    const resourceBudget = Math.max(0, Math.min(options.maxWorkers, ramUnits) - pressurePenalty - snapshot.bootedSimulators * current.simulatorPenalty);
+    const resourceBudget = Math.max(0, Math.min(ceiling, ramUnits) - pressurePenalty - snapshot.bootedSimulators * current.simulatorPenalty);
     const budget = processLimited ? 0 : resourceBudget;
     const queue = rows.filter((row) => row.startedAt === null || row.startedAt === undefined).sort((a, b) => Number(a.priority) - Number(b.priority) || String(a.queuedAt).localeCompare(String(b.queuedAt))).map((row) => ({
       id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))),

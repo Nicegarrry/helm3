@@ -4,7 +4,7 @@ Status: ready to dispatch. Owner: Nick. Scope: drops 1–3 + Jev module. Vision:
 Gate for every ticket: `npm test` + `npm run typecheck` in `helm/` (no lint script exists).
 Tests use `node:test`, no network: fake `fetch`, fake `exec` (pattern of `ghGitHub(exec?)`), `:memory:` store.
 `src/types.ts` is the contract; tickets that change it say so, and the coordinator reviews them.
-Lanes (Nick, 2026-09-29): builders Codex only; reviews by Claude subagents outside Helm (posted as PR comments); Jev for judgement. Per-ticket lane lines below that name deepseek/gemini are superseded: use codex/gpt-5.6-luna.
+Lanes (Nick, 2026-09-29): builders Codex only; reviews by Claude subagents outside Helm (posted as PR comments); Jev for judgement. Per-ticket lane lines below that name deepseek/gemini are superseded: use codex/gpt-6-luna.
 
 ## Design decisions (made here; reverse deliberately)
 
@@ -39,7 +39,7 @@ Round 1: A0, A4 (+A8 in parallel) · Round 2: A1, A2, A5a · Round 3: A3, A5b, A
 - `types.ts`: widen `ToolName` to `string` so modules can export tool defs that `tools.ts` concatenates.
 - `cli.ts cmdServe`: start the ticker.
 **Acceptance:** missing or invalid `helm.json` → defaults (invalid logs one line, no crash); a consumer processes each event exactly once across a store reopen; existing tests pass.
-**Out:** any feature logic. **Size** S (~120 lines). **Lane** codex/gpt-5.6-luna:high (touches the contract).
+**Out:** any feature logic. **Size** S (~120 lines). **Lane** codex/gpt-6-luna:high (touches the contract).
 
 ## A1 — Jev client + call log
 **Why:** Jev is the shared cheap-judgement service for triage and the watcher; every call must be logged for calibration.
@@ -73,7 +73,7 @@ Round 1: A0, A4 (+A8 in parallel) · Round 2: A1, A2, A5a · Round 3: A3, A5b, A
 - A pane id change is re-resolved by label.
 - Rotate sends the `/compact` line and the follow-up as two separate deliveries.
 - A tmux fallback test runs on a fake exec.
-**Out:** pane creation (A3), Jev and watch rules. **Size** M (~260). **Lane** codex/gpt-5.6-luna:high. **Deps** A0.
+**Out:** pane creation (A3), Jev and watch rules. **Size** M (~260). **Lane** codex/gpt-6-luna:high. **Deps** A0.
 
 ## A3 — `helm supervisor start <project>`
 **Why:** one idempotent command that brings up, or reattaches, a project's owner session.
@@ -120,7 +120,7 @@ After launch, warn if `agent_status` is `blocked` (e.g. Claude's folder-trust pr
 - A reply resumes the same `sessionFile` and marks the row answered.
 - A reply to a non-waiting worker is refused.
 - Both Pi and Codex parsing accept a question result (a `parseWorkerResult` case + a Codex fake-JSONL case).
-**Out:** Jev triage, auto-answering. **Size** M (~150). **Lane** codex/gpt-5.6-luna:high. **Deps** A0.
+**Out:** Jev triage, auto-answering. **Size** M (~150). **Lane** codex/gpt-6-luna:high. **Deps** A0.
 
 ## A5b — Jev triage of questions (shadow)
 **Why:** most questions never need Nick; the rare ones that do must never be missed.
@@ -215,4 +215,4 @@ Soak on one project for 2–3 days with shadow on. Then label `jev_calls` from o
 - The 80% warning fires once per budget.
 - The global cap still refuses when set and exceeded.
 - Existing spend tests pass.
-**Size** M (~140). **Lane** codex/gpt-5.6-luna:high. **Deps** A0.
+**Size** M (~140). **Lane** codex/gpt-6-luna:high. **Deps** A0.

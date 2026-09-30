@@ -35,6 +35,8 @@ type PrViewJson = {
   mergedAt?: string | null;
   statusCheckRollup?: { name?: string; status?: string; conclusion?: string | null; state?: string; context?: string }[] | null;
   reviews?: { author?: { login?: string }; state?: string }[] | null;
+  title?: string;
+  baseRefName?: string;
 };
 
 const PENDING_CONTEXT_STATES: ReadonlySet<string> = new Set(['PENDING', 'EXPECTED']);
@@ -69,6 +71,8 @@ function mapPrStatus(json: PrViewJson): PrStatus {
     checks,
     reviews,
     url: json.url,
+    ...(json.title ? { title: json.title } : {}),
+    ...(json.baseRefName ? { base: json.baseRefName } : {}),
   };
 }
 
@@ -97,11 +101,17 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       if (args.length > 4) await run(exec, args);
     },
 
+    async issueTitle(repoSlug: string, number: number): Promise<string | undefined> {
+      const stdout = await run(exec, ['issue', 'view', String(number), '--repo', repoSlug, '--json', 'title']);
+      const parsed = JSON.parse(stdout) as { title?: unknown };
+      return typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : undefined;
+    },
+
     async prStatus(repoSlug: string, number: number): Promise<PrStatus> {
       const stdout = await run(exec, [
         'pr', 'view', String(number),
         '--repo', repoSlug,
-        '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt',
+        '--json', 'number,state,headRefOid,mergeable,isDraft,statusCheckRollup,reviews,url,mergedAt,title,baseRefName',
       ]);
       const parsed = JSON.parse(stdout) as PrViewJson;
       return mapPrStatus(parsed);

@@ -46,20 +46,60 @@ function processAlertText(value: unknown): string {
   return `${names || 'process headroom is low'}${headroom}`;
 }
 
-function milestone(event: EventRow): string | null {
-  if (event.kind === 'pr') return `PR opened: #${text(event.data.number, 'unknown')}`;
-  if (event.kind === 'pr.merged') return `Merged: #${text(event.data.number, 'unknown')}`;
+function spendStartupLine(data: EventRow['data']): string {
+  const values = data.values && typeof data.values === 'object' ? data.values as Record<string, unknown> : {};
+  const cap = values.capUsd === 0 ? 'NO spend cap' : `spend cap $${text(values.capUsd, 'unknown')}`;
+  return `Helm started: ${cap}, warn $${text(values.warnUsd, 'unknown')}, max workers ${text(values.maxWorkers, 'unknown')}${data.tampered ? ' (tampered)' : ''}`;
+}
+
+function optional(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : typeof value === 'number' && Number.isFinite(value) ? String(value) : undefined;
+}
+
+function milestone(event: EventRow, projectCount: number): string | null {
+  const project = optional(event.data.project);
+  const prefix = projectCount > 1 && project ? `${project} ` : '';
+  if (event.kind === 'dispatched') {
+    const issue = optional(event.data.issue);
+    if (!issue) return null;
+    const title = optional(event.data.title) ?? 'untitled issue';
+    const model = optional(event.data.model) ?? 'unknown model';
+    const tier = optional(event.data.tier) ?? 'unknown';
+    return `Dispatched ${text(event.workerId, 'unknown')} on #${issue} ${title} (${model}, tier ${tier})`;
+  }
+  if (event.kind === 'pr') {
+    const title = optional(event.data.title);
+    const url = optional(event.data.url);
+    const updated = event.data.updated === true ? 'PR updated' : '';
+    return `${updated ? `${updated}: ` : ''}${prefix}#${text(event.data.number, 'unknown')}${title ? ` ${title}` : ''}${url ? ` ${url}` : ''}`;
+  }
+  if (event.kind === 'pr.merged') {
+    const title = optional(event.data.title);
+    const base = optional(event.data.base);
+    const url = optional(event.data.url);
+    return `${prefix}#${text(event.data.number, 'unknown')}${title ? ` ${title}` : ''} merged into ${base ?? 'unknown'}${url ? ` ${url}` : ''}`;
+  }
+  if (event.kind === 'pr.closed') return `${prefix}#${text(event.data.number, 'unknown')} closed${optional(event.data.url) ? ` ${optional(event.data.url)}` : ''}`;
   if (event.kind === 'watch.alert') return event.data.rule === 'procs.low'
     ? `Process headroom low: ${processAlertText(event.data.detail)}`
     : `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
-  if (event.kind === 'capacity.waiting') return `Capacity wait: ${text(event.data.kind, 'job')} has waited ${text(event.data.waitedMs, 'too long')}ms`;
+  if (event.kind === 'spend.invalid') return 'helm.json invalid; keeping last good limits';
+  if (event.kind === 'spend.changed') {
+    if (event.data.source === 'startup') return spendStartupLine(event.data);
+    const values = event.data.values && typeof event.data.values === 'object' ? Object.entries(event.data.values).map(([name, value]) => `${name}=${String(value)}`).join(', ') : '';
+    return `Spend changed: ${event.data.ignored ? 'raise ignored' : text(event.data.source, 'updated')}${values ? `: ${values}` : ''}`;
+  }
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
   if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;
-  if (event.kind === 'deploy') return `Deployed: ${text(event.data.target, 'target')}${event.data.url ? ` ${text(event.data.url, '')}` : ''}`;
-  if (event.kind === 'deploy.rolledback') return `Deploy rolled back: ${text(event.data.target, 'target')}`;
-  if (event.kind === 'deploy.failed') return `Deploy failed: ${text(event.data.target, 'target')}`;
+  if (event.kind === 'deploy' || event.kind === 'deploy.rolledback' || event.kind === 'deploy.failed') {
+    const state = event.kind === 'deploy' ? 'Deployed' : event.kind === 'deploy.rolledback' ? 'Deploy rolled back' : 'Deploy failed';
+    const details = [event.data.env, event.data.sha, event.data.url, event.data.pr ? `PR #${event.data.pr}` : undefined, event.data.issue ? `issue #${event.data.issue}` : undefined]
+      .map(optional).filter((value): value is string => Boolean(value)).join(' ');
+    return `${state}: ${text(event.data.target, 'target')}${details ? ` ${details}` : ''}`;
+  }
+  if (event.kind === 'routing.stale') return `Routing catalog stale: ${text(event.data.summary, 'check routing candidates')}`;
   return null;
 }
 
@@ -75,6 +115,8 @@ export function createDiscord(options: Options): DiscordService {
   });
 
   function webhook(project: string): string | undefined {
+    const global = globalWebhooks().find((route) => route.project === project)?.url;
+    if (global) return global;
     const name = options.settings.discord.projects[project]?.webhookEnv;
     return name ? env[name] : undefined;
   }
@@ -84,8 +126,28 @@ export function createDiscord(options: Options): DiscordService {
     return name ? env[name] : undefined;
   }
 
+  function configuredGlobalWebhook(): string | undefined {
+    const name = options.settings.discord.globalWebhookEnv;
+    return name ? env[name] : undefined;
+  }
+
+  function globalWebhooks(): Array<{ project: string; url: string }> {
+    const tap = normalizeWebhook(tapWebhook());
+    const global = configuredGlobalWebhook();
+    if (global) return normalizeWebhook(global) !== tap ? [{ project: 'global', url: global }] : [];
+    const routes = new Map<string, { project: string; url: string }>();
+    for (const [project, configured] of Object.entries(options.settings.discord.projects)) {
+      const url = env[configured.webhookEnv];
+      const normalized = normalizeWebhook(url);
+      if (url && normalized && normalized !== tap && !routes.has(normalized)) routes.set(normalized, { project: `global:${normalized}`, url });
+    }
+    return [...routes.values()];
+  }
+
   function isMilestoneWebhook(url: string): boolean {
-    return Object.values(options.settings.discord.projects).some((project) => normalizeWebhook(env[project.webhookEnv]) === normalizeWebhook(url));
+    const normalized = normalizeWebhook(url);
+    return [...Object.values(options.settings.discord.projects).map((project) => env[project.webhookEnv]), configuredGlobalWebhook()]
+      .some((milestoneUrl) => normalizeWebhook(milestoneUrl) === normalized);
   }
 
   function normalizeWebhook(url: string | undefined): string | undefined {
@@ -156,23 +218,47 @@ export function createDiscord(options: Options): DiscordService {
 
   const consume = consumer(options.store, 'discord', (events) => {
     for (const event of events) {
-      const line = milestone(event);
+      let milestoneEvent = event;
+      if (event.kind === 'deploy' || event.kind === 'deploy.rolledback' || event.kind === 'deploy.failed') {
+        try {
+          const id = optional(event.data.id);
+          const deployment = id ? options.store.sql.prepare('SELECT env, sha, url FROM deploys WHERE id = ?').get(id) as Record<string, unknown> | undefined : undefined;
+          if (deployment) {
+            const sha = optional(deployment.sha);
+            const project = optional(event.data.project);
+            const pr = sha && project ? options.store.listPrs().find((candidate) => candidate.repoSlug === project && candidate.head === deployment.sha) : undefined;
+            const issue = pr ? options.store.getMeta(pr.workerId)?.issue : undefined;
+            milestoneEvent = { ...event, data: {
+              ...event.data,
+              ...(deployment.env !== undefined ? { env: deployment.env } : {}),
+              ...(sha ? { sha: sha.slice(0, 7) } : {}),
+              ...(deployment.url ? { url: deployment.url } : {}),
+              ...(pr ? { pr: pr.number } : {}),
+              ...(issue !== undefined && issue !== null ? { issue } : {}),
+            } };
+          }
+        } catch { /* deployment enrichment is best effort */ }
+      }
+      const line = milestone(milestoneEvent, Object.keys(options.settings.discord.projects).length);
       if (!line) continue;
       const worker = options.store.getWorker(event.workerId);
       const project = text(event.data.project ?? worker?.repoSlug, 'unknown');
-      const existing = getPendingStmt.get(project) as Record<string, unknown> | undefined;
-      const lastSeq = Number(existing?.lastSeq ?? 0);
-      if (event.seq <= lastSeq) continue;
-      const lines = existing ? JSON.parse(String(existing.lines)) as string[] : [];
-      lines.push(line);
-      upsertPendingStmt.run(project, JSON.stringify(lines), Number(existing?.firstAt ?? now().getTime()), Number(existing?.nextAttemptAt ?? 0), event.seq);
+      const destinations = event.workerId === 'project:global' || project === 'global' ? globalWebhooks() : [{ project, url: webhook(project) ?? '' }];
+      for (const destination of destinations) {
+        const target = destination.project;
+        const existing = getPendingStmt.get(target) as Record<string, unknown> | undefined;
+        const lastSeq = Number(existing?.lastSeq ?? 0);
+        if (event.seq <= lastSeq) continue;
+        const lines = existing ? JSON.parse(String(existing.lines)) as string[] : [];
+        lines.push(line);
+        upsertPendingStmt.run(target, JSON.stringify(lines), Number(existing?.firstAt ?? now().getTime()), Number(existing?.nextAttemptAt ?? 0), event.seq);
+      }
     }
   });
 
   async function flush(row: Pending): Promise<void> {
     const project = row.project;
-    const configured = options.settings.discord.projects[project];
-    if (!configured || !webhook(project)) { deletePendingStmt.run(project); return; }
+    if (!webhook(project)) { deletePendingStmt.run(project); return; }
     const current = now().getTime();
     if (current < row.nextAttemptAt || current - row.firstAt < options.settings.discord.digestSec * 1000) return;
     const hourAgo = current - 60 * 60_000;

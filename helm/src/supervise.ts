@@ -82,6 +82,7 @@ function watchAlertSummary(event: EventRow): string {
 
 registerWakeKind('ask', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'ask', workerId: event.workerId, summary: String(event.data.question ?? event.data.summary ?? 'worker asked a question'), command: false, createdAt: now }));
 registerWakeKind('watch.alert', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'watch.alert', workerId: event.workerId, summary: watchAlertSummary(event), command: false, createdAt: now }));
+registerWakeKind('routing.stale', (event, project, now) => ({ id: `wake-${randomUUID()}`, project, kind: 'routing.stale', workerId: event.workerId, summary: 'routing catalog is stale; call routing.check', command: false, createdAt: now }));
 registerWakeKind('state', (event, project, now) => {
   const target = String(event.data.to ?? '');
   if (!new Set(['succeeded', 'failed', 'idle', 'waiting', 'unknown', 'stopped']).has(target)) return null;

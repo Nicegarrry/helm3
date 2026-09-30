@@ -929,6 +929,19 @@ test('markInterruptedOnStart flips running workers to interrupted', async () => 
   assert.equal(store.getWorker(spawned.workerId)?.state, 'interrupted');
 });
 
+test('startup deploy recovery does not wait for a remote checkout', async () => {
+  const { helm, store, workspace } = makeHelm();
+  workspace.clone = async () => await new Promise<void>(() => {});
+  store.sql.prepare('INSERT INTO deploys (id, project, target, kind, env, sha, state, bootId, reason, url, deploymentId, previousId, smoke, tapId, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run('d-startup', 'owner/missing', 'prod', 'vercel', '{}', 'a'.repeat(40), 'deploying', 'boot-previous', null, null, null, null, '{}', null, new Date().toISOString());
+  const result = await Promise.race([
+    helm.markInterruptedOnStart('boot-previous'),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('startup recovery blocked')), 250)),
+  ]);
+  assert.deepEqual(result, []);
+  assert.equal((store.sql.prepare('SELECT state FROM deploys WHERE id = ?').get('d-startup') as { state: string }).state, 'deploying');
+});
+
 test('overview includes a cumulative spendSeries', async () => {
   const { helm } = makeHelm();
   const repo = mkTempDir('helm-repo-');

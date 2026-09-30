@@ -431,12 +431,21 @@ export class Helm {
       currentBootId: this.lifecycle.bootId,
       predecessorBootId,
       timeoutFor: async (row) => {
-        try {
-          const repo = requireValue(await this.resolveRepo(row.project), `project not found: ${row.project}`);
+        let timer: NodeJS.Timeout | undefined;
+        const lookup = (async () => {
+          const repo = requireValue(await this.resolveRepo(row.project, { allowRemote: false }), `project not found: ${row.project}`);
           const config = await loadRepoConfig(repo, row.sha, false, { timeout: 5_000 });
           return config.deploy?.targets.find((target) => target.name === row.target)?.timeoutMin;
+        })();
+        try {
+          return await Promise.race([
+            lookup,
+            new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 5_000); }),
+          ]);
         } catch {
           return undefined;
+        } finally {
+          if (timer) clearTimeout(timer);
         }
       },
     });
@@ -972,14 +981,17 @@ export class Helm {
   }
 
   /** Absolute local paths are used as-is; `owner/name` is cloned once under $HELM_HOME/repos and fetched on later use. */
-  private async resolveRepo(repo: string): Promise<string | undefined> {
+  private async resolveRepo(repo: string, options: { allowRemote?: boolean } = {}): Promise<string | undefined> {
     if (/^[\w.-]+\/[\w.-]+$/.test(repo)) {
       const dest = join(this.config.home, 'repos', repo.replace('/', '__'));
       if (existsSync(join(dest, '.git'))) {
+        if (options.allowRemote === false) return dest;
         try { await this.workspace.fetch(dest); } catch { /* offline is fine; use what we have */ }
-      } else {
+      } else if (options.allowRemote !== false) {
         mkdirSync(dirname(dest), { recursive: true });
         await this.workspace.clone(repo, dest);
+      } else {
+        return undefined;
       }
       return dest;
     }

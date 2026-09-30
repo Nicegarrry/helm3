@@ -43,10 +43,10 @@ function commitConfig(repo: string, target: DeployTarget): string {
   return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
 }
 
-function deployDeps(repo: string, sha: string, exec: DeployExec, decision: 'allow' | 'tap' = 'allow', env: NodeJS.ProcessEnv = { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token }) {
+function deployDeps(repo: string, sha: string, exec: DeployExec, decision: 'allow' | 'tap' = 'allow', env: NodeJS.ProcessEnv = { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token }, kinds: string[] = []) {
   const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-deploy-home-'));
   const wrapped: DeployExec = async (file, args, options) => { if (file === 'git' && args[0] === 'worktree' && args[1] === 'add') { mkdirSync(args[3]!, { recursive: true }); writeFileSync(join(args[3]!, 'Gemfile.lock'), 'GEM'); } return exec(file, args, options); };
-  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async () => ({ ok: true, decisions: [{ decision }] }), reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: wrapped, env, envFile: TEST_ENV_FILE, now: () => new Date('2026-09-30T00:00:00.000Z') });
+  const service = createDeploy({ store, home, workspace: workspace(sha), resolveRepo: async () => ({ repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { kinds.push(kind); return { ok: true, decisions: [{ decision }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: wrapped, env, envFile: TEST_ENV_FILE, now: () => new Date('2026-09-30T00:00:00.000Z') });
   return { service, store, home };
 }
 
@@ -108,6 +108,20 @@ test('base Vercel deploy refuses an unlinked checkout before the provider CLI ru
   const config = { ...target, env: { VERCEL_TOKEN: 'VERCEL_TOKEN', VERCEL_ORG_ID: 'VERCEL_ORG_ID', VERCEL_PROJECT_ID: 'VERCEL_PROJECT_ID' }, smoke: {} }; const { repo, sha } = repoWithConfig(config); const calls: string[] = [];
   const d = deployDeps(repo, sha, async (file, args) => { calls.push(file); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; return { stdout: '', code: 0 }; }, 'allow', {});
   try { const result = await d.service.run({ project: 'owner/repo', target: 'prod' }); assert.equal(result.ok, false); assert.equal(result.reason, `vercel target prod is not linked: set org/project ids or run \`vercel link\` in ${repo}`); assert.equal(calls.includes('vercel'), false); }
+  finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('base Vercel dev target without scoped credentials is refused before the provider CLI runs', async () => {
+  const config = { ...target, name: 'dev', env: 'dev', smoke: {} }; const { repo, sha } = repoWithConfig(config); const calls: string[] = [];
+  const d = deployDeps(repo, sha, async (file, args) => { calls.push(file); if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; return { stdout: '', code: 0 }; }, 'allow', {});
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'dev' }); assert.equal(result.ok, false); assert.equal(result.reason, 'branch preview deploys require scoped credentials (VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID)'); assert.equal(calls.includes('vercel'), false); }
+  finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
+});
+
+test('base production fallback asks the envelope for deploy.prod', async () => {
+  const config = { ...target, name: 'release', env: 'prod', smoke: {} }; const { repo, sha } = repoWithConfig(config); mkdirSync(join(repo, '.vercel')); writeFileSync(join(repo, '.vercel', 'project.json'), JSON.stringify({ orgId: 'checkout-org', projectId: 'checkout-project' })); const kinds: string[] = [];
+  const d = deployDeps(repo, sha, async (file, args) => { if (file === 'git' && args[0] === 'rev-parse') return { stdout: `${sha}\n`, code: 0 }; if (file === 'vercel') return { stdout: 'https://production-fallback.example.invalid\n', code: 0 }; return { stdout: '', code: 0 }; }, 'allow', {}, kinds);
+  try { const result = await d.service.run({ project: 'owner/repo', target: 'release' }); assert.equal(result.ok, true); assert.deepEqual(kinds, ['deploy.release', 'deploy.prod']); }
   finally { d.store.close(); rmSync(repo, { recursive: true, force: true }); rmSync(d.home, { recursive: true, force: true }); }
 });
 
@@ -303,6 +317,13 @@ test('Convex migration checks both envelope kinds and consumes one granted tap',
   const c = convexRepo(); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = []; const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-convex-tap-')); insertSuccessfulConvex(store, c.oldSha); const actions: string[] = []; let committed = 0;
   const service = createDeploy({ store, home, workspace: workspace(c.newSha), resolveRepo: async () => ({ repo: c.repo, slug: 'owner/repo' }), envelope: async ({ kind, actions: currentActions }) => { actions.push(`${kind}:${currentActions[0]}`); return { ok: true, decisions: [{ decision: 'allow' }] }; }, reserveTap: (project, kind, action, tapId) => { assert.equal(kind, 'convex.migration'); assert.equal(tapId, 'tap-1'); assert.match(action, new RegExp(`${c.oldSha}:${c.newSha}$`)); return { tapId: tapId!, token: 'reservation' }; }, commitTap: () => { committed += 1; }, rollbackTap() {}, exec: convexExec(c.repo, c.newSha, 'convex/schema.ts\n', calls), env: { CONVEX_DEPLOY_KEY: token } });
   try { const result = await service.run({ project: 'owner/repo', target: 'prod', tapId: 'tap-1' }); assert.equal(result.ok, true); assert.equal(committed, 1); assert.deepEqual(calls.filter((call) => call.file === 'npm').map((call) => call.args), [['ci']]); assert.deepEqual(calls.filter((call) => call.file === 'npx').map((call) => call.args), [['--no-install', 'convex', 'deploy', '--yes']]); const install = calls.find((call) => call.file === 'npm')!; assert.ok(install.options.cwd?.includes('/deploys/owner__repo/')); assert.notEqual(install.options.env?.HOME, process.env.HOME); assert.equal(existsSync(install.options.env!.HOME!), false); assert.deepEqual(Object.keys(install.options.env ?? {}).sort(), ['HOME', 'PATH']); const deploy = calls.find((call) => call.file === 'npx')!; assert.equal(deploy.options.env?.HOME, process.env.HOME ?? homedir()); assert.equal(Object.keys(deploy.options.env ?? {}).sort().join(','), 'CONVEX_DEPLOY_KEY,HOME,LANG,LC_ALL,PATH,TMPDIR'); assert.ok(actions.every((action) => action.includes(c.oldSha) && action.includes(c.newSha))); assert.ok(!JSON.stringify(install.options.env).includes(token)); }
+  finally { store.close(); rmSync(c.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('Convex production fallback makes migration a hard prod tap', async () => {
+  const c = convexRepo({ ...convexTarget, name: 'release', env: 'prod' }); writeFileSync(join(c.repo, '.env.local'), 'CONVEX_DEPLOYMENT=prod:checkout-project\n'); const calls: Array<{ file: string; args: string[]; options: Parameters<DeployExec>[2] }> = []; const store = openStore(':memory:'); const home = mkdtempSync(join(tmpdir(), 'helm-convex-prod-fallback-')); insertSuccessfulConvex(store, c.oldSha); const kinds: string[] = [];
+  const service = createDeploy({ store, home, workspace: workspace(c.newSha), resolveRepo: async () => ({ repo: c.repo, slug: 'owner/repo' }), envelope: async ({ kind }) => { kinds.push(kind); return { ok: true, decisions: [{ decision: 'allow' }] }; }, reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {}, exec: convexExec(c.repo, c.newSha, 'convex/schema.ts\n', calls), env: {} });
+  try { const result = await service.run({ project: 'owner/repo', target: 'release' }); assert.equal(result.ok, false); assert.equal(result.reason?.startsWith('tap required for convex.migration:'), true); assert.deepEqual(kinds, ['deploy.release', 'deploy.prod', 'convex.migration']); assert.equal(calls.some((call) => call.file === 'npx'), false); }
   finally { store.close(); rmSync(c.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
 });
 

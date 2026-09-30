@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
+import { compactInputSchema, createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
 import { VERSION } from './lifecycle.js';
 import type { Helm } from './helm.js';
 
@@ -17,15 +17,16 @@ type Registry = ReturnType<typeof createToolRegistry>;
 
 /** The daemon: owns the store and the workers, serves the CLI endpoint and MCP over HTTP. */
 export async function serve(opts: ServeOptions): Promise<ServeHandle> {
-  return serveHttp(opts.helm, createToolRegistry(opts.helm, opts.tools ?? resolveToolProfile(process.env.HELM_TOOLS)), opts.port ?? 0);
+  const profile = opts.tools ?? resolveToolProfile(process.env.HELM_TOOLS);
+  return serveHttp(opts.helm, createToolRegistry(opts.helm, profile, true), createToolRegistry(opts.helm, 'all'), opts.port ?? 0);
 }
 
 /** Stdio proxy: owns no workers or store; forwards calls without replay. See docs/runtime-notes.md. */
 export async function serveStdioProxy(port: number, tools?: ToolProfile): Promise<ServeHandle> {
-  const local = createToolRegistry(undefined as unknown as Helm, tools ?? resolveToolProfile(process.env.HELM_TOOLS)); // schemas only; `call` forwards here
+  const local = createToolRegistry(undefined as unknown as Helm, tools ?? resolveToolProfile(process.env.HELM_TOOLS), true); // schemas only; `call` forwards here
   const registry: Registry = {
     list: () => local.list(),
-    call: (name, input) => callDaemon(port, name, input) as ReturnType<Registry['call']>,
+    call: (name, input) => callDaemon(port, name, input, true) as ReturnType<Registry['call']>,
   };
   const mcp = buildMcpServer(registry);
   const transport = new StdioServerTransport();
@@ -37,9 +38,9 @@ export async function serveStdioProxy(port: number, tools?: ToolProfile): Promis
   return { port, closed, async close() { await mcp.close(); } };
 }
 
-export function callDaemon(port: number, name: string, input: unknown): Promise<unknown> {
+export function callDaemon(port: number, name: string, input: unknown, fromMcp = false): Promise<unknown> {
   return new Promise((resolve) => {
-      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json' } }, (res) => {
+      const req = httpRequest({ host: '127.0.0.1', port, method: 'POST', path: `/tools/${encodeURIComponent(name)}`, headers: { 'content-type': 'application/json', ...(fromMcp ? { 'x-helm-mcp': '1' } : {}) } }, (res) => {
         let body = '';
         res.setEncoding('utf8');
         res.on('error', (err) => resolve({ ok: false, reason: `daemon response interrupted: ${err.message}; mutation outcome may be unknown, inspect before retrying` }));
@@ -56,20 +57,20 @@ function buildMcpServer(registry: Registry): McpServer {
   for (const tool of registry.list()) {
     server.registerTool(
       tool.name,
-      { description: tool.description, inputSchema: tool.inputSchema },
+      { description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) },
       async (args: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(await registry.call(tool.name, args)) }] }),
     );
   }
   return server;
 }
 
-async function serveHttp(helm: Helm, registry: Registry, requestedPort: number): Promise<ServeHandle> {
+async function serveHttp(helm: Helm, mcpRegistry: Registry, internalRegistry: Registry, requestedPort: number): Promise<ServeHandle> {
   const home = helm.config.home;
   mkdirSync(home, { recursive: true });
   let port = requestedPort;
 
   const httpServer = createServer((req, res) => {
-    void handleHttpRequest(req, res, helm, registry, () => port);
+    void handleHttpRequest(req, res, helm, mcpRegistry, internalRegistry, () => port);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -98,7 +99,7 @@ async function serveHttp(helm: Helm, registry: Registry, requestedPort: number):
   };
 }
 
-async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm: Helm, registry: Registry, getPort: () => number): Promise<void> {
+async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm: Helm, mcpRegistry: Registry, internalRegistry: Registry, getPort: () => number): Promise<void> {
   try {
     const host = req.headers.host ?? '';
     if (host !== `127.0.0.1:${getPort()}` || (req.headers.origin && req.headers.origin !== `http://${host}`)) {
@@ -108,7 +109,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
     const url = new URL(req.url ?? '/', `http://${host}`);
 
     if (url.pathname === '/mcp') {
-      const mcp = buildMcpServer(registry);
+      const mcp = buildMcpServer(mcpRegistry);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on('close', () => {
         void transport.close();
@@ -151,6 +152,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
         }
         throw err;
       }
+      const registry = req.headers['x-helm-mcp'] === '1' ? mcpRegistry : internalRegistry;
       const outcome = await registry.call(name, input);
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(outcome));
       return;

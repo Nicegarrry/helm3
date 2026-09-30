@@ -315,8 +315,8 @@ export const spawnInput = z.object({
   loadClass: z.enum(LOAD_CLASSES).optional(),
   lanes: z.array(z.enum(['codex', 'pi', 'claude'])).max(3).optional(),
 }).strict();
-export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(20) }).strict();
-export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();
+export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(5), verbose: z.boolean().optional() }).strict();
+export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional(), verbose: z.boolean().optional() }).strict();
 export const steerInput = z.object({ workerId: z.string().min(1), message: z.string().min(1).max(20000) }).strict();
 export const retryInput = z.object({ workerId: z.string().min(1), kind: z.enum(['gate', 'acceptance', 'claims', 'review', 'tests_edited', 'conflict']).optional() }).strict();
 export const stopInput = z.object({ workerId: z.string().min(1) }).strict();
@@ -337,10 +337,10 @@ export const waitInput = z.object({
   // HTTP) so a wait is never aborted for silence. A caller that sees `timedOut` waits again.
   timeoutMs: z.number().int().min(1000).max(1_500_000).default(600_000),
 }).strict();
-export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional() }).strict();
+export const gateInput = z.object({ workerId: z.string().min(1), checks: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).max(20).optional(), verbose: z.boolean().optional() }).strict();
 export const baselineInput = z.object({ workerId: z.string().min(1) }).strict();
 export const claimsCheckInput = z.object({ workerId: z.string().min(1) }).strict();
-export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true), base: z.string().min(1).optional() }).strict();
+export const prOpenInput = z.object({ workerId: z.string().min(1), title: z.string().max(200).optional(), body: z.string().max(60000).optional(), draft: z.boolean().default(true), base: z.string().min(1).optional(), verbose: z.boolean().optional() }).strict();
 export const prStatusInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive().optional(), workerId: z.string().min(1).optional() }).strict();
 export const reviewInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), workerId: z.string().min(1).optional(), number: z.number().int().positive().optional(), model: z.string().min(1).optional(), allowSameFamily: z.boolean().default(false) }).strict();
 export const prMergeInput = z.object({ project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), expectedHead: z.string().regex(/^[0-9a-f]{40}$/) }).strict();
@@ -349,9 +349,10 @@ export const reviewRecordInput = z.object({
 }).strict();
 export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
+export const runStatusInput = z.object({ verbose: z.boolean().optional() }).strict();
 export const supervisorRegisterInput = z.object({ project: z.string().min(1), repo: z.string().min(1), host: z.enum(['herdr', 'tmux']), label: z.string().min(1) }).strict();
 export const supervisorListInput = emptyInput;
-export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boolean().default(false) }).strict();
+export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boolean().default(false), verbose: z.boolean().optional() }).strict();
 export const supervisorRotateInput = z.object({ project: z.string().min(1), focus: z.string().min(1).max(4000) }).strict();
 export const notifyNickInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();

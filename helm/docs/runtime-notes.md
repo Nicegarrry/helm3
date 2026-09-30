@@ -46,8 +46,11 @@ The Pi session file, reported as soon as it is opened rather than when the turn 
 
 The tool registry maps registered tool names to their zod input schemas and dispatches validated
 calls to a Helm instance. Its MCP-facing list is filtered by the `core`, `supervisor`, or `all`
-profile; dispatch remains unrestricted for CLI and loopback HTTP calls. `helm.call` delegates
-back through this same registry, and `helm.help` exposes compact indexes or full schemas.
+profile; dispatch remains unrestricted for CLI and loopback HTTP calls. MCP schemas are compact,
+while `helm.help` exposes full schemas. `helm.call` delegates back through this same registry, so
+validation, lifecycle guards, and tap rules are identical to direct calls. Core is the default MCP
+profile; `worker.list` is callable through `helm.call` and compact responses opt into full output
+with `verbose: true`.
 Never throws; unknown tools and invalid input both come back as `{ ok: false, reason }`.
 
 ## ui.ts

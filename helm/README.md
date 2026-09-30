@@ -65,12 +65,19 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
 `supervisor`, or `all` with `--tools <profile>` or `HELM_TOOLS`. The CLI and loopback HTTP
 `/tools/<name>` calls retain access to every registered tool regardless of the MCP profile.
 
-`core` contains the normal supervisor loop plus `helm.call` and `helm.help`; `supervisor` adds
-the next most-used review, claims, baseline, PR, envelope, deploy, memory, scorecard, budget,
-and spend tools. `all` exposes the complete catalog. `helm.help` with no argument returns one
-compact line per tool; pass `{ "tool": "worker.spawn" }` for that tool's full JSON schema and
-description. `helm.call` accepts `{ "tool": "...", "input": { ... } }` and runs the named tool
-through the same validation, lifecycle guards, and tap rules as a direct call.
+`core` exposes `worker.spawn`, `worker.steer`, `worker.inspect`, `inbox.reply`, `wake.list`,
+`gate.run`, `pr.open`, `run.status`, `helm.call`, and `helm.help`. Everything else is still
+available through `helm.call`. `supervisor` adds the next most-used review, claims, baseline, PR,
+envelope, deploy, memory, scorecard, budget, and spend tools; `all` exposes the complete catalog.
+`helm.help` with no argument returns one compact line per tool; pass `{ "tool": "worker.spawn" }`
+for that tool's full JSON schema and description. `helm.call` accepts `{ "tool": "...", "input":
+{ ... } }` and runs the named tool through the same validation, lifecycle guards, and tap rules as
+a direct call.
+
+MCP responses are compact by default. `worker.list` (available through `helm.call`) returns active,
+waiting, queued, and recently settled workers as short lines, while `worker.inspect` returns five
+bounded events. `wake.list` returns readable lines and gate, PR, and status results omit large nested
+blobs. Pass `verbose: true` in the target input to opt into the full response.
 
 ## Tools
 
@@ -78,7 +85,7 @@ through the same validation, lifecycle guards, and tap rules as a direct call.
 | --- | --- |
 | `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`), or `claude/<model>[:<effort>]` for the Claude CLI (`claude/sonnet:high`). |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
-| `worker.list` | One line per worker. |
+| `worker.list` | Compact active/recent worker lines; call through `helm.call` in core. |
 | `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
 | `worker.steer` | Send a follow-up message to an idle or interrupted worker in its own session (a Pi session, or a Codex thread resumed with the same model). |
 | `worker.stop` | Ask a running worker to stop. |
@@ -331,6 +338,7 @@ kind so the supervisor can call `tap.request` with the exact action returned by 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `HELM_HOME` | `~/.helm` | State directory |
+| `HELM_TOOLS` | `core` for MCP | MCP profile: `core`, `supervisor`, or `all` |
 | `HELM_SPEND_CAP_USD` | `0` (no cap) | Run-wide hard spend cap |
 | `HELM_SPEND_WARN_USD` | 80% of the cap | Soft cap: warn, never block |
 | `HELM_MAX_WORKERS` | `3` | Concurrent workers |

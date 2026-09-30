@@ -1,5 +1,6 @@
 /** Pi session runtime: creates one in-process Pi coding-agent session per turn inside a worktree, with Pi's built-in tools enabled, guarded by a `tool_call` extension hook that is the entire protected-path policy. */
 import { mkdir, realpath } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent' with { 'resolution-mode': 'import' };
 import type { Model, Api } from '@earendil-works/pi-ai' with { 'resolution-mode': 'import' };
@@ -147,10 +148,22 @@ function bashRefusalReason(command: string, role: WorkerRole, worktree: string, 
 async function evaluateToolCall(
   toolName: string,
   input: Record<string, unknown>,
-  ctx: Readonly<{ worktree: string; worktreeReal: string; role: WorkerRole; allowWorkflows: boolean }>,
+  ctx: Readonly<{ worktree: string; worktreeReal: string; role: WorkerRole; allowWorkflows: boolean; helmHome: string }>,
 ): Promise<Verdict> {
+  const tokenPath = async (path: string): Promise<boolean> => {
+    const resolved = await resolveGuardedPath(ctx.worktree, path);
+    return dirname(resolved) === ctx.helmHome && /^(serve\.json|serve\.json\..*\.tmp)$/.test(basename(resolved));
+  };
   if (toolName === 'bash' || toolName === 'powershell') {
     const command = typeof input.command === 'string' ? input.command : '';
+    // Cooperative detection only: computed paths and arbitrary scripts can bypass this.
+    const expanded = command.replace(/["']/g, '').replace(/\$\{?HELM_HOME\}?/g, ctx.helmHome)
+      .replace(/\$\{?HOME\}?|~/g, homedir());
+    const token = join(ctx.helmHome, 'serve.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`${token}(?:\\.[^\\s]*\\.tmp)?(?=$|[\\s;|<>])`).test(expanded)) return { allow: false, reason: 'refusing daemon token read' };
+    for (const path of tokenizeShell(expanded)) {
+      if (await tokenPath(path)) return { allow: false, reason: 'refusing daemon token read' };
+    }
     const reason = bashRefusalReason(command, ctx.role, ctx.worktree, ctx.worktreeReal);
     if (reason) return { allow: false, reason };
     return { allow: true, summary: command.slice(0, 120) };
@@ -162,6 +175,7 @@ async function evaluateToolCall(
     }
     const rawPath = typeof input.path === 'string' ? input.path : undefined;
     if (rawPath === undefined) return { allow: true, summary: toolName };
+    if (await tokenPath(rawPath)) return { allow: false, reason: 'refusing daemon token read' };
     const resolved = await resolveGuardedPath(ctx.worktree, rawPath);
     if (!isInside(resolved, ctx.worktreeReal) && !isInside(resolved, ctx.worktree)) {
       return { allow: false, reason: `path resolves outside the worktree: ${rawPath}` };
@@ -209,6 +223,7 @@ function computeCostUsd(model: Model<Api>, usage: Readonly<{ input: number; outp
 export type PiWorkerRunnerOptions = Readonly<{
   modelRuntime?: ModelRuntime;
   resolveModel?: (name: string) => Model<Api> | undefined;
+  helmHome?: string;
 }>;
 
 export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
@@ -237,6 +252,7 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
       const openedSessionFile = sessionManager.getSessionFile();
       if (openedSessionFile) hooks.onSession(openedSessionFile);
       const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
+      const helmHome = await resolveGuardedPath(input.worktree, resolve(opts.helmHome || process.env.HELM_HOME || join(homedir(), '.helm')));
 
       let worktreeReal: string;
       try {
@@ -255,6 +271,7 @@ export function piWorkerRunner(opts: PiWorkerRunnerOptions = {}): WorkerRunner {
           const verdict = await evaluateToolCall(event.toolName, event.input as Record<string, unknown>, {
             worktree: input.worktree,
             worktreeReal,
+            helmHome,
             role: input.role,
             allowWorkflows: input.allowWorkflows,
           });

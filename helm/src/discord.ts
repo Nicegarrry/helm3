@@ -36,6 +36,16 @@ function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+function processAlertText(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'process headroom is low';
+  const detail = value as { headroomPct?: unknown; topProcesses?: unknown };
+  const names = Array.isArray(detail.topProcesses)
+    ? detail.topProcesses.map((item) => item && typeof item === 'object' ? `${String((item as { name?: unknown }).name ?? 'unknown')} (${String((item as { count?: unknown }).count ?? 0)})` : '').filter(Boolean).slice(0, 3).join(', ')
+    : '';
+  const headroom = typeof detail.headroomPct === 'number' ? ` (${(detail.headroomPct * 100).toFixed(1)}% headroom)` : '';
+  return `${names || 'process headroom is low'}${headroom}`;
+}
+
 function spendStartupLine(data: EventRow['data']): string {
   const values = data.values && typeof data.values === 'object' ? data.values as Record<string, unknown> : {};
   const cap = values.capUsd === 0 ? 'NO spend cap' : `spend cap $${text(values.capUsd, 'unknown')}`;
@@ -70,8 +80,14 @@ function milestone(event: EventRow, projectCount: number): string | null {
     return `${prefix}#${text(event.data.number, 'unknown')}${title ? ` ${title}` : ''} merged into ${base ?? 'unknown'}${url ? ` ${url}` : ''}`;
   }
   if (event.kind === 'pr.closed') return `${prefix}#${text(event.data.number, 'unknown')} closed${optional(event.data.url) ? ` ${optional(event.data.url)}` : ''}`;
-  if (event.kind === 'watch.alert') return `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
+  if (event.kind === 'watch.alert') return event.data.rule === 'procs.low'
+    ? `Process headroom low: ${processAlertText(event.data.detail)}`
+    : `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
+  if (event.kind === 'capacity.waiting') {
+    const waited = Math.max(0, Math.round(Number(event.data.waitedMs ?? 0) / 60_000));
+    return `Waiting for capacity: ${text(event.data.kind, 'job')} ${text(event.data.loadClass, 'unknown')}, ${waited} min`;
+  }
   if (event.kind === 'spend.invalid') return 'helm.json invalid; keeping last good limits';
   if (event.kind === 'spend.changed') {
     if (event.data.source === 'startup') return spendStartupLine(event.data);
@@ -81,6 +97,8 @@ function milestone(event: EventRow, projectCount: number): string | null {
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
   if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;
+  if (event.kind === 'gate.sandbox.opt_out') return `Gate sandbox disabled: ${text(event.data.project, 'project')} (${text(event.data.reason, 'repo opt-out')})`;
+  if (event.kind === 'gate.unsandboxed') return `Gate ran unsandboxed: ${text(event.data.project, 'project')} (${text(event.data.reason, 'sandbox failure')})`;
   if (event.kind === 'deploy' || event.kind === 'deploy.rolledback' || event.kind === 'deploy.failed') {
     const state = event.kind === 'deploy' ? 'Deployed' : event.kind === 'deploy.rolledback' ? 'Deploy rolled back' : 'Deploy failed';
     const details = [event.data.env, event.data.sha, event.data.url, event.data.pr ? `PR #${event.data.pr}` : undefined, event.data.issue ? `issue #${event.data.issue}` : undefined]

@@ -11,7 +11,7 @@ import { registerWakeKind } from './supervise.js';
 export type QueueState = 'queued' | 'updating' | 'gating' | 'checks' | 'review' | 'ready' | 'merged' | 'failed' | 'conflict';
 export type MergeQueueRow = Readonly<{ id: string; repoSlug: string; number: number; workerId: string; state: QueueState; head: string; reason: string | null; enqueuedAt: string; updatedAt: string }>;
 export type QueueExec = (file: string, args: string[], options: { cwd?: string }) => Promise<{ stdout: string; stderr?: string; code: number }>;
-type GateCall = (input: { workerId: string }) => Promise<ToolOutcome<{ head: string; passed: boolean }>>;
+type GateCall = (input: { workerId: string }) => Promise<ToolOutcome<{ head: string; passed: boolean; queued?: true; gateId?: string }>>;
 type MergeCall = (input: { repoSlug: string; number: number; expectedHead: string }) => Promise<ToolOutcome<{ merged: true }>>;
 type QueueError = Error & { conflict?: boolean; transient?: boolean; stdout?: string; stderr?: string; files?: string[]; baseSha?: string; currentHead?: string };
 type QueueMeta = { baseSha: string; pendingBaseSha: string | null; priorPatchId: string | null; transientErrors: number; conflictRetries: number; conflictFiles: string[] };
@@ -329,6 +329,7 @@ export function createQueue(options: QueueOptions): QueueService {
       current = setState(current, 'gating');
       const gated = await gate({ workerId: current.workerId });
       if (!gated.ok) { fail(current, gated.reason); return true; }
+      if (gated.queued) return false;
       if (!gated.passed) { fail(current, 'gate failed'); return true; }
       try { await workspace.push(worker.worktree, worker.branch); const ready = await exec('gh', ['pr', 'ready', String(current.number), '--repo', current.repoSlug], { cwd: worker.worktree }); if (ready.code !== 0) throw new Error(ready.stderr?.trim() || 'gh pr ready failed'); }
       catch (error) { fail(current, errorMessage(error)); return true; }

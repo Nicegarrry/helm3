@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { consumer } from './daemon.js';
 import type { MemoryService } from './memory.js';
 import type { Store, ToolOutcome } from './types.js';
+import type { LoadClass } from './types.js';
 
 const isoDate = z.string().min(1).refine((value) => {
   const shape = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
@@ -18,6 +19,7 @@ export type ScorecardJson = Readonly<{
   activeMinutes: number; codexTokens: number; usd: number; jevCalls: number; jevCost: number | null;
   deploys: number; rollbacks: number; taps: number;
   outcomes: ReadonlyArray<Readonly<{ model: string; tier: number | 'unbanded'; clean: number; rework: number; failed: number }>>;
+  capacity?: Readonly<Record<LoadClass, Readonly<{ jobs: number; durationMs: number; avgDurationMs: number; peakRssMb: number }>>>;
 }>;
 export type ScorecardService = Readonly<{
   export(input: ScorecardExportInput): Promise<ToolOutcome<{ markdown: string; json: ScorecardJson }>>;
@@ -98,6 +100,10 @@ function markdown(json: ScorecardJson): string {
   for (const [kind, count] of Object.entries(json.retriesPerTicket)) lines.push(`| ${kind} | ${count.toFixed(4)} |`);
   lines.push('', '## Model × tier', '', '| Model | Tier | Clean | Rework | Failed |', '| --- | --- | ---: | ---: | ---: |');
   for (const outcome of json.outcomes) lines.push(`| ${outcome.model} | ${outcome.tier} | ${outcome.clean} | ${outcome.rework} | ${outcome.failed} |`);
+  if (json.capacity && Object.keys(json.capacity).length) {
+    lines.push('', '## Capacity by load class', '', '| Class | Jobs | Duration (ms) | Average (ms) | Peak RSS (MB) |', '| --- | ---: | ---: | ---: | ---: |');
+    for (const [loadClass, stats] of Object.entries(json.capacity)) lines.push(`| ${loadClass} | ${stats.jobs} | ${stats.durationMs} | ${stats.avgDurationMs} | ${stats.peakRssMb} |`);
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -137,6 +143,11 @@ export function createScorecard(options: { store: Store; memory: MemoryService; 
       const outcomeMap = new Map<string, { model: string; tier: number | 'unbanded'; clean: number; rework: number; failed: number }>(); const projectWorkers = (store.sql.prepare("SELECT w.workerId,w.createdAt,wm.issue FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.repoSlug=? AND w.role='builder'").all(input.project) as Row[]);
       for (const worker of builders) { const later = projectWorkers.some((row) => n(row.issue) === worker.issue && String(row.createdAt) > worker.createdAt); const workerEvents = events.filter((event) => String(event.workerId) === worker.workerId); const turns = workerEvents.filter((event) => event.kind === 'turn.start').length; const failedGate = firstGateRows.some((row) => String(row.workerId) === worker.workerId && !Boolean(row.passed)); const requestChanges = reviews.some((row) => String(row.workerId) === worker.workerId && (row.verdict === 'changes' || row.verdict === 'disputed')); const kind = classifyOutcome({ later, state: worker.state, failedGate, requestChanges, turns }); const key = `${worker.model}\u0000${worker.tier}`; const value = outcomeMap.get(key) ?? { model: worker.model, tier: worker.tier, clean: 0, rework: 0, failed: 0 }; value[kind]++; outcomeMap.set(key, value); }
       json.outcomes = [...outcomeMap.values()].sort((a, b) => a.model.localeCompare(b.model) || String(b.tier).localeCompare(String(a.tier)));
+      if (hasTable(store, 'capacity_jobs')) {
+        const capacityRows = store.sql.prepare(`SELECT loadClass,COUNT(*) AS jobs,COALESCE(SUM(durationMs),0) AS durationMs,COALESCE(AVG(durationMs),0) AS avgDurationMs,COALESCE(MAX(peakRssMb),0) AS peakRssMb FROM capacity_jobs WHERE workerId IN (${inList})${between('endedAt', from, to).sql} AND endedAt IS NOT NULL GROUP BY loadClass ORDER BY loadClass`).all(...args, ...between('endedAt', from, to).args) as Row[];
+        const capacity = Object.fromEntries(capacityRows.map((row) => [String(row.loadClass), { jobs: n(row.jobs), durationMs: round(n(row.durationMs)), avgDurationMs: round(n(row.avgDurationMs)), peakRssMb: round(n(row.peakRssMb)) }])) as Record<LoadClass, { jobs: number; durationMs: number; avgDurationMs: number; peakRssMb: number }>;
+        json.capacity = capacity;
+      }
     }
     const projectWindow = between('at', from, to); if (hasTable(store, 'deploys')) { const rows = store.sql.prepare(`SELECT id,state,at FROM deploys WHERE project=?${projectWindow.sql}`).all(input.project, ...projectWindow.args) as Row[]; json.deploys = rows.length; json.rollbacks = rows.filter((row) => String(row.state).toLowerCase() === 'rolledback').length; } if (hasTable(store, 'taps')) json.taps = (store.sql.prepare(`SELECT COUNT(*) AS count FROM taps WHERE project=?${between('requestedAt', from, to).sql}`).get(input.project, ...between('requestedAt', from, to).args) as Row).count as number;
     const result = { markdown: markdown(json), json }; const label = json.window.label ?? input.since ?? 'all'; const title = `Scorecard ${label}${input.budgetId ? ` ${input.budgetId}` : ''}`; const saved = await memory.write({ scope: 'project', project: input.project, type: 'scorecard', title, summary: `${json.tickets} tickets; ${json.merged} merged`, truth: result.markdown }); if (!saved.ok) return saved; return { ok: true, ...result };

@@ -9,6 +9,7 @@ import { CLAUDE_SESSION_PREFIX, available, claudeArgs, claudeSandboxSettings, cl
 import { CORRECTION_MESSAGE } from '../src/worker.js';
 import { RESULT_INSTRUCTION } from '../src/prompt.js';
 import { laneRunner } from '../src/codex.js';
+import { credentialPaths } from '../src/sandbox.js';
 import type { EventRow, WorkerHooks, WorkerRunInput, WorkerRunner } from '../src/types.js';
 
 function fakeClaude(mode: string, record: string): string {
@@ -109,12 +110,7 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
     allowRead: ['/wt', join(homedir(), '.config', 'git'), '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/helm-claude'],
     allowWrite: ['/wt', '/tmp/helm-claude'],
     denyWrite: ['/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/wt/.git'],
-    denyRead: [
-      join(homedir(), '.config'), join(homedir(), '.ssh'), join(homedir(), '.aws'), join(homedir(), '.gnupg'), join(homedir(), '.netrc'),
-      join(homedir(), '.npmrc'), join(homedir(), '.yarnrc*'), join(homedir(), '.docker'), join(homedir(), '.kube'), join(homedir(), '.stripe'),
-      join(homedir(), '.convex'), join(homedir(), '.codex'), join(homedir(), '.pi'), join(homedir(), '.claude'), join(homedir(), '.claude.json'),
-      join(homedir(), '.appstoreconnect'), join(homedir(), 'Library', 'Keychains'), join(homedir(), 'Library', 'Application Support'), join(homedir(), '.helm'),
-    ],
+    denyRead: credentialPaths(homedir()),
   });
   assert.deepEqual(settings.sandbox.network, { allowedDomains: [], deniedDomains: ['*'] });
   assert.equal(build.filter((arg) => arg === '--add-dir').length, 1);

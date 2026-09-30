@@ -54,7 +54,7 @@ test('maps milestone events, batches them, and never leaks the webhook URL', asy
       fetch: async (url, init) => { calls.push({ url: String(url), body: String(init?.body) }); return new Response('{}', { status: 200 }); }, log: (line) => logs.push(line) });
     const events = [
       ['pr', { number: 7 }], ['pr.merged', { number: 7 }], ['watch.alert', { rule: 'silence' }],
-      ['spend.warning', { spendUsd: 8 }], ['spend.invalid', { reason: 'helm.json invalid; keeping last good limits' }], ['spend.changed', { source: 'file' }], ['spend.changed', { source: 'startup', values: { capUsd: 10, warnUsd: 8, maxWorkers: 3 } }], ['inbox.triage', { inboxId: 'q-1', route: 'needs_human', shadow: true, question: 'approve it' }], ['state', { to: 'failed' }],
+      ['spend.warning', { spendUsd: 8 }], ['capacity.waiting', { kind: 'gate', loadClass: 'heavy', waitedMs: 120_000 }], ['spend.invalid', { reason: 'helm.json invalid; keeping last good limits' }], ['spend.changed', { source: 'file' }], ['spend.changed', { source: 'startup', values: { capUsd: 10, warnUsd: 8, maxWorkers: 3 } }], ['inbox.triage', { inboxId: 'q-1', route: 'needs_human', shadow: true, question: 'approve it' }], ['state', { to: 'failed' }],
     ] as const;
     for (const [kind, data] of events) store.appendEvent('w-1', kind, { ...data, project: 'o/r' }, clock.toISOString());
     await discord.tick();
@@ -65,6 +65,7 @@ test('maps milestone events, batches them, and never leaks the webhook URL', asy
     const payload = JSON.parse(calls[0]!.body) as { content: string; username: string; allowed_mentions: { parse: string[] } };
     assert.match(payload.content, /#7/);
     assert.match(payload.content, /Needs Nick/);
+    assert.match(payload.content, /Waiting for capacity: gate heavy, 2 min/);
     assert.match(payload.content, /helm\.json invalid; keeping last good limits/);
     assert.match(payload.content, /Spend changed: file/);
     assert.match(payload.content, /Helm started: spend cap \$10, warn \$8, max workers 3/);
@@ -130,6 +131,36 @@ test('formats dispatch, PR, merge, and deployment milestone lines', async () => 
     assert.match(content, /PR updated: o\/r #12 PR title https:\/\/github\.test\/12/);
     assert.match(content, /o\/r #12 PR title merged into main https:\/\/github\.test\/12/);
     assert.match(content, /Deployed: prod production abcdef1 https:\/\/app\.test PR #12 issue #260/);
+  } finally { store.close(); }
+});
+
+test('formats a gate sandbox opt-out as a milestone', async () => {
+  const store = openStore(':memory:');
+  const bodies: string[] = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: settings(), env: { HELM_TEST_WEBHOOK: 'https://discord.test/one' }, now: () => clock,
+      fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('w-1', 'gate.sandbox.opt_out', { project: 'o/r', reason: 'base helm.json sets gate.sandbox=false' });
+    await discord.tick();
+    clock = new Date(clock.getTime() + 60_000);
+    await discord.tick();
+    assert.match(JSON.parse(bodies[0]!).content, /Gate sandbox disabled: o\/r \(base helm\.json sets gate\.sandbox=false\)/);
+  } finally { store.close(); }
+});
+
+test('formats an unsandboxed gate fallback as a milestone', async () => {
+  const store = openStore(':memory:');
+  const bodies: string[] = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: settings(), env: { HELM_TEST_WEBHOOK: 'https://discord.test/one' }, now: () => clock,
+      fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('w-1', 'gate.unsandboxed', { project: 'o/r', reason: 'sandbox-exec failed to apply profile' });
+    await discord.tick();
+    clock = new Date(clock.getTime() + 60_000);
+    await discord.tick();
+    assert.match(JSON.parse(bodies[0]!).content, /Gate ran unsandboxed: o\/r \(sandbox-exec failed to apply profile\)/);
   } finally { store.close(); }
 });
 

@@ -12,9 +12,14 @@ import { loadSettings, type Settings } from '../src/settings.js';
 import type { GitHub, PrStatus, WorkerRow, Workspace } from '../src/types.js';
 import { disableGitMaintenance, removeTempDir } from './git-fixture.js';
 
+function unHardenedGitArgs(file: string, args: string[]): string[] {
+  return file === 'git' && args[0] === '-c' ? args.slice(8).filter((arg) => arg !== '--no-verify') : args;
+}
+
 const h1 = '1'.repeat(40);
 const h2 = '2'.repeat(40);
 const h3 = '3'.repeat(40);
+const HARDENED_GIT_PREFIX = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.sshCommand=ssh', '-c', 'protocol.ext.allow=never'];
 const rejectExec = (): never => { throw Object.assign(new Error('git command failed'), { code: 1, stdout: '', stderr: '' }); };
 
 function worker(id: string, number: number, head: string, worktree = `/worktree/${id}`, state: WorkerRow['state'] = 'succeeded'): WorkerRow {
@@ -41,7 +46,7 @@ function setup(options: { gate?: boolean; mergeHead?: string; worktree?: string;
     async prStatus(_repo, number): Promise<PrStatus> { if (options.statusError) throw new Error('checks service unavailable'); return { number, state: options.merged ? 'merged' : 'open', head: heads.get(number)!, mergeable: options.mergeable === undefined ? true : options.mergeable, draft: false, checks: options.pending ? [{ name: 'ci', status: 'pending', conclusion: null }] : [], reviews: [], url: 'https://example.invalid/pr' }; },
     async openPr() { return { number: 1, url: 'https://example.invalid/pr' }; }, async comment() { return { body: 'APPROVE: ok', issueNumber: 1 }; }, async postComment() {}, async merge() {},
   };
-  const exec: QueueExec = options.exec ?? (async (file, args, opts) => { calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) return rejectExec(); return { stdout: '', stderr: '', code: 0 }; });
+  const exec: QueueExec = options.exec ?? (async (file, args, opts) => { args = unHardenedGitArgs(file, args); calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse' && args.includes('MERGE_HEAD')) return rejectExec(); return { stdout: '', stderr: '', code: 0 }; });
   const settings = { ...loadSettings('/missing-queue-settings'), queue: { tickSec: 1, checksTimeoutMin: 1 } } as Settings;
   const review = createReview({ store, github, workspace, jev: { shadow: false, async ask() { return { ok: false as const, reason: 'no key' }; } }, settings });
   const queue = createQueue({ store, workspace, github, settings, retry: options.retry, gate: async ({ workerId }) => ({ ok: true, head: store.getWorker(workerId)?.head ?? h1, passed: options.gate ?? true }), prMerge: async ({ number, expectedHead }) => { if (!options.guardReviews) return { ok: true, merged: true }; const reason = await review.guard({ number, expectedHead }); return reason ? { ok: false, reason } : { ok: true, merged: true }; }, exec, now: () => clock });
@@ -63,6 +68,23 @@ test('two PRs on one repository are processed in order, one per tick', async () 
     assert.equal(rows(d)[1]?.state, 'queued');
     await d.queue.tick();
     assert.equal(rows(d)[1]?.state, 'merged');
+  } finally { d.store.close(); }
+});
+
+test('queue hardens raw merge argv passed to an injected exec', async () => {
+  const raw: Array<{ file: string; args: string[] }> = [];
+  const d = setup({ exec: async (file, args) => {
+    raw.push({ file, args: [...args] });
+    return { stdout: '', stderr: '', code: 0 };
+  } });
+  try {
+    await d.queue.enqueue({ number: 1 });
+    d.setBase('base-2');
+    await d.queue.tick();
+    const merge = raw.find((call) => call.file === 'git' && call.args[8] === 'merge');
+    assert.ok(merge);
+    assert.deepEqual(merge.args.slice(0, 8), HARDENED_GIT_PREFIX);
+    assert.deepEqual(merge.args.slice(8, 11), ['merge', '--no-verify', '--no-commit']);
   } finally { d.store.close(); }
 });
 
@@ -99,7 +121,7 @@ test('a red gate fails the item and emits queue.failed', async () => {
 });
 
 test('a merge conflict enters conflict and emits a wake, without force or rebase', async () => {
-  const d = setup({ exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stdout: 'CONFLICT (content): conflict.txt', code: 1 }); if (file === 'git' && args[0] === 'diff') return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
+  const d = setup({ exec: async (file, args, opts) => { args = unHardenedGitArgs(file, args); d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stdout: 'CONFLICT (content): conflict.txt', code: 1 }); if (file === 'git' && args[0] === 'diff') return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
   d.heads.set(1, h3);
   d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
   try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); assert.equal(rows(d)[0]?.head, h3); assert.equal(d.store.listEvents('w-1').find((event) => event.kind === 'conflict')?.data.head, h3); assert.ok(d.calls.some((call) => call.args.includes('--no-commit'))); assert.equal(d.calls.some((call) => call.args.includes('--force') || call.args.includes('rebase')), false); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
@@ -108,7 +130,7 @@ test('a merge conflict enters conflict and emits a wake, without force or rebase
 
 test('a conflict retries the original worker and a clean unchanged fix merges without re-review', async () => {
   const retryCalls: Array<{ workerId: string; kind: 'conflict' }> = [];
-  const d = setup({ guardReviews: true, retry: async (input) => { retryCalls.push(input); return { ok: true, turn: 2, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } });
+  const d = setup({ guardReviews: true, retry: async (input) => { retryCalls.push(input); return { ok: true, turn: 2, message: 'retry sent' }; }, exec: async (file, args, opts) => { args = unHardenedGitArgs(file, args); d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } });
   try {
     await d.queue.enqueue({ number: 1 });
     await d.review.record({ number: 1, head: h1, commentUrl: 'https://example.invalid/pr/1#issuecomment-1', reviewer: 'claude-sonnet', verdict: 'approve' });
@@ -121,7 +143,7 @@ test('a conflict retries the original worker and a clean unchanged fix merges wi
 
 test('trailing whitespace and markdown separators do not trigger a conflict retry', async () => {
   let retries = 0;
-  const d = setup({ guardReviews: true, retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'diff' && args[1] === '--check') throw Object.assign(new Error('diff check failed'), { stdout: 'README.md:2: trailing whitespace\nREADME.md:5:=======', code: 2 }); if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } });
+  const d = setup({ guardReviews: true, retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { args = unHardenedGitArgs(file, args); d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'diff' && args[1] === '--check') throw Object.assign(new Error('diff check failed'), { stdout: 'README.md:2: trailing whitespace\nREADME.md:5:=======', code: 2 }); if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } });
   try { await d.queue.enqueue({ number: 1 }); await d.review.record({ number: 1, head: h1, commentUrl: 'https://example.invalid/pr/1#issuecomment-3', reviewer: 'claude-sonnet', verdict: 'approve' }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { head: h3, state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(retries, 1); assert.equal(rows(d)[0]?.state, 'merged'); assert.equal(d.calls.some((call) => call.args.includes('--check')), false); }
   finally { d.store.close(); }
 });
@@ -133,7 +155,7 @@ test('leftover conflict markers trigger one second retry, then conflict and a wa
   disableGitMaintenance(worktree);
   writeFileSync(join(worktree, 'conflict.txt'), '<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n'); execFileSync('git', ['add', 'conflict.txt'], { cwd: worktree }); execFileSync('git', ['commit', '-qm', 'marker'], { cwd: worktree });
   const markerHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).trim();
-  const d = setup({ worktree, mergeHead: markerHead, retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'merge-base') return { stdout: '', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); if (file === 'git' && (args[0] === 'ls-files' || args[0] === 'grep')) { try { return { stdout: execFileSync(file, args, { cwd: opts.cwd, encoding: 'utf8' }), stderr: '', code: 0 }; } catch (error) { throw error; } } return { stdout: '', stderr: '', code: 0 }; } });
+  const d = setup({ worktree, mergeHead: markerHead, retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { args = unHardenedGitArgs(file, args); d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'merge-base') return { stdout: '', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); if (file === 'git' && (args[0] === 'ls-files' || args[0] === 'grep')) { try { return { stdout: execFileSync(file, args, { cwd: opts.cwd, encoding: 'utf8' }), stderr: '', code: 0 }; } catch (error) { throw error; } } return { stdout: '', stderr: '', code: 0 }; } });
   d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
   try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(retries, 2); assert.equal(rows(d)[0]?.state, 'updating'); assert.equal(d.store.listEvents('w-1').filter((event) => event.kind === 'conflict').at(-1)?.data.head, markerHead); assert.deepEqual(d.store.listEvents('w-1').filter((event) => event.kind === 'conflict').at(-1)?.data.files, ['conflict.txt']); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
   finally { d.store.close(); removeTempDir(worktree); }
@@ -142,7 +164,7 @@ test('leftover conflict markers trigger one second retry, then conflict and a wa
 test('an aborted merge or leftover MERGE_HEAD triggers a second retry then conflict', async () => {
   for (const mode of ['aborted', 'merge-head'] as const) {
     let retries = 0;
-    const d = setup({ retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'merge-base') { if (mode === 'aborted') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } if (file === 'git' && args[0] === 'rev-parse') { if (mode === 'merge-head') return { stdout: 'other\n', stderr: '', code: 0 }; return rejectExec(); } return { stdout: '', stderr: '', code: 0 }; } });
+    const d = setup({ retry: async () => { retries += 1; return { ok: true, turn: retries, message: 'retry sent' }; }, exec: async (file, args, opts) => { args = unHardenedGitArgs(file, args); d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'merge-base') { if (mode === 'aborted') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } if (file === 'git' && args[0] === 'rev-parse') { if (mode === 'merge-head') return { stdout: 'other\n', stderr: '', code: 0 }; return rejectExec(); } return { stdout: '', stderr: '', code: 0 }; } });
     d.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
     try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(retries, 2); assert.equal(rows(d)[0]?.state, 'updating'); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'conflict'); await d.supervisor.consume(); const wakes = d.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
     finally { d.store.close(); }
@@ -150,12 +172,12 @@ test('an aborted merge or leftover MERGE_HEAD triggers a second retry then confl
 });
 
 test('a changed conflict fix requires approval at the new head, and missing or stopped workers wake as conflict', async () => {
-  const d = setup({ guardReviews: true, patchIds: { [`base:h1`]: 'old', [`base-2:${h3}`]: 'new' }, retry: async () => ({ ok: true, turn: 1, message: 'retry sent' }), exec: async (file, args, opts) => { d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } });
+  const d = setup({ guardReviews: true, patchIds: { [`base:h1`]: 'old', [`base-2:${h3}`]: 'new' }, retry: async () => ({ ok: true, turn: 1, message: 'retry sent' }), exec: async (file, args, opts) => { args = unHardenedGitArgs(file, args); d.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; if (file === 'git' && args[0] === 'ls-files') return rejectExec(); if (file === 'git' && args[0] === 'grep') return rejectExec(); if (file === 'git' && args[0] === 'rev-parse') return rejectExec(); return { stdout: '', stderr: '', code: 0 }; } });
   try { await d.queue.enqueue({ number: 1 }); d.setBase('base-2'); await d.queue.tick(); d.store.updateWorker('w-1', { head: h3, state: 'succeeded' }); d.heads.set(1, h3); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'review'); await d.review.record({ number: 1, head: h3, commentUrl: 'https://example.invalid/pr/1#issuecomment-2', reviewer: 'claude-sonnet', verdict: 'approve' }); await d.queue.tick(); assert.equal(rows(d)[0]?.state, 'merged'); }
   finally { d.store.close(); }
 
   for (const options of [{ missingWorktree: true }, { workerState: 'stopped' as const }]) {
-    const d2 = setup({ ...options, retry: async () => ({ ok: true, turn: 1, message: 'retry sent' }), exec: async (file, args, opts) => { d2.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
+    const d2 = setup({ ...options, retry: async () => ({ ok: true, turn: 1, message: 'retry sent' }), exec: async (file, args, opts) => { args = unHardenedGitArgs(file, args); d2.calls.push({ file, args, cwd: opts.cwd }); if (file === 'git' && args[0] === 'merge') throw Object.assign(new Error('merge failed'), { stderr: 'CONFLICT', code: 1 }); if (file === 'git' && args[0] === 'diff' && args.includes('--diff-filter=U')) return { stdout: 'conflict.txt\n', stderr: '', code: 0 }; return { stdout: '', stderr: '', code: 0 }; } });
     d2.supervisor.register({ project: 'owner/repo', repo: '/repo', host: 'herdr', label: 'owner/repo' });
     try { await d2.queue.enqueue({ number: 1 }); d2.setBase('base-2'); await d2.queue.tick(); assert.equal(rows(d2)[0]?.state, 'conflict'); await d2.supervisor.consume(); const wakes = d2.supervisor.wakes({ project: 'owner/repo', ack: false }); assert.equal(wakes.ok && wakes.wakes[0]?.kind, 'queue.failed'); }
     finally { d2.store.close(); }

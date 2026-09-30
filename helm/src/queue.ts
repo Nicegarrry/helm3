@@ -52,7 +52,8 @@ function transientError(error: unknown, message: string): QueueError {
 
 export function createQueue(options: QueueOptions): QueueService {
   const { store, workspace, github, settings, gate, prMerge, retry } = options;
-  const exec: QueueExec = options.exec ?? ((file, args, execOptions) => defaultExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions));
+  const rawExec = options.exec ?? defaultExec;
+  const exec: QueueExec = (file, args, execOptions) => rawExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions);
   const now = options.now ?? (() => new Date());
   const queueTable = store.sql.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'merge_queue'").get();
   if (!queueTable) {

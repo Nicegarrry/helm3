@@ -25,6 +25,12 @@ export type CatalogProbe = Readonly<{
   models?: (lane: RoutingLane) => readonly string[] | Promise<readonly string[]>;
 }>;
 
+export type CatalogSources = Readonly<{
+  codexModels?: () => readonly string[] | Promise<readonly string[]>;
+  piModels?: () => readonly string[] | Promise<readonly string[]>;
+  claudeAvailable?: () => boolean | Promise<boolean>;
+}>;
+
 export type ModelCatalog = Readonly<{
   availability(model: string): Promise<{ available: boolean; reason?: string }>;
   refresh?(settings: Settings): Promise<void>;
@@ -120,7 +126,7 @@ async function defaultClaudeProbe(): Promise<boolean> {
   try { await exec('which', ['claude'], { timeout: 2_000 }); return true; } catch { return false; }
 }
 
-export function createModelCatalog(options: { getSettings?: () => Settings; probe?: CatalogProbe; claudeLaneRegistered?: boolean }): ModelCatalog {
+export function createModelCatalog(options: { getSettings?: () => Settings; probe?: CatalogProbe; sources?: CatalogSources; home?: string; claudeLaneRegistered?: boolean }): ModelCatalog {
   type Result = { available: boolean; reason?: string };
   type Entry = { at: number; result: Result };
   const cache = new Map<string, Entry>();
@@ -128,6 +134,8 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
   const laneCache = new Map<RoutingLane, { at: number; models: readonly string[] }>();
   const lanePending = new Map<RoutingLane, Promise<readonly string[]>>();
   const probe = options.probe ?? {};
+  const sources = options.sources ?? {};
+  const home = options.home ?? homedir();
   const getSettings = options.getSettings ?? (() => { throw new Error('routing catalog settings are not configured'); });
 
   async function availability(model: string, force = false): Promise<Result> {
@@ -139,7 +147,7 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
     const operation = (async () => {
       if (model.startsWith('claude/')) {
         if (!options.claudeLaneRegistered) return { available: false, reason: 'no worker lane for claude' };
-        const available = await (probe.claude ?? defaultClaudeProbe)();
+        const available = await (sources.claudeAvailable ?? probe.claude ?? defaultClaudeProbe)();
         return available ? { available: true } : { available: false, reason: 'claude binary is unavailable' };
       }
       const parts = modelParts(model);
@@ -175,9 +183,9 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
     if (active) return active;
     const operation = (async () => {
       if (probe.models) return probe.models(lane);
-      if (lane === 'codex') return defaultCodexModels();
-      if (lane === 'pi') return [...new Set([
-        ...piModelsFromJson(readJson(join(homedir(), '.pi', 'agent', 'models.json'))),
+      if (lane === 'codex') return sources.codexModels ? sources.codexModels() : defaultCodexModels();
+      if (lane === 'pi') return sources.piModels ? sources.piModels() : [...new Set([
+        ...piModelsFromJson(readJson(join(home, '.pi', 'agent', 'models.json'))),
         ...piBuiltInModels(),
       ])];
       return [];

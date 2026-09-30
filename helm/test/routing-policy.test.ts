@@ -12,6 +12,18 @@ const baseSettings = loadSettings('/missing-routing-policy-settings');
 const input: SpawnInput = { repo: 'acme/repo', objective: 'task', role: 'builder', contextPaths: [], allowWorkflows: false };
 const jev: Jev = { shadow: true, async ask() { return { ok: true, answers: { complexity: { score: 0.2 }, too_big: { noul: false } } }; } };
 const choose = async (route: ReturnType<typeof createRouter>, value = input): Promise<ModelChoice> => await route(value) as ModelChoice;
+function testCatalog(available: (model: string) => boolean | Promise<boolean> = () => true): ReturnType<typeof createModelCatalog> {
+  return createModelCatalog({
+    claudeLaneRegistered: false,
+    sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false },
+    probe: {
+      codex: (id) => available(`codex/${id}`),
+      pi: (provider, id) => available(`${provider}/${id}`),
+      claude: () => false,
+      models: () => [],
+    },
+  });
+}
 
 function settings(tiers: Record<string, string[]>, policy: { lanes?: ('codex' | 'pi' | 'claude')[]; subscriptionOnly?: boolean }) {
   return { ...baseSettings, routing: { ...baseSettings.routing, tiers, allowed: Object.values(tiers).flat(), policy } };
@@ -22,7 +34,7 @@ test('codex-only policy maps each Jev tier to its Codex candidate', async () => 
   try {
     const tiers = { '1': ['pi/flash', 'codex/gpt-6-luna:medium'], '2': ['pi/gemini', 'codex/gpt-6-luna:high'], '3': ['claude/sonnet:high', 'codex/gpt-5.6-terra:high'], '4': ['codex/gpt-6.1-sol:medium'], '5': ['codex/gpt-6-astra:high', 'codex/gpt-6.1-sol:high'] };
     for (const [tier, score] of [[1, 0.2], [2, 1], [3, 2], [4, 3], [5, 3.5]] as const) {
-      const route = createRouter({ settings: settings(tiers, { lanes: ['codex'] }), store, jev: { shadow: true, async ask() { return { ok: true, answers: { complexity: { score }, too_big: { noul: false } } }; } }, catalog: createModelCatalog({ getSettings: () => baseSettings, probe: { codex: () => true } }) });
+      const route = createRouter({ settings: settings(tiers, { lanes: ['codex'] }), store, jev: { shadow: true, async ask() { return { ok: true, answers: { complexity: { score }, too_big: { noul: false } } }; } }, catalog: testCatalog() });
       const result = await choose(route, { ...input, objective: `tier ${tier}` });
       assert.equal(result.model, tiers[String(tier) as keyof typeof tiers]!.find((model: string) => model.startsWith('codex/')));
     }
@@ -32,7 +44,7 @@ test('codex-only policy maps each Jev tier to its Codex candidate', async () => 
 test('subscriptionOnly excludes Pi candidates without changing Jev triage', async () => {
   const store = openStore(':memory:'); let calls = 0;
   try {
-    const route = createRouter({ settings: settings({ '1': ['pi/paid', 'codex/gpt-6-luna:medium'] }, { subscriptionOnly: true }), store, jev: { shadow: true, async ask() { calls += 1; return { ok: true, answers: { complexity: { score: 0.2 }, too_big: { noul: false } } }; } }, isAvailable: () => true });
+    const route = createRouter({ settings: settings({ '1': ['pi/paid', 'codex/gpt-6-luna:medium'] }, { subscriptionOnly: true }), store, jev: { shadow: true, async ask() { calls += 1; return { ok: true, answers: { complexity: { score: 0.2 }, too_big: { noul: false } } }; } }, catalog: testCatalog() });
     const result = await choose(route);
     assert.equal(result.model, 'codex/gpt-6-luna:medium');
     assert.equal(calls, 1);
@@ -44,7 +56,7 @@ test('per-spawn lanes can narrow but never widen the configured policy', async (
   const store = openStore(':memory:');
   try {
     const tiers = { '1': ['pi/flash', 'codex/luna'] };
-    const catalog = createModelCatalog({ probe: { pi: () => true, codex: () => true } });
+    const catalog = testCatalog();
     const route = createRouter({ settings: settings(tiers, { lanes: ['codex'] }), store, jev, catalog });
     const narrowed = await choose(route, { ...input, lanes: ['codex', 'pi'] });
     assert.equal(narrowed.model, 'codex/luna');
@@ -61,7 +73,7 @@ test('Codex catalog parses debug models slugs', () => {
 
 test('catalog retries a failed refresh while preserving the last known result', async () => {
   let calls = 0;
-  const catalog = createModelCatalog({ probe: { codex: () => { calls += 1; if (calls === 2) throw new Error('temporary'); return true; } } });
+  const catalog = createModelCatalog({ probe: { codex: () => { calls += 1; if (calls === 2) throw new Error('temporary'); return true; } }, sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false } });
   assert.equal((await catalog.availability('codex/luna')).available, true);
   assert.equal((await catalog.availability('codex/luna')).available, true);
   assert.equal(calls, 1);

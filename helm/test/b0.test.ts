@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { Helm } from '../src/helm.js';
+import { createModelCatalog } from '../src/routing/catalog.js';
 import { projectOf } from '../src/supervise.js';
 import { loadRepoConfig } from '../src/repoconfig.js';
 import { openStore } from '../src/store.js';
@@ -29,7 +30,12 @@ function deps() {
     async comment() { return { body: '', issueNumber: 1 }; }, async postComment() {}, async merge() {},
   };
   const runner: WorkerRunner = { async run(_input, _message, _hooks) { return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null }; } };
-  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'build', reviewer: () => 'review', validator: () => 'validate' }, settings: loadSettings(home) });
+  const routingCatalog = createModelCatalog({
+    claudeLaneRegistered: false,
+    sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false },
+    probe: { codex: () => true, pi: () => true, claude: () => false },
+  });
+  const helm = new Helm({ config, store, workspace, gates, github, runner, prompts: { builder: () => 'build', reviewer: () => 'review', validator: () => 'validate' }, settings: loadSettings(home), routingCatalog });
   return { helm, store, home };
 }
 

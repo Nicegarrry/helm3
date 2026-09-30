@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { compactInputSchema, createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { compactInputSchema, compactInputValidator, createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
 import { VERSION } from './lifecycle.js';
 import type { Helm } from './helm.js';
 
@@ -54,13 +55,15 @@ export function callDaemon(port: number, name: string, input: unknown, fromMcp =
 
 function buildMcpServer(registry: Registry): McpServer {
   const server = new McpServer({ name: 'helm', version: VERSION });
+  const advertisedTools = registry.list().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) }));
   for (const tool of registry.list()) {
     server.registerTool(
       tool.name,
-      { description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) },
+      { description: tool.description, inputSchema: compactInputValidator(tool.inputSchema) },
       async (args: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(await registry.call(tool.name, args)) }] }),
     );
   }
+  server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: advertisedTools }));
   return server;
 }
 

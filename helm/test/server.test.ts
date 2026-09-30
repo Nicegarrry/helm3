@@ -153,8 +153,10 @@ test('MCP tool profiles stay within their serialized context budgets', async () 
       try {
         const { tools } = await client.listTools();
         assert.deepEqual(tools.map((tool) => tool.name).sort(), [...expected[profile]].sort());
-        const tokenEstimate = JSON.stringify(tools).length / 4;
-        assert.ok(tokenEstimate <= (profile === 'core' ? 1_200 : 3_000), `${profile} tools/list is about ${tokenEstimate} tokens`);
+        const serialized = JSON.stringify(tools);
+        assert.doesNotMatch(serialized, /\"\$schema\"/);
+        assert.doesNotMatch(serialized, /9007199254740991/);
+        assert.ok(serialized.length <= (profile === 'core' ? 3_600 : 8_500), `${profile} tools/list is ${serialized.length} chars`);
       } finally { await client.close(); }
     }, profile);
   }

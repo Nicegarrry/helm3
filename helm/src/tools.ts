@@ -213,12 +213,40 @@ function compactZodSchema(value: unknown, required: boolean): z.ZodType {
   return required ? schema : schema.optional();
 }
 
-export function compactInputSchema(schema: z.ZodObject): z.ZodObject {
+export function compactInputValidator(schema: z.ZodObject): z.ZodObject {
   const json = z.toJSONSchema(schema) as JsonObject;
   const required = new Set(Array.isArray(json.required) ? json.required.filter((item): item is string => typeof item === 'string') : []);
   const properties = json.properties && typeof json.properties === 'object' ? json.properties as JsonObject : {};
   const shape = Object.fromEntries(Object.entries(properties).map(([key, value]) => [key, compactZodSchema(value, required.has(key) && !(value && typeof value === 'object' && 'default' in value))]));
   return z.object(shape).strict();
+}
+
+function compactJsonSchemaValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(compactJsonSchemaValue);
+  if (!value || typeof value !== 'object') return value;
+  const source = value as JsonObject;
+  const result: JsonObject = {};
+  if (source.type !== undefined) result.type = source.type;
+  if (Array.isArray(source.enum)) result.enum = source.enum;
+  if (source.properties && typeof source.properties === 'object') {
+    const properties = source.properties as JsonObject;
+    result.properties = Object.fromEntries(Object.entries(properties).map(([key, child]) => [key, compactJsonSchemaValue(child)]));
+    const required = Array.isArray(source.required)
+      ? source.required.filter((key): key is string => {
+        if (typeof key !== 'string') return false;
+        const child = properties[key];
+        return !(child && typeof child === 'object' && 'default' in child);
+      })
+      : [];
+    if (required.length) result.required = required;
+  }
+  if (source.items !== undefined) result.items = compactJsonSchemaValue(source.items);
+  for (const key of ['anyOf', 'oneOf']) if (source[key] !== undefined) result[key] = compactJsonSchemaValue(source[key]);
+  return result;
+}
+
+export function compactInputSchema(schema: z.ZodObject): Record<string, unknown> {
+  return compactJsonSchemaValue(z.toJSONSchema(schema)) as Record<string, unknown>;
 }
 
 const TOOLS: readonly ToolDef[] = [

@@ -10,6 +10,7 @@ import type { WorkerHooks, WorkerRunInput, WorkerRunOutcome, WorkerRunner } from
 import { RESULT_INSTRUCTION } from './prompt.js';
 import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
 import { hardenedGitArgs } from './git.js';
+import { credentialPaths } from './sandbox.js';
 
 export const CLAUDE_PREFIX = 'claude/';
 /** What `--resume` holds for a Claude worker: the CLI session id. */
@@ -50,28 +51,6 @@ export function minimalClaudeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   for (const key of INHERITED_ENV) if (env[key] !== undefined) result[key] = env[key];
   return result;
 }
-
-const CLAUDE_DENY_READ = [
-  join(homedir(), '.config'),
-  join(homedir(), '.ssh'),
-  join(homedir(), '.aws'),
-  join(homedir(), '.gnupg'),
-  join(homedir(), '.netrc'),
-  join(homedir(), '.npmrc'),
-  join(homedir(), '.yarnrc*'),
-  join(homedir(), '.docker'),
-  join(homedir(), '.kube'),
-  join(homedir(), '.stripe'),
-  join(homedir(), '.convex'),
-  join(homedir(), '.codex'),
-  join(homedir(), '.pi'),
-  join(homedir(), '.claude'),
-  join(homedir(), '.claude.json'),
-  join(homedir(), '.appstoreconnect'),
-  join(homedir(), 'Library', 'Keychains'),
-  join(homedir(), 'Library', 'Application Support'),
-  join(homedir(), '.helm'),
-];
 
 const STOP_GRACE_MS = 1_000;
 const execFileAsync = promisify(execFile);
@@ -120,7 +99,7 @@ export function claudeSandboxSettings(
         allowRead: [...new Set([worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
         allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
         denyWrite: [gitDirs.gitDir, gitDirs.commonDir, join(worktree, '.git')],
-        denyRead: CLAUDE_DENY_READ,
+        denyRead: credentialPaths(homedir()),
       },
       network: {
         allowedDomains: [],

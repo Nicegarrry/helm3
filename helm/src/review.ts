@@ -46,9 +46,20 @@ function approveScore(answer: { noul?: boolean | number } | undefined): number |
   if (typeof answer.noul === 'boolean') return answer.noul ? 1 : 0;
   return null;
 }
+/** True when `offset` is quoted text: after an odd number of quote marks on its line, on a '>' line, or inside an open code fence. */
+export function isQuoted(text: string, offset: number): boolean {
+  const start = text.lastIndexOf('\n', offset - 1) + 1;
+  let fence = '';
+  for (const [, marks, info] of text.slice(0, start).matchAll(/^[\t ]*(`{3,}|~{3,})(.*)$/gm)) {
+    if (!fence) fence = marks!;
+    else if (marks![0] === fence[0] && marks!.length >= fence.length && !info!.trim()) fence = '';
+  }
+  return fence !== '' ||/^[\t ]*>/.test(text.slice(start)) || (text.slice(start, offset).match(/["“”]/g)?.length ?? 0) % 2 === 1;
+}
 export function verdictLine(body: string): 'approve' | 'changes' {
-  const last = body.split(/\r?\n/).filter((line) => line.trim()).at(-1) ?? '';
-  return last.startsWith('APPROVE: ') ? 'approve' : 'changes';
+  const text = body.trimEnd();
+  const start = text.lastIndexOf('\n') + 1;
+  return text.startsWith('APPROVE: ', start) && !isQuoted(text, start) ? 'approve' : 'changes';
 }
 
 function patchBase(store: Store, repoSlug: string, number: number, fallback: string): string {

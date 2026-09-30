@@ -8,7 +8,7 @@ import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 import type { WorkerHooks, WorkerRunInput, WorkerRunOutcome, WorkerRunner } from './types.js';
 import { RESULT_INSTRUCTION } from './prompt.js';
-import { CORRECTION_MESSAGE, parseWorkerResult } from './worker.js';
+import { correctionMessage, parseWorkerResult } from './worker.js';
 import { hardenedGitArgs } from './git.js';
 import { credentialPaths } from './sandbox.js';
 
@@ -100,7 +100,7 @@ export function claudeSandboxSettings(
         allowRead: [...new Set([worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, temporaryDirectory])],
         allowWrite: reviewer ? [temporaryDirectory] : [worktree, temporaryDirectory],
         denyWrite: [gitDirs.gitDir, gitDirs.commonDir, join(worktree, '.git')],
-        denyRead: credentialPaths(homedir(), helmHome),
+        denyRead: [...credentialPaths(homedir(), helmHome), join(helmHome, 'serve.json.*.tmp')],
       },
       network: {
         allowedDomains: [],
@@ -257,7 +257,7 @@ export function claudeWorkerRunner(opts: ClaudeWorkerRunnerOptions = {}): Worker
       let rawText = await turn(message);
       let result = parseWorkerResult(rawText);
       if (!result && hooks.shouldContinue()) {
-        rawText = await turn(CORRECTION_MESSAGE);
+        rawText = await turn(correctionMessage(rawText));
         result = parseWorkerResult(rawText);
       }
       if (result) hooks.emit('result', { ...result });

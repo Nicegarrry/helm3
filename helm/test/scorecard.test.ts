@@ -21,7 +21,7 @@ function seed() {
   const budget = openBudget(store, { project: 'acme/widgets', label: 'sprint-1', capUsd: 5, openedAt: base });
   const clean = worker('w-clean', 'codex/luna'); const rework = worker('w-rework', 'codex/luna'); const failed = worker('w-failed', 'codex/terra'); const respawn = { ...worker('w-respawn', 'codex/terra'), createdAt: '2026-09-30T00:20:00.000Z' }; const validator = { ...worker('w-validator', 'codex/terra', 'succeeded', 'validator'), createdAt: '2026-09-30T00:10:00.000Z' };
   for (const row of [clean, rework, failed, respawn, validator]) store.insertWorker(row);
-  store.setMeta(clean.workerId, { issue: 101, band: 'small' }); store.setMeta(rework.workerId, { issue: 102, band: 'medium' }); store.setMeta(failed.workerId, { issue: 103, band: 'large' }); store.setMeta(respawn.workerId, { issue: 103, band: 'large' }); store.setMeta(validator.workerId, { issue: 101, band: 'small' });
+  store.setMeta(clean.workerId, { issue: 101, tier: 2 }); store.setMeta(rework.workerId, { issue: 102, tier: 3 }); store.setMeta(failed.workerId, { issue: 103, tier: 4 }); store.setMeta(respawn.workerId, { issue: 103, tier: 4 }); store.setMeta(validator.workerId, { issue: 101, tier: 2 });
   for (const id of [clean.workerId, rework.workerId, failed.workerId, respawn.workerId]) attachWorker(store, id, budget.id);
   event(store, clean.workerId, 'turn.start', '01'); event(store, clean.workerId, 'turn.end', '04'); event(store, clean.workerId, 'result', '05', { status: 'succeeded' }); event(store, clean.workerId, 'pr.merged', '06');
   event(store, rework.workerId, 'turn.start', '08'); event(store, rework.workerId, 'turn.end', '09'); event(store, rework.workerId, 'result', '10', { status: 'succeeded' }); event(store, rework.workerId, 'turn.start', '11'); event(store, rework.workerId, 'turn.end', '12');
@@ -45,8 +45,10 @@ test('scorecard snapshot classifies tickets and tolerates missing deploys/taps',
   try {
     const result = await seeded.scorecard.export({ project: 'acme/widgets', budgetId: seeded.budget.id });
     assert.equal(result.ok, true); if (!result.ok) return;
-    assert.deepEqual(result.json, { project: 'acme/widgets', window: { budgetId: seeded.budget.id, label: 'sprint-1', openedAt: base, closedAt: '2026-09-30T00:30:00.000Z' }, tickets: 3, merged: 1, firstPassGateRate: 0.3333, claimsPassRate: 0.6667, firstReviewApprovalRate: 0.5, retriesPerTicket: { gate: 0.3333, review: 0.3333 }, activeMinutes: 0.08, codexTokens: 160, usd: 0, jevCalls: 0, jevCost: null, deploys: 0, rollbacks: 0, taps: 0, outcomes: [{ model: 'codex/luna', band: 'medium', clean: 0, rework: 1, failed: 0 }, { model: 'codex/luna', band: 'small', clean: 1, rework: 0, failed: 0 }, { model: 'codex/terra', band: 'large', clean: 1, rework: 0, failed: 1 }] });
-    assert.equal(result.markdown, '# Scorecard acme/widgets — sprint-1\n\nWindow: 2026-09-30T00:00:00.000Z .. 2026-09-30T00:30:00.000Z\n\n## Delivery\n\n| Metric | Value |\n| --- | ---: |\n| Tickets | 3 |\n| Merged | 1 |\n| First-pass gate rate | 33.33% |\n| Claims pass rate | 66.67% |\n| First-review approval rate | 50.00% |\n| Active minutes | 0.08 |\n| Codex tokens | 160 |\n| USD | 0.0000 |\n| Jev calls | 0 |\n| Jev cost | n/a (not recorded) |\n| Deploys | 0 |\n| Rollbacks | 0 |\n| Taps | 0 |\n\n## Retries per ticket\n\n| Kind | Retries per ticket |\n| --- | ---: |\n| gate | 0.3333 |\n| review | 0.3333 |\n\n## Model × complexity band\n\n| Model | Band | Clean | Rework | Failed |\n| --- | --- | ---: | ---: | ---: |\n| codex/luna | medium | 0 | 1 | 0 |\n| codex/luna | small | 1 | 0 | 0 |\n| codex/terra | large | 1 | 0 | 1 |\n');
+    assert.deepEqual(result.json, { project: 'acme/widgets', window: { budgetId: seeded.budget.id, label: 'sprint-1', openedAt: base, closedAt: '2026-09-30T00:30:00.000Z' }, tickets: 3, merged: 1, firstPassGateRate: 0.3333, claimsPassRate: 0.6667, firstReviewApprovalRate: 0.5, retriesPerTicket: { gate: 0.3333, review: 0.3333 }, activeMinutes: 0.08, codexTokens: 160, usd: 0, jevCalls: 0, jevCost: null, deploys: 0, rollbacks: 0, taps: 0, outcomes: [{ model: 'codex/luna', tier: 3, clean: 0, rework: 1, failed: 0 }, { model: 'codex/luna', tier: 2, clean: 1, rework: 0, failed: 0 }, { model: 'codex/terra', tier: 4, clean: 1, rework: 0, failed: 1 }] });
+    assert.match(result.markdown, /## Model × tier/);
+    assert.match(result.markdown, /\| codex\/luna \| 2 \| 1 \| 0 \| 0 \|/);
+    assert.match(result.markdown, /\| codex\/luna \| 3 \| 0 \| 1 \| 0 \|/);
   } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
 });
 
@@ -57,7 +59,7 @@ test('a single steer turn is rework even without a failed gate or request change
     seeded.store.sql.prepare('DELETE FROM reviews WHERE id = 2').run();
     const result = await seeded.scorecard.export({ project: 'acme/widgets', budgetId: seeded.budget.id });
     assert.equal(result.ok, true); if (!result.ok) return;
-    assert.deepEqual(result.json.outcomes.find((outcome) => outcome.model === 'codex/luna' && outcome.band === 'medium'), { model: 'codex/luna', band: 'medium', clean: 0, rework: 1, failed: 0 });
+    assert.deepEqual(result.json.outcomes.find((outcome) => outcome.model === 'codex/luna' && outcome.tier === 3), { model: 'codex/luna', tier: 3, clean: 0, rework: 1, failed: 0 });
   } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
 });
 

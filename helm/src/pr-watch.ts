@@ -33,18 +33,20 @@ export function createPrTicker(options: { store: Store; github: GitHub; now?: ()
       const checkedAt = now().toISOString();
       const nextState = status.state === 'merged' || status.state === 'closed' ? status.state : 'open';
       const updated: PrRow = { ...pr, state: nextState, checkedAt, head: status.head || pr.head, url: status.url || pr.url };
-      options.store.updatePr(updated);
       // Rows with no state are legacy rows: establish a baseline silently on first observation.
-      if (pr.state !== 'open' || nextState === 'open') continue;
-      options.store.appendEvent(pr.workerId, nextState === 'merged' ? 'pr.merged' : 'pr.closed', {
-        project: pr.repoSlug,
-        number: pr.number,
-        url: updated.url,
-        head: updated.head,
-        external: true,
-        ...(status.title ? { title: status.title } : {}),
-        ...(status.base ? { base: status.base } : {}),
-      });
+      if (pr.state === 'open' && nextState !== 'open') {
+        if (options.store.getPrByNumber(pr.repoSlug, pr.number)?.state !== 'open') continue;
+        options.store.appendEvent(pr.workerId, nextState === 'merged' ? 'pr.merged' : 'pr.closed', {
+          project: pr.repoSlug,
+          number: pr.number,
+          url: updated.url,
+          head: updated.head,
+          external: true,
+          ...(status.title ? { title: status.title } : {}),
+          ...(status.base ? { base: status.base } : {}),
+        });
+      }
+      options.store.updatePr(updated);
     }
   };
 }

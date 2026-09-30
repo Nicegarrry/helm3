@@ -462,7 +462,9 @@ export class Helm {
       let selection: Selection;
       try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
       const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
-      if (outcome.ok) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice);
+      if (outcome.ok) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice).catch((error) => {
+        try { this.store.appendEvent(outcome.workerId, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
+      });
       return outcome;
     });
   }

@@ -303,6 +303,21 @@ test('dispatched issue-title lookup runs after spawn admission and falls back on
   }
 });
 
+test('dispatch milestone rejection becomes a warning event instead of an unhandled rejection', async () => {
+  const { helm, store } = makeHelm();
+  const appendEvent = store.appendEvent.bind(store);
+  store.appendEvent = (workerId, kind, data, at) => {
+    if (kind === 'dispatched') throw new Error('milestone write failed');
+    return appendEvent(workerId, kind, data, at);
+  };
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-dispatched-warning-'), { issue: 44 }));
+  assert.ok(outcome.ok);
+  if (!outcome.ok) return;
+  await new Promise((resolve) => setImmediate(resolve));
+  const warning = store.listEvents(outcome.workerId).find((event) => event.kind === 'dispatched.warning');
+  assert.equal(warning?.data.message, 'dispatch milestone failed: milestone write failed');
+});
+
 test('a settled worker turn removes node_modules from every top-level package', async () => {
   const runner = createFakeRunner(async (input) => {
     mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });

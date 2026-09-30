@@ -30,6 +30,25 @@ test('external PR merges emit once and refresh the stored row', async () => {
   } finally { store.close(); }
 });
 
+test('external merge does not announce when Helm merged while the GitHub check was in flight', async () => {
+  const store = openStore(':memory:');
+  try {
+    const worker = makeWorker('w-race');
+    store.insertWorker(worker);
+    store.insertPr({ repoSlug: 'o/r', number: 15, workerId: worker.workerId, url: 'https://github.test/15', head: 'old', createdAt: worker.createdAt });
+    let release!: (status: { number: number; state: 'merged'; head: string; mergeable: true; draft: false; checks: never[]; reviews: never[]; url: string }) => void;
+    const status = new Promise<{ number: number; state: 'merged'; head: string; mergeable: true; draft: false; checks: never[]; reviews: never[]; url: string }>((resolve) => { release = resolve; });
+    const github = { prStatus: async () => status } as unknown as GitHub;
+    const tick = createPrTicker({ store, github });
+    const pending = tick();
+    await new Promise((resolve) => setImmediate(resolve));
+    store.updatePr({ ...store.getPrByNumber('o/r', 15)!, state: 'merged', checkedAt: new Date().toISOString() });
+    release({ number: 15, state: 'merged', head: 'new', mergeable: true, draft: false, checks: [], reviews: [], url: 'https://github.test/15' });
+    await pending;
+    assert.equal(store.listAllEvents().some((event) => event.kind === 'pr.merged'), false);
+  } finally { store.close(); }
+});
+
 test('legacy PR rows are silently backfilled and terminal rows are never polled again', async () => {
   const store = openStore(':memory:');
   try {

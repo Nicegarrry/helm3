@@ -109,6 +109,7 @@ export type HelmDeps = Readonly<{
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
   settings?: Settings;
+  spendStartup?: boolean;
   supervisor?: SupervisorService;
   discord?: DiscordService;
   review?: ReviewService;
@@ -246,7 +247,7 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
-    this.spendSettings = createEffectiveSpendReader(deps.config, this.store, this.settings, () => this.nowDate());
+    this.spendSettings = createEffectiveSpendReader(deps.config, this.store, this.settings, () => this.nowDate(), deps.spendStartup ? 'startup' : 'read');
     this.statfs = deps.statfs;
     this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;

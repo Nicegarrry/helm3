@@ -47,6 +47,7 @@ function milestone(event: EventRow): string | null {
   if (event.kind === 'pr.merged') return `Merged: #${text(event.data.number, 'unknown')}`;
   if (event.kind === 'watch.alert') return `Stall: ${text(event.data.detail ?? event.data.rule, 'watch alert')}`;
   if (event.kind === 'spend.warning') return `Spend 80%: ${text(event.data.spendUsd, 'threshold reached')}`;
+  if (event.kind === 'spend.invalid') return 'helm.json invalid; keeping last good limits';
   if (event.kind === 'spend.changed') {
     if (event.data.source === 'startup') return spendStartupLine(event.data);
     const values = event.data.values && typeof event.data.values === 'object' ? Object.entries(event.data.values).map(([name, value]) => `${name}=${String(value)}`).join(', ') : '';

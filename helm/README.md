@@ -252,6 +252,11 @@ A value of `0` or an unset variable means no global cap. A soft cap,
 and steer results so the orchestrator sees it. Models
 with no price are counted as tokens and reported as unknown-cost events, never blocked.
 
+Spend limits are detected-not-prevented against a same-user forge of `helm.sqlite`: a user who can
+rewrite the database can also forge the limit state, with the same trust boundary as `envelope.json`.
+The daemon's startup Discord line always reports the effective spend limits so such a forge is visible
+to Nick.
+
 ## Configuration
 
 The live spend settings can be placed alongside the other daemon settings in `$HELM_HOME/helm.json`:

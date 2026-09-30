@@ -15,11 +15,11 @@ const PEPPER = Buffer.from('spend-test-tap-pepper-32-bytes!!');
 
 function home(): string { return mkdtempSync(join(tmpdir(), 'helm-spend-')); }
 
-function makeHelm(root: string, db = ':memory:', env: { cap?: string; warn?: string; workers?: string } = {}): { helm: Helm; store: ReturnType<typeof openStore> } {
+function makeHelm(root: string, db = ':memory:', env: { cap?: string; warn?: string; workers?: string } = {}, spendStartup = true): { helm: Helm; store: ReturnType<typeof openStore> } {
   const store = openStore(db);
   const config = loadConfig({ HELM_HOME: root, HELM_SPEND_CAP_USD: env.cap ?? '5', HELM_SPEND_WARN_USD: env.warn ?? '4', HELM_MAX_WORKERS: env.workers ?? '2' });
   const helm = new Helm({
-    config, store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never,
+    config, store, workspace: {} as never, gates: {} as never, github: {} as never, runner: {} as never, spendStartup,
     prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, settings: loadSettings(root),
     discord: { consume: async () => {}, tick: async () => {}, notifyNick: async () => ({ ok: true, sent: true }), postTap: async () => ({ ok: true }) },
     randomInt: () => Number(CODE), tapPepper: PEPPER,
@@ -63,9 +63,35 @@ test('spend settings hot reload after helm.json edit without restarting Helm', a
     writeFileSync(join(root, 'helm.json'), '{ invalid');
     const invalid = await helm.runStatus();
     assert.equal(invalid.ok && invalid.spendCapUsd, 2);
-    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.warning').length, 1);
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.invalid').length, 1);
     await helm.runStatus();
-    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.warning').length, 1);
+    assert.equal(store.listAllEvents().filter((event) => event.kind === 'spend.invalid').length, 1);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('read-only status does not bootstrap spend limits or emit startup events', async () => {
+  const root = home(), db = join(root, 'helm.sqlite');
+  const { helm, store } = makeHelm(root, db, {}, false);
+  try {
+    writeFileSync(join(root, 'helm.json'), JSON.stringify({ spend: { capUsd: 2, warnUsd: 1, maxWorkers: 2 } }));
+    const status = await helm.runStatus();
+    assert.equal(status.ok && status.spendCapUsd, 2);
+    assert.deepEqual(store.getSpendLimits(), []);
+    assert.equal(store.listAllEvents().some((event) => event.kind === 'spend.changed' && event.data.source === 'startup'), false);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('invalid helm.json keeps the last good limits and emits a distinct event', async () => {
+  const root = home();
+  const { helm, store } = makeHelm(root);
+  try {
+    writeFileSync(join(root, 'helm.json'), '{ invalid');
+    const status = await helm.runStatus();
+    assert.equal(status.ok && status.spendCapUsd, 5);
+    const invalid = store.listAllEvents().filter((event) => event.kind === 'spend.invalid');
+    assert.equal(invalid.length, 1);
+    assert.equal(invalid[0]?.data.reason, 'helm.json invalid; keeping last good limits');
+    assert.equal(store.listAllEvents().some((event) => event.kind === 'spend.warning' && String(event.data.reason).includes('invalid')), false);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

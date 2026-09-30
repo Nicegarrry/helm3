@@ -121,6 +121,7 @@ const settingsSchema = z.object({
     tapWebhookEnv: z.string().optional(),
   }).default(DISCORD_DEFAULTS),
   deploy: z.object({ smokeEnv: z.array(z.string()).default([]) }).default(DEPLOY_DEFAULTS),
+  gates: z.object({ allowUnsandboxed: z.boolean().default(false) }).optional(),
   hygiene: z.object({
     keepNodeModules: z.boolean().default(false),
     gcSec: z.number().int().positive().default(600),
@@ -130,9 +131,10 @@ const settingsSchema = z.object({
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
-export type Settings = Omit<ParsedSettings, 'deploy' | 'capacity' | 'routing'> & {
+export type Settings = Omit<ParsedSettings, 'deploy' | 'capacity' | 'routing' | 'gates'> & {
   deploy?: ParsedSettings['deploy'];
   capacity?: ParsedSettings['capacity'];
+  gates?: ParsedSettings['gates'];
   routing: Omit<ParsedSettings['routing'], 'policy' | 'checkDays'> & {
     policy?: { lanes?: ('codex' | 'pi' | 'claude')[]; subscriptionOnly?: boolean };
     checkDays?: number;

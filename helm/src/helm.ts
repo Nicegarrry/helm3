@@ -90,6 +90,7 @@ import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js
 import { askLoadClass } from './capacity/classify.js';
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
+import { sandboxEnabled } from './gate.js';
 
 const exec = promisify(execFile);
 const INFRA_GATE_FAILURE = /EAGAIN|ENOMEM|resource temporarily unavailable/i;
@@ -754,15 +755,17 @@ export class Helm {
         must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
         const head = await this.workspace.head(row.worktree);
         const existing = this.capacity.findQueued(input.workerId, 'gate', head);
-        if (existing) return { row, head, checks: [] as Array<{ name: string; command: string }>, loadClass: existing.loadClass, gateId: existing.id, duplicate: true as const };
+        if (existing) return { row, head, checks: [] as Array<{ name: string; command: string }>, sandbox: undefined, loadClass: existing.loadClass, gateId: existing.id, duplicate: true as const };
         const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
+        const sandbox = await sandboxEnabled(row.repo, row.baseSha);
+        if (!sandbox) this.store.appendEvent(row.workerId, 'gate.sandbox.opt_out', { project: row.repoSlug, head, reason: 'base helm.json sets gate.sandbox=false' });
         const meta = this.store.getMeta(row.workerId);
         const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
         if (baseline) {
           const command = (await loadRepoConfig(row.repo, baseline.baseSha, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
           checks.push({ name: 'acceptance', command });
         }
-        return { row, head, checks, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };
+        return { row, head, checks, sandbox, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };
       });
       if (prepared.duplicate) return { ok: true, queued: true, gateId: prepared.gateId } as ToolOutcome<GateToolResult>;
 
@@ -792,8 +795,11 @@ export class Helm {
         const outcome = await this.gates.run(current.worktree, prepared.checks, logDir, {
           timeoutMs: this.config.gateTimeoutMs,
           nodeModulesRoot: this.workerWorktreeRoot(current),
+          sandbox: prepared.sandbox,
           onPid: (pid) => this.capacity.setPid(runId, pid),
           onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
+          onUnsandboxed: (reason) => this.store.appendEvent(input.workerId, 'gate.unsandboxed', { project: current.repoSlug, head: prepared.head, reason }),
+          onRefused: (reason) => this.store.appendEvent(input.workerId, 'gate.refused', { project: current.repoSlug, head: prepared.head, reason }),
         });
         if (!outcome.passed && attempt === 0 && isInfrastructureGateFailure(outcome.checks)) {
           this.store.appendEvent(input.workerId, 'gate.infra', { gateId: runId, head: prepared.head, reason: 'process or memory resource exhaustion', checks: outcome.checks });

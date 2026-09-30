@@ -392,6 +392,42 @@ test('an infrastructure gate failure is retried once instead of steering the wor
   assert.equal(store.listGates(spawned.workerId).at(-1)?.passed, true);
 });
 
+test('gate sandbox fallback is recorded as an event for Discord milestones', async () => {
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      options?.onUnsandboxed?.('sandbox-exec failed to apply profile');
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-unsandboxed-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'gate.unsandboxed' && event.data.reason === 'sandbox-exec failed to apply profile'));
+});
+
+test('gate refusal is recorded when the runner rejects the worktree', async () => {
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      options?.onRefused?.('worktree contains a symlink escaping the worktree: /tmp/worktree/node_modules');
+      return { passed: false, checks: [] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-refused-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'gate.refused' && event.data.reason === 'worktree contains a symlink escaping the worktree: /tmp/worktree/node_modules'));
+});
+
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
   const { helm, store, cloned, fetched, config } = makeHelm();
   const first = await helm.spawn(spawnBody('acme/widgets'));

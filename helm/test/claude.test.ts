@@ -146,7 +146,7 @@ test('resolveClaudeGitDirs: linked worktree exposes its git dir and ~/.helm comm
   await mkdir(join(root, '.helm', 'worktrees', 'owner__repo'), { recursive: true });
   runGit('worktree', 'add', '-q', '-b', 'worker', worktree, 'HEAD');
   const gitDirs = await resolveClaudeGitDirs(worktree);
-  assert.equal(gitDirs.commonDir, join(repo, '.git'));
+  assert.equal(gitDirs.commonDir, await realpath(join(repo, '.git')));
   const settings = JSON.parse(claudeSandboxSettings(worktree, join(root, '.helm', 'tmp', 'w-1'), gitDirs)) as { sandbox: { filesystem: { allowRead: string[]; allowWrite: string[] } } };
   assert.deepEqual(settings.sandbox.filesystem.allowRead, [worktree, join(homedir(), '.config', 'git'), gitDirs.gitDir, gitDirs.commonDir, join(root, '.helm', 'tmp', 'w-1')]);
   assert.deepEqual(settings.sandbox.filesystem.allowWrite, [worktree, join(root, '.helm', 'tmp', 'w-1')]);

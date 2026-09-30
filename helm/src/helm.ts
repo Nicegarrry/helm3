@@ -660,7 +660,7 @@ export class Helm {
   async list(input: z.infer<typeof listInput>) {
     return runGuard(async () => {
       const rows = this.store.listWorkers({ repo: input.repo, state: input.state });
-      const workers = rows.map((r) => ({ workerId: r.workerId, state: r.state, role: r.role, model: r.model, branch: r.branch, head: r.head, createdAt: r.createdAt }));
+      const workers = rows.map((r) => ({ workerId: r.workerId, state: r.state, role: r.role, model: r.model, branch: r.branch, head: r.head, createdAt: r.createdAt, updatedAt: r.updatedAt }));
       return { ok: true, workers };
     });
   }

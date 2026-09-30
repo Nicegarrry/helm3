@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createToolRegistry } from '../src/tools.js';
-import { TOOL_NAMES } from '../src/types.js';
+import { ALL_TOOL_NAMES, CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.js';
 import type { ToolOutcome } from '../src/types.js';
 import type { Helm } from '../src/helm.js';
 
@@ -36,13 +36,39 @@ test('list() returns every tool with a description and a zod input schema', () =
   const { helm } = createFakeHelm();
   const registry = createToolRegistry(helm);
   const tools = registry.list();
-  assert.equal(tools.length, TOOL_NAMES.length);
-  for (const name of TOOL_NAMES) {
+  assert.equal(tools.length, ALL_TOOL_NAMES.length);
+  for (const name of ALL_TOOL_NAMES) {
     const tool = tools.find((t) => t.name === name);
     assert.ok(tool, `missing tool: ${name}`);
     assert.equal(typeof tool?.description, 'string');
     assert.ok((tool?.description.length ?? 0) > 0);
+    assert.ok((tool?.description.length ?? 0) <= 100, `${name} description is too long`);
     assert.equal(typeof tool?.inputSchema.safeParse, 'function');
+  }
+});
+
+test('MCP profiles expose the requested supervisor tools plus meta tools', () => {
+  const { helm } = createFakeHelm();
+  const names = (profile: 'core' | 'supervisor') => createToolRegistry(helm, profile).list().map((tool) => tool.name);
+  assert.deepEqual(names('core').sort(), [...CORE_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+  assert.deepEqual(names('supervisor').sort(), [...SUPERVISOR_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+});
+
+test('helm.help returns an index or a full schema without exposing empty optional fields', async () => {
+  const { helm } = createFakeHelm();
+  const registry = createToolRegistry(helm, 'core');
+  const index = await registry.call('helm.help', {});
+  assert.equal(index.ok, true);
+  if (index.ok) {
+    assert.match(String(index.index), /^worker\.spawn:/m);
+    assert.doesNotMatch(String(index.index), /undefined/);
+  }
+  const help = await registry.call('helm.help', { tool: 'worker.spawn' });
+  assert.equal(help.ok, true);
+  if (help.ok) {
+    assert.equal(help.tool, 'worker.spawn');
+    assert.equal(typeof help.description, 'string');
+    assert.equal(typeof help.inputSchema, 'object');
   }
 });
 
@@ -79,6 +105,90 @@ test('call() validates and dispatches a valid call to the matching Helm method',
   const mergeOutcome = await registry.call('pr.merge', { number: 1, expectedHead: 'a'.repeat(40) });
   assert.equal(mergeOutcome.ok, true);
   assert.equal(calls.at(-1)?.method, 'prMerge');
+});
+
+test('helm.call reuses direct validation and dispatch', async () => {
+  const { helm, calls } = createFakeHelm();
+  const registry = createToolRegistry(helm, 'core');
+  const outcome = await registry.call('helm.call', { tool: 'run.status', input: {} });
+  assert.equal(outcome.ok, true);
+  assert.equal(calls.at(-1)?.method, 'runStatus');
+  const refused = await registry.call('helm.call', { tool: 'worker.spawn', input: { repo: '/repo' } });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /invalid input/);
+});
+
+test('helm.call preserves lifecycle admission refusals', async () => {
+  const { helm } = createFakeHelm();
+  const admitted: string[] = [];
+  const guardedHelm = { ...helm, lifecycle: { admit(name: string) { admitted.push(name); throw new Error('admission refused'); } } } as unknown as Helm;
+  const registry = createToolRegistry(guardedHelm, 'core');
+  const input = { repo: '/repo', objective: 'task' };
+  const direct = await registry.call('worker.spawn', input);
+  const throughCall = await registry.call('helm.call', { tool: 'worker.spawn', input });
+  assert.deepEqual(throughCall, direct);
+  assert.deepEqual(admitted, ['worker.spawn', 'worker.spawn']);
+});
+
+test('worker.list stays compact with a large worker store', async () => {
+  const { helm } = createFakeHelm();
+  const workers = Array.from({ length: 200 }, (_, index) => ({ workerId: `w-${index}`, state: 'running', model: 'provider/model', head: 'a'.repeat(40) }));
+  helm.list = (async () => ({ ok: true, workers })) as unknown as Helm['list'];
+  const result = await createToolRegistry(helm, 'core', true).call('helm.call', { tool: 'worker.list', input: {} });
+  assert.equal(result.ok, true);
+  assert.ok(JSON.stringify(result).length <= 3_000);
+  if (result.ok) {
+    const workers = result.workers as string[];
+    assert.equal(workers.length, 31);
+    assert.equal(workers.at(-1), '+170 more');
+  }
+});
+
+test('worker.inspect defaults to five bounded events and a one-line diff stat', async () => {
+  const { helm } = createFakeHelm();
+  helm.inspect = (async () => ({
+    ok: true, state: 'running', model: 'provider/model', branch: 'helm/test', head: 'a'.repeat(40), spendUsd: 1, tokens: 2,
+    diffStat: `10 files changed\n${'large detail '.repeat(100)}`,
+    result: { status: 'partial', summary: 'summary' },
+    events: Array.from({ length: 20 }, (_, seq) => ({ seq, at: 'now', kind: 'event', data: { payload: 'x'.repeat(500) } })),
+  })) as unknown as Helm['inspect'];
+  const result = await createToolRegistry(helm, 'core', true).call('worker.inspect', { workerId: 'w-1' });
+  assert.equal(result.ok, true);
+  assert.ok(JSON.stringify(result).length <= 3_000);
+  if (result.ok) {
+    const events = result.events as Array<{ data: string }>;
+    assert.equal(events.length, 5);
+    assert.ok(events.every((event) => event.data.length <= 200));
+    assert.doesNotMatch(String(result.diffStat), /\n/);
+  }
+});
+
+test('wake.list renders object summaries as bounded readable strings', async () => {
+  const { helm } = createFakeHelm();
+  helm.wakeList = (async () => ({ ok: true, wakes: [{ kind: 'watch.alert', workerId: 'w-1', summary: { message: 'attention', details: 'x'.repeat(300) } }] })) as unknown as Helm['wakeList'];
+  const result = await createToolRegistry(helm, 'core', true).call('wake.list', { project: 'acme/widgets' });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const wakes = result.wakes as string[];
+    assert.equal(wakes.length, 1);
+    const wake = wakes[0];
+    assert.ok(wake);
+    assert.ok(wake.length <= 160);
+    assert.doesNotMatch(wake, /\[object Object\]/);
+  }
+});
+
+test('wake.list preserves ask questions up to 2,000 characters', async () => {
+  const { helm } = createFakeHelm();
+  const question = 'question '.repeat(300);
+  helm.wakeList = (async () => ({ ok: true, wakes: [{ kind: 'ask', workerId: 'w-1', summary: question }] })) as unknown as Helm['wakeList'];
+  const result = await createToolRegistry(helm, 'core', true).call('wake.list', { project: 'acme/widgets' });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    const wake = (result.wakes as string[])[0] ?? '';
+    assert.equal(wake, question.slice(0, 2000 - 3) + '...');
+    assert.ok(wake.length <= 2000);
+  }
 });
 
 

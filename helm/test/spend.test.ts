@@ -166,11 +166,13 @@ test('raising cap without a spend.cap tap is refused; a granted tap is consumed 
   const root = home();
   const { helm, store } = makeHelm(root);
   try {
-    const tools = createToolRegistry(helm);
+    const tools = createToolRegistry(helm, 'core', true);
     const action = spendCapAction({ capUsd: 5, warnUsd: 4, maxWorkers: 2 }, { capUsd: 8, maxWorkers: 4 });
     const refused = await tools.call('spend.set', { capUsd: 8, maxWorkers: 4 });
     assert.equal(refused.ok, false);
     if (!refused.ok) assert.match(refused.reason, new RegExp(`${SPEND_CAP_TAP_KIND}.*${action.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    const throughCall = await tools.call('helm.call', { tool: 'spend.set', input: { capUsd: 8, maxWorkers: 4 } });
+    assert.deepEqual(throughCall, refused);
     const requested = await tools.call('tap.request', { project: SPEND_CAP_TAP_PROJECT, kind: SPEND_CAP_TAP_KIND, action });
     assert.equal(requested.ok, true);
     if (!requested.ok) return;

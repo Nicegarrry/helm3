@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Lifecycle } from '../src/lifecycle.js';
 import { serve } from '../src/server.js';
-import { TOOL_NAMES } from '../src/types.js';
+import { ALL_TOOL_NAMES, CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.js';
 import type { ToolOutcome } from '../src/types.js';
 import type { Helm } from '../src/helm.js';
 
@@ -129,14 +129,56 @@ test('serve http: POST /tools/run.status returns ok JSON', async () => {
 test('serve http: /mcp initialize + tools/list via the MCP SDK client returns every tool', async () => {
   await withServer(async (port) => {
     const client = new Client({ name: 'test-client', version: '0.0.1' });
-    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp?tools=all`));
     await client.connect(transport);
     try {
       const { tools } = await client.listTools();
-      assert.equal(tools.length, TOOL_NAMES.length);
-      for (const name of TOOL_NAMES) assert.ok(tools.some((t) => t.name === name), `missing tool: ${name}`);
+      assert.equal(tools.length, ALL_TOOL_NAMES.length);
+      for (const name of ALL_TOOL_NAMES) assert.ok(tools.some((t) => t.name === name), `missing tool: ${name}`);
     } finally {
       await client.close();
+    }
+  });
+});
+
+test('MCP tool profiles stay within their serialized context budgets', async () => {
+  const expected = {
+    core: [...CORE_TOOL_NAMES, ...META_TOOL_NAMES],
+    supervisor: [...SUPERVISOR_TOOL_NAMES, ...META_TOOL_NAMES],
+  } as const;
+  for (const profile of ['core', 'supervisor'] as const) {
+    await withServer(async (port) => {
+      const client = new Client({ name: `${profile}-size-client`, version: '1' });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp?tools=${profile}`)));
+      try {
+        const { tools } = await client.listTools();
+        assert.deepEqual(tools.map((tool) => tool.name).sort(), [...expected[profile]].sort());
+        const serialized = JSON.stringify(tools);
+        assert.doesNotMatch(serialized, /\"\$schema\"/);
+        assert.doesNotMatch(serialized, /9007199254740991/);
+        assert.ok(serialized.length <= (profile === 'core' ? 3_600 : 8_500), `${profile} tools/list is ${serialized.length} chars`);
+      } finally { await client.close(); }
+    });
+  }
+});
+
+test('HTTP MCP profiles are selected per connection by query or header', async () => {
+  await withServer(async (port) => {
+    const core = new Client({ name: 'core-client', version: '1' });
+    const defaultClient = new Client({ name: 'default-client', version: '1' });
+    const supervisor = new Client({ name: 'supervisor-client', version: '1' });
+    try {
+      await Promise.all([
+        core.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp?tools=core`))),
+        defaultClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))),
+        supervisor.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { 'x-helm-tools': 'supervisor' } } })),
+      ]);
+      const [{ tools: coreTools }, { tools: defaultTools }, { tools: supervisorTools }] = await Promise.all([core.listTools(), defaultClient.listTools(), supervisor.listTools()]);
+      assert.deepEqual(coreTools.map((tool) => tool.name).sort(), [...CORE_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+      assert.deepEqual(defaultTools.map((tool) => tool.name).sort(), [...CORE_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+      assert.deepEqual(supervisorTools.map((tool) => tool.name).sort(), [...SUPERVISOR_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+    } finally {
+      await Promise.all([core.close(), defaultClient.close(), supervisor.close()]);
     }
   });
 });
@@ -167,7 +209,7 @@ test('F12: an invalid JSON body returns 400, not 500', async () => {
 test('MCP drain closes admission for both MCP and CLI HTTP calls and keeps reads available', async () => {
   await withServer(async (port) => {
     const client = new Client({ name: 'drain-client', version: '1' });
-    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp?tools=all`)));
     try {
       const call = async (name: string, args: Record<string, unknown>) => {
         const result = await client.callTool({ name, arguments: args });

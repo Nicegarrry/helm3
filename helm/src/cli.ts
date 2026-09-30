@@ -37,6 +37,7 @@ import { createMemorySync } from './memory-sync.js';
 import { createHygiene } from './hygiene.js';
 import { createPrTicker } from './pr-watch.js';
 import type { CapacityExec } from './capacity/sampler.js';
+import { resolveToolProfile, type ToolProfile } from './tools.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -75,7 +76,7 @@ function usage(): void {
   budget close <project>
   budget [project] [--json]
   tap <id> <code> [--json]
-  serve [--stdio|--http] [--port n]
+  serve [--stdio|--http] [--port n] [--tools core|supervisor|all]
   daemon --action status|drain|resume [--json]
   supervisor register <project> --repo <path> --host herdr|tmux --label <text>
   supervisor start <owner/name> --repo <abs path> [--host herdr|tmux] [--label <text>]
@@ -477,7 +478,7 @@ export async function startSupervisor(input: StartSupervisorInput, deps: StartSu
   } else {
     const config = loadConfig();
     const serveJsonPath = join(config.home, 'serve.json');
-    if (!readLiveServeJson(serveJsonPath)) await startDetachedDaemon(config.home, serveJsonPath, 0);
+    if (!readLiveServeJson(serveJsonPath)) await startDetachedDaemon(config.home, serveJsonPath, 0, resolveToolProfile(process.env.HELM_TOOLS));
     printOutcome(await postTool('supervisor.register', { project: input.project, repo, host: hostName, label }), input.json === true);
   }
 }
@@ -503,14 +504,15 @@ const cmdJev = async (args: string[]): Promise<void> => {
 
 /** HTTP owns the daemon; stdio attaches or starts it. See README.md. */
 async function cmdServe(args: string[]): Promise<void> {
-  const { values } = parseArgs({ args, options: { stdio: { type: 'boolean' }, http: { type: 'boolean' }, port: { type: 'string' } } });
+  const { values } = parseArgs({ args, options: { stdio: { type: 'boolean' }, http: { type: 'boolean' }, port: { type: 'string' }, tools: { type: 'string' } } });
+  const tools = resolveToolProfile(values.tools ?? process.env.HELM_TOOLS) as ToolProfile;
   const config = loadConfig();
   ensureHome(config);
   const serveJsonPath = join(config.home, 'serve.json');
   const port = values.port ? Number(values.port) : 0;
   if (values.stdio && !values.http) {
-    const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port));
-    const handle = await serveStdioProxy(live.port);
+    const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port, tools));
+    const handle = await serveStdioProxy(live.port, tools);
     console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);
     await handle.closed;
     await handle.close();
@@ -586,7 +588,7 @@ async function cmdServe(args: string[]): Promise<void> {
 }
 
 /** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */
-async function startDetachedDaemon(home: string, serveJsonPath: string, port: number): Promise<{ port: number; pid: number }> {
+async function startDetachedDaemon(home: string, serveJsonPath: string, port: number, tools: ToolProfile): Promise<{ port: number; pid: number }> {
   if (existsSync(join(home, 'upgrade.lock'))) throw new Error('upgrade in progress; automatic startup is paused');
   const update = readMetadata(join(home, 'upgrade.json'));
   if (update?.phase === 'failed' && update.handoverStarted) throw new Error('upgrade failed after shutdown; explicit manual recovery is required');
@@ -594,7 +596,7 @@ async function startDetachedDaemon(home: string, serveJsonPath: string, port: nu
   const entry = selected ? join(String(selected.root), 'helm', 'src', 'cli.ts') : process.argv[1] ?? '';
   const log = openSync(join(home, 'daemon.log'), 'a');
   const child = spawn(process.execPath, ['--import', 'tsx', entry, 'serve', '--http', '--port', String(port)], {
-    cwd: resolve(entry, '..'), detached: true, stdio: ['ignore', log, log], env: process.env,
+    cwd: resolve(entry, '..'), detached: true, stdio: ['ignore', log, log], env: { ...process.env, HELM_TOOLS: tools },
   });
   closeSync(log);
   child.on('error', (err) => console.error(err.message));

@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { TOOL_NAMES } from '../src/types.ts';
+import { CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.ts';
 
-function stdioFrontEnd(home: string) {
+function stdioFrontEnd(home: string, tools = 'core') {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['--import', 'tsx', 'src/cli.ts', 'serve', '--stdio'],
     cwd: process.cwd(),
-    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3' } as Record<string, string>,
+    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools } as Record<string, string>,
     stderr: 'pipe',
   });
   return { transport, client: new Client({ name: 'helm-test', version: '0' }) };
@@ -42,13 +42,13 @@ async function stopDaemon(home: string): Promise<void> {
 
 const text = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? '');
 
-test('mcp stdio: a real client lists all tools and calls them through helm serve --stdio', async () => {
+test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const { transport, client } = stdioFrontEnd(home);
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort());
+    assert.deepEqual(tools.map((t) => t.name).sort(), [...CORE_TOOL_NAMES, ...META_TOOL_NAMES].sort());
     const status = JSON.parse(text(await client.callTool({ name: 'run.status', arguments: {} }))) as { ok: boolean; maxWorkers: number };
     assert.equal(status.ok, true);
     assert.equal(status.maxWorkers, 3);
@@ -68,7 +68,7 @@ test('mcp stdio: a real client lists all tools and calls them through helm serve
 test('mcp stdio: the front-end exits with its client, the daemon outlives it, and a second client attaches to the same daemon', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const a = stdioFrontEnd(home);
-  const b = stdioFrontEnd(home);
+  const b = stdioFrontEnd(home, 'supervisor');
   try {
     await a.client.connect(a.transport);
     const daemon = daemonOf(home);
@@ -79,6 +79,8 @@ test('mcp stdio: the front-end exits with its client, the daemon outlives it, an
     await b.client.connect(b.transport);
     assert.deepEqual(daemonOf(home), daemon, 'the second front-end attached instead of starting a daemon');
     assert.notEqual(b.transport.pid, aPid);
+    const { tools } = await b.client.listTools();
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), [...SUPERVISOR_TOOL_NAMES, ...META_TOOL_NAMES].sort());
     const fromB = JSON.parse(text(await b.client.callTool({ name: 'run.status', arguments: {} }))) as { ok: boolean };
     assert.equal(fromB.ok, true);
 

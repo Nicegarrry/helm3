@@ -17,7 +17,9 @@ package-script gates and print the `.mcp.json` snippet. Existing repo configurat
 requires `--force`; existing operator configuration is preserved. A new operator
 configuration sets a $5 spend cap and enables subscription-only routing when no API
 keys are in the environment. Swift projects get `swift test`; Xcode and unknown
-projects get a failing TODO gate to customize.
+projects get a failing TODO gate to customize. Lockfiles select npm, pnpm, or Yarn
+installation and script commands; without a lockfile, installation uses `npm install`.
+After writing its files, `init` exits successfully and prints doctor failures as next steps.
 
 `helm doctor` checks local tools, credentials, configuration, routing and daemon
 health without starting a daemon or writing state. It prints one next command,

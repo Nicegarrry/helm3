@@ -151,17 +151,18 @@ test('init guesses real package scripts, prints MCP, runs doctor and protects bo
   await rm(join(f.home), { recursive: true });
   await writeFile(join(f.repo, 'package.json'), JSON.stringify({ name: 'temp-repo', scripts: { test: 'node --test', typecheck: 'tsc --noEmit', lint: 'eslint .', build: 'echo build' } }));
   const result = await f.cli('init');
+  assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /\.mcp.json snippet:/);
   assert.match(result.stdout, /"serve",\s*"--stdio"/);
   assert.match(result.stdout, /ok node:/);
   const repoConfig = JSON.parse(await readFile(join(f.repo, 'helm.json'), 'utf8'));
-  assert.deepEqual(repoConfig.gates, [{ name: 'install', command: 'npm ci' }, ...['test', 'typecheck', 'lint'].map((name) => ({ name, command: `npm run ${name}` }))]);
+  assert.deepEqual(repoConfig.gates, [{ name: 'install', command: 'npm install' }, ...['test', 'typecheck', 'lint'].map((name) => ({ name, command: `npm run ${name}` }))]);
   const operator = await readFile(join(f.home, 'helm.json'), 'utf8');
   assert.deepEqual(JSON.parse(operator), { spend: { capUsd: 5 }, routing: { policy: { subscriptionOnly: true } } });
   const refused = await f.cli('init'); assert.equal(refused.code, 1); assert.match(refused.stderr, /--force/);
   assert.deepEqual(JSON.parse(await readFile(join(f.repo, 'helm.json'), 'utf8')), repoConfig);
   await writeFile(join(f.repo, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
-  await f.cli('init', '--force');
+  assert.equal((await f.cli('init', '--force')).code, 0);
   assert.equal(JSON.parse(await readFile(join(f.repo, 'helm.json'), 'utf8')).gates.length, 2);
   assert.equal(await readFile(join(f.home, 'helm.json'), 'utf8'), operator);
   await assert.rejects(readFile(join(f.repo, '.mcp.json')), { code: 'ENOENT' });
@@ -170,18 +171,112 @@ test('init supports --repo, Swift/Xcode/TODO fallback and API-key operator polic
   const f = await fixture(t);
   const target = join(f.root, 'target'); await mkdir(target);
   await writeFile(join(target, 'Package.swift'), '// real Swift marker');
-  await f.cli('init', '--repo', target);
+  assert.equal((await f.cli('init', '--repo', target)).code, 0);
   assert.deepEqual(JSON.parse(await readFile(join(target, 'helm.json'), 'utf8')).gates, [{ name: 'swift', command: 'swift test' }]);
   await rm(join(target, 'Package.swift')); await mkdir(join(target, 'App.xcodeproj'));
-  await f.cli('init', '--repo', target, '--force');
+  assert.equal((await f.cli('init', '--repo', target, '--force')).code, 0);
   let config = JSON.parse(await readFile(join(target, 'helm.json'), 'utf8'));
   assert.match(config.gates[0].command, /xcodebuild test/);
   await rm(join(target, 'App.xcodeproj'), { recursive: true });
-  await f.cli('init', '--repo', target, '--force');
+  assert.equal((await f.cli('init', '--repo', target, '--force')).code, 0);
   config = JSON.parse(await readFile(join(target, 'helm.json'), 'utf8'));
   await assert.rejects(exec('/bin/sh', ['-c', config.gates[0].command]), { code: 1 });
   await rm(join(f.home, 'helm.json')); f.env.OPENROUTER_API_KEY = secret;
   const result = await f.cli('init', '--repo', target, '--force');
+  assert.equal(result.code, 0);
   assert.equal(JSON.parse(await readFile(join(f.home, 'helm.json'), 'utf8')).routing.policy.subscriptionOnly, false);
   assert.ok(!result.stdout.includes(secret));
+});
+test('doctor requires routing.allowed membership and treats an empty allowlist as unrestricted', async (t) => {
+  const f = await fixture(t);
+  for (const [allowed, code] of [[['codex/other'], 1], [['codex/test-model:medium'], 0], [[], 0]] as const) {
+    await writeFile(join(f.home, 'helm.json'), JSON.stringify({ routing: { ...f.config.routing, allowed } }));
+    const result = await f.cli('doctor', '--json');
+    assert.equal(result.code, code, result.stdout + result.stderr);
+    const tier = JSON.parse(result.stdout).tiers['1'];
+    assert.deepEqual(tier.available, code === 0 ? ['codex/test-model:medium'] : []);
+  }
+});
+test('init selects the lockfile package manager for install and script gates', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.repo, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc', lint: 'eslint .' } }));
+  for (const [lockfile, manager, command] of [
+    ['package-lock.json', 'npm', 'npm ci'],
+    ['pnpm-lock.yaml', 'pnpm', 'pnpm install --frozen-lockfile'],
+    ['yarn.lock', 'yarn', 'yarn install --frozen-lockfile'],
+    ['', 'npm', 'npm install'],
+  ]) {
+    if (lockfile) await writeFile(join(f.repo, lockfile), 'fixture lockfile');
+    const result = await f.cli('init', '--force');
+    assert.equal(result.code, 0, result.stderr);
+    const config = JSON.parse(await readFile(join(f.repo, 'helm.json'), 'utf8'));
+    assert.deepEqual(config.gates, [{ name: 'install', command }, ...['test', 'typecheck', 'lint'].map((name) => ({ name, command: `${manager} run ${name}` }))]);
+    if (lockfile) await rm(join(f.repo, lockfile));
+  }
+});
+test('init ignores tool/subscription tokens and recognizes model-provider API keys', async (t) => {
+  const f = await fixture(t);
+  const operator = join(f.home, 'helm.json');
+  const excluded = ['NPM_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_OAUTH_TOKEN', 'GITHUB_TOKEN', 'COPILOT_GITHUB_TOKEN', 'OTHER_API_KEY'];
+  for (const name of excluded) f.env[name] = secret;
+  let result = await f.cli('init');
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(await readFile(operator, 'utf8')).routing.policy.subscriptionOnly, true);
+  for (const name of excluded) delete f.env[name];
+  for (const name of ['OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GROQ_API_KEY', 'HF_TOKEN']) {
+    await rm(operator); f.env[name] = secret;
+    result = await f.cli('init', '--force');
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(await readFile(operator, 'utf8')).routing.policy.subscriptionOnly, false, name);
+    assert.ok(!result.stdout.includes(secret) && !result.stderr.includes(secret));
+    delete f.env[name];
+  }
+});
+test('init reports specific path/package errors without writing configuration or printing input', async (t) => {
+  const f = await fixture(t);
+  const missing = await f.cli('init', '--repo', join(f.root, 'absent'));
+  assert.equal(missing.code, 1); assert.match(missing.stderr, /invalid --repo path/);
+  const path = join(f.repo, 'package.json');
+  await writeFile(path, `{"secret":"${secret}",broken`);
+  const notDirectory = await f.cli('init', '--repo', path);
+  assert.equal(notDirectory.code, 1); assert.match(notDirectory.stderr, /invalid --repo path/);
+  for (const value of [`{"secret":"${secret}",broken`, 'null', '[]', '{"scripts":42}']) {
+    await writeFile(path, value);
+    const result = await f.cli('init');
+    assert.equal(result.code, 1); assert.match(result.stderr, /invalid package.json/);
+    assert.ok(!result.stdout.includes(secret) && !result.stderr.includes(secret));
+    await assert.rejects(readFile(join(f.repo, 'helm.json')), { code: 'ENOENT' });
+    await assert.rejects(readFile(join(f.home, 'helm.json')), { code: 'ENOENT' });
+  }
+});
+test('init exits zero after writing files even when doctor fails', async (t) => {
+  const f = await fixture(t);
+  await f.script('gh', 'exit 1');
+  const result = await f.cli('init');
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /fail gh:/);
+  assert.match(result.stdout, /Files written\. Follow the doctor next steps/);
+  assert.match(result.stdout, /next: gh auth login/);
+  assert.ok(await readFile(join(f.repo, 'helm.json')));
+  assert.ok(await readFile(join(f.home, 'helm.json')));
+  assert.equal((await f.cli('doctor', '--json')).code, 1);
+});
+test('other launcher commands do not load onboarding', async (t) => {
+  const f = await fixture(t);
+  const hook = join(f.root, 'forbid-onboarding.mjs');
+  await writeFile(hook, `import { registerHooks } from 'node:module';
+    registerHooks({ resolve(specifier, context, next) {
+      if (/onboard\\.(ts|js)$/.test(specifier)) throw new Error('onboarding module loaded');
+      return next(specifier, context);
+    } });`);
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  const result = await f.cli('--version');
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^\d+\.\d+\.\d+/);
+  const listed = await f.cli('ps', '--json');
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.deepEqual(JSON.parse(listed.stdout), []);
+  const blocked = await f.cli('doctor', '--json');
+  assert.equal(blocked.code, 1);
+  assert.match(blocked.stderr, /onboarding module loaded/);
 });

@@ -11,5 +11,5 @@ if (process.argv[2] === 'fleet') {
   const result = spawnSync(process.execPath, [join(here, 'fleet.mjs'), ...process.argv.slice(3)], { stdio: 'inherit' });
   process.exit(result.status ?? 1);
 }
-const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(here, '..', 'src', ['init', 'doctor'].includes(process.argv[2]) ? 'onboard.ts' : 'cli.ts'), ...process.argv.slice(2)], { stdio: 'inherit', cwd: ['init', 'doctor'].includes(process.argv[2]) ? process.cwd() : join(here, '..') });
+const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), join(here, '..', 'src', 'cli.ts'), ...process.argv.slice(2)], { stdio: 'inherit', cwd: ['init', 'doctor'].includes(process.argv[2]) ? process.cwd() : join(here, '..') });
 child.on('exit', (code) => process.exit(code ?? 1));

@@ -3,8 +3,7 @@ import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import { findEnvKeys } from '@earendil-works/pi-ai/compat';
+import { findEnvKeys, getProviders } from '@earendil-works/pi-ai/compat';
 import { getAgentDir, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { loadConfig } from './config.js';
 import { defaultCodexBin } from './codex.js';
@@ -15,7 +14,9 @@ import { appliedPolicy, policyAllows } from './routing/policy.js';
 import { repoConfigSchema } from './repoconfig.js';
 type Check = { name: string; status: 'ok' | 'warn' | 'fail'; detail: string; next: string };
 const exec = promisify(execFile);
-const apiKeysPresent = () => Object.entries(process.env).some(([key, value]) => /(?:API_KEY|AUTH_TOKEN|OAUTH_TOKEN)$/.test(key) && value?.trim());
+const apiKeysPresent = () => Boolean(process.env.GOOGLE_API_KEY?.trim()) || getProviders().some((provider) =>
+  findEnvKeys(provider)?.some((key) => (key.endsWith('_API_KEY') || key === 'HF_TOKEN') && Boolean(process.env[key]?.trim())));
+export class OnboardingError extends Error {}
 const jsonFile = (path: string) => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { throw new Error('invalid JSON file'); } };
 export async function doctor(repo = process.cwd()) {
   const home = loadConfig().home, checks: Check[] = [];
@@ -52,7 +53,10 @@ export async function doctor(repo = process.cwd()) {
   const catalog = createModelCatalog({ claudeLaneRegistered: true, probe: { codex: (id) => codex && codexModels.includes(id), claude: () => claude, pi: (provider, id) => piModels.includes(`${provider}/${id}`) } });
   const tiers: Record<string, { models: string[]; available: string[] }> = {};
   if (settings) for (const [tier, models] of Object.entries(settings.routing.tiers)) {
-    const available = (await Promise.all(models.map(async (m) => policyAllows(appliedPolicy(settings, {}), m) && lanes[laneForModel(m)] && (await catalog.availability(m)).available ? m : undefined))).filter((m): m is string => m !== undefined);
+    const available = (await Promise.all(models.map(async (m) =>
+      (settings.routing.allowed.length === 0 || settings.routing.allowed.includes(m)) &&
+      policyAllows(appliedPolicy(settings, {}), m) && lanes[laneForModel(m)] &&
+      (await catalog.availability(m)).available ? m : undefined))).filter((m): m is string => m !== undefined);
     tiers[tier] = { models, available };
     add(`tier ${tier}`, available.length ? 'ok' : 'fail', available.length ? 'available model found' : 'no available allowed model', 'vi "${HELM_HOME:-$HOME/.helm}/helm.json"');
   }
@@ -75,19 +79,30 @@ export async function doctor(repo = process.cwd()) {
 }
 export async function init(repo: string, force = false): Promise<string> {
   repo = resolve(repo); const home = resolve(loadConfig().home), path = join(repo, 'helm.json');
-  if (repo === home) throw new Error('target repo must differ from HELM_HOME');
-  if (existsSync(path) && !force) throw new Error('repo helm.json exists; use --force to overwrite');
-  const files = readdirSync(repo), gates: Array<{ name: string; command: string }> = [];
+  if (repo === home) throw new OnboardingError('target repo must differ from HELM_HOME');
+  let files: string[];
+  try { files = readdirSync(repo); }
+  catch { throw new OnboardingError('invalid --repo path: expected an existing readable directory'); }
+  if (existsSync(path) && !force) throw new OnboardingError('repo helm.json exists; use --force to overwrite');
+  const gates: Array<{ name: string; command: string }> = [];
   if (files.includes('package.json')) {
-    const scripts = jsonFile(join(repo, 'package.json')).scripts ?? {};
-    gates.push({ name: 'install', command: 'npm ci' });
-    for (const name of ['test', 'typecheck', 'lint']) if (typeof scripts[name] === 'string') gates.push({ name, command: `npm run ${name}` });
+    let scripts: Record<string, unknown>;
+    try {
+      const pkg = jsonFile(join(repo, 'package.json'));
+      if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg) ||
+          (pkg.scripts !== undefined && (!pkg.scripts || typeof pkg.scripts !== 'object' || Array.isArray(pkg.scripts)))) throw new Error();
+      scripts = pkg.scripts ?? {};
+    } catch { throw new OnboardingError('invalid package.json: expected a JSON object with an optional scripts object'); }
+    const manager = files.includes('package-lock.json') ? 'npm' : files.includes('pnpm-lock.yaml') ? 'pnpm' : files.includes('yarn.lock') ? 'yarn' : 'npm';
+    const install = files.includes('package-lock.json') ? 'npm ci' : manager === 'npm' ? 'npm install' : `${manager} install --frozen-lockfile`;
+    gates.push({ name: 'install', command: install });
+    for (const name of ['test', 'typecheck', 'lint']) if (typeof scripts[name] === 'string') gates.push({ name, command: `${manager} run ${name}` });
   } else if (files.includes('Package.swift')) gates.push({ name: 'swift', command: 'swift test' });
   else gates.push({ name: 'TODO', command: `echo '${files.some((f) => /\.(xcodeproj|xcworkspace)$/.test(f)) ? 'TODO: configure xcodebuild test with your scheme and destination' : 'TODO: configure a project test gate'}'; exit 1` });
   writeFileSync(path, `${JSON.stringify({ gates }, null, 2)}\n`, { flag: force ? 'w' : 'wx' });
   mkdirSync(home, { recursive: true });
   try { writeFileSync(join(home, 'helm.json'), `${JSON.stringify({ spend: { capUsd: 5 }, routing: { policy: { subscriptionOnly: !apiKeysPresent() } } }, null, 2)}\n`, { flag: 'wx', mode: 0o600 }); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw new Error('could not create operator helm.json'); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw new OnboardingError('could not create operator helm.json'); }
   return JSON.stringify({ mcpServers: { helm: { command: 'helm', args: ['serve', '--stdio'] } } }, null, 2);
 }
 export async function onboard(command: 'doctor' | 'init', args: string[]): Promise<void> {
@@ -97,6 +112,6 @@ export async function onboard(command: 'doctor' | 'init', args: string[]): Promi
   const report = await doctor(repo);
   if (values.json) console.log(JSON.stringify(report, null, 2));
   else { for (const c of report.checks) console.log(`${c.status} ${c.name}: ${c.detail}`); console.log(`lanes: ${JSON.stringify(report.lanes)}\ntiers: ${JSON.stringify(report.tiers)}\nnext: ${report.nextCommand}`); }
-  process.exitCode = report.ok ? 0 : 1;
+  if (command === 'init' && !report.ok) console.log('Files written. Follow the doctor next steps above before starting workers.');
+  process.exitCode = command === 'init' || report.ok ? 0 : 1;
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) onboard(process.argv[2] as 'doctor' | 'init', process.argv.slice(3)).catch((e) => { console.error(e instanceof Error && /^(repo helm.json exists|target repo must differ)/.test(e.message) ? e.message : 'onboarding failed; check paths, permissions and JSON configuration'); process.exitCode = 1; });

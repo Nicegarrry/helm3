@@ -91,6 +91,7 @@ import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTa
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
 import { askLoadClass } from './capacity/classify.js';
+import { admissionRank, effectivePriority, quickCheck, type QuickCheck } from './capacity/priority.js';
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 import { sandboxEnabled } from './gate.js';
@@ -576,7 +577,8 @@ export class Helm {
       if (reason) return refuse(reason);
       let selection: Selection;
       try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
-      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
+      const check = await quickCheck(this.jev, { objective: chosen.input.objective, project: chosen.input.repo });
+      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice, check));
       if (outcome.ok) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice).catch((error) => {
         try { this.store.appendEvent(outcome.workerId, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
       });
@@ -589,7 +591,7 @@ export class Helm {
     input: SpawnInput,
     onDone?: OnDone,
     selection: Selection = { guidance: '', skills: [] },
-    choice?: ModelChoice,
+    choice?: ModelChoice, check: QuickCheck = {},
   ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string; queued?: true; loadClass?: LoadClass }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
@@ -606,6 +608,8 @@ export class Helm {
     if (baseline && baseline.repoSlug !== repoSlug) return refuse(`baseline belongs to ${baseline.repoSlug}, not ${repoSlug}`);
     const baseRef = baseline?.testCommit ?? input.baseRef ?? (await this.workspace.defaultBranch(repo));
     const baseSha = await this.workspace.resolveSha(repo, baseRef);
+    const stated = input.priority ?? (await loadRepoConfig(repo, baseSha, true, { timeout: 5_000 }).catch(() => undefined))?.priority ?? 'normal';
+    const effective = effectivePriority(stated, check), rank = admissionRank(effective, input.requestedBy ?? 'auto', check.size);
     const workerId = genId('w');
     const branch = `helm/${workerId}`;
     const worktree = join(this.config.home, 'worktrees', repoSlug.replace(/\//g, '__'), workerId);
@@ -640,10 +644,11 @@ export class Helm {
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
+    this.store.appendEvent(workerId, 'admission.priority', { stated, requestedBy: input.requestedBy ?? 'auto', class: check.class ?? null, size: check.size ?? null, effective, score: rank.base, reasons: rank.reasons });
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
-    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
+    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, rank, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
     const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
     if ('queued' in admitted) warnings.push('queued: capacity');
     return { ok: true, workerId, branch, worktree, loadClass, ...(warnings.length ? { warning: warnings.join('; ') } : {}), ...('queued' in admitted ? { queued: true as const } : {}) };

@@ -19,6 +19,7 @@ function unHardenedGitArgs(file: string, args: string[]): string[] {
 const h1 = '1'.repeat(40);
 const h2 = '2'.repeat(40);
 const h3 = '3'.repeat(40);
+const HARDENED_GIT_PREFIX = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.sshCommand=ssh', '-c', 'protocol.ext.allow=never'];
 const rejectExec = (): never => { throw Object.assign(new Error('git command failed'), { code: 1, stdout: '', stderr: '' }); };
 
 function worker(id: string, number: number, head: string, worktree = `/worktree/${id}`, state: WorkerRow['state'] = 'succeeded'): WorkerRow {
@@ -67,6 +68,23 @@ test('two PRs on one repository are processed in order, one per tick', async () 
     assert.equal(rows(d)[1]?.state, 'queued');
     await d.queue.tick();
     assert.equal(rows(d)[1]?.state, 'merged');
+  } finally { d.store.close(); }
+});
+
+test('queue hardens raw merge argv passed to an injected exec', async () => {
+  const raw: Array<{ file: string; args: string[] }> = [];
+  const d = setup({ exec: async (file, args) => {
+    raw.push({ file, args: [...args] });
+    return { stdout: '', stderr: '', code: 0 };
+  } });
+  try {
+    await d.queue.enqueue({ number: 1 });
+    d.setBase('base-2');
+    await d.queue.tick();
+    const merge = raw.find((call) => call.file === 'git' && call.args[8] === 'merge');
+    assert.ok(merge);
+    assert.deepEqual(merge.args.slice(0, 8), HARDENED_GIT_PREFIX);
+    assert.deepEqual(merge.args.slice(8, 11), ['merge', '--no-verify', '--no-commit']);
   } finally { d.store.close(); }
 });
 

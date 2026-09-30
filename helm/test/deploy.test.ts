@@ -21,6 +21,7 @@ function unHardenedGitArgs(file: string, args: string[]): string[] {
 
 const token = 'deploy-sentinel-token';
 const TEST_ENV_FILE = '/definitely-missing/helm-test-env';
+const HARDENED_GIT_PREFIX = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.sshCommand=ssh', '-c', 'protocol.ext.allow=never'];
 const createDeploy = (options: Parameters<typeof createDeployImpl>[0]) => createDeployImpl({ ...options, envFile: TEST_ENV_FILE });
 const target = { name: 'prod', kind: 'vercel' as const, env: { VERCEL_TOKEN: 'VERCEL_TOKEN' }, mode: 'cli' as const, smoke: { commands: [{ name: 'smoke', command: 'false' }] }, rollback: 'auto' as const };
 type DeployTarget = NonNullable<RepoConfig['deploy']>['targets'][number];
@@ -85,6 +86,34 @@ test('loadRepoConfig passes a bounded timeout to git config lookup', async () =>
   });
   assert.deepEqual(config, { gates: [] });
   assert.deepEqual(calls, [{ file: 'git', args: hardenedGitArgs(['show', `${'a'.repeat(40)}:helm.json`]), timeout: 5_000 }]);
+});
+
+test('deploy hardens raw git argv passed to an injected exec', async () => {
+  const fixture = repoWithConfig({ ...target, smoke: {} });
+  const store = openStore(':memory:');
+  const home = mkdtempSync(join(tmpdir(), 'helm-deploy-hardening-'));
+  const calls: Array<{ file: string; args: string[] }> = [];
+  try {
+    const service = createDeploy({
+      store, home,
+      workspace: workspace(fixture.sha),
+      resolveRepo: async () => ({ repo: fixture.repo, slug: 'owner/repo' }),
+      envelope: async () => ({ ok: true, decisions: [{ decision: 'allow' }] }),
+      reserveTap: () => 'tap required', commitTap() {}, rollbackTap() {},
+      exec: async (file, args) => {
+        calls.push({ file, args: [...args] });
+        if (file === 'git' && args[8] === 'rev-parse') return { stdout: `${fixture.sha}\n`, code: 0 };
+        if (file === 'vercel') return { stdout: 'https://deploy-hardening.example.invalid\n', code: 0 };
+        return { stdout: '', code: 0 };
+      },
+      env: { VERCEL_TOKEN: token, VERCEL_ORG_ID: token, VERCEL_PROJECT_ID: token },
+    });
+    const result = await service.run({ project: 'owner/repo', target: 'prod' });
+    assert.equal(result.ok, true);
+    const worktree = calls.find((call) => call.file === 'git' && call.args[8] === 'worktree');
+    assert.ok(worktree);
+    assert.deepEqual(worktree.args.slice(0, 8), HARDENED_GIT_PREFIX);
+  } finally { store.close(); rmSync(fixture.repo, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
 });
 
 function repoWithConfig(configTarget: DeployTarget = target): { repo: string; sha: string } {

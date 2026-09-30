@@ -71,7 +71,8 @@ test('e2e: spawn -> faux Pi writes a file -> commit -> gate -> pr.open -> daemon
   const config: HelmConfig = { home, spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 60_000 };
   const store = openStore(join(home, 'helm.sqlite'));
   const ghCalls: string[] = [];
-  const helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner({ allowUnsandboxed: process.platform !== 'darwin' }), github: fakeGitHub(ghCalls), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt } });
+  const alreadySandboxed = process.env.HELM_GATE_SANDBOXED === '1';
+  const helm = new Helm({ config, store, workspace: gitWorkspace(), gates: gateRunner({ allowUnsandboxed: process.platform !== 'darwin' || alreadySandboxed }), github: fakeGitHub(ghCalls), runner: piWorkerRunner({ modelRuntime }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt } });
   const daemon = await serve({ helm, port: 0 });
   try {
     const spawned = await helm.spawn({ repo, objective: 'Create hello.txt containing a greeting.', model: 'e2e-faux/offline', role: 'builder', contextPaths: [], allowWorkflows: false });
@@ -96,7 +97,7 @@ test('e2e: spawn -> faux Pi writes a file -> commit -> gate -> pr.open -> daemon
     assert.equal(gate.ok, true);
     if (!gate.ok) return;
     assert.equal((gate as { passed: boolean }).passed, true);
-    if (process.platform !== 'darwin') assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'gate.unsandboxed'), 'Linux e2e gates must record unsandboxed fallback');
+    if (alreadySandboxed || process.platform !== 'darwin') assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'gate.unsandboxed'), 'e2e gate fallback must be recorded');
 
     const pr = await helm.prOpen({ workerId: spawned.workerId, draft: true });
     assert.equal(pr.ok, true, JSON.stringify(pr));

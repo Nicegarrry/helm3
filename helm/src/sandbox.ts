@@ -151,6 +151,7 @@ export function buildSandboxProfile(options: {
     `(deny file-write* ${subpath(join(cwd, '.git'))})`,
     '(allow signal (target same-sandbox))',
     `(allow file-write* ${regex(`^${darwinTempPattern}/xcrun_db-[^/]+$`)})`,
+    `(allow file-write* ${literal(join(darwinTempDir, 'xcrun_db'))})`,
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
   ];
 
@@ -214,6 +215,7 @@ export function minimalGateEnv(home: string, tempDir: string): NodeJS.ProcessEnv
     HOME: home,
     LANG: process.env.LANG ?? 'C',
     TMPDIR: tempDir,
+    HELM_GATE_SANDBOXED: '1',
     CI: '1',
     GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_0: 'gc.auto',

@@ -276,6 +276,7 @@ test('review.request fetches refs/pull/N/head before creating the reviewer workt
   try {
     const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
     assert.equal(result.ok, true); if (!result.ok) return;
+    await d.helm.settle(result.reviewWorkerId);
     assert.deepEqual(calls, ['fetch pull-1 refs/pull/1/head', 'create']);
   } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
 });

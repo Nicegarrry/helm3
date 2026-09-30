@@ -46,7 +46,7 @@ function approveScore(answer: { noul?: boolean | number } | undefined): number |
   if (typeof answer.noul === 'boolean') return answer.noul ? 1 : 0;
   return null;
 }
-function verdictLine(body: string): 'approve' | 'changes' {
+export function verdictLine(body: string): 'approve' | 'changes' {
   const last = body.split(/\r?\n/).filter((line) => line.trim()).at(-1) ?? '';
   return last.startsWith('APPROVE: ') ? 'approve' : 'changes';
 }

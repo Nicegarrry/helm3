@@ -47,7 +47,7 @@ function fakeGitHub(calls: string[]): GitHub {
     async openPr(input) { head = input.head; calls.push(`openPr ${input.base} <- ${input.head} draft=${input.draft} title=${input.title}`); return { number: 7, url: 'https://github.example/pr/7' }; },
     async prStatus(slug, number): Promise<PrStatus> { calls.push(`prStatus ${slug}#${number}`); return { number, state: 'open', head, mergeable: true, draft: false, checks: [], reviews: [], url: 'https://github.example/pr/7' }; },
     async comment() { return { body: '', issueNumber: 1 }; },
-    async postComment(slug, number, body) { calls.push(`comment ${slug}#${number}: ${body.slice(0, 60)}`); },
+    async postComment(slug, number, body) { calls.push(`comment ${slug}#${number}: ${body.slice(0, 60)}`); return `https://github.com/${slug}/pull/${number}#issuecomment-1`; },
     async merge(slug, number, expectedHead) { calls.push(`merge ${slug}#${number} ${expectedHead}`); },
   };
 }

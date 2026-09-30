@@ -36,7 +36,7 @@ function fakeWorkspace(removed: string[], contained: Set<string>, dirty: Set<str
 }
 
 function fakeGitHub(statuses: Map<number, PrStatus>): GitHub {
-  return { async prStatus(_repo, number) { return statuses.get(number) ?? { number, state: 'open', head: '', mergeable: null, draft: false, checks: [], reviews: [], url: '' }; }, async openPr() { return { number: 1, url: '' }; }, async comment() { return { body: '' }; }, async postComment() {}, async merge() {} };
+  return { async prStatus(_repo, number) { return statuses.get(number) ?? { number, state: 'open', head: '', mergeable: null, draft: false, checks: [], reviews: [], url: '' }; }, async openPr() { return { number: 1, url: '' }; }, async comment() { return { body: '' }; }, async postComment() { return 'https://github.com/o/r/pull/1#issuecomment-1'; }, async merge() {} };
 }
 
 test('GC removes only settled clean workers eligible by merged PR, origin containment, or TTL', async () => {

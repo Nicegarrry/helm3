@@ -86,7 +86,7 @@ const timer = setInterval(() => {
   const old = await start(home, { HELM_CODEX_BIN: fakeCodex });
   const before = await control(old.port, { action: 'status' });
   const post = async (name: string, body: object) => (await (await fetch(`http://127.0.0.1:${old.port}/tools/${name}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json()) as any;
-  const spawned = await post('worker.spawn', { repo, objective: 'synthetic task', difficulty: 'easy' });
+  const spawned = await post('worker.spawn', { repo, objective: 'synthetic task', model: 'codex/gpt-6-luna:medium', difficulty: 'easy' });
   assert.ok(spawned.ok, JSON.stringify(spawned));
   await eventually(() => post('worker.inspect', { workerId: spawned.workerId }), (s) => s.state === 'running' && s.events.some((e: any) => e.kind === 'turn.start'));
   await control(old.port, { action: 'upgrade', timeoutMs: 10000 });

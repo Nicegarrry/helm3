@@ -4,8 +4,14 @@ import type { Settings } from './settings.js';
 import { cleanRateForRouting } from './scorecard.js';
 import type { Store } from './types.js';
 import type { ModelChooser, ModelChoice, SpawnInput } from './helm.js';
+import { LOAD_CLASS_QUESTION, loadClassFromAnswer } from './capacity/classify.js';
 
 const HIGH = 'codex/gpt-5.6-luna:high';
+
+function choice(value: ModelChoice, loadClassAsked = true): ModelChoice {
+  Object.defineProperty(value, 'loadClassAsked', { value: loadClassAsked, enumerable: false });
+  return value;
+}
 
 function tooBig(answer: JevAnswer | undefined): boolean {
   return flag(answer, 'true', true);
@@ -30,25 +36,28 @@ export function createRouter(options: { settings: Settings; store: Store; jev: J
       result = await options.jev.ask('route', {
         ...(projectName ? { project: projectName } : {}),
         state: { objective: input.objective, acceptance: input.acceptance ?? null },
-        questions: { complexity: questions.complexity!, too_big: questions.too_big! },
+        questions: { complexity: questions.complexity!, too_big: questions.too_big!, load: LOAD_CLASS_QUESTION },
       });
     } catch {
-      return { model: fallbackModel() };
+      return choice({ model: fallbackModel() });
     }
-    if (!result.ok) return { model: fallbackModel() };
+    if (!result.ok) return choice({ model: fallbackModel() });
     const splitRecommended = tooBig(result.answers.too_big);
     const complexity = score(result.answers.complexity);
     const complexityBand = band(complexity);
-    if (complexityBand === undefined) return { model: fallbackModel(), ...(splitRecommended ? { warning: 'split recommended' } : {}) };
+    const loadClass = loadClassFromAnswer(result.answers.load);
+    if (complexityBand === undefined) return choice({ model: fallbackModel(), ...(splitRecommended ? { warning: 'split recommended' } : {}), ...(loadClass ? { loadClass } : {}) });
     let model = allowed(options.settings.routing.table[complexityBand] ?? HIGH, options.settings);
     const rate = cleanRateForRouting(options.store, model, complexityBand, options.now?.() ?? new Date(), projectName);
     if (rate.n >= options.settings.routing.minN && rate.clean / rate.n < options.settings.routing.minClean) model = allowed(HIGH, options.settings);
-    return {
+    const output: ModelChoice = {
       model,
       band: complexityBand,
       complexity,
       ...(splitRecommended ? { warning: 'split recommended' } : {}),
+      ...(loadClass ? { loadClass } : {}),
     };
+    return choice(output);
   };
 }
 

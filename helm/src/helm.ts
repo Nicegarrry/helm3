@@ -25,6 +25,7 @@ import type {
   Workspace,
   SupervisorRow,
   WakeRow,
+  LoadClass,
 } from './types.js';
 import {
   budgetCloseInput,
@@ -80,6 +81,9 @@ import { registerRouting } from './route.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
+import { askLoadClass } from './capacity/classify.js';
+import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
+import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 
 const exec = promisify(execFile);
 
@@ -121,6 +125,9 @@ export type HelmDeps = Readonly<{
   deploySleep?: (ms: number) => Promise<void>;
   deployEnv?: NodeJS.ProcessEnv;
   statfs?: (path: string) => Promise<StatfsResult>;
+  capacity?: CapacityAdmission;
+  capacitySampler?: CapacitySampler;
+  capacityExec?: CapacityExec;
 }>;
 
 const STEERABLE_STATES: ReadonlySet<WorkerState> = new Set(['idle', 'waiting', 'succeeded', 'failed', 'interrupted']);
@@ -184,7 +191,7 @@ export function modelFamily(model: string): string {
 const TASK_MODELS = { normal: 'codex/gpt-5.6-luna:high', easy: 'codex/gpt-5.6-luna:medium', 'super-easy': 'codex/gpt-5.6-luna:medium' } as const;
 
 export type ToolGuard = (input: unknown) => string | null | Promise<string | null>;
-export type ModelChoice = Readonly<{ model: string; band?: string; complexity?: number; warning?: string }>;
+export type ModelChoice = Readonly<{ model: string; band?: string; complexity?: number; warning?: string; loadClass?: LoadClass; loadClassAsked?: boolean }>;
 export type ModelChooser = (input: SpawnInput) => string | ModelChoice | null | undefined | Promise<string | ModelChoice | null | undefined>;
 
 export class Helm {
@@ -225,6 +232,7 @@ export class Helm {
   private readonly selector: ReturnType<typeof createSelector>;
   readonly scorecard: ScorecardService;
   readonly deploy: DeployService;
+  readonly capacity: CapacityAdmission;
   /** Tail of an in-process promise-chain mutex serializing spawn/steer/reviewRequest admission sections. */
   private lock: Promise<void> = Promise.resolve();
   /** Per-worker admission locks shared with hygiene so GC cannot race steer/retry. */
@@ -252,6 +260,10 @@ export class Helm {
     this.supervisor = deps.supervisor;
     this.discord = deps.discord;
     this.review = deps.review;
+    this.capacity = deps.capacity ?? createCapacityAdmission({
+      home: this.config.home, maxWorkers: this.config.maxWorkers, store: this.store, settings: this.settings,
+      sampler: deps.capacitySampler, exec: deps.capacityExec, statfs: this.statfs, now: () => this.nowDate(),
+    });
     this.guard('pr.open', async (raw) => {
       const input = raw as z.infer<typeof prOpenInput>;
       const worker = this.store.getWorker(input.workerId);
@@ -388,7 +400,10 @@ export class Helm {
       const selected = await fn(chosen);
       if (!selected) continue;
       if (typeof selected === 'string') chosen = { ...chosen, model: selected };
-      else { chosen = { ...chosen, model: selected.model }; choice = { ...choice, ...selected }; }
+      else {
+        chosen = { ...chosen, model: selected.model, ...(selected.loadClass ? { loadClass: selected.loadClass } : {}) };
+        choice = { ...choice, ...selected, ...(selected.loadClassAsked !== undefined ? { loadClassAsked: selected.loadClassAsked } : {}) };
+      }
     }
     return { input: chosen, choice };
   }
@@ -452,7 +467,7 @@ export class Helm {
     return this.store.markInterrupted();
   }
 
-  async spawn(input: SpawnInput): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string }>> {
+  async spawn(input: SpawnInput): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string; queued?: true; loadClass?: LoadClass }>> {
     return runGuard(async () => {
       const freeGb = await freeSpaceGb(this.config.home, this.statfs);
       if (freeGb !== null && freeGb < this.settings.hygiene.minFreeGb / 2) return refuse('disk low');
@@ -471,7 +486,7 @@ export class Helm {
     onDone?: OnDone,
     selection: Selection = { guidance: '', skills: [] },
     choice?: ModelChoice,
-  ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string }>> {
+  ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string; queued?: true; loadClass?: LoadClass }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
       if (existing) return { ok: true, workerId: existing.workerId, branch: existing.branch, worktree: existing.worktree };
@@ -482,6 +497,7 @@ export class Helm {
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
+    const loadClass = await askLoadClass({ jev: this.jev, repo, role: input.role, explicit: input.loadClass, alreadyAsked: choice !== undefined || input.model !== undefined || input.difficulty !== undefined, state: { objective: input.objective, acceptance: input.acceptance ?? null } });
     const admittedBudget = this.assertBudget(repoSlug);
     const baseline = input.baselineId ? requireValue(getBaseline(this.store, input.baselineId), `baseline not found: ${input.baselineId}`) : undefined;
     if (baseline && baseline.repoSlug !== repoSlug) return refuse(`baseline belongs to ${baseline.repoSlug}, not ${repoSlug}`);
@@ -512,16 +528,17 @@ export class Helm {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
     }
-    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, baseRef, baseSha, branch, worktree });
+    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, loadClass, baseRef, baseSha, branch, worktree });
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
     const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
-    this.startRun(workerId, message, onDone);
+    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass }, () => { this.startRun(workerId, message, onDone); });
     const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
-    return { ok: true, workerId, branch, worktree, ...(warnings.length ? { warning: warnings.join('; ') } : {}) };
+    if ('queued' in admitted) warnings.push('queued: capacity');
+    return { ok: true, workerId, branch, worktree, loadClass, ...(warnings.length ? { warning: warnings.join('; ') } : {}), ...('queued' in admitted ? { queued: true as const } : {}) };
   }
 
   async inspect(input: z.infer<typeof inspectInput>) {
@@ -637,16 +654,26 @@ export class Helm {
         checks.push({ name: 'acceptance', command });
       }
       const gateId = genId('g');
-      const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
-      const outcome = await this.gates.run(row.worktree, checks, logDir, {
-        timeoutMs: this.config.gateTimeoutMs,
-        nodeModulesRoot: this.workerWorktreeRoot(row),
-        onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
-      });
-      const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
-      this.store.insertGate(gateRow);
-      this.store.appendEvent(input.workerId, 'gate', { gateId, passed: outcome.passed, head });
-      return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
+      const runGate = async (): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> => {
+        const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
+        try {
+          const outcome = await this.gates.run(row.worktree, checks, logDir, {
+            timeoutMs: this.config.gateTimeoutMs,
+            nodeModulesRoot: this.workerWorktreeRoot(row),
+            onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
+          });
+          const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
+          this.store.insertGate(gateRow);
+          this.store.appendEvent(input.workerId, 'gate', { gateId, passed: outcome.passed, head });
+          return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
+        } finally {
+          this.capacity.finish(gateId);
+        }
+      };
+      let result: ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>> | undefined;
+      const admitted = await this.capacity.admit({ id: gateId, workerId: input.workerId, kind: 'gate', loadClass: (await askLoadClass({ repo: row.repo, role: 'gate' })) }, async () => { result = await runGate(); });
+      if ('queued' in admitted) return refuse('queued: capacity');
+      return result ?? refuse('gate did not produce a result');
     }));
   }
 
@@ -710,7 +737,7 @@ export class Helm {
     });
   }
 
-  async reviewRequest(input: z.infer<typeof reviewInput>): Promise<ToolOutcome<{ reviewWorkerId: string }>> {
+  async reviewRequest(input: z.infer<typeof reviewInput>): Promise<ToolOutcome<{ reviewWorkerId: string; queued?: true; warning?: 'queued: capacity' }>> {
     return runGuard(async () => {
       if (!input.model) return refuse('record Claude reviews with review.record');
       const workerRepo = input.workerId ? this.store.getWorker(input.workerId)?.repoSlug : undefined;
@@ -735,7 +762,7 @@ export class Helm {
       };
       const outcome = await runGuard(() => this.withLock(() => this.spawnLocked(spawnPayload, onDone)));
       if (!outcome.ok) return outcome;
-      return { ok: true, reviewWorkerId: outcome.workerId };
+      return { ok: true, reviewWorkerId: outcome.workerId, ...(outcome.queued ? { queued: true as const, warning: 'queued: capacity' as const } : {}) };
     });
   }
 
@@ -790,13 +817,14 @@ export class Helm {
 
   private aboveSoftCap(): boolean { const w = this.spendWarnUsd(); return w > 0 && this.store.spendTotal().spendUsd >= w; }
 
-  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[] }>> {
+  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[]; capacity: CapacityStatus }>> {
     return runGuard(async () => {
       const total = this.store.spendTotal();
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
+      const capacity = await this.capacity.status();
       return {
         ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),
-        activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(this.store),
+        activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(this.store), capacity,
       };
     });
   }
@@ -1023,10 +1051,14 @@ export class Helm {
   private startRun(workerId: string, message: string, onDone?: OnDone): void {
     const promise = this.runTurn(workerId, message, onDone).catch((err) => {
       this.store.appendEvent(workerId, 'error', { message: `unhandled: ${errMessage(err)}` });
-    });
+    }).finally(() => { this.capacity.finish(workerId); });
     this.running.set(workerId, promise);
     void promise.finally(() => { if (this.running.get(workerId) === promise) this.running.delete(workerId); });
   }
+
+  async capacityTick(): Promise<void> { await this.capacity.tick(); }
+
+  async capacityStatus(): Promise<CapacityStatus> { return this.capacity.status(); }
 
   private async runTurn(workerId: string, message: string, onDone?: OnDone): Promise<void> {
     const row = this.store.getWorker(workerId);

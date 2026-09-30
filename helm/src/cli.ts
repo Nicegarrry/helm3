@@ -523,10 +523,11 @@ async function cmdServe(args: string[]): Promise<void> {
   const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
+  const stopCapacity = startTicker(1000, [helm.capacityTick.bind(helm)]);
   const stopDiscord = startTicker(1000, [discord.tick]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopDiscord(); stopMemory(); stopHygiene(); };
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); helm.capacity.sampler.stop(); stopDiscord(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();

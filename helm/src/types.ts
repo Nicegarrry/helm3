@@ -33,6 +33,8 @@ export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded
 export type WorkerState = (typeof WORKER_STATES)[number];
 export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
+export const LOAD_CLASSES = ['light', 'medium', 'heavy'] as const;
+export type LoadClass = (typeof LOAD_CLASSES)[number];
 
 export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
 export type InboxState = (typeof INBOX_STATES)[number];
@@ -297,6 +299,7 @@ export const spawnInput = z.object({
   allowWorkflows: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200).optional(),
   skills: z.array(z.string().min(1)).optional(),
+  loadClass: z.enum(LOAD_CLASSES).optional(),
 }).strict();
 export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(20) }).strict();
 export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();

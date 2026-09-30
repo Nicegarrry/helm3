@@ -10,7 +10,7 @@ const RETRY_DELAY_MS = 10;
 
 export type JevQuestion =
   | { type: 'noul'; instructions: string; criteria?: { true: string; false: string } }
-  | { type: 'choice'; instructions: string; criteria: Readonly<Record<string, string>> }
+  | { type: 'choice'; instructions: string; options?: readonly string[]; criteria: Readonly<Record<string, string>> }
   | { type: 'score'; instructions: string; criteria: ReadonlyArray<string> };
 
 export type JevAnswer = Readonly<{

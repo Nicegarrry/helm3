@@ -9,6 +9,16 @@ const WATCH_DEFAULTS = { tickSec: 60, silenceMin: 15, sameRefusal: 5, attentionE
 const BUDGET_DEFAULTS = { defaultCapUsd: 25, defaultCodexTokens: 20_000_000 };
 const FACTORY_DEFAULTS = { claims: 'block' as const, claimsAt: 0.7, verdictAt: 0.5, retryMax: 2, envelopeTapAt: 0.5, tapTtlMin: 60 };
 const QUEUE_DEFAULTS = { tickSec: 30, checksTimeoutMin: 30 };
+const CAPACITY_DEFAULTS = {
+  sampleSec: 5,
+  reserveGb: 4,
+  gbPerUnit: 2,
+  units: { light: 1, medium: 2, heavy: 4 },
+  pressureWarnPenalty: 1,
+  pressureCriticalPenalty: 2,
+  simulatorPenalty: 1,
+  waitMilestoneMin: 10,
+};
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
 const ROUTING_DEFAULTS = {
   table: { trivial: 'codex/gpt-5.6-luna:medium', small: 'codex/gpt-5.6-luna:medium', medium: 'codex/gpt-5.6-luna:medium', large: 'codex/gpt-5.6-luna:high' },
@@ -57,6 +67,20 @@ const settingsSchema = z.object({
     tickSec: z.number().default(30),
     checksTimeoutMin: z.number().default(30),
   }).default(QUEUE_DEFAULTS),
+  capacity: z.object({
+    sampleSec: z.number().positive().default(5),
+    reserveGb: z.number().nonnegative().default(4),
+    gbPerUnit: z.number().positive().default(2),
+    units: z.object({
+      light: z.number().positive().default(1),
+      medium: z.number().positive().default(2),
+      heavy: z.number().positive().default(4),
+    }).default(CAPACITY_DEFAULTS.units),
+    pressureWarnPenalty: z.number().nonnegative().default(1),
+    pressureCriticalPenalty: z.number().nonnegative().default(2),
+    simulatorPenalty: z.number().nonnegative().default(1),
+    waitMilestoneMin: z.number().positive().default(10),
+  }).default(CAPACITY_DEFAULTS),
   memory: z.object({
     dir: z.string().optional(),
     cg: z.object({ url: z.string(), keyEnv: z.string(), enabled: z.boolean().default(false) }).optional(),
@@ -89,9 +113,16 @@ const settingsSchema = z.object({
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
-export type Settings = Omit<ParsedSettings, 'deploy'> & { deploy?: ParsedSettings['deploy'] };
+export type Settings = Omit<ParsedSettings, 'deploy' | 'capacity'> & { deploy?: ParsedSettings['deploy']; capacity?: ParsedSettings['capacity'] };
 
-const DEFAULT_SETTINGS = settingsSchema.parse({});
+function normalizeSettings(value: ParsedSettings): Settings {
+  // Keep the newly added section available by property access without changing
+  // the legacy enumerable shape consumed by older callers and snapshots.
+  Object.defineProperty(value, 'capacity', { value: value.capacity, enumerable: false, configurable: true });
+  return value;
+}
+
+const DEFAULT_SETTINGS = normalizeSettings(settingsSchema.parse({}));
 
 export function loadSettings(home: string): Settings {
   const path = join(home, 'helm.json');
@@ -108,7 +139,7 @@ export function loadSettings(home: string): Settings {
     console.error(`invalid ${path}; using defaults`);
     return DEFAULT_SETTINGS;
   }
-  return parsed.data;
+  return normalizeSettings(parsed.data);
 }
 
 export function loadEnvFile(path: string): Record<string, string> {

@@ -23,8 +23,9 @@ After writing its files, `init` exits successfully and prints doctor failures as
 
 `helm doctor` checks local tools, credentials, configuration, routing and daemon
 health without starting a daemon or writing state. It prints one next command,
-returns nonzero for failed checks, and supports `--json`. Missing optional lanes
-or an absent daemon produce warnings; a tier without an available allowed model fails.
+returns nonzero for failed checks, and supports `--json` and `--repo path`. Missing optional lanes
+or an absent daemon produce warnings. Tiers without usable models warn because routing
+falls back across tiers; routing fails only when no tier has an available allowed model.
 
 1. Install Node 22 and Pi, then log in to the providers you want workers to use:
 

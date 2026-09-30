@@ -54,7 +54,7 @@ const capacityExec: CapacityExec = async (file, args, options) => {
 
 function usage(): void {
   console.error(`usage: helm <command> [options]
-  doctor [--json]
+  doctor [--repo path] [--json]
   init [--repo path] [--force]
   spawn --repo <path> --objective <text> [--issue n] [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
         [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k]

@@ -9,8 +9,9 @@ import { loadConfig } from './config.js';
 import { defaultCodexBin } from './codex.js';
 import { defaultClaudeBin } from './claude.js';
 import { readSettingsFile } from './settings.js';
-import { createModelCatalog, laneForModel, parseCodexModelSlugs } from './routing/catalog.js';
-import { appliedPolicy, policyAllows } from './routing/policy.js';
+import { createModelCatalog, parseCodexModelSlugs } from './routing/catalog.js';
+import { appliedPolicy } from './routing/policy.js';
+import { candidateUnavailableReason } from './routing/select.js';
 import { repoConfigSchema } from './repoconfig.js';
 type Check = { name: string; status: 'ok' | 'warn' | 'fail'; detail: string; next: string };
 const exec = promisify(execFile);
@@ -54,13 +55,11 @@ export async function doctor(repo = process.cwd()) {
   const tiers: Record<string, { models: string[]; available: string[] }> = {};
   if (settings) for (const [tier, models] of Object.entries(settings.routing.tiers)) {
     const available = (await Promise.all(models.map(async (m) =>
-      (settings.routing.allowed.length === 0 || settings.routing.allowed.includes(m)) &&
-      policyAllows(appliedPolicy(settings, {}), m) && lanes[laneForModel(m)] &&
-      (await catalog.availability(m)).available ? m : undefined))).filter((m): m is string => m !== undefined);
+      await candidateUnavailableReason(settings, appliedPolicy(settings, {}), catalog, m) === undefined ? m : undefined))).filter((m): m is string => m !== undefined);
     tiers[tier] = { models, available };
-    add(`tier ${tier}`, available.length ? 'ok' : 'fail', available.length ? 'available model found' : 'no available allowed model', 'vi "${HELM_HOME:-$HOME/.helm}/helm.json"');
+    add(`tier ${tier}`, available.length ? 'ok' : 'warn', available.length ? 'available model found' : 'no available allowed model; routing can fall back to another tier', 'vi "${HELM_HOME:-$HOME/.helm}/helm.json"');
   }
-  if (settings && !Object.keys(tiers).length) add('routing', 'fail', 'no routing tiers configured', 'vi "${HELM_HOME:-$HOME/.helm}/helm.json"');
+  if (settings && !Object.values(tiers).some((tier) => tier.available.length > 0)) add('routing', 'fail', 'no routing tier has a usable model', 'vi "${HELM_HOME:-$HOME/.helm}/helm.json"');
   const servePath = join(home, 'serve.json');
   if (!existsSync(servePath)) add('daemon', 'warn', 'serve.json absent', 'helm serve --stdio');
   else {
@@ -106,7 +105,10 @@ export async function init(repo: string, force = false): Promise<string> {
   return JSON.stringify({ mcpServers: { helm: { command: 'helm', args: ['serve', '--stdio'] } } }, null, 2);
 }
 export async function onboard(command: 'doctor' | 'init', args: string[]): Promise<void> {
-  const { values } = parseArgs({ args, options: command === 'init' ? { repo: { type: 'string' }, force: { type: 'boolean' } } : { json: { type: 'boolean' } } });
+  const options: Record<string, { type: 'string' | 'boolean' }> = {
+    repo: { type: 'string' }, [command === 'init' ? 'force' : 'json']: { type: 'boolean' },
+  };
+  const { values } = parseArgs({ args, options });
   const repo = typeof values.repo === 'string' ? values.repo : process.cwd();
   if (command === 'init') console.log(`.mcp.json snippet:\n${await init(repo, values.force === true)}`);
   const report = await doctor(repo);

@@ -197,6 +197,57 @@ test('doctor requires routing.allowed membership and treats an empty allowlist a
     assert.deepEqual(tier.available, code === 0 ? ['codex/test-model:medium'] : []);
   }
 });
+test('doctor warns on empty or unavailable tiers and fails routing only without a usable fallback', async (t) => {
+  const f = await fixture(t);
+  for (const [usableTier, emptyTier] of [['1', '5'], ['5', '1']]) {
+    await writeFile(join(f.home, 'helm.json'), JSON.stringify({ routing: {
+      tiers: { [emptyTier!]: ['codex/missing'], [usableTier!]: ['codex/test-model:medium'], 3: [] },
+    } }));
+    const result = await f.cli('doctor', '--json');
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.checks.find((c: { name: string }) => c.name === `tier ${emptyTier}`).status, 'warn');
+    assert.equal(report.checks.find((c: { name: string }) => c.name === 'tier 3').status, 'warn');
+    assert.equal(report.checks.find((c: { name: string }) => c.name === `tier ${usableTier}`).status, 'ok');
+    assert.ok(!report.checks.some((c: { status: string }) => c.status === 'fail'));
+  }
+  await writeFile(join(f.home, 'helm.json'), JSON.stringify({ routing: {
+    tiers: { 1: ['codex/missing'], 5: ['codex/test-model:medium'] }, allowed: ['codex/missing'],
+  } }));
+  const result = await f.cli('doctor', '--json');
+  assert.equal(result.code, 1);
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.checks.find((c: { name: string }) => c.name === 'routing').status, 'fail');
+  assert.ok(report.checks.filter((c: { name: string }) => c.name.startsWith('tier ')).every((c: { status: string }) => c.status === 'warn'));
+});
+test('launcher uses Helm tsconfig/cwd while preserving default and relative target repos', async (t) => {
+  const f = await fixture(t);
+  const hostile = join(f.repo, 'tsconfig.json');
+  await writeFile(hostile, '{not valid tsconfig');
+  f.env.TSX_TSCONFIG_PATH = hostile;
+  await writeFile(join(f.repo, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  await writeFile(join(f.home, 'helm.json'), JSON.stringify(f.config));
+  const created = await f.cli('init');
+  assert.equal(created.code, 0, created.stderr);
+  assert.deepEqual(JSON.parse(await readFile(join(f.repo, 'helm.json'), 'utf8')).gates, [
+    { name: 'install', command: 'npm install' }, { name: 'test', command: 'npm run test' },
+  ]);
+  assert.equal((await f.cli('doctor', '--json')).code, 0);
+  const nested = join(f.repo, 'nested repo');
+  await mkdir(nested); await writeFile(join(nested, 'Package.swift'), '// fixture');
+  assert.equal((await f.cli('init', '--repo', 'nested repo')).code, 0);
+  assert.deepEqual(JSON.parse(await readFile(join(nested, 'helm.json'), 'utf8')).gates, [{ name: 'swift', command: 'swift test' }]);
+  assert.equal((await f.cli('init', '--repo=nested repo', '--force')).code, 0);
+  await writeFile(join(nested, 'helm.json'), 'invalid');
+  const explicit = await f.cli('doctor', '--repo=nested repo', '--json');
+  assert.equal(explicit.code, 1);
+  assert.equal(JSON.parse(explicit.stdout).checks.find((c: { name: string }) => c.name === 'repo-config').status, 'fail');
+  assert.equal((await f.cli('doctor', '--json')).code, 0);
+  await writeFile(join(f.repo, 'helm.json'), 'invalid');
+  const current = await f.cli('doctor', '--json');
+  assert.equal(current.code, 1);
+  assert.equal(JSON.parse(current.stdout).checks.find((c: { name: string }) => c.name === 'repo-config').status, 'fail');
+});
 test('init selects the lockfile package manager for install and script gates', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.repo, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc', lint: 'eslint .' } }));

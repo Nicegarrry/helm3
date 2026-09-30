@@ -76,7 +76,10 @@ test('a model chooser runs only for an unclassified spawn', async () => {
     assert.equal(calls, 0);
     const unclassified = await d.helm.spawn({ repo, objective: 'unclassified', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(unclassified.ok, true);
-    if (unclassified.ok) assert.equal(d.store.getWorker(unclassified.workerId)?.model, 'codex/gpt-5.6-luna:medium');
+    if (unclassified.ok) {
+      assert.equal(d.store.getWorker(unclassified.workerId)?.model, 'codex/gpt-5.6-luna:medium');
+      await d.helm.settle(unclassified.workerId);
+    }
     assert.equal(calls, 1);
   } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });

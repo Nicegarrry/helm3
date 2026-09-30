@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -276,6 +276,29 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   assert.equal(row?.result?.status, 'succeeded');
 });
 
+test('a settled worker turn removes node_modules from every top-level package', async () => {
+  const runner = createFakeRunner(async (input) => {
+    mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });
+    mkdirSync(join(input.worktree, 'helm'), { recursive: true });
+    writeFileSync(join(input.worktree, 'helm', 'package.json'), '{}');
+    mkdirSync(join(input.worktree, 'helm', 'node_modules'), { recursive: true });
+    mkdirSync(join(input.worktree, 'app', 'node_modules'), { recursive: true });
+    writeFileSync(join(input.worktree, 'app', 'package.json'), '{}');
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const { helm, store } = makeHelm({ runner });
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-repo-cleanup-')));
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  const waited = await helm.wait({ workerIds: [outcome.workerId], timeoutMs: 2000 });
+  assert.equal(waited.ok, true);
+  const row = store.getWorker(outcome.workerId)!;
+  assert.equal(row.state, 'succeeded');
+  assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
+  assert.equal(existsSync(join(row.worktree, 'helm', 'node_modules')), false);
+  assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
+});
+
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
   const { helm, store, cloned, fetched, config } = makeHelm();
   const first = await helm.spawn(spawnBody('acme/widgets'));
@@ -536,6 +559,24 @@ test('gate.run refuses on a dirty worktree', async () => {
   const outcome = await helm.gate({ workerId: spawned.workerId });
   assert.equal(outcome.ok, false);
   if (!outcome.ok) assert.match(outcome.reason, /not clean/);
+});
+
+test('gate.run and gate.baseline refuse while a worker turn is running', async () => {
+  const controllable = createControllableRunner();
+  const { helm } = makeHelm({ runner: controllable.runner });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-running-gate-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+
+  const gate = await helm.gate({ workerId: spawned.workerId });
+  assert.equal(gate.ok, false);
+  if (!gate.ok) assert.equal(gate.reason, 'worker turn running; wait');
+  const baseline = await helm.baseline({ workerId: spawned.workerId });
+  assert.equal(baseline.ok, false);
+  if (!baseline.ok) assert.equal(baseline.reason, 'worker turn running; wait');
+
+  controllable.resolveNext({ result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
+  await helm.settle(spawned.workerId);
 });
 
 test('pr.open is refused without a passing gate at head, then allowed once gated', async () => {

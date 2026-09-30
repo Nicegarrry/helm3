@@ -78,8 +78,8 @@ import type { Jev } from './jev.js';
 import type { PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
-import { createDeploy, type DeployExec, type DeployService } from './deploy.js';
-import { freeSpaceGb, type StatfsResult } from './hygiene.js';
+import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
+import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
 
 const exec = promisify(execFile);
 
@@ -294,7 +294,7 @@ export class Helm {
     this.memory = createMemory({ store: this.store, home: this.config.home, settings: this.settings, now: () => this.now ? new Date(this.now()) : new Date() });
     this.scorecard = createScorecard({ store: this.store, memory: this.memory, now: () => this.now ? new Date(this.now()) : new Date() });
     this.deploy = createDeploy({
-      store: this.store, home: this.config.home, workspace: this.workspace,
+      store: this.store, home: this.config.home, workspace: this.workspace, bootId: this.lifecycle.bootId,
       resolveRepo: async (project) => { const repo = requireValue(await this.resolveRepo(project), `project not found: ${project}`); return { repo, slug: await this.repoSlugFor(repo) }; },
       envelope: (input) => this.envelopeCheck(input),
       reserveTap: (project, kind, action, tapId) => reserveDeployTap(this.store, this.taps, project, kind, actionHash(action), tapId, this.nowDate()),
@@ -426,7 +426,8 @@ export class Helm {
   }
 
   /** Called once on daemon start: every `running` worker becomes `interrupted`. */
-  markInterruptedOnStart(): string[] {
+  markInterruptedOnStart(predecessorBootId?: string): string[] {
+    markDeploysInterrupted(this.store, { currentBootId: this.lifecycle.bootId, predecessorBootId });
     return this.store.markInterrupted();
   }
 
@@ -602,8 +603,9 @@ export class Helm {
   }
 
   async gate(input: z.infer<typeof gateInput>): Promise<ToolOutcome<Omit<GateRow, 'gateId' | 'workerId' | 'at'>>> {
-    return runGuard(async () => {
+    return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+      must(!this.running.has(input.workerId), 'worker turn running; wait');
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
       const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
@@ -615,23 +617,28 @@ export class Helm {
       }
       const gateId = genId('g');
       const logDir = join(this.config.home, 'logs', input.workerId, `gate-${gateId}`);
-      const outcome = await this.gates.run(row.worktree, checks, logDir, { timeoutMs: this.config.gateTimeoutMs });
+      const outcome = await this.gates.run(row.worktree, checks, logDir, {
+        timeoutMs: this.config.gateTimeoutMs,
+        nodeModulesRoot: this.workerWorktreeRoot(row),
+        onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'error', { message }),
+      });
       const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
       this.store.insertGate(gateRow);
       this.store.appendEvent(input.workerId, 'gate', { gateId, passed: outcome.passed, head });
       return { ok: true, head, passed: outcome.passed, checks: outcome.checks };
-    });
+    }));
   }
 
   async baseline(input: z.infer<typeof baselineInput>): Promise<ToolOutcome<BaselineRow>> {
-    return runGuard(async () => {
+    return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const row = requireValue(this.store.getWorker(input.workerId), 'worker not found');
+      must(!this.running.has(input.workerId), 'worker turn running; wait');
       return createBaseline({ store: this.store, gates: this.gates, config: this.config, worker: row, now: this.nowIso() });
-    });
+    }));
   }
 
   async prOpen(input: z.infer<typeof prOpenInput>): Promise<ToolOutcome<{ number: number; url: string; head: string; updated?: true }>> {
-    return runGuard(async () => {
+    return runGuard(() => this.withWorkerLock(input.workerId, async () => {
       const reason = await this.refusal('pr.open', input);
       if (reason) {
         const worker = this.store.getWorker(input.workerId);
@@ -671,7 +678,7 @@ export class Helm {
       this.store.insertPr(prRow);
       this.store.appendEvent(input.workerId, 'pr', { number: opened.number, url: opened.url });
       return { ok: true, number: opened.number, url: opened.url, head };
-    });
+    }));
   }
 
   async prStatus(input: z.infer<typeof prStatusInput>): Promise<ToolOutcome<PrStatus>> {
@@ -915,6 +922,17 @@ export class Helm {
 
   private nowDate(): Date { return this.now ? this.now() : new Date(); }
 
+  private workerWorktreeRoot(row: WorkerRow): string {
+    return join(this.config.home, 'worktrees', row.repoSlug.replace(/\//g, '__'), row.workerId);
+  }
+
+  private async cleanupWorkerNodeModules(row: WorkerRow): Promise<void> {
+    await cleanupNodeModules(row.worktree, this.settings.hygiene.keepNodeModules, {
+      allowedRoot: this.workerWorktreeRoot(row),
+      onError: (message) => this.store.appendEvent(row.workerId, 'error', { message }),
+    });
+  }
+
   private spendCapExceeded(): boolean {
     return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;
   }
@@ -1053,6 +1071,9 @@ export class Helm {
       // Only report 'stopped' when this turn actually observed the stop request (via
       // hooks.shouldContinue()); a turn that completed on its own keeps its real outcome.
       if (this.stopObserved.has(workerId)) nextState = 'stopped';
+      if (nextState === 'succeeded' || nextState === 'failed' || nextState === 'idle' || nextState === 'stopped') {
+        await this.cleanupWorkerNodeModules(row);
+      }
       this.stopRequested.delete(workerId);
       this.stopObserved.delete(workerId);
       // `row` was read before the turn, so its sessionFile predates hooks.onSession; fall back to

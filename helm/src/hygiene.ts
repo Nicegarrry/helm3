@@ -1,6 +1,6 @@
 /** Conservative cleanup for worker, deploy, and low-disk state. */
 import { execFile } from 'node:child_process';
-import { readdir, rm, stat, statfs as fsStatfs } from 'node:fs/promises';
+import { realpath, readdir, rm, stat, statfs as fsStatfs } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Settings } from './settings.js';
@@ -40,6 +40,42 @@ const defaultExec: HygieneExec = async (file, args, options) => {
 };
 
 const defaultFs: HygieneFs = { readdir, stat, rm };
+
+/** Remove dependencies from the root and each first-level package in a worktree. */
+export async function cleanupNodeModules(worktree: string, keepNodeModules = false, options: { allowedRoot?: string; onError?: (message: string) => void } = {}): Promise<void> {
+  if (keepNodeModules) return;
+  const allowedRoot = options.allowedRoot ?? worktree;
+  let realAllowedRoot: string;
+  try {
+    realAllowedRoot = await realpath(allowedRoot);
+    if (await realpath(worktree) !== realAllowedRoot) throw new Error('worktree resolves outside its allowed root');
+  } catch (error) {
+    options.onError?.(`node_modules cleanup skipped: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  const packageRoots = [worktree];
+  try {
+    for (const entry of await readdir(worktree, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      try {
+        await stat(join(worktree, entry.name, 'package.json'));
+        packageRoots.push(join(worktree, entry.name));
+      } catch { /* not a top-level package */ }
+    }
+  } catch { /* a removed worktree is already clean */ }
+  await Promise.all([...new Set(packageRoots)].map(async (root) => {
+    const nodeModules = join(root, 'node_modules');
+    let realNodeModules: string;
+    try { realNodeModules = await realpath(nodeModules); } catch { return; }
+    if (!inside(realAllowedRoot, realNodeModules)) {
+      options.onError?.(`node_modules cleanup skipped outside worktree: ${nodeModules}`);
+      return;
+    }
+    await rm(nodeModules, { recursive: true, force: true }).catch((error) => {
+      options.onError?.(`node_modules cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }));
+}
 
 export async function freeSpaceGb(path: string, statfs: (path: string) => Promise<StatfsResult> = fsStatfs): Promise<number | null> {
   try {
@@ -116,7 +152,9 @@ export function createHygiene(options: Options): HygieneService {
     if (!head) return false;
     try {
       if (options.workspace.reachableFromOrigin) return await options.workspace.reachableFromOrigin(worker.repo, head);
-      return (await git(worker.repo, ['branch', '-r', '--contains', head])).trim().length > 0;
+      return (await git(worker.repo, ['branch', '-r', '--contains', head])).split(/\r?\n/)
+        .map((line) => line.replace(/^\s*\*?\s*/, '').trim())
+        .some((ref) => ref.startsWith('origin/') || ref.startsWith('refs/remotes/origin/'));
     } catch {
       return false;
     }
@@ -154,6 +192,11 @@ export function createHygiene(options: Options): HygieneService {
     return before.state === after.state && before.updatedAt === after.updatedAt && before.worktree === after.worktree && before.branch === after.branch && before.head === after.head;
   }
 
+  function keptForState(workerId: string, state: string): boolean {
+    return options.store.listEvents(workerId, { limit: 1_000_000 })
+      .some((event) => event.kind === 'worktree.kept' && event.data.state === state);
+  }
+
   async function gcWorker(candidate: WorkerRow): Promise<void> {
     if (!inside(worktreeRoot, candidate.worktree)) return;
     await withWorkerLock(candidate.workerId, async () => {
@@ -164,7 +207,9 @@ export function createHygiene(options: Options): HygieneService {
       const latest = options.store.getWorker(worker.workerId);
       if (!latest || !sameWorker(worker, latest) || !settled(latest) || options.isRunning?.(latest.workerId)) return;
       if (!pushed) {
-        options.store.appendEvent(worker.workerId, 'worktree.kept', { reason: 'unpushed commits', worktree: worker.worktree, branch: worker.branch });
+        if (!keptForState(worker.workerId, worker.state)) {
+          options.store.appendEvent(worker.workerId, 'worktree.kept', { reason: 'unpushed commits', state: worker.state, worktree: worker.worktree, branch: worker.branch });
+        }
         return;
       }
       try { await removeWorkerWorktree(latest); } catch { /* leave the row for a later conservative retry */ }

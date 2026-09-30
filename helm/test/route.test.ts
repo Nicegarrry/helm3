@@ -171,6 +171,7 @@ test('route warning and worker metadata reach spawn, while explicit classificati
     assert.equal(explicit.ok, true); if (explicit.ok) await fixture.helm.settle(explicit.workerId);
     const difficulty = await fixture.helm.spawn({ repo: fixture.repo, objective: 'difficulty', difficulty: 'easy', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(difficulty.ok, true);
+    if (difficulty.ok) await fixture.helm.settle(difficulty.workerId);
     assert.deepEqual(fixture.calls, ['route']);
   } finally { fixture.store.close(); rmSync(fixture.home, { recursive: true, force: true }); rmSync(fixture.repo, { recursive: true, force: true }); }
 });

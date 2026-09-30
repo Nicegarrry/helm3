@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 
 export type GateSandbox = Readonly<{
@@ -51,6 +51,12 @@ function unique(paths: readonly string[]): string[] {
 
 function validPorts(ports: readonly number[]): number[] {
   return [...new Set(ports.filter((port) => Number.isInteger(port) && port >= 1 && port <= 65_535))];
+}
+
+function darwinTempRoot(path: string): string {
+  const parts = resolve(path).split(sep);
+  const tempIndex = parts.lastIndexOf('T');
+  return tempIndex >= 0 ? parts.slice(0, tempIndex + 1).join(sep) || sep : resolve(path);
 }
 
 function ancestors(paths: readonly string[]): string[] {
@@ -109,10 +115,13 @@ export function buildSandboxProfile(options: {
   gitDirs?: readonly string[];
   denyLocalPorts?: readonly number[];
   denyLocalSocketPaths?: readonly string[];
+  darwinTempDir?: string;
   allowNetwork: boolean;
 }): string {
   const cwd = resolve(options.cwd);
   const tempDir = resolve(options.tempDir);
+  const darwinTempDir = resolve(options.darwinTempDir ?? darwinTempRoot(tempDir));
+  const darwinTempPattern = darwinTempDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const gitDirs = unique([options.gitDir ?? '', ...(options.gitDirs ?? [])].filter(Boolean));
   const readOnlyExceptions = unique([
     cwd,
@@ -140,6 +149,8 @@ export function buildSandboxProfile(options: {
     `(allow file-write* ${subpath(cwd)})`,
     `(allow file-write* ${subpath(tempDir)})`,
     `(deny file-write* ${subpath(join(cwd, '.git'))})`,
+    '(allow signal (target same-sandbox))',
+    `(allow file-write* ${regex(`^${darwinTempPattern}/xcrun_db-[^/]+$`)})`,
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
   ];
 
@@ -278,6 +289,7 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
       gitDirs: await worktreeGitDirs(profileCwd),
       denyLocalPorts: options.denyLocalPorts,
       denyLocalSocketPaths: await Promise.all((options.denyLocalSocketPaths ?? []).map((path) => canonicalPath(path))),
+      darwinTempDir: darwinTempRoot(profileTempDir),
       allowNetwork: options.allowNetwork,
     });
     const profilePath = join(tempDir, 'profile.sb');

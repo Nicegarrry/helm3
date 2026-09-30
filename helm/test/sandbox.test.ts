@@ -6,7 +6,7 @@ import { delimiter, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import test from 'node:test';
 import { gateRunner } from '../src/gate.js';
-import { buildSandboxProfile, operatorHomePaths, sandboxExecutable, worktreeGitDirs } from '../src/sandbox.js';
+import { buildSandboxProfile, minimalGateEnv, operatorHomePaths, sandboxExecutable, worktreeGitDirs } from '../src/sandbox.js';
 
 const sandboxUsable = process.platform === 'darwin' && Boolean(sandboxExecutable()) && (() => {
   try { execFileSync('/usr/bin/sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true']); return true; } catch { return false; }
@@ -23,7 +23,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const tempDir = '/private/tmp/helm-gate-123';
   const tempHome = join(tempDir, 'home');
   const daemonSocket = '/private/tmp/helm-daemon.sock';
-  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gateHome: tempHome, toolchainPaths: [join(home, '.nvm', 'versions', 'node', 'v22', 'bin')], npmCachePaths: [join(home, '.npm')], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', denyLocalSocketPaths: [daemonSocket], allowNetwork: false });
+  const darwinTempDir = '/private/var/folders/vn/test/T';
+  const profile = buildSandboxProfile({ cwd, tempDir, operatorHomes: [home], gateHome: tempHome, toolchainPaths: [join(home, '.nvm', 'versions', 'node', 'v22', 'bin')], npmCachePaths: [join(home, '.npm')], gitDir: '/Users/tester/.helm/worktrees/project/.git/worktrees/w-123', denyLocalSocketPaths: [daemonSocket], darwinTempDir, allowNetwork: false });
 
   assert.match(profile, new RegExp(`\\(deny file-read\\* \\(subpath "${home.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
   assert.match(profile, /\(deny file-read\* \(subpath ".*\/\.config"\)\)/);
@@ -37,6 +38,8 @@ test('generated profile denies credentials and writes outside the worktree', () 
   assert.match(profile, new RegExp(`\\(allow file-write\\* \\(subpath "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}"\\)\\)`));
   assert.match(profile, new RegExp(`\\(deny file-write\\* \\(subpath "${cwd.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}/\\.git"\\)\\)`));
   assert.match(profile, /\(deny network\*\)/);
+  assert.match(profile, /\(allow signal \(target same-sandbox\)\)/);
+  assert.ok(profile.includes(`(allow file-write* (regex "^${darwinTempDir}/xcrun_db-[^/]+$"))`));
   for (const path of [tempDir, cwd]) {
     assert.match(profile, new RegExp(`\\(allow network\\* \\(local unix-socket \\(subpath "${path.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}"\\)\\)\\)`));
     assert.match(profile, new RegExp(`\\(allow network\\* \\(remote unix-socket \\(subpath "${path.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}"\\)\\)\\)`));
@@ -48,6 +51,7 @@ test('generated profile denies credentials and writes outside the worktree', () 
   const tempRead = profile.indexOf(`(allow file-read* (subpath "${tempDir}"))`);
   const homeDeny = profile.indexOf(`(deny file-read* (subpath "${home}"))`);
   assert.ok(tempRead >= 0 && homeDeny >= 0 && homeDeny < tempRead, 'HOME deny must precede disposable temp HOME re-allow');
+  assert.equal(minimalGateEnv('/private/tmp/helm-gate-123/home', tempDir).TMPDIR, tempDir);
 });
 
 test('install profiles retain unrestricted network access', () => {

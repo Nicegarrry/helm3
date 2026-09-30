@@ -86,6 +86,7 @@ import { createModelCatalog, type CatalogProbe, type ModelCatalog } from './rout
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
+import { sandboxEnabled } from './gate.js';
 
 const exec = promisify(execFile);
 
@@ -696,6 +697,8 @@ export class Helm {
       must(await this.workspace.isClean(row.worktree), 'worktree is not clean');
       const head = await this.workspace.head(row.worktree);
       const checks = [...(input.checks ?? (await this.gates.defaultChecks(row.repo, row.baseSha)))];
+      const sandbox = await sandboxEnabled(row.repo, row.baseSha);
+      if (!sandbox) this.store.appendEvent(row.workerId, 'gate.sandbox.opt_out', { project: row.repoSlug, head, reason: 'base helm.json sets gate.sandbox=false' });
       const meta = this.store.getMeta(row.workerId);
       const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
       if (baseline) {
@@ -707,7 +710,10 @@ export class Helm {
       const outcome = await this.gates.run(row.worktree, checks, logDir, {
         timeoutMs: this.config.gateTimeoutMs,
         nodeModulesRoot: this.workerWorktreeRoot(row),
+        sandbox,
         onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
+        onUnsandboxed: (reason) => this.store.appendEvent(input.workerId, 'gate.unsandboxed', { project: row.repoSlug, head, reason }),
+        onRefused: (reason) => this.store.appendEvent(input.workerId, 'gate.refused', { project: row.repoSlug, head, reason }),
       });
       const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
       this.store.insertGate(gateRow);

@@ -81,6 +81,8 @@ function milestone(event: EventRow, projectCount: number): string | null {
   if (event.kind === 'inbox.triage' && event.data.route === 'needs_human') return `Needs Nick: ${text(event.data.question, 'human decision needed')}`;
   if (event.kind === 'state' && (event.data.to === 'failed' || event.data.to === 'unknown')) return `Worker failed: ${text(event.data.to, 'unknown')}`;
   if (event.kind === 'envelope.changed') return `Envelope changed: ${text(event.data.project, 'project')}`;
+  if (event.kind === 'gate.sandbox.opt_out') return `Gate sandbox disabled: ${text(event.data.project, 'project')} (${text(event.data.reason, 'repo opt-out')})`;
+  if (event.kind === 'gate.unsandboxed') return `Gate ran unsandboxed: ${text(event.data.project, 'project')} (${text(event.data.reason, 'sandbox failure')})`;
   if (event.kind === 'deploy' || event.kind === 'deploy.rolledback' || event.kind === 'deploy.failed') {
     const state = event.kind === 'deploy' ? 'Deployed' : event.kind === 'deploy.rolledback' ? 'Deploy rolled back' : 'Deploy failed';
     const details = [event.data.env, event.data.sha, event.data.url, event.data.pr ? `PR #${event.data.pr}` : undefined, event.data.issue ? `issue #${event.data.issue}` : undefined]

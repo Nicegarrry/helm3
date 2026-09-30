@@ -133,6 +133,36 @@ test('formats dispatch, PR, merge, and deployment milestone lines', async () => 
   } finally { store.close(); }
 });
 
+test('formats a gate sandbox opt-out as a milestone', async () => {
+  const store = openStore(':memory:');
+  const bodies: string[] = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: settings(), env: { HELM_TEST_WEBHOOK: 'https://discord.test/one' }, now: () => clock,
+      fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('w-1', 'gate.sandbox.opt_out', { project: 'o/r', reason: 'base helm.json sets gate.sandbox=false' });
+    await discord.tick();
+    clock = new Date(clock.getTime() + 60_000);
+    await discord.tick();
+    assert.match(JSON.parse(bodies[0]!).content, /Gate sandbox disabled: o\/r \(base helm\.json sets gate\.sandbox=false\)/);
+  } finally { store.close(); }
+});
+
+test('formats an unsandboxed gate fallback as a milestone', async () => {
+  const store = openStore(':memory:');
+  const bodies: string[] = [];
+  let clock = new Date('2026-01-01T00:00:00.000Z');
+  try {
+    const discord = createDiscord({ store, settings: settings(), env: { HELM_TEST_WEBHOOK: 'https://discord.test/one' }, now: () => clock,
+      fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response('{}', { status: 200 }); } });
+    store.appendEvent('w-1', 'gate.unsandboxed', { project: 'o/r', reason: 'sandbox-exec failed to apply profile' });
+    await discord.tick();
+    clock = new Date(clock.getTime() + 60_000);
+    await discord.tick();
+    assert.match(JSON.parse(bodies[0]!).content, /Gate ran unsandboxed: o\/r \(sandbox-exec failed to apply profile\)/);
+  } finally { store.close(); }
+});
+
 test('caps digest posts with one muted line and rate-limits notify.nick', async () => {
   const store = openStore(':memory:');
   const bodies: string[] = [];

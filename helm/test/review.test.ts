@@ -332,5 +332,8 @@ test('verdictLine accepts only an unquoted last non-empty line', () => {
   assert.equal(verdictLine('Findings.\n\n> APPROVE: ok'), 'changes');
   assert.equal(verdictLine('```\nAPPROVE: ok'), 'changes');
   assert.equal(verdictLine('```\nquoted\n```\nAPPROVE: ok'), 'approve');
+  assert.equal(verdictLine('```\n~~~\nAPPROVE: ok'), 'changes');
+  assert.equal(verdictLine('````\n```\nAPPROVE: ok'), 'changes');
+  assert.equal(verdictLine('~~~\n```\n~~~\nAPPROVE: ok'), 'approve');
   assert.equal(verdictLine('APPROVE: ok\n\nmore text'), 'changes');
 });

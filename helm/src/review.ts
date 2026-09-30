@@ -49,8 +49,12 @@ function approveScore(answer: { noul?: boolean | number } | undefined): number |
 /** True when `offset` is quoted text: after an odd number of quote marks on its line, on a '>' line, or inside an open code fence. */
 export function isQuoted(text: string, offset: number): boolean {
   const start = text.lastIndexOf('\n', offset - 1) + 1;
-  const fences = text.slice(0, start).match(/^[\t ]*(?:```|~~~)/gm)?.length ?? 0;
-  return fences % 2 === 1 || /^[\t ]*>/.test(text.slice(start)) || (text.slice(start, offset).match(/["“”]/g)?.length ?? 0) % 2 === 1;
+  let fence = '';
+  for (const [, marks, info] of text.slice(0, start).matchAll(/^[\t ]*(`{3,}|~{3,})(.*)$/gm)) {
+    if (!fence) fence = marks!;
+    else if (marks![0] === fence[0] && marks!.length >= fence.length && !info!.trim()) fence = '';
+  }
+  return fence !== '' ||/^[\t ]*>/.test(text.slice(start)) || (text.slice(start, offset).match(/["“”]/g)?.length ?? 0) % 2 === 1;
 }
 export function verdictLine(body: string): 'approve' | 'changes' {
   const text = body.trimEnd();

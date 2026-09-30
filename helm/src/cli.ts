@@ -15,6 +15,7 @@ import { gateRunner } from './gate.js';
 import { ghGitHub } from './github.js';
 import { piWorkerRunner } from './worker.js';
 import { codexWorkerRunner, laneRunner } from './codex.js';
+import { available as claudeAvailable, claudeWorkerRunner } from './claude.js';
 import { builderPrompt, reviewerPrompt, validatorPrompt } from './prompt.js';
 import { Helm } from './helm.js';
 import { serve, serveStdioProxy, formatWorkerTable, callDaemon } from './server.js';
@@ -528,7 +529,13 @@ async function cmdServe(args: string[]): Promise<void> {
   const github = ghGitHub();
   const helm = new Helm({
     config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules }), github,
-    runner: laneRunner({ pi: piWorkerRunner(), codex: codexWorkerRunner() }), prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
+    claudeLaneRegistered: claudeAvailable(),
+    runner: laneRunner({
+      pi: piWorkerRunner(),
+      codex: codexWorkerRunner(),
+      claude: claudeAvailable() ? claudeWorkerRunner() : undefined,
+    }),
+    prompts: { builder: builderPrompt, reviewer: reviewerPrompt, validator: validatorPrompt },
     capacityExec,
     spendStartup: true,
     supervisor: createSupervisor({ store, settings, hosts: { herdr: herdrHost(), tmux: tmuxHost() } }),

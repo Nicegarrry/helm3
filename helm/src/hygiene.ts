@@ -5,6 +5,7 @@ import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Settings } from './settings.js';
 import type { GitHub, Store, Workspace, WorkerRow } from './types.js';
+import { hardenedGitArgs } from './git.js';
 
 export type StatfsResult = Readonly<{ bavail: number; bsize: number }>;
 export type HygieneExec = (file: string, args: string[], options: { cwd?: string }) => Promise<{ stdout: string; stderr?: string; code?: number }>;
@@ -99,7 +100,8 @@ export type HygieneService = Readonly<{ tick(): Promise<void>; gc(): Promise<voi
 
 export function createHygiene(options: Options): HygieneService {
   const now = options.now ?? (() => new Date());
-  const exec = options.exec ?? defaultExec;
+  const rawExec = options.exec ?? defaultExec;
+  const exec: HygieneExec = (file, args, execOptions) => rawExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions);
   const fs = options.fs ?? defaultFs;
   const worktreeRoot = join(options.home, 'worktrees');
   const deployRoot = join(options.home, 'deploys');
@@ -181,6 +183,7 @@ export function createHygiene(options: Options): HygieneService {
 
   async function removeWorkerWorktree(worker: WorkerRow): Promise<void> {
     await options.workspace.remove(worker.repo, worker.worktree);
+    await fs.rm(join(options.home, 'tmp', worker.workerId), { recursive: true, force: true }).catch(() => undefined);
     if (options.workspace.prune) await options.workspace.prune(worker.repo);
     else await git(worker.repo, ['worktree', 'prune']);
     if (options.workspace.deleteBranch) await options.workspace.deleteBranch(worker.repo, worker.branch);

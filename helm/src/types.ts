@@ -192,7 +192,7 @@ export interface Workspace {
   diffStat(path: string, baseSha: string): Promise<string>;
   /** Stage everything and commit; returns new head. No-op (returns head) if nothing to commit. */
   patchId(repo: string, baseSha: string, head: string): Promise<string>;
-  commitAll(path: string, message: string): Promise<string>;
+  commitAll(path: string, message: string, repo?: string): Promise<string>;
   push(path: string, branch: string): Promise<void>;
   /** Clone `owner/name` into `dest`, preferring `gh repo clone` (uses gh auth) and falling back to https. */
   clone(slug: string, dest: string): Promise<void>;
@@ -250,6 +250,7 @@ export type WorkerRunInput = Readonly<{
   allowWorkflows: boolean;
   sessionFile: string | null; // resume when set
   sessionDir: string;         // where new session files go
+  tempDir?: string;            // per-worker temp directory for sandboxed CLI processes
 }>;
 
 export type WorkerRunOutcome = Readonly<{

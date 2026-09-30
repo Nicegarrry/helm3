@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import type { GitHub, Store, ToolOutcome, Workspace, WorkerRow } from './types.js';
 import type { Settings } from './settings.js';
+import { hardenedGitArgs } from './git.js';
 import { registerWakeKind } from './supervise.js';
 
 export type QueueState = 'queued' | 'updating' | 'gating' | 'checks' | 'review' | 'ready' | 'merged' | 'failed' | 'conflict';
@@ -51,7 +52,7 @@ function transientError(error: unknown, message: string): QueueError {
 
 export function createQueue(options: QueueOptions): QueueService {
   const { store, workspace, github, settings, gate, prMerge, retry } = options;
-  const exec = options.exec ?? defaultExec;
+  const exec: QueueExec = options.exec ?? ((file, args, execOptions) => defaultExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions));
   const now = options.now ?? (() => new Date());
   const queueTable = store.sql.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'merge_queue'").get();
   if (!queueTable) {
@@ -214,7 +215,7 @@ export function createQueue(options: QueueOptions): QueueService {
       }
       throw error;
     }
-    const head = await workspace.commitAll(worker.worktree, `helm: merge origin/${worker.baseRef}`);
+    const head = await workspace.commitAll(worker.worktree, `helm: merge origin/${worker.baseRef}`, worker.repo);
     store.updateWorker(worker.workerId, { head });
     metaWrite.run(row.id, base, null, priorPatchId, 0, 0, '[]');
     return setState(updating, 'gating', head);
@@ -294,7 +295,7 @@ export function createQueue(options: QueueOptions): QueueService {
       const meta = readMeta(current.id);
       const base = meta.pendingBaseSha ?? meta.baseSha;
       let head = worker.head ?? await workspace.head(worker.worktree).catch(() => current.head);
-      try { head = await workspace.commitAll(worker.worktree, 'helm: resolve merge conflict'); store.updateWorker(worker.workerId, { head }); }
+      try { head = await workspace.commitAll(worker.worktree, 'helm: resolve merge conflict', worker.repo); store.updateWorker(worker.workerId, { head }); }
       catch (error) { conflictState(current, `conflict commit failed: ${errorMessage(error)}`); return true; }
       if (!(await mergeResolved(worker, base, head))) {
         if (meta.conflictRetries >= 2) { conflictState(current, `merge remains unresolved against ${base}`); return true; }

@@ -11,6 +11,7 @@ import { runTestFlight } from '../src/testflight.js';
 import type { Jev } from '../src/jev.js';
 import { loadRepoConfig } from '../src/repoconfig.js';
 import type { RepoConfig } from '../src/repoconfig.js';
+import { hardenedGitArgs } from '../src/git.js';
 import { openStore } from '../src/store.js';
 import type { Workspace } from '../src/types.js';
 
@@ -79,7 +80,7 @@ test('loadRepoConfig passes a bounded timeout to git config lookup', async () =>
     exec: async (file, args, options) => { calls.push({ file, args, timeout: options.timeout }); return { stdout: '{"gates":[]}' }; },
   });
   assert.deepEqual(config, { gates: [] });
-  assert.deepEqual(calls, [{ file: 'git', args: ['show', `${'a'.repeat(40)}:helm.json`], timeout: 5_000 }]);
+  assert.deepEqual(calls, [{ file: 'git', args: hardenedGitArgs(['show', `${'a'.repeat(40)}:helm.json`]), timeout: 5_000 }]);
 });
 
 function repoWithConfig(configTarget: DeployTarget = target): { repo: string; sha: string } {

@@ -765,7 +765,7 @@ export class Helm {
         const meta = this.store.getMeta(row.workerId);
         const baseline = meta?.baselineId ? requireValue(getBaseline(this.store, meta.baselineId), `baseline not found: ${meta.baselineId}`) : undefined;
         if (baseline) {
-          const command = (await loadRepoConfig(row.repo, baseRef, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
+          const command = (await loadRepoConfig(row.repo, baseline.baseSha, false).catch(() => undefined))?.acceptance?.command ?? baseline.command;
           checks.push({ name: 'acceptance', command });
         }
         return { row, head, checks, sandbox, baseSha, loadClass: await askLoadClass({ repo: row.repo, role: 'gate' }), gateId: genId('g'), duplicate: false as const };

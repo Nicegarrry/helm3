@@ -10,7 +10,7 @@ import { buildSandboxProfile, operatorHomePaths, sandboxExecutable, worktreeGitD
 const sandboxUsable = process.platform === 'darwin' && Boolean(sandboxExecutable()) && (() => {
   try { execFileSync('/usr/bin/sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true']); return true; } catch { return false; }
 })();
-const macOnly = !sandboxUsable ? { skip: 'a usable macOS sandbox-exec is required' } : undefined;
+const macOnly = process.platform !== 'darwin' ? { skip: 'native sandbox tests require macOS' } : !sandboxUsable ? { skip: 'a usable macOS sandbox-exec is required' } : undefined;
 
 function fixture(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));

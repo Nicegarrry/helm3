@@ -142,7 +142,11 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
   try {
     const unavailable = sandboxUnavailableReason(options.allowUnsandboxed);
     if (unavailable && (options.sandbox || process.platform !== 'darwin')) throw new Error(unavailable);
-    sandbox = options.sandbox && sandboxExecutable()
+    const executable = sandboxExecutable();
+    if (options.sandbox && !executable && options.allowUnsandboxed) {
+      options.onUnsandboxed?.(`sandbox-exec is unavailable on ${process.platform}; running gate unsandboxed because allowUnsandboxed is enabled`);
+    }
+    sandbox = options.sandbox && executable
       ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome })
       : await prepareUnsandboxedGate();
     if (sandbox.executable && sandbox.profilePath && /^(1|true)$/i.test(process.env.HELM_DEBUG_SANDBOX ?? '')) {

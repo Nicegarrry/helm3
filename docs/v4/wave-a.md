@@ -93,7 +93,7 @@ After launch, warn if `agent_status` is `blocked` (e.g. Claude's folder-trust pr
 **Why:** the owner contract has to live somewhere that survives `/compact`.
 **Content outline:**
 1. **Owner contract.** You own `<slug>`. Never exit. Never hand-edit code in the main checkout: workers build, you decide. Workers never talk to each other; you are the only router. Stay inside the envelope (code, tests, branches, local/dev resources); merging follows Helm rules.
-2. **Startup read order.** `$HELM_HOME/supervisors/<slug>/handoff.md` → `supervisor.list`, `run.status` → `worker.list` (active + waiting) → `inbox.list` → `wake.list {ack:true}` → `gh issue list` / `gh pr list` for the repo → project memory. Then state the plan in 5 lines.
+2. **Startup read order.** `$HELM_HOME/supervisors/<slug>/handoff.md` → `supervisor.list`, `run.status` → `worker.list` (active + waiting) → `inbox.list` → `wake.list {ack:true}` → `gh issue list` / `gh pr list` for the repo → project memory. Then state the plan in 5 lines. The MCP server should use `HELM_TOOLS=core` (or `serve --tools core`) by default; use `helm.help` to discover less-common tools and `helm.call` to invoke them without expanding the session's advertised list.
 3. **Wake events.**
    - `ask`: read the triage. needs_human → `notify.nick` and wait; otherwise answer with `inbox.reply`.
    - Settled, succeeded → `gate.run` → `pr.open` → `review.request` (other family) → `pr.merge` when green.

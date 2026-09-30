@@ -6,8 +6,9 @@ without spending its own context on the mechanics. Three lanes serve the workers
 on cheap API models, the Codex CLI on the operator's ChatGPT subscription, and the Claude CLI
 on the operator's Claude subscription (both at $0 marginal cost).
 
-Sixteen tools, one SQLite file, one daemon shared by every project on the machine. Under 3.1k
-lines of TypeScript.
+Forty-five operational tools plus two meta tools, one SQLite file, and one daemon shared by
+every project on the machine. MCP uses small tool profiles so an orchestrator does not pay for
+the full harness catalog on every session.
 
 ## Five-minute start
 
@@ -23,7 +24,7 @@ lines of TypeScript.
 2. Give the tools to an orchestrator. For Claude Code, add to the project's `.mcp.json`:
 
    ```json
-   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio", "--port", "4747"],
+   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio", "--port", "4747", "--tools", "core"],
                              "env": { "HELM_SPEND_CAP_USD": "5" } } } }
    ```
 
@@ -58,6 +59,19 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
    helm status
    ```
 
+## MCP tool profiles
+
+`serve --stdio` and the `/mcp` endpoint default to the `core` profile. Select `core`,
+`supervisor`, or `all` with `--tools <profile>` or `HELM_TOOLS`. The CLI and loopback HTTP
+`/tools/<name>` calls retain access to every registered tool regardless of the MCP profile.
+
+`core` contains the normal supervisor loop plus `helm.call` and `helm.help`; `supervisor` adds
+the next most-used review, claims, baseline, PR, envelope, deploy, memory, scorecard, budget,
+and spend tools. `all` exposes the complete catalog. `helm.help` with no argument returns one
+compact line per tool; pass `{ "tool": "worker.spawn" }` for that tool's full JSON schema and
+description. `helm.call` accepts `{ "tool": "...", "input": { ... } }` and runs the named tool
+through the same validation, lifecycle guards, and tap rules as a direct call.
+
 ## Tools
 
 | Tool | What it does |
@@ -77,6 +91,8 @@ Reviewed base-branch deploys without a Vercel token or Convex deploy key use whi
 | `budget.open` / `budget.close` / `budget.status` | Open, close and inspect per-project sprint budgets. A new budget closes the previous one; worker spend remains attributed to the budget active at spawn. |
 | `daemon.control` | Inspect lifecycle, drain new work, resume admissions, safely shut down, or apply a staged upgrade when idle. |
 | `pr.merge` | Merge only when the PR is open, not a draft, mergeable, every check has finished and succeeded, and the head matches. |
+| `helm.call` | Call any registered tool by name through normal validation and guards. |
+| `helm.help` | List the tool catalog or inspect one tool's full schema and description. |
 
 Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Nothing throws across the
 boundary.

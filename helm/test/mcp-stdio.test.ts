@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { TOOL_NAMES } from '../src/types.ts';
+import { CORE_TOOL_NAMES, META_TOOL_NAMES } from '../src/tools.ts';
 
 function stdioFrontEnd(home: string) {
   const transport = new StdioClientTransport({
@@ -42,13 +42,13 @@ async function stopDaemon(home: string): Promise<void> {
 
 const text = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? '');
 
-test('mcp stdio: a real client lists all tools and calls them through helm serve --stdio', async () => {
+test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const { transport, client } = stdioFrontEnd(home);
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort());
+    assert.deepEqual(tools.map((t) => t.name).sort(), [...CORE_TOOL_NAMES, ...META_TOOL_NAMES].sort());
     const status = JSON.parse(text(await client.callTool({ name: 'run.status', arguments: {} }))) as { ok: boolean; maxWorkers: number };
     assert.equal(status.ok, true);
     assert.equal(status.maxWorkers, 3);

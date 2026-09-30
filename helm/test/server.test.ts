@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Lifecycle } from '../src/lifecycle.js';
 import { serve } from '../src/server.js';
-import { TOOL_NAMES } from '../src/types.js';
+import { ALL_TOOL_NAMES, CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.js';
 import type { ToolOutcome } from '../src/types.js';
 import type { Helm } from '../src/helm.js';
 
@@ -42,10 +42,10 @@ function createFakeHelm(home: string): Helm {
   } as unknown as Helm;
 }
 
-async function withServer(fn: (port: number, helm: Helm) => Promise<void>): Promise<void> {
+async function withServer(fn: (port: number, helm: Helm) => Promise<void>, tools: 'core' | 'supervisor' | 'all' = 'all'): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'helm-serve-'));
   const helm = createFakeHelm(home);
-  const handle = await serve({ helm, port: 0 });
+  const handle = await serve({ helm, port: 0, tools });
   try {
     assert.ok(handle.port, 'http mode should report the bound port');
     await fn(handle.port as number, helm);
@@ -133,12 +133,31 @@ test('serve http: /mcp initialize + tools/list via the MCP SDK client returns ev
     await client.connect(transport);
     try {
       const { tools } = await client.listTools();
-      assert.equal(tools.length, TOOL_NAMES.length);
-      for (const name of TOOL_NAMES) assert.ok(tools.some((t) => t.name === name), `missing tool: ${name}`);
+      assert.equal(tools.length, ALL_TOOL_NAMES.length);
+      for (const name of ALL_TOOL_NAMES) assert.ok(tools.some((t) => t.name === name), `missing tool: ${name}`);
     } finally {
       await client.close();
     }
   });
+});
+
+test('MCP tool profiles stay within their serialized context budgets', async () => {
+  const expected = {
+    core: [...CORE_TOOL_NAMES, ...META_TOOL_NAMES],
+    supervisor: [...SUPERVISOR_TOOL_NAMES, ...META_TOOL_NAMES],
+  } as const;
+  for (const profile of ['core', 'supervisor'] as const) {
+    await withServer(async (port) => {
+      const client = new Client({ name: `${profile}-size-client`, version: '1' });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+      try {
+        const { tools } = await client.listTools();
+        assert.deepEqual(tools.map((tool) => tool.name).sort(), [...expected[profile]].sort());
+        const tokenEstimate = JSON.stringify(tools).length / 4;
+        assert.ok(tokenEstimate <= (profile === 'core' ? 2_500 : 5_000), `${profile} tools/list is about ${tokenEstimate} tokens`);
+      } finally { await client.close(); }
+    }, profile);
+  }
 });
 
 test('serve http: a Host header mismatch is rejected with 403', async () => {

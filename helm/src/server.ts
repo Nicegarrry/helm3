@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createToolRegistry } from './tools.js';
+import { createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
 import { VERSION } from './lifecycle.js';
 import type { Helm } from './helm.js';
 
-export type ServeOptions = Readonly<{ helm: Helm; port?: number }>;
+export type ServeOptions = Readonly<{ helm: Helm; port?: number; tools?: ToolProfile }>;
 /** `closed` resolves when the peer goes away (stdio only), so the process can exit with it. */
 export type ServeHandle = Readonly<{ close(): Promise<void>; port?: number; closed?: Promise<void> }>;
 
@@ -17,12 +17,12 @@ type Registry = ReturnType<typeof createToolRegistry>;
 
 /** The daemon: owns the store and the workers, serves the CLI endpoint and MCP over HTTP. */
 export async function serve(opts: ServeOptions): Promise<ServeHandle> {
-  return serveHttp(opts.helm, createToolRegistry(opts.helm), opts.port ?? 0);
+  return serveHttp(opts.helm, createToolRegistry(opts.helm, opts.tools ?? resolveToolProfile(process.env.HELM_TOOLS)), opts.port ?? 0);
 }
 
 /** Stdio proxy: owns no workers or store; forwards calls without replay. See docs/runtime-notes.md. */
-export async function serveStdioProxy(port: number): Promise<ServeHandle> {
-  const local = createToolRegistry(undefined as unknown as Helm); // schemas only; `call` never runs here
+export async function serveStdioProxy(port: number, tools?: ToolProfile): Promise<ServeHandle> {
+  const local = createToolRegistry(undefined as unknown as Helm, tools ?? resolveToolProfile(process.env.HELM_TOOLS)); // schemas only; `call` forwards here
   const registry: Registry = {
     list: () => local.list(),
     call: (name, input) => callDaemon(port, name, input) as ReturnType<Registry['call']>,

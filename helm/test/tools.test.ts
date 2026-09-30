@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createToolRegistry } from '../src/tools.js';
-import { TOOL_NAMES } from '../src/types.js';
+import { ALL_TOOL_NAMES, CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.js';
 import type { ToolOutcome } from '../src/types.js';
 import type { Helm } from '../src/helm.js';
 
@@ -36,13 +36,39 @@ test('list() returns every tool with a description and a zod input schema', () =
   const { helm } = createFakeHelm();
   const registry = createToolRegistry(helm);
   const tools = registry.list();
-  assert.equal(tools.length, TOOL_NAMES.length);
-  for (const name of TOOL_NAMES) {
+  assert.equal(tools.length, ALL_TOOL_NAMES.length);
+  for (const name of ALL_TOOL_NAMES) {
     const tool = tools.find((t) => t.name === name);
     assert.ok(tool, `missing tool: ${name}`);
     assert.equal(typeof tool?.description, 'string');
     assert.ok((tool?.description.length ?? 0) > 0);
+    assert.ok((tool?.description.length ?? 0) <= 160, `${name} description is too long`);
     assert.equal(typeof tool?.inputSchema.safeParse, 'function');
+  }
+});
+
+test('MCP profiles expose the requested supervisor tools plus meta tools', () => {
+  const { helm } = createFakeHelm();
+  const names = (profile: 'core' | 'supervisor') => createToolRegistry(helm, profile).list().map((tool) => tool.name);
+  assert.deepEqual(names('core').sort(), [...CORE_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+  assert.deepEqual(names('supervisor').sort(), [...SUPERVISOR_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+});
+
+test('helm.help returns an index or a full schema without exposing empty optional fields', async () => {
+  const { helm } = createFakeHelm();
+  const registry = createToolRegistry(helm, 'core');
+  const index = await registry.call('helm.help', {});
+  assert.equal(index.ok, true);
+  if (index.ok) {
+    assert.match(String(index.index), /^worker\.spawn:/m);
+    assert.doesNotMatch(String(index.index), /undefined/);
+  }
+  const help = await registry.call('helm.help', { tool: 'worker.spawn' });
+  assert.equal(help.ok, true);
+  if (help.ok) {
+    assert.equal(help.tool, 'worker.spawn');
+    assert.equal(typeof help.description, 'string');
+    assert.equal(typeof help.inputSchema, 'object');
   }
 });
 
@@ -79,6 +105,29 @@ test('call() validates and dispatches a valid call to the matching Helm method',
   const mergeOutcome = await registry.call('pr.merge', { number: 1, expectedHead: 'a'.repeat(40) });
   assert.equal(mergeOutcome.ok, true);
   assert.equal(calls.at(-1)?.method, 'prMerge');
+});
+
+test('helm.call reuses direct validation and dispatch', async () => {
+  const { helm, calls } = createFakeHelm();
+  const registry = createToolRegistry(helm, 'core');
+  const outcome = await registry.call('helm.call', { tool: 'run.status', input: {} });
+  assert.equal(outcome.ok, true);
+  assert.equal(calls.at(-1)?.method, 'runStatus');
+  const refused = await registry.call('helm.call', { tool: 'worker.spawn', input: { repo: '/repo' } });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.match(refused.reason, /invalid input/);
+});
+
+test('helm.call preserves lifecycle admission refusals', async () => {
+  const { helm } = createFakeHelm();
+  const admitted: string[] = [];
+  const guardedHelm = { ...helm, lifecycle: { admit(name: string) { admitted.push(name); throw new Error('admission refused'); } } } as unknown as Helm;
+  const registry = createToolRegistry(guardedHelm, 'core');
+  const input = { repo: '/repo', objective: 'task' };
+  const direct = await registry.call('worker.spawn', input);
+  const throughCall = await registry.call('helm.call', { tool: 'worker.spawn', input });
+  assert.deepEqual(throughCall, direct);
+  assert.deepEqual(admitted, ['worker.spawn', 'worker.spawn']);
 });
 
 

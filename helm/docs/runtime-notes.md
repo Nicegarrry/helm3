@@ -44,7 +44,11 @@ The Pi session file, reported as soon as it is opened rather than when the turn 
 
 ## tools.ts
 
-The tool registry: maps the twelve tool names to their zod input schemas and dispatches validated calls to a Helm instance. Never throws; unknown tools and invalid input both come back as { ok: false, reason }. See DESIGN.md.
+The tool registry maps registered tool names to their zod input schemas and dispatches validated
+calls to a Helm instance. Its MCP-facing list is filtered by the `core`, `supervisor`, or `all`
+profile; dispatch remains unrestricted for CLI and loopback HTTP calls. `helm.call` delegates
+back through this same registry, and `helm.help` exposes compact indexes or full schemas.
+Never throws; unknown tools and invalid input both come back as `{ ok: false, reason }`.
 
 ## ui.ts
 
@@ -56,7 +60,9 @@ Codex CLI runtime: one `codex exec` (or `codex exec resume <thread>`) process pe
 
 ## server.ts
 
-`helm serve`: exposes the tool registry over MCP (stdio and Streamable HTTP) plus a small loopback HTTP API the CLI uses. See DESIGN.md and one-shot-brief.md section 3.
+`helm serve`: exposes a profile-filtered tool registry over MCP (stdio and Streamable HTTP) plus
+a loopback HTTP API whose internal calls retain the full registry. See DESIGN.md and
+one-shot-brief.md section 3.
 
 An MCP front-end over stdio that forwards every tool call to the daemon on `port`. It owns nothing: no store, no workers. Any number of these can attach to one daemon, one per orchestrator session, and each exits with its client. Calls go over `node:http` rather than `fetch` because undici gives up on a response after five silent minutes, and `worker.wait` may hold a response open for twenty-five.
 
@@ -69,4 +75,3 @@ Accept strict JSON or a ```json fenced block. Strict-JSON-whole-message is tried
 Tokenizer-based classifier for bash commands, exported so it can be unit tested without a Pi session. Finds every `git` invocation in the command (across `;`, `&&`, `||`, `|`, `( )`, backticks and `$(`), skips its option tokens (and the value argument of options that take one) to find the actual subcommand, and denies push/worktree/checkout(without `--` for the reviewer or `switch`)/switch regardless of how many flags precede it. This closes the `git -C .. push`, `git --no-pager push`, `git -C .. worktree remove` style bypasses that a flat `/git\s+push/` regex misses.
 
 Resolve `rawPath` against the worktree and realpath it. When the path does not exist yet (the write tool's normal case), realpath throws; falling back to the lexical path there would let a symlink such as `evil -> /tmp` plus a write to `evil/x.txt` escape the worktree undetected. Instead walk up to the deepest ancestor that does exist, realpath that (resolving any symlink in the existing prefix), and re-append the remaining, not-yet-existing components before the containment check.
-

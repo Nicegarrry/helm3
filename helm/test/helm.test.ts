@@ -351,7 +351,7 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
 });
 
-function installHarness(helmJson: object) {
+function installHarness(helmJson: object, gatesOverride?: GateRunner) {
   const repo = mkTempDir('helm-install-repo-');
   const git = (...args: string[]) => execFileSync('git', args, { cwd: repo });
   git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
@@ -372,7 +372,7 @@ function installHarness(helmJson: object) {
     seen.push(!existsSync(path) ? 'missing' : lstatSync(path).isSymbolicLink() ? 'symlink' : 'dir');
     return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
   });
-  const made = makeHelm({ gates, runner, workerInstall: true });
+  const made = makeHelm({ gates: gatesOverride ?? gates, runner, workerInstall: true });
   made.workspace.resolveSha = async (_repo, ref) => execFileSync('git', ['rev-parse', ref === 'main' ? 'HEAD' : ref], { cwd: repo, encoding: 'utf8' }).trim();
   return { ...made, installs, seen, repo };
 }
@@ -391,6 +391,30 @@ test('worker turns see a real node_modules from the install gate step and hygien
   assert.deepEqual(seen, ['dir', 'dir']);
   assert.equal(installs.length, 2);
   assert.equal(existsSync(join(spawned.worktree, 'node_modules')), false);
+});
+
+test('stop during the pre-turn install aborts it, never runs the turn, and settles stopped', async () => {
+  let installing!: () => void;
+  const started = new Promise<void>((resolve) => { installing = resolve; });
+  let signal: AbortSignal | undefined;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      signal = options?.signal;
+      installing();
+      return new Promise((resolve) => signal?.addEventListener('abort', () => resolve({ passed: false, checks: [] })));
+    },
+    async defaultChecks() { return []; },
+  };
+  const { helm, store, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }] }, gates);
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await started;
+  const stopped = await helm.stop({ workerId: spawned.workerId });
+  assert.deepEqual(stopped, { ok: true, state: 'stopped' });
+  assert.equal(signal?.aborted, true);
+  assert.deepEqual(seen, []);
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'stopped');
 });
 
 test('workerInstall false in helm.json skips the worker install', async () => {

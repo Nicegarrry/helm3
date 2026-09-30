@@ -142,7 +142,7 @@ async function refuseEscapingSymlinks(worktree: string, logDir: string): Promise
   return { reason, result: { name: 'gate.refused', command: 'symlink preflight', exitCode: 1, outputPath, durationMs: 0 } };
 }
 
-async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; daemonHome?: string; denyLocalPorts: readonly number[]; denyLocalSocketPaths: readonly string[]; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<CheckResult> {
+async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; daemonHome?: string; denyLocalPorts: readonly number[]; denyLocalSocketPaths: readonly string[]; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void; signal?: AbortSignal }): Promise<CheckResult> {
   const start = Date.now();
   const outputPath = join(logDir, `${outputSlug}.log`);
   let sandbox: Awaited<ReturnType<typeof prepareGateSandbox>> | Awaited<ReturnType<typeof prepareUnsandboxedGate>> | undefined;
@@ -173,7 +173,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
       const executable = child.executable ?? '/bin/sh';
       const command = child.executable ? withGateCache(check.command, child.tempDir) : check.command;
       const args = child.executable ? ['-f', child.profilePath!, '/bin/sh', '-c', command] : ['-c', command];
-      const childProcess = execFile(executable, args, { cwd, env: child.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const childProcess = execFile(executable, args, { cwd, env: child.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, signal: options.signal }, (error, stdout, stderr) => {
         resolve({ error: error as ExecFileError | null, stdout, stderr });
       });
       if (childProcess.pid) options.onPid?.(childProcess.pid);
@@ -199,7 +199,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
 
 export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string; denyLocalPorts?: readonly number[]; denyLocalSocketPaths?: readonly string[]; daemonHome?: string; daemonPort?: number; daemonSocketPath?: string } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; keepNodeModules?: boolean; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; keepNodeModules?: boolean; signal?: AbortSignal; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const daemon = await readDaemonNetworkConfig(options.daemonHome);
@@ -214,6 +214,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
       }
       try {
         for (const check of await expandInstallChecks(cwd, checks)) {
+          if (opts?.signal?.aborted) break;
           const base = slugifyCheckName(check.name);
           const seen = usedSlugs.get(base) ?? 0;
           usedSlugs.set(base, seen + 1);
@@ -227,13 +228,14 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
             denyLocalSocketPaths,
             onUnsandboxed: opts?.onUnsandboxed,
             onPid: opts?.onPid,
+            signal: opts?.signal,
           });
           results.push(result);
         }
       } finally {
         await cleanupNodeModules(cwd, opts?.keepNodeModules ?? options.keepNodeModules, { allowedRoot: opts?.nodeModulesRoot, onError: opts?.onNodeModulesError });
       }
-      const passed = results.every((result) => result.exitCode === 0);
+      const passed = !opts?.signal?.aborted && results.every((result) => result.exitCode === 0);
       return { passed, checks: results };
     },
 

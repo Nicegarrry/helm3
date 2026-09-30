@@ -265,6 +265,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly workerInstall: boolean;
+  private readonly installAborts = new Map<string, AbortController>();
   private readonly settings: Settings;
   private readonly spendSettings: EffectiveSpendReader;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
@@ -768,6 +769,7 @@ export class Helm {
       }
       must(row.state === 'running', `worker is not running (state: ${row.state})`);
       this.stopRequested.add(input.workerId);
+      this.installAborts.get(input.workerId)?.abort();
       this.store.appendEvent(input.workerId, 'stop.requested');
       const settled = await this.waitForSettle(input.workerId, this.stopTimeoutMs);
       if (!settled) {
@@ -1209,13 +1211,15 @@ export class Helm {
     const lock = createHash('sha256');
     for (const name of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) if (existsSync(join(row.worktree, name))) lock.update(readFileSync(join(row.worktree, name)));
     const digest = lock.digest('hex');
+    const abort = new AbortController();
+    this.installAborts.set(row.workerId, abort);
     try {
       const config = await loadRepoConfig(row.repo, row.baseSha, false).catch(() => undefined);
       const checks = (config?.gates ?? []).filter((gate) => installManager(gate.command));
       if (config?.workerInstall === false || checks.length === 0) return;
       if (this.installedLocks.get(row.workerId) === digest && existsSync(join(row.worktree, 'node_modules'))) return;
       const outcome = await this.gates.run(row.worktree, checks, join(this.config.home, 'logs', row.workerId, `install-${Date.now()}`), {
-        timeoutMs: this.config.gateTimeoutMs, nodeModulesRoot: this.workerWorktreeRoot(row), keepNodeModules: true, sandbox: await sandboxEnabled(row.repo, row.baseSha),
+        timeoutMs: this.config.gateTimeoutMs, nodeModulesRoot: this.workerWorktreeRoot(row), keepNodeModules: true, signal: abort.signal, sandbox: await sandboxEnabled(row.repo, row.baseSha),
         onPid: (pid) => this.capacity.setPid(row.workerId, pid),
         onRefused: (reason) => this.store.appendEvent(row.workerId, 'worker.install.refused', { reason }),
       });
@@ -1223,7 +1227,7 @@ export class Helm {
       this.store.appendEvent(row.workerId, 'worker.install', { passed: outcome.passed, lock: digest });
     } catch (err) {
       this.store.appendEvent(row.workerId, 'worker.install', { passed: false, error: errMessage(err) });
-    }
+    } finally { this.installAborts.delete(row.workerId); }
   }
 
   private workerTempDir(workerId: string): string {
@@ -1372,9 +1376,11 @@ export class Helm {
     };
     try {
       if (this.workerInstall && row.role !== 'reviewer') await this.installWorkerDeps(row);
-      const outcome = await this.runner.run(runInput, message, hooks);
+      const skipped = this.stopRequested.has(workerId);
+      if (skipped) this.stopObserved.add(workerId);
+      const outcome: WorkerRunOutcome = skipped ? { result: null, rawText: '', sessionFile: row.sessionFile } : await this.runner.run(runInput, message, hooks);
       const result = outcome.result;
-      if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {
+      if ((row.role === 'builder' || row.role === 'validator') && !skipped && result?.status !== 'failed') {
         try {
           const commitMessage = result?.summary ?? `helm: ${workerId} turn complete`;
           const head = await this.workspace.commitAll(row.worktree, commitMessage, row.repo);

@@ -1,4 +1,6 @@
 /** Deterministic portfolio snapshots and local-day webhook delivery. */
+import { appendFileSync } from 'node:fs';
+import { startTicker } from './daemon.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { listBudgetStatuses } from './budget.js';
@@ -21,8 +23,15 @@ export async function portfolio(store: Store, settings: Settings, since?: string
       const approved = has(store, 'reviews') && store.sql.prepare("SELECT verdict FROM reviews WHERE repoSlug=? AND number=? AND head=? ORDER BY at DESC,id DESC LIMIT 1").get(project, p.number, p.head) as Row | undefined;
       return { number: p.number, waiting: approved && approved.verdict === 'approve' ? 'merge' : 'review' };
     });
-    const stateAt = (w: typeof workers[number]) => String((store.sql.prepare("SELECT at FROM events WHERE workerId=? AND kind='state' AND json_extract(data,'$.to')=? ORDER BY seq DESC LIMIT 1").get(w.workerId, w.state) as Row | undefined)?.at ?? w.updatedAt);
-    const stuck = workers.filter((w) => w.repoSlug === project && ['idle', 'waiting', 'failed'].includes(w.state) && now.getTime() - Date.parse(stateAt(w)) > 7_200_000).map((w) => ({ workerId: w.workerId, state: w.state }));
+    const stateAt = (w: typeof workers[number]) => String((store.sql.prepare("SELECT at FROM events WHERE workerId=? AND kind='state' ORDER BY seq DESC LIMIT 1").get(w.workerId) as Row | undefined)?.at ?? w.updatedAt);
+    const activityAt = (w: typeof workers[number]) => Math.max(Date.parse(w.updatedAt), ...[
+      "SELECT MAX(at) AS at FROM events WHERE workerId=?", "SELECT MAX(at) AS at FROM spend WHERE workerId=?", "SELECT MAX(at) AS at FROM gates WHERE workerId=?", "SELECT MAX(createdAt) AS at FROM prs WHERE workerId=?",
+    ].map((sql) => Date.parse(String((store.sql.prepare(sql).get(w.workerId) as Row).at ?? w.updatedAt))));
+    const stuck = workers.filter((w) => {
+      if (w.repoSlug !== project) return false;
+      if (['waiting', 'running', 'queued'].includes(w.state)) return now.getTime() - Date.parse(stateAt(w)) > 7_200_000;
+      return w.state === 'idle' && w.role === 'builder' && prs.some((p) => p.workerId === w.workerId && p.repoSlug === project && (p.state === 'open' || p.state === null)) && now.getTime() - activityAt(w) > 7_200_000;
+    }).map((w) => ({ workerId: w.workerId, state: w.state }));
     const inbox = has(store, 'inbox') ? Number((store.sql.prepare("SELECT COUNT(*) AS n FROM inbox WHERE project=? AND state='open'").get(project) as Row).n) : 0;
     const budget = budgets.find((b) => b.project === project && b.closedAt === null);
     return { project, usd: score.usd, codexTokens: score.codexTokens, budget: budget ? { usd: budget.spentUsd, capUsd: budget.capUsd, codexTokens: budget.spentCodexTokens, capCodexTokens: budget.capCodexTokens } : null, merged: score.merged, cleanRate: outcomes.n ? outcomes.clean / outcomes.n : 0, firstPassGateRate: score.firstPassGateRate, openPrs, stuck, inbox, taps: score.taps };
@@ -49,28 +58,50 @@ export function reportContent(text: string): string {
   const prefix = text.slice(0, 2000 - tail.length); const end = prefix.lastIndexOf('\n');
   return `${end > 0 ? prefix.slice(0, end) : prefix.replace(/[\uD800-\uDBFF]$/, '')}${tail}`;
 }
-export function createReportTicker(options: { store: Store; home: string; settings?: Settings; env?: NodeJS.ProcessEnv; fetch?: typeof fetch; now?: () => Date }) {
+/** Separate timers ensure a slow report POST cannot hold the Discord consumer open. */
+export function startNotificationTickers(discord: () => Promise<void>, report: () => Promise<void>) {
+  const discordTicker = startTicker(1000, [discord]);
+  const reportTicker = startTicker(60_000, [report]);
+  return { discord: discordTicker, report: reportTicker, stop() { discordTicker(); reportTicker(); } };
+}
+export function createReportTicker(options: { store: Store; home: string; settings?: Settings; env?: NodeJS.ProcessEnv; fetch?: typeof fetch; now?: () => Date; readSettings?: typeof loadSettings; log?: (line: string) => void }) {
   const { store } = options; let sending = false;
-  store.sql.exec('CREATE TABLE IF NOT EXISTS portfolio_report (id INTEGER PRIMARY KEY CHECK(id=1), lastSentDate TEXT NOT NULL)');
+  let settings = options.settings; let settingsReadAt = -Infinity; let env: NodeJS.ProcessEnv = {};
+  const log = options.log ?? ((line: string) => { try { appendFileSync(join(options.home, 'daemon.log'), `${line}\n`); } catch { /* logging must not break delivery */ } });
+  const giveUp = (day: string) => {
+    const result = store.sql.prepare('UPDATE portfolio_report SET gaveUpDate=? WHERE id=1 AND (gaveUpDate IS NULL OR gaveUpDate<>?)').run(day, day);
+    if (result.changes) log(`Portfolio report abandoned for ${day} after 3 attempts`);
+  };
   return async () => {
     if (sending) return;
-    const settings = options.settings ?? loadSettings(options.home);
-    const env = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...options.env };
-    const fallback = Object.values(settings.discord.projects)[0]?.webhookEnv;
-    const url = (settings.report?.webhookEnv ? env[settings.report.webhookEnv]?.trim() : undefined) || (fallback ? env[fallback]?.trim() : undefined);
+    const now = options.now?.() ?? new Date();
+    if (now.getTime() - settingsReadAt >= 60_000) {
+      settings = options.settings ?? (options.readSettings ?? loadSettings)(options.home); settingsReadAt = now.getTime();
+      env = { ...loadEnvFile(join(homedir(), '.config', 'helm', 'env')), ...process.env, ...options.env };
+    }
+    const current = settings!;
+    const names = [current.report?.webhookEnv, current.discord.globalWebhookEnv, Object.values(current.discord.projects)[0]?.webhookEnv];
+    const url = names.map((name) => name ? env[name]?.trim() : undefined).find(Boolean);
     if (!url) return;
-    const now = options.now?.() ?? new Date(); const at = settings.report?.at ?? '06:00';
+    const at = current.report?.at ?? '06:00';
     const localDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const [hour = 6, minute = 0] = at.split(':').map(Number);
     if (now.getHours() * 60 + now.getMinutes() < hour * 60 + minute) return;
-    const last = store.sql.prepare('SELECT lastSentDate FROM portfolio_report WHERE id=1').get() as Row | undefined;
-    if (last?.lastSentDate === localDate) return;
+    const last = store.sql.prepare('SELECT * FROM portfolio_report WHERE id=1').get() as Row | undefined;
+    if (last?.lastSentDate === localDate || last?.gaveUpDate === localDate) return;
+    const attempts = last?.attemptDate === localDate ? Number(last.attempts) : 0;
+    if (attempts >= 3) { giveUp(localDate); return; }
+    const delay = attempts === 1 ? 5 * 60_000 : 15 * 60_000;
+    if (attempts && now.getTime() - Date.parse(String(last?.lastAttemptAt)) < delay) return;
     sending = true;
     try {
-      const content = reportContent(formatPortfolio(await portfolio(store, settings, undefined, now)));
+      store.sql.prepare(`INSERT INTO portfolio_report (id,lastSentDate,attemptDate,lastAttemptAt,attempts) VALUES (1,'',?,?,?)
+        ON CONFLICT(id) DO UPDATE SET attemptDate=excluded.attemptDate,lastAttemptAt=excluded.lastAttemptAt,attempts=excluded.attempts`).run(localDate, now.toISOString(), attempts + 1);
+      const content = reportContent(formatPortfolio(await portfolio(store, current, undefined, now)));
       const response = await (options.fetch ?? globalThis.fetch)(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, allowed_mentions: { parse: [] } }), signal: AbortSignal.timeout(15_000) });
-      if (response.ok) store.sql.prepare('INSERT INTO portfolio_report VALUES (1,?) ON CONFLICT(id) DO UPDATE SET lastSentDate=excluded.lastSentDate').run(localDate);
-    } catch { /* Retry on the next tick; never log webhook credentials. */ }
+      if (response.ok) { store.sql.prepare('UPDATE portfolio_report SET lastSentDate=? WHERE id=1').run(localDate); return; }
+    } catch { /* Back off without logging webhook credentials. */ }
     finally { sending = false; }
+    if (attempts + 1 >= 3) giveUp(localDate);
   };
 }

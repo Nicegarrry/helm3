@@ -7,7 +7,7 @@ import test from 'node:test';
 import { attachWorker, openBudget } from '../src/budget.js';
 import { ensureTapTable } from '../src/envelope.js';
 import { insertInbox } from '../src/inbox.js';
-import { createReportTicker, formatPortfolio, portfolio, reportContent } from '../src/portfolio.js';
+import { createReportTicker, formatPortfolio, portfolio, reportContent, startNotificationTickers } from '../src/portfolio.js';
 import { loadSettings } from '../src/settings.js';
 import { openStore } from '../src/store.js';
 import type { WorkerRow } from '../src/types.js';
@@ -47,7 +47,7 @@ test('seeded portfolio reuses scorecard activity, includes old workers, budget a
     assert.equal(one.usd, 2); assert.equal(one.codexTokens, 120); assert.equal(one.budget?.usd, 5); assert.equal(one.budget?.capUsd, 10); assert.equal(one.budget?.capCodexTokens, 1000);
     assert.equal(one.merged, 1); assert.equal(one.cleanRate, 0.5); assert.equal(one.firstPassGateRate, 0.5); assert.equal(one.taps, 1);
     assert.deepEqual(one.openPrs, [{ number: 1, waiting: 'review' }, { number: 2, waiting: 'merge' }]);
-    assert.equal(report.total.stuck, 4); assert.equal(report.total.inbox, 1);
+    assert.equal(report.total.stuck, 1); assert.equal(report.total.inbox, 1);
     const content = formatPortfolio(report); assert.ok(content.split('\n').length <= 25); assert.match(content, /Fleet: \$2.00; Codex 120 tokens; merged 1/);
     assert.equal(f.store.sql.prepare("SELECT 1 FROM sqlite_master WHERE name='memory_outbox'").get(), undefined);
     assert.equal((await portfolio(f.store, f.settings, '2026-10-01T11:00:00Z', now)).total.usd, 0);
@@ -112,7 +112,97 @@ test('Discord payload truncates cleanly at 2000 chars and preserves fleet total'
 test('unsuccessful webhook sends do not advance the persisted date and can retry', async () => {
   const f = fixture({ report: { webhookEnv: 'REPORT' } }); const sent: { url: string; content: string }[] = []; const clock = { date: new Date(2026, 9, 1, 7) };
   try {
-    await delivery(f, clock, sent, f.store, false)(); assert.equal(f.store.sql.prepare('SELECT * FROM portfolio_report').get(), undefined);
+    await delivery(f, clock, sent, f.store, false)(); assert.equal((f.store.sql.prepare('SELECT lastSentDate FROM portfolio_report').get() as { lastSentDate: string }).lastSentDate, '');
+    clock.date = new Date(2026, 9, 1, 7, 5);
     await delivery(f, clock, sent)(); assert.equal(sent.length, 2); assert.equal((f.store.sql.prepare('SELECT lastSentDate FROM portfolio_report').get() as { lastSentDate: string }).lastSentDate, '2026-10-01');
   } finally { f.close(); }
+});
+
+test('report persists 5m and 15m backoff across restart, gives up after three attempts, logs once and resets next day', async () => {
+  const f = fixture({ report: { webhookEnv: 'REPORT' } }); const clock = { date: new Date(2026, 9, 1, 7) }; const logs: string[] = []; let posts = 0;
+  const create = (store = f.store) => createReportTicker({ store, home: f.home, now: () => clock.date, env: { REPORT: 'https://example/report' }, log: (line) => logs.push(line), fetch: (async () => { posts++; if (posts === 2) throw new Error('secret webhook URL'); return new Response(null, { status: 500 }); }) as typeof fetch });
+  try {
+    const tick = create(); await tick(); assert.equal(posts, 1);
+    assert.equal((f.store.sql.prepare('SELECT lastAttemptAt FROM portfolio_report').get() as { lastAttemptAt: string }).lastAttemptAt, clock.date.toISOString());
+    for (let second = 1; second < 300; second++) { clock.date = new Date(2026, 9, 1, 7, 0, second); await tick(); }
+    assert.equal(posts, 1); assert.equal(logs.length, 0);
+    f.store.close(); const restarted = openStore(f.path);
+    try {
+      const next = create(restarted); clock.date = new Date(2026, 9, 1, 7, 5); await next(); assert.equal(posts, 2);
+      clock.date = new Date(2026, 9, 1, 7, 19, 59); await next(); assert.equal(posts, 2);
+      clock.date = new Date(2026, 9, 1, 7, 20); await next(); assert.equal(posts, 3); assert.equal(logs.length, 1);
+      assert.match(logs[0]!, /abandoned.*2026-10-01.*3 attempts/); assert.doesNotMatch(logs[0]!, /secret|https/);
+      const state = restarted.sql.prepare('SELECT attempts,gaveUpDate,lastSentDate FROM portfolio_report').get() as { attempts: number; gaveUpDate: string; lastSentDate: string };
+      assert.deepEqual({ ...state }, { attempts: 3, gaveUpDate: '2026-10-01', lastSentDate: '' });
+      const anotherRestart = create(restarted); clock.date = new Date(2026, 9, 1, 22); await next(); await anotherRestart(); assert.equal(posts, 3); assert.equal(logs.length, 1);
+      clock.date = new Date(2026, 9, 2, 7); await anotherRestart(); assert.equal(posts, 4);
+      assert.equal((restarted.sql.prepare('SELECT attempts FROM portfolio_report').get() as { attempts: number }).attempts, 1);
+    } finally { restarted.close(); }
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
+});
+
+test('report settings are re-read no more than once per minute and reload at the minute boundary', async () => {
+  const f = fixture({ report: { webhookEnv: 'EMPTY' } }); let reads = 0; let posts = 0; let date = new Date(2026, 9, 1, 7);
+  try {
+    const tick = createReportTicker({ store: f.store, home: f.home, env: { EMPTY: '', REPORT: 'https://example/report' }, now: () => date, readSettings: (home) => { reads++; return loadSettings(home); }, fetch: (async () => { posts++; return new Response(null, { status: 204 }); }) as typeof fetch });
+    await tick(); writeFileSync(join(f.home, 'helm.json'), JSON.stringify({ report: { webhookEnv: 'REPORT' } }));
+    for (let second = 1; second < 60; second++) { date = new Date(2026, 9, 1, 7, 0, second); await tick(); }
+    assert.equal(reads, 1); assert.equal(posts, 0);
+    date = new Date(2026, 9, 1, 7, 1); await tick(); assert.equal(reads, 2); assert.equal(posts, 1);
+  } finally { f.close(); }
+});
+
+test('independent notification tickers keep delivering Discord while a report POST is pending', async () => {
+  const f = fixture({ report: { webhookEnv: 'REPORT' } }); let discordCalls = 0; let reportCalls = 0; let complete!: () => void;
+  const pending = new Promise<void>((resolve) => { complete = resolve; });
+  const report = createReportTicker({ store: f.store, home: f.home, now: () => new Date(2026, 9, 1, 7), env: { REPORT: 'https://example/report' }, fetch: (async () => { reportCalls++; await pending; return new Response(null, { status: 204 }); }) as typeof fetch });
+  const timers = startNotificationTickers(async () => { discordCalls++; }, report);
+  try {
+    const running = timers.report.tick(); await new Promise<void>((resolve) => setImmediate(resolve)); assert.equal(reportCalls, 1);
+    await timers.discord.tick(); await timers.discord.tick(); assert.equal(discordCalls, 2); assert.equal(reportCalls, 1);
+    complete(); await running; await timers.report.tick(); assert.equal(reportCalls, 1);
+  } finally { complete(); timers.stop(); f.close(); }
+});
+
+test('stuck means old waiting/running/queued transitions or inactive idle builders with open PRs', async () => {
+  const f = fixture();
+  try {
+    for (const state of ['waiting', 'running', 'queued', 'idle', 'failed', 'succeeded', 'stopped', 'unknown', 'interrupted'] as const) {
+      f.store.insertWorker({ ...worker(state, 'acme/test', state), updatedAt: old });
+      f.store.appendEvent(state, 'state', { to: state }, old);
+    }
+    for (const id of ['idle-pr', 'active-event', 'active-spend', 'active-gate', 'boundary', 'reviewer', 'closed-pr', 'fresh-running']) {
+      f.store.insertWorker({ ...worker(id, 'acme/test', id === 'fresh-running' ? 'running' : 'idle'), updatedAt: id === 'boundary' ? '2026-10-01T10:00:00Z' : old, role: id === 'reviewer' ? 'reviewer' : 'builder' });
+      f.store.insertPr({ repoSlug: 'acme/test', workerId: id, number: 100 + f.store.listPrs().length, head: 'b', state: id === 'closed-pr' ? 'closed' : 'open', url: 'https://pr/' + id, createdAt: old });
+    }
+    f.store.appendEvent('active-event', 'tool.call', {}, '2026-10-01T11:00:00Z');
+    f.store.appendEvent('fresh-running', 'state', { to: 'running' }, '2026-10-01T11:00:00Z');
+    f.store.addSpend({ workerId: 'active-spend', model: 'codex/luna', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, at: '2026-10-01T11:00:00Z' });
+    f.store.insertGate({ workerId: 'active-gate', gateId: 'active', head: 'b', checks: [], passed: true, at: '2026-10-01T11:00:00Z' });
+    const report = await portfolio(f.store, f.settings, undefined, now);
+    assert.deepEqual(report.projects[0]!.stuck.map((w) => w.workerId).sort(), ['idle-pr', 'queued', 'running', 'waiting']);
+  } finally { f.close(); }
+});
+
+test('fallback webhook order is report, global, first project; empty values fall through', async () => {
+  for (const [report, global, expected] of [['REPORT', 'GLOBAL', 'report'], ['EMPTY', 'GLOBAL', 'global'], [undefined, 'GLOBAL', 'global'], ['EMPTY', 'EMPTY', 'project']] as const) {
+    const f = fixture({ report: { webhookEnv: report }, discord: { globalWebhookEnv: global, projects: { one: { webhookEnv: 'PROJECT' }, two: { webhookEnv: 'SECOND' } } } }); const urls: string[] = [];
+    try {
+      await createReportTicker({ store: f.store, home: f.home, now: () => new Date(2026, 9, 1, 7), env: { REPORT: 'report', GLOBAL: 'global', PROJECT: 'project', SECOND: 'second', EMPTY: '' }, fetch: (async (url) => { urls.push(String(url)); return new Response(null, { status: 204 }); }) as typeof fetch })();
+      assert.deepEqual(urls, [expected]);
+    } finally { f.close(); }
+  }
+});
+
+test('openStore owns report schema and upgrades legacy daily markers without losing the sent date', () => {
+  const f = fixture();
+  try {
+    assert.ok(f.store.sql.prepare("SELECT 1 FROM sqlite_master WHERE name='portfolio_report'").get());
+    f.store.sql.exec("DROP TABLE portfolio_report; CREATE TABLE portfolio_report (id INTEGER PRIMARY KEY CHECK(id=1),lastSentDate TEXT NOT NULL); INSERT INTO portfolio_report VALUES (1,'2026-10-01')");
+    f.store.close(); const reopened = openStore(f.path);
+    try {
+      const state = reopened.sql.prepare('SELECT lastSentDate,lastAttemptAt,attempts FROM portfolio_report').get() as { lastSentDate: string; lastAttemptAt: null; attempts: number };
+      assert.deepEqual({ ...state }, { lastSentDate: '2026-10-01', lastAttemptAt: null, attempts: 0 });
+    } finally { reopened.close(); }
+  } finally { rmSync(f.home, { recursive: true, force: true }); }
 });

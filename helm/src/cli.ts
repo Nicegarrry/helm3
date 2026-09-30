@@ -35,7 +35,7 @@ import { createRetry } from './retry.js';
 import { createEnvelopeTicker } from './envelope.js';
 import { createMemorySync } from './memory-sync.js';
 import { createHygiene } from './hygiene.js';
-import { portfolio, formatPortfolio, createReportTicker } from './portfolio.js';
+import { portfolio, formatPortfolio, createReportTicker, startNotificationTickers } from './portfolio.js';
 import { createPrTicker } from './pr-watch.js';
 import type { CapacityExec } from './capacity/sampler.js';
 import { resolveToolProfile, type ToolProfile } from './tools.js';
@@ -563,11 +563,11 @@ async function cmdServe(args: string[]): Promise<void> {
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopCapacity = startTicker(1000, [helm.capacityTick.bind(helm)]);
-  const stopDiscord = startTicker(1000, [discord.tick, createReportTicker({ store, home: config.home })]);
+  const notifications = startNotificationTickers(discord.tick, createReportTicker({ store, home: config.home }));
   const stopPrWatch = startTicker(5 * 60_000, [createPrTicker({ store, github })]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); stopDiscord(); stopPrWatch(); stopMemory(); stopHygiene(); };
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); notifications.stop(); stopPrWatch(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();

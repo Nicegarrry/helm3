@@ -55,15 +55,17 @@ import {
   deployRunInput,
   deployStatusInput,
   deployRollbackInput,
+  spendSetInput,
 } from './types.js';
 import { answerInbox, createInboxId, getInbox, insertInbox, listInbox, supersedeOpenInbox } from './inbox.js';
 import { createBaseline, ensureBaselineTable, getBaseline } from './baseline.js';
 import { loadRepoConfig } from './repoconfig.js';
 
 import { Lifecycle } from './lifecycle.js';
-import { loadSettings, type Settings } from './settings.js';
+import { createSettingsReader, loadSettings, updateSpendSettings, type Settings } from './settings.js';
+import { effectiveSpend, type EffectiveSpend } from './config.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
+import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
@@ -206,6 +208,7 @@ export class Helm {
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly settings: Settings;
+  private readonly spendSettings: () => Settings;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
   private readonly jev?: Jev;
   private readonly tapRandomInt?: (min: number, max: number) => number;
@@ -243,6 +246,7 @@ export class Helm {
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
+    this.spendSettings = createSettingsReader(deps.config.home, this.settings);
     this.statfs = deps.statfs;
     this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;
@@ -312,7 +316,6 @@ export class Helm {
     this.selector = createSelector({ settings: this.settings, memory: this.memory, jev: deps.jev, home: this.config.home });
     registerRouting({ chooseModel: (chooser) => this.chooseModel(chooser), settings: this.settings, store: this.store, jev: deps.jev, now: () => this.now ? new Date(this.now()) : new Date(), resolveProject: async (repo) => isAbsolute(repo) ? this.repoSlugFor(repo) : undefined });
   }
-
   async memoryWrite(input: import('./memory.js').MemoryWriteInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.write(input); }
   async memoryLog(input: import('./memory.js').MemoryLogInput): Promise<ToolOutcome<{ path: string }>> { return this.memory.log(input); }
   async memoryList(input: import('./memory.js').MemoryListInput): Promise<ToolOutcome<{ memories: Array<{ path: string; title: string; summary: string }> }>> { return this.memory.list(input); }
@@ -320,7 +323,25 @@ export class Helm {
   async deployRun(input: z.infer<typeof deployRunInput>) { return this.deploy.run(input); }
   async deployStatus(input: z.infer<typeof deployStatusInput>) { return this.deploy.status(input); }
   async deployRollback(input: z.infer<typeof deployRollbackInput>) { return this.deploy.rollback(input); }
-
+  async spendSet(input: z.infer<typeof spendSetInput>): Promise<ToolOutcome<{ spend: Settings['spend'] }>> {
+    return runGuard(() => this.withLock(async () => {
+      if (input.capUsd === undefined && input.warnUsd === undefined && input.maxWorkers === undefined) return refuse('at least one spend setting is required');
+      const current = this.effectiveSpend();
+      const nextCapUsd = input.capUsd ?? current.capUsd;
+      const nextMaxWorkers = input.maxWorkers ?? current.maxWorkers;
+      const raising = nextCapUsd > current.capUsd || nextMaxWorkers > current.maxWorkers;
+      const action = spendCapAction(input);
+      let reservation: TapReservation | undefined;
+      if (raising) {
+        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}`);
+        const reserved = reserveTap(this.store, this.taps, SPEND_CAP_TAP_PROJECT, SPEND_CAP_TAP_KIND, actionHash(action), input.tapId, this.nowDate());
+        if (typeof reserved === 'string') return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${reserved}`);
+        reservation = reserved;
+      }
+      try { const updated = updateSpendSettings(this.config.home, { capUsd: input.capUsd, warnUsd: input.warnUsd, maxWorkers: input.maxWorkers }); if (reservation) commitTap(this.store, this.taps, reservation.tapId, reservation.token, this.nowDate()); return { ok: true, spend: updated.spend }; }
+      catch (error) { if (reservation) rollbackTap(this.taps, reservation.tapId, reservation.token); throw error; }
+    }));
+  }
   async jevCheck(input: import('./jevcheck.js').JevCheckInput): Promise<ToolOutcome<Record<string, unknown>>> { return this.jevChecker ? this.jevChecker.check(input) : { ok: false, reason: 'jev service unavailable' }; }
   async jevLabel(input: { id: number; label: string }): Promise<ToolOutcome<{ id: number; label: string }>> { return this.jevChecker ? this.jevChecker.label(input) : { ok: false, reason: 'jev service unavailable' }; }
   async claimsCheck(input: import('./claims.js').ClaimsCheckInput): Promise<ToolOutcome<Record<string, unknown>>> {
@@ -330,7 +351,6 @@ export class Helm {
   async mergeEnqueue(input: z.infer<typeof mergeEnqueueInput>) { return this.queue.enqueue(input); }
   async mergeQueue(input: z.infer<typeof mergeQueueInput>) { return this.queue.queue(input); }
   async mergeDequeue(input: z.infer<typeof mergeDequeueInput>) { return this.queue.dequeue(input); }
-
   async retryWorker(input: z.infer<typeof retryInput>): Promise<ToolOutcome<{ turn: number; kind: import('./retry.js').RetryKind; message: string }>> {
     if (!this.retry) return refuse('retry service is not configured');
     return runGuard(async () => {
@@ -341,19 +361,16 @@ export class Helm {
       });
     });
   }
-
   /** Register a refusal hook; hooks run in registration order and the first reason wins. */
   guard(tool: string, fn: ToolGuard): void {
     const hooks = this.guards.get(tool) ?? [];
     hooks.push(fn);
     this.guards.set(tool, hooks);
   }
-
   /** Register model selection before spawn admission takes the mutex. */
   chooseModel(fn: ModelChooser): void {
     this.modelChoosers.push(fn);
   }
-
   private async refusal(tool: string, input: unknown): Promise<string | null> {
     for (const fn of this.guards.get(tool) ?? []) {
       const reason = await fn(input);
@@ -361,7 +378,6 @@ export class Helm {
     }
     return null;
   }
-
   private prByNumber(number: number, project?: string): PrRow {
     const resolution = this.store.resolvePrByNumber(number, project);
     return requireValue(resolution.pr, resolution.reason ?? 'pr not found');
@@ -457,7 +473,8 @@ export class Helm {
     }
     const model = input.model ?? TASK_MODELS[input.difficulty ?? 'normal'];
     const active = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
-    must(active < this.config.maxWorkers, `max workers reached (${this.config.maxWorkers})`);
+    const spend = this.effectiveSpend();
+    must(active < spend.maxWorkers, `max workers reached (${spend.maxWorkers})`);
     must(!this.spendCapExceeded(), 'spend cap reached');
     const repo = requireValue(await this.resolveRepo(input.repo), 'repo must be an absolute local path or owner/name');
     const repoSlug = await this.repoSlugFor(repo);
@@ -762,20 +779,21 @@ export class Helm {
 
   /** Soft cap: explicit HELM_SPEND_WARN_USD, else 80% of the hard cap, else none. */
   spendWarnUsd(): number {
-    const explicit = this.config.spendWarnUsd ?? 0;
-    if (explicit > 0) return explicit;
-    return this.config.spendCapUsd > 0 ? Math.round(this.config.spendCapUsd * 0.8 * 100) / 100 : 0;
+    return this.effectiveSpend().warnUsd;
   }
 
   private aboveSoftCap(): boolean { const w = this.spendWarnUsd(); return w > 0 && this.store.spendTotal().spendUsd >= w; }
 
-  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[] }>> {
+  async runStatus(): Promise<ToolOutcome<{ daemon: ReturnType<Lifecycle['status']>; spendUsd: number; spendCapUsd: number; spendWarnUsd: number; aboveSoftCap: boolean; activeWorkers: number; maxWorkers: number; unknownCostEvents: number; projects: BudgetStatus[]; spendSources: EffectiveSpend['sources']; spendCapSource: EffectiveSpend['sources']['capUsd']; spendWarnSource: EffectiveSpend['sources']['warnUsd']; maxWorkersSource: EffectiveSpend['sources']['maxWorkers']; warning?: string }>> {
     return runGuard(async () => {
       const total = this.store.spendTotal();
       const activeWorkers = this.store.listWorkers().filter((w) => ACTIVE_STATES.has(w.state)).length;
+      const spend = this.effectiveSpend();
       return {
-        ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: this.config.spendCapUsd, spendWarnUsd: this.spendWarnUsd(), aboveSoftCap: this.aboveSoftCap(),
-        activeWorkers, maxWorkers: this.config.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(this.store),
+        ok: true, daemon: this.lifecycle.status(), spendUsd: total.spendUsd, spendCapUsd: spend.capUsd, spendWarnUsd: spend.warnUsd, aboveSoftCap: spend.warnUsd > 0 && total.spendUsd >= spend.warnUsd,
+        activeWorkers, maxWorkers: spend.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(this.store), spendSources: spend.sources,
+        spendCapSource: spend.sources.capUsd, spendWarnSource: spend.sources.warnUsd, maxWorkersSource: spend.sources.maxWorkers,
+        ...(spend.warning ? { warning: spend.warning } : {}),
       };
     });
   }
@@ -934,8 +952,11 @@ export class Helm {
   }
 
   private spendCapExceeded(): boolean {
-    return this.config.spendCapUsd > 0 && this.store.spendTotal().spendUsd >= this.config.spendCapUsd;
+    const spend = this.effectiveSpend();
+    return spend.capUsd > 0 && this.store.spendTotal().spendUsd >= spend.capUsd;
   }
+
+  private effectiveSpend(): EffectiveSpend { return effectiveSpend(this.config, this.spendSettings()); }
 
   private ensureProjectBudget(project: string) {
     const existing = openBudgetFor(this.store, project);
@@ -1027,7 +1048,7 @@ export class Helm {
         this.store.addSpend({ ...usage, workerId, at: this.nowIso() });
         const warn = this.spendWarnUsd();
         const after = this.store.spendTotal().spendUsd;
-        if (warn > 0 && before < warn && after >= warn) this.store.appendEvent(workerId, 'spend.warning', { spendUsd: after, spendWarnUsd: warn, spendCapUsd: this.config.spendCapUsd });
+        if (warn > 0 && before < warn && after >= warn) this.store.appendEvent(workerId, 'spend.warning', { spendUsd: after, spendWarnUsd: warn, spendCapUsd: this.effectiveSpend().capUsd });
         const budget = budgetForWorker(this.store, workerId);
         if (budget) {
           const current = budgetStatus(this.store, budget);

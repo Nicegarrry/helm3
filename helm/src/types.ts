@@ -1,7 +1,6 @@
 /** Shared contracts for the Helm harness. */
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
-
 function omitEmptyStrings(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(omitEmptyStrings);
   if (value && typeof value === 'object') {
@@ -28,12 +27,10 @@ export const workerResultSchema = z.preprocess(omitEmptyStrings, z.object({
   }
 }));
 export type WorkerResult = z.infer<typeof workerResultSchema>;
-
 export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded', 'failed', 'stopped', 'interrupted', 'unknown'] as const;
 export type WorkerState = (typeof WORKER_STATES)[number];
 export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
-
 export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
 export type InboxState = (typeof INBOX_STATES)[number];
 export type InboxRow = Readonly<{
@@ -48,7 +45,6 @@ export type InboxRow = Readonly<{
   createdAt: string;
   answeredAt: string | null;
 }>;
-
 
 export type WorkerRow = Readonly<{
   workerId: string;
@@ -73,7 +69,6 @@ export type WorkerRow = Readonly<{
   createdAt: string;
   updatedAt: string;
 }>;
-
 export type WorkerMeta = Readonly<{
   workerId: string;
   issue: number | null;
@@ -256,8 +251,6 @@ export type WorkerHooks = Readonly<{
   /** Return false to stop the turn (spend cap hit or stop requested). Checked at tool-call boundaries. */
   shouldContinue(): boolean;
 }>;
-
-
 export type ToolOk<T> = { ok: true } & T;
 export type ToolErr = { ok: false; reason: string };
 export type ToolOutcome<T> = ToolOk<T> | ToolErr;
@@ -282,7 +275,6 @@ export type WakeRow = Readonly<{
   deliveredAt: string | null;
   ackedAt: string | null;
 }>;
-
 export const spawnInput = z.object({
   repo: z.string().min(1),
   objective: z.string().min(1).max(20000),
@@ -347,15 +339,17 @@ export const mergeDequeueInput = z.object({ project: z.string().min(1).optional(
 export const deployRunInput = z.object({ project: z.string().min(1), target: z.string().min(1), sha: z.string().min(1).optional(), tapId: z.string().optional() }).strict();
 export const deployStatusInput = z.object({ project: z.string().min(1).optional(), id: z.string().min(1).optional() }).strict();
 export const deployRollbackInput = z.object({ id: z.string().min(1), tapId: z.string().optional() }).strict();
-
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback'] as const;
+export const spendSetInput = z.object({
+  capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().positive().optional(),
+  tapId: z.string().regex(/^t-[0-9a-f]+$/).optional(),
+}).strict();
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'spend.set', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback'] as const;
 export type ToolName = string;
-
-
 export type HelmConfig = Readonly<{
   home: string;            // $HELM_HOME, default ~/.helm
   spendCapUsd: number;     // 0 = no cap
   spendWarnUsd?: number;   // soft cap: warn, never block. Default 80% of the cap when a cap is set
   maxWorkers: number;
   gateTimeoutMs: number;
+  spendEnv?: Readonly<{ capUsd?: number; warnUsd?: number; maxWorkers?: number }>;
 }>;

@@ -43,6 +43,7 @@ import {
   deployRunInput,
   deployStatusInput,
   deployRollbackInput,
+  spendSetInput,
   type ToolName,
   type ToolOutcome,
 } from './types.js';
@@ -62,7 +63,6 @@ type ToolDef = Readonly<{
 function def<S extends z.ZodObject>(name: ToolName, description: string, inputSchema: S, call: (helm: Helm, input: z.infer<S>) => Promise<ToolOutcome<unknown>>): ToolDef {
   return { name, description, inputSchema, call: call as ToolDef['call'] };
 }
-
 const TOOLS: readonly ToolDef[] = [
   def('daemon.control', 'Inspect lifecycle, drain new work, resume admissions, safely stop an idle daemon, or apply a staged upgrade when idle. Draining refuses new mutations without replaying them.', daemonInput, (h, i) => h.lifecycle.control(i)),
   def('budget.open', 'Open a per-project sprint budget; opening one closes the previous budget for that project.', budgetOpenInput, (h, i) => h.budgetOpen(i)),
@@ -87,6 +87,7 @@ const TOOLS: readonly ToolDef[] = [
   def('review.request', 'Review an open PR with an explicit model. Claude reviews are recorded with review.record.', reviewInput, (h, i) => h.reviewRequest(i)),
   def('review.record', 'Record an external review comment and its merge verdict for the exact pull-request head.', reviewRecordInput, (h, i) => h.reviewRecord(i)),
   def('run.status', 'Get overall spend, the spend cap, and how many worker slots are active out of the configured maximum.', emptyInput, (h) => h.runStatus()),
+  def('spend.set', 'Update global spend caps and worker limits in $HELM_HOME/helm.json; raising the cap or worker limit requires a one-time spend.cap tap.', spendSetInput, (h, i) => h.spendSet(i)),
   def('pr.merge', 'Merge a pull request, but only if it is open, mergeable, at the exact expected head commit, and all checks passed.', prMergeInput, (h, i) => h.prMerge(i)),
   def('inbox.list', 'List open worker questions, optionally filtered by project or state.', inboxListInput, (h, i) => h.inboxList(i)),
   def('inbox.reply', 'Answer an open worker question and resume that worker on the same session.', inboxReplyInput, (h, i) => h.inboxReply(i)),
@@ -108,7 +109,6 @@ const TOOLS: readonly ToolDef[] = [
   def('deploy.status', 'List recorded deployments for a project or deployment id.', deployStatusInput, (h, i) => h.deployStatus(i)),
   def('deploy.rollback', 'Roll back a recorded production deployment to its previous provider deployment.', deployRollbackInput, (h, i) => h.deployRollback(i)),
 ];
-
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));
 
 export function createToolRegistry(helm: Helm): {

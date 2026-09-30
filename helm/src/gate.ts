@@ -1,8 +1,8 @@
 /** Run checks as child processes, capture output. See DESIGN.md. */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, unlink, writeFile } from 'node:fs/promises';
+import { join, relative, resolve } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
 import { cleanupNodeModules } from './hygiene.js';
@@ -10,6 +10,7 @@ import { disposeGateSandbox, installManager, prepareGateSandbox, prepareUnsandbo
 
 type CheckResult = { name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number };
 type PreparedGateCheck = GateCheck & { allowNetwork?: boolean };
+type EscapingSymlink = { path: string; nodeModules: boolean };
 
 type ExecFileError = NodeJS.ErrnoException & { code?: number | string; signal?: string | null; killed?: boolean };
 
@@ -77,6 +78,57 @@ function withGateCache(command: string, tempDir: string): string {
   return `${command} ${flag} ${JSON.stringify(join(tempDir, `${manager}-cache`))}`;
 }
 
+function insideOrEqual(root: string, candidate: string): boolean {
+  const child = relative(resolve(root), resolve(candidate));
+  return child.length === 0 || (!child.startsWith('..') && !child.startsWith('/'));
+}
+
+async function escapingSymlinks(worktree: string): Promise<EscapingSymlink[]> {
+  const root = await realpath(worktree);
+  const found: EscapingSymlink[] = [];
+  async function walk(directory: string): Promise<void> {
+    let entries;
+    try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name === '.git') continue;
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) {
+        try {
+          if (!insideOrEqual(root, await realpath(path))) found.push({ path, nodeModules: entry.name === 'node_modules' });
+        } catch { /* a broken link cannot escape through its current target */ }
+        continue;
+      }
+      if (entry.isDirectory()) await walk(path);
+    }
+  }
+  await walk(worktree);
+  return found;
+}
+
+async function unlinkNodeModulesSymlink(path: string): Promise<boolean> {
+  try {
+    if (!(await lstat(path)).isSymbolicLink()) return false;
+    await unlink(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function refuseEscapingSymlinks(worktree: string, logDir: string): Promise<{ result: CheckResult; reason: string } | undefined> {
+  let found: EscapingSymlink[];
+  try { found = await escapingSymlinks(worktree); } catch { return undefined; }
+  if (found.length === 0) return undefined;
+  const first = found[0]!;
+  const reason = `worktree contains a symlink escaping the worktree: ${first.path}`;
+  const removed = (await Promise.all(found.filter((link) => link.nodeModules).map(async (link) => (await unlinkNodeModulesSymlink(link.path)) ? link.path : undefined)))
+    .filter((path): path is string => Boolean(path));
+  const note = removed.length > 0 ? `\nunlinked escaping node_modules symlink: ${removed.join(', ')}` : '';
+  const outputPath = join(logDir, 'gate-refused.log');
+  await writeFile(outputPath, `${reason}${note}\n`).catch(() => {});
+  return { reason, result: { name: 'gate.refused', command: 'symlink preflight', exitCode: 1, outputPath, durationMs: 0 } };
+}
+
 async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; onUnsandboxed?: (reason: string) => void }): Promise<CheckResult> {
   const start = Date.now();
   const outputPath = join(logDir, `${outputSlug}.log`);
@@ -129,11 +181,16 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
 
 export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string } = {}): GateRunner {
   return {
-    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void }) {
+    async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void }) {
       await mkdir(logDir, { recursive: true });
       const timeoutMs = opts?.timeoutMs ?? 900000;
       const results: CheckResult[] = [];
       const usedSlugs = new Map<string, number>();
+      const refusal = await refuseEscapingSymlinks(cwd, logDir);
+      if (refusal) {
+        opts?.onRefused?.(refusal.reason);
+        return { passed: false, checks: [refusal.result] };
+      }
       try {
         for (const check of await expandInstallChecks(cwd, checks)) {
           const base = slugifyCheckName(check.name);

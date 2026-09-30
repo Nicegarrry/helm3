@@ -673,6 +673,7 @@ export class Helm {
         sandbox,
         onNodeModulesError: (message) => this.store.appendEvent(input.workerId, 'hygiene.warning', { message }),
         onUnsandboxed: (reason) => this.store.appendEvent(input.workerId, 'gate.unsandboxed', { project: row.repoSlug, head, reason }),
+        onRefused: (reason) => this.store.appendEvent(input.workerId, 'gate.refused', { project: row.repoSlug, head, reason }),
       });
       const gateRow: GateRow = { gateId, workerId: input.workerId, head, passed: outcome.passed, checks: outcome.checks, at: this.nowIso() };
       this.store.insertGate(gateRow);

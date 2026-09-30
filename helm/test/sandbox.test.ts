@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
@@ -54,6 +54,30 @@ test('git sandbox directories come from git rev-parse', async () => {
         .trim().split(/\r?\n/).map((path) => realpathSync(path.startsWith('/') ? path : join(root, path))),
     )].sort();
     assert.deepEqual((await worktreeGitDirs(root)).sort(), expected);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('gate refuses an escaping node_modules symlink without touching its target', async () => {
+  const root = fixture('helm-gate-symlink-');
+  const worktree = join(root, 'worktree');
+  const outside = join(root, 'operator-node-modules');
+  const link = join(worktree, 'node_modules');
+  const sentinel = join(outside, 'sentinel.txt');
+  const logDir = join(root, 'logs');
+  mkdirSync(worktree, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(sentinel, 'untouched');
+  symlinkSync(outside, link, 'dir');
+  const reasons: string[] = [];
+  try {
+    const result = await gateRunner({ allowUnsandboxed: true }).run(worktree, [{ name: 'must-not-run', command: 'exit 0' }], logDir, { sandbox: false, onRefused: (reason) => reasons.push(reason) });
+    assert.equal(result.passed, false);
+    assert.deepEqual(reasons, [`worktree contains a symlink escaping the worktree: ${link}`]);
+    assert.equal(readFileSync(sentinel, 'utf8'), 'untouched');
+    assert.equal(existsSync(link), false);
+    assert.match(readFileSync(join(logDir, 'gate-refused.log'), 'utf8'), /unlinked escaping node_modules symlink/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

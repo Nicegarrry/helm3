@@ -381,6 +381,24 @@ test('gate sandbox fallback is recorded as an event for Discord milestones', asy
   assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'gate.unsandboxed' && event.data.reason === 'sandbox-exec failed to apply profile'));
 });
 
+test('gate refusal is recorded when the runner rejects the worktree', async () => {
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      options?.onRefused?.('worktree contains a symlink escaping the worktree: /tmp/worktree/node_modules');
+      return { passed: false, checks: [] };
+    },
+    async defaultChecks() { return [{ name: 'test', command: 'npm test' }]; },
+  };
+  const { helm, store } = makeHelm({ gates });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-refused-')));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
+  assert.equal(result.ok, true);
+  assert.ok(store.listEvents(spawned.workerId).some((event) => event.kind === 'gate.refused' && event.data.reason === 'worktree contains a symlink escaping the worktree: /tmp/worktree/node_modules'));
+});
+
 test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on reuse', async () => {
   const { helm, store, cloned, fetched, config } = makeHelm();
   const first = await helm.spawn(spawnBody('acme/widgets'));

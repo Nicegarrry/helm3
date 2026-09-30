@@ -47,6 +47,7 @@ function milestone(event: EventRow): string | null {
   if (event.kind === 'deploy') return `Deployed: ${text(event.data.target, 'target')}${event.data.url ? ` ${text(event.data.url, '')}` : ''}`;
   if (event.kind === 'deploy.rolledback') return `Deploy rolled back: ${text(event.data.target, 'target')}`;
   if (event.kind === 'deploy.failed') return `Deploy failed: ${text(event.data.target, 'target')}`;
+  if (event.kind === 'routing.stale') return `Routing catalog stale: ${text(event.data.summary, 'check routing candidates')}`;
   return null;
 }
 

@@ -90,17 +90,32 @@ threshold. A higher tier is tried when the current tier has no usable candidate.
 
 | Tier | Ordered candidates (cheapest first) |
 | --- | --- |
-| 1 | `opencode-go/qwen3.8-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, `codex/gpt-5.6-luna:medium` |
-| 2 | `google/gemini-3.8-flash`, `codex/gpt-5.6-luna:high` |
+| 1 | `openrouter/qwen/qwen3.8-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, `codex/gpt-6-luna:medium` |
+| 2 | `google/gemini-3.8-flash`, `codex/gpt-6-luna:high` |
 | 3 | `claude/sonnet:high`, `codex/gpt-5.6-terra:high` |
-| 4 | `codex/gpt-5.6-sol:medium`, `claude/opus:medium` |
-| 5 | `codex/gpt-5.6-astra:high`, `claude/opus:high`, `claude/fable:high` |
+| 4 | `codex/gpt-6.1-sol:medium`, `claude/opus:medium` |
+| 5 | `codex/gpt-6-astra:high`, `claude/opus:high`, `claude/fable:high`, `codex/gpt-6.1-sol:high` |
 
-The Qwen entry uses Helm's existing `opencode-go/qwen3.8-flash` Pi lane: the local Pi
-catalog does not expose the requested `openrouter/qwen/qwen3.8-flash` identifier. Gemini
-3.8 Flash is present in Pi's Google catalog. `claude/*` candidates remain unavailable
-until Helm has a Claude worker lane. The table, `allowed`, `minClean`, and `minN` are
-hot-reloaded from `$HELM_HOME/helm.json` for each automatic route.
+The tier-1 Qwen entry is the requested `openrouter/qwen/qwen3.8-flash` identifier. The
+current operator `models.json` exposes the older `opencode-go/qwen3.8-flash` override
+instead, so the catalog reports this requested candidate unavailable until configured;
+it does not silently substitute it. Gemini 3.8 Flash is present in Pi's Google catalog.
+`claude/*` candidates remain unavailable
+until Helm has a Claude worker lane. The table, `allowed`, `minClean`, `minN`, `policy`,
+and `checkDays` are hot-reloaded from `$HELM_HOME/helm.json` for each automatic route.
+`routing.policy.lanes` may contain `codex`, `pi`, and `claude`; `subscriptionOnly: true`
+permits only Codex and Claude. `worker.spawn` accepts a repeatable `lanes` override for
+one spawn. Jev still scores every spawn without an explicit model before policy filtering.
+If a policy empties the judged tier, Helm searches higher tiers, then lower tiers; if all
+candidates are disallowed or unavailable it refuses with the policy reason rather than
+silently choosing one.
+
+`helm routing check` (or the `routing.check` tool) probes the catalog and records the last
+check in the Helm store. The weekly ticker runs it when `checkDays` has elapsed and emits
+`routing.stale` for unavailable tier candidates or models present in a lane but absent from
+the table. The Codex probe checks known model IDs through the Codex CLI; Pi reads its
+operator and built-in provider catalogs; Claude requires both a binary and a registered
+Helm lane.
 
 Retrospectives should review the 30-day model × tier scorecard, then edit the ordered
 `routing.tiers` lists or `routing.allowed` in `helm.json`. Keep the cheapest acceptable

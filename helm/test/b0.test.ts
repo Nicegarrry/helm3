@@ -34,7 +34,7 @@ function deps() {
 
 function worker(workerId: string, repo: string): WorkerRow {
   const now = new Date().toISOString();
-  return { workerId, repo, repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-5.6-luna:high', objective: 'test', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'a'.repeat(40), branch: 'helm/test', worktree: repo, state: 'succeeded', head: 'a'.repeat(40), sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
+  return { workerId, repo, repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-6-luna:high', objective: 'test', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'a'.repeat(40), branch: 'helm/test', worktree: repo, state: 'succeeded', head: 'a'.repeat(40), sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
 }
 
 test('registered guard refuses pr.merge with its reason', async () => {
@@ -55,7 +55,7 @@ test('spawn defaults to the Codex normal model before any chooser is registered'
     assert.equal(result.ok, true);
     if (result.ok) {
       await d.helm.settle(result.workerId);
-      assert.equal(d.store.getWorker(result.workerId)?.model, 'codex/gpt-5.6-luna:high');
+      assert.equal(d.store.getWorker(result.workerId)?.model, 'codex/gpt-6-luna:high');
     }
   } finally { d.store.close(); rmSync(d.home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); }
 });
@@ -65,7 +65,7 @@ test('a model chooser runs only for an unclassified spawn', async () => {
   const repo = mkdtempSync(join(tmpdir(), 'helm-b0-chooser-'));
   let calls = 0;
   try {
-    d.helm.chooseModel(() => { calls += 1; return 'codex/gpt-5.6-luna:medium'; });
+    d.helm.chooseModel(() => { calls += 1; return 'codex/gpt-6-luna:medium'; });
     const explicit = await d.helm.spawn({ repo, objective: 'explicit', role: 'builder', model: 'acme/model', contextPaths: [], allowWorkflows: false });
     assert.equal(explicit.ok, true);
     if (explicit.ok) await d.helm.settle(explicit.workerId);
@@ -77,7 +77,7 @@ test('a model chooser runs only for an unclassified spawn', async () => {
     const unclassified = await d.helm.spawn({ repo, objective: 'unclassified', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(unclassified.ok, true);
     if (unclassified.ok) {
-      assert.equal(d.store.getWorker(unclassified.workerId)?.model, 'codex/gpt-5.6-luna:medium');
+      assert.equal(d.store.getWorker(unclassified.workerId)?.model, 'codex/gpt-6-luna:medium');
       await d.helm.settle(unclassified.workerId);
     }
     assert.equal(calls, 1);
@@ -109,7 +109,7 @@ test('worker_meta round-trips and projectOf maps project worker ids', () => {
   const store = openStore(':memory:');
   try {
     store.setMeta('w-meta', { issue: 177, prBase: 'main', baselineId: 'b1', tier: 3, score: 2.1, chosenModel: 'codex/gpt-5.6-terra:high', skippedCandidates: [{ model: 'claude/sonnet:high', reason: 'no worker lane for claude', tier: 3 }], skills: ['testing'] });
-    assert.deepEqual(store.getMeta('w-meta'), { workerId: 'w-meta', issue: 177, prBase: 'main', baselineId: 'b1', tier: 3, score: 2.1, chosenModel: 'codex/gpt-5.6-terra:high', skippedCandidates: [{ model: 'claude/sonnet:high', reason: 'no worker lane for claude', tier: 3 }], skills: ['testing'] });
+    assert.deepEqual(store.getMeta('w-meta'), { workerId: 'w-meta', issue: 177, prBase: 'main', baselineId: 'b1', tier: 3, score: 2.1, chosenModel: 'codex/gpt-5.6-terra:high', policyApplied: null, skippedCandidates: [{ model: 'claude/sonnet:high', reason: 'no worker lane for claude', tier: 3 }], skills: ['testing'] });
     assert.equal(projectOf({ workerId: 'project:owner/name' }), 'owner/name');
   } finally { store.close(); }
 });

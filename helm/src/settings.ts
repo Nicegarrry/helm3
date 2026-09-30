@@ -11,15 +11,16 @@ const FACTORY_DEFAULTS = { claims: 'block' as const, claimsAt: 0.7, verdictAt: 0
 const QUEUE_DEFAULTS = { tickSec: 30, checksTimeoutMin: 30 };
 const SELECT_DEFAULTS = { skillDirs: ['~/code/skills'], skillAllow: [], autoAt: 0.7, lessons: 'shadow' as const };
 const ROUTING_TIERS_DEFAULTS: Record<string, string[]> = {
-  1: ['opencode-go/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-5.6-luna:medium'],
-  2: ['google/gemini-3.8-flash', 'codex/gpt-5.6-luna:high'],
+  1: ['openrouter/qwen/qwen3.8-flash', 'openrouter/deepseek/deepseek-v4.1-flash', 'codex/gpt-6-luna:medium'],
+  2: ['google/gemini-3.8-flash', 'codex/gpt-6-luna:high'],
   3: ['claude/sonnet:high', 'codex/gpt-5.6-terra:high'],
-  4: ['codex/gpt-5.6-sol:medium', 'claude/opus:medium'],
-  5: ['codex/gpt-5.6-astra:high', 'claude/opus:high', 'claude/fable:high'],
+  4: ['codex/gpt-6.1-sol:medium', 'claude/opus:medium'],
+  5: ['codex/gpt-6-astra:high', 'claude/opus:high', 'claude/fable:high', 'codex/gpt-6.1-sol:high'],
 };
 const ROUTING_DEFAULTS = {
   tiers: ROUTING_TIERS_DEFAULTS,
   allowed: Object.values(ROUTING_TIERS_DEFAULTS).flat(), minClean: 0.5, minN: 8,
+  policy: { subscriptionOnly: false }, checkDays: 7,
 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
@@ -79,6 +80,11 @@ const settingsSchema = z.object({
     allowed: z.array(z.string()).default(ROUTING_DEFAULTS.allowed),
     minClean: z.number().default(0.5),
     minN: z.number().int().default(8),
+    policy: z.object({
+      lanes: z.array(z.enum(['codex', 'pi', 'claude'])).optional(),
+      subscriptionOnly: z.boolean().default(false),
+    }).default(ROUTING_DEFAULTS.policy),
+    checkDays: z.number().positive().default(7),
   }).default(ROUTING_DEFAULTS),
   discord: z.object({
     projects: z.record(z.string(), z.object({ webhookEnv: z.string() })).default({}),
@@ -96,7 +102,13 @@ const settingsSchema = z.object({
 });
 
 type ParsedSettings = z.infer<typeof settingsSchema>;
-export type Settings = Omit<ParsedSettings, 'deploy'> & { deploy?: ParsedSettings['deploy'] };
+export type Settings = Omit<ParsedSettings, 'deploy' | 'routing'> & {
+  deploy?: ParsedSettings['deploy'];
+  routing: Omit<ParsedSettings['routing'], 'policy' | 'checkDays'> & {
+    policy?: { lanes?: ('codex' | 'pi' | 'claude')[]; subscriptionOnly?: boolean };
+    checkDays?: number;
+  };
+};
 
 const DEFAULT_SETTINGS = settingsSchema.parse({});
 

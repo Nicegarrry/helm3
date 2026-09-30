@@ -33,7 +33,7 @@ test('a Codex token cap exhausts independently of dollar spend', () => {
   try {
     const budget = openBudget(store, { project: 'acme/codex', label: 'sprint', capUsd: 10, capCodexTokens: 100, openedAt: new Date().toISOString() });
     attachWorker(store, 'w-codex', budget.id);
-    spend(store, 'w-codex', 'codex/gpt-5.6-luna', 0, 60, 40);
+    spend(store, 'w-codex', 'codex/gpt-6-luna', 0, 60, 40);
     const status = budgetStatus(store, budget);
     assert.equal(status.spentUsd, 0);
     assert.equal(status.spentCodexTokens, 100);

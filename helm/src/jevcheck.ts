@@ -46,7 +46,7 @@ export function createJevCheck({ jev, store }: { jev: Jev; store: Store }): JevC
       const result = await ask('issue', input.project, input.input, issueQuestions());
       if (!result.ok) return result;
       const scoreTierValue = scoreTier(result.answers.complexity);
-      return { ok: true, flags: { testable: flag(result.answers.testable, 'true', false), too_big: flag(result.answers.too_big, 'true', true) }, complexity: scoreTierValue ?? {}, answers: result.answers };
+      return { ok: true, flags: { testable: flag(result.answers.testable, 'true', false), too_big: flag(result.answers.too_big, 'true', true) }, ...(scoreTierValue ? { complexity: scoreTierValue } : {}), answers: result.answers };
     }
     if (input.preset === 'verdict') {
       const result = await ask('verdict', input.project, { body: text(input.input, 6000) }, { verdict: { type: 'noul', instructions: 'Does this code review approve the change for merge (as opposed to requesting changes)?' } });

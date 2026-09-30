@@ -107,7 +107,7 @@ const timer = setInterval(() => {
   assert.deepEqual(read(join(home, 'current-release.json')), staged);
   const worker = await post('worker.inspect', { workerId: spawned.workerId });
   assert.equal(worker.state, 'succeeded');
-  assert.equal(worker.model, 'codex/gpt-5.6-luna:medium');
+  assert.equal(worker.model, 'codex/gpt-6-luna:medium');
   assert.match(worker.head, /^[a-f0-9]{40}$/);
   assert.equal(readFileSync(join(spawned.worktree, 'completed.txt'), 'utf8'), 'synthetic worker finished before restart');
   await control(old.port, { action: 'shutdown' });

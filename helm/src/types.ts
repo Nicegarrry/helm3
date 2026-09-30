@@ -82,6 +82,7 @@ export type WorkerMeta = Readonly<{
   tier: number | null;
   score: number | null;
   chosenModel: string | null;
+  policyApplied: Readonly<{ lanes: readonly ('codex' | 'pi' | 'claude')[]; subscriptionOnly: boolean }> | null;
   skippedCandidates: readonly Readonly<{ model: string; reason: string; tier: number }>[];
   skills: readonly string[];
 }>;
@@ -299,6 +300,7 @@ export const spawnInput = z.object({
   allowWorkflows: z.boolean().default(false),
   idempotencyKey: z.string().min(1).max(200).optional(),
   skills: z.array(z.string().min(1)).optional(),
+  lanes: z.array(z.enum(['codex', 'pi', 'claude'])).max(3).optional(),
 }).strict();
 export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(20) }).strict();
 export const listInput = z.object({ repo: z.string().min(1).optional(), state: z.enum(WORKER_STATES).optional() }).strict();
@@ -350,7 +352,8 @@ export const deployRunInput = z.object({ project: z.string().min(1), target: z.s
 export const deployStatusInput = z.object({ project: z.string().min(1).optional(), id: z.string().min(1).optional() }).strict();
 export const deployRollbackInput = z.object({ id: z.string().min(1), tapId: z.string().optional() }).strict();
 
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback'] as const;
+export const routingCheckInput = z.object({}).strict();
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'routing.check', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback'] as const;
 export type ToolName = string;
 
 

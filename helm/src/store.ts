@@ -120,6 +120,7 @@ function toWorkerMeta(row: Record<string, unknown>): WorkerMeta {
     tier: (row.tier as number | null) ?? null,
     score: (row.score as number | null) ?? null,
     chosenModel: (row.chosenModel as string | null) ?? null,
+    policyApplied: row.policyApplied ? JSON.parse(row.policyApplied as string) : null,
     skippedCandidates: row.skippedCandidates ? JSON.parse(row.skippedCandidates as string) : [],
     skills: row.skills ? JSON.parse(row.skills as string) : [],
   };
@@ -127,7 +128,7 @@ function toWorkerMeta(row: Record<string, unknown>): WorkerMeta {
 
 function ensureWorkerMetaColumns(db: DatabaseSync): void {
   const existing = new Set((db.prepare('PRAGMA table_info(worker_meta)').all() as Array<{ name: string }>).map((row) => row.name));
-  for (const [name, definition] of [['tier', 'INTEGER'], ['score', 'REAL'], ['chosenModel', 'TEXT'], ['skippedCandidates', "TEXT NOT NULL DEFAULT '[]'"]] as const) {
+  for (const [name, definition] of [['tier', 'INTEGER'], ['score', 'REAL'], ['chosenModel', 'TEXT'], ['policyApplied', "TEXT"], ['skippedCandidates', "TEXT NOT NULL DEFAULT '[]'"]] as const) {
     if (!existing.has(name)) db.exec(`ALTER TABLE worker_meta ADD COLUMN ${name} ${definition}`);
   }
 }
@@ -230,6 +231,7 @@ export function openStore(path: string): Store {
       tier INTEGER,
       score REAL,
       chosenModel TEXT,
+      policyApplied TEXT,
       skippedCandidates TEXT NOT NULL DEFAULT '[]',
       skills TEXT NOT NULL DEFAULT '[]'
     );
@@ -244,10 +246,10 @@ export function openStore(path: string): Store {
   const getWorkerStmt = db.prepare('SELECT * FROM workers WHERE workerId = ?');
   const getMetaStmt = db.prepare('SELECT * FROM worker_meta WHERE workerId = ?');
   const setMetaStmt = db.prepare(`
-    INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, tier, score, chosenModel, skippedCandidates, skills)
-    VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
+    INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, tier, score, chosenModel, policyApplied, skippedCandidates, skills)
+    VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(workerId) DO UPDATE SET issue = excluded.issue, prBase = excluded.prBase,
-      tier = excluded.tier, score = excluded.score, chosenModel = excluded.chosenModel,
+      tier = excluded.tier, score = excluded.score, chosenModel = excluded.chosenModel, policyApplied = excluded.policyApplied,
       skippedCandidates = excluded.skippedCandidates, skills = excluded.skills
   `);
   const findByIdempotencyKeyStmt = db.prepare('SELECT * FROM workers WHERE idempotencyKey = ?');
@@ -308,9 +310,9 @@ export function openStore(path: string): Store {
     },
 
     setMeta(workerId: string, patch: Partial<Omit<WorkerMeta, 'workerId'>>): void {
-      const current = this.getMeta(workerId) ?? { workerId, issue: null, prBase: null, baselineId: null, tier: null, score: null, chosenModel: null, skippedCandidates: [], skills: [] };
+      const current = this.getMeta(workerId) ?? { workerId, issue: null, prBase: null, baselineId: null, tier: null, score: null, chosenModel: null, policyApplied: null, skippedCandidates: [], skills: [] };
       const next = { ...current, ...patch };
-      setMetaStmt.run(next.workerId, next.issue, next.prBase, next.baselineId, next.tier, next.score, next.chosenModel, JSON.stringify(next.skippedCandidates), JSON.stringify(next.skills));
+      setMetaStmt.run(next.workerId, next.issue, next.prBase, next.baselineId, next.tier, next.score, next.chosenModel, next.policyApplied ? JSON.stringify(next.policyApplied) : null, JSON.stringify(next.skippedCandidates), JSON.stringify(next.skills));
     },
 
     findByIdempotencyKey(key: string): WorkerRow | undefined {

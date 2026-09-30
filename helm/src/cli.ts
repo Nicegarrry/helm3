@@ -173,11 +173,11 @@ const cmdSpawn = (args: string[]) =>
   simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective
     ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
         baseRef: v['base-ref'], role: v.role, contextPaths: v.context ?? [], allowWorkflows: v['allow-workflows'] ?? false,
-        idempotencyKey: v['idempotency-key'] }
+        idempotencyKey: v['idempotency-key'], lanes: v.lanes }
     : undefined), {
     repo: { type: 'string' }, objective: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
     'base-ref': { type: 'string' }, role: { type: 'string' }, context: { type: 'string', multiple: true },
-    'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' },
+    'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' }, lanes: { type: 'string', multiple: true },
   });
 
 const cmdPs = (args: string[]) =>
@@ -520,7 +520,7 @@ async function cmdServe(args: string[]): Promise<void> {
   helm.markInterruptedOnStart(predecessorBootId);
   const hygiene = createHygiene({ home: config.home, store, settings, workspace, github, isRunning: (workerId) => helm.isWorkerRunning(workerId), withWorkerLock: (workerId, fn) => helm.withWorkerLock(workerId, fn), deployInProgress: (project, target) => helm.deploy.isInProgress(project, target) });
   const handle = await serve({ helm, port }).catch((err) => { store.close(); releaseOwner(); throw err; });
-  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
+  const stopWake = startTicker(1000, [helm.supervisor?.tick ?? (() => undefined), helm.tapTick.bind(helm), helm.routingTick.bind(helm), createInboxTriage({ store, settings, jev, home: config.home }), createEnvelopeTicker({ store, home: config.home }), helm.scorecard.consume]);
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopDiscord = startTicker(1000, [discord.tick]);
@@ -577,6 +577,11 @@ async function cmdShutdown(): Promise<void> {
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
 const cmdScorecard = (args: string[]) => simpleCmd('scorecard.export', args, (p, v) => (p[0] ? { project: p[0], ...(v.budget ? { budgetId: v.budget } : {}), ...(v.since ? { since: v.since } : {}) } : undefined), { budget: { type: 'string' }, since: { type: 'string' } });
+const cmdRouting = async (args: string[]): Promise<void> => {
+  const [verb, ...rest] = args;
+  if (verb === 'check') { await simpleCmd('routing.check', rest, () => ({})); return; }
+  usage(); process.exitCode = 2;
+};
 const cmdDeploy = async (args: string[]): Promise<void> => {
   const [verb, ...rest] = args;
   if (verb === 'run') { await simpleCmd('deploy.run', rest, (p, v) => p[0] && p[1] ? { project: p[0], target: p[1], ...(v.sha ? { sha: v.sha } : {}), ...(v['tap-id'] ? { tapId: v['tap-id'] } : {}) } : undefined, { sha: { type: 'string' }, 'tap-id': { type: 'string' } }); return; }
@@ -589,7 +594,7 @@ const cmdDeploy = async (args: string[]): Promise<void> => {
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, deploy: cmdDeploy,
+  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, routing: cmdRouting, deploy: cmdDeploy,
 };
 
 async function main(): Promise<void> {

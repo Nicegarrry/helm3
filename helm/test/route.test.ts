@@ -11,7 +11,7 @@ import type { Jev, JevAnswers } from '../src/jev.js';
 import type { SpawnInput, ModelChoice } from '../src/helm.js';
 import type { WorkerRow } from '../src/types.js';
 
-const HIGH = 'codex/gpt-5.6-luna:high';
+const HIGH = 'codex/gpt-6-luna:high';
 const now = () => new Date('2026-09-30T00:00:00.000Z');
 function input(repo = 'acme/repo'): SpawnInput { return { repo, objective: 'task', role: 'builder', contextPaths: [], allowWorkflows: false }; }
 function answers(score: number, noul: boolean | number = false): JevAnswers { return { complexity: { score }, too_big: { noul } }; }
@@ -31,7 +31,7 @@ test('each Jev tier selects its first available candidate', async () => {
     for (const [index, score] of scores.entries()) {
       const jev: Jev = { shadow: true, async ask() { return { ok: true, answers: answers(score) }; } };
       const result = await choose(createRouter({ settings: settings(tiers), store, jev, now, isAvailable: () => true }));
-      assert.deepEqual(result, { model: `codex/tier-${index + 1}`, tier: index + 1, score });
+    assert.deepEqual(result, { model: `codex/tier-${index + 1}`, tier: index + 1, score, policyApplied: { lanes: ['codex', 'pi', 'claude'], subscriptionOnly: false } });
     }
   } finally { store.close(); }
 });

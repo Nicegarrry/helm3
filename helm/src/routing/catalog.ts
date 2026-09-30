@@ -6,9 +6,12 @@ import { promisify } from 'node:util';
 import { createRequire } from 'node:module';
 import type { Settings } from '../settings.js';
 import { laneForModel, type RoutingLane } from './policy.js';
+import { defaultClaudeBin } from '../claude.js';
+import { defaultCodexBin } from '../codex.js';
 
 const exec = promisify(execFile);
 const require = createRequire(import.meta.url);
+type CatalogExec = (file: string, args: string[], options: { timeout: number }) => Promise<{ stdout: string; stderr: string }>;
 
 export type CatalogUnavailable = Readonly<{ tier: number; model: string; reason: string }>;
 export type CatalogExtra = Readonly<{ lane: RoutingLane; model: string }>;
@@ -106,14 +109,14 @@ export function parseCodexModelSlugs(value: unknown): string[] {
   });
 }
 
-async function defaultCodexProbe(modelId: string): Promise<boolean> {
-  const { stdout } = await exec('codex', ['debug', 'models'], { timeout: 10_000 });
+async function defaultCodexProbe(modelId: string, run: CatalogExec, bin: string): Promise<boolean> {
+  const { stdout } = await run(bin, ['debug', 'models'], { timeout: 10_000 });
   const slugs = parseCodexModelSlugs(JSON.parse(stdout) as unknown);
   return slugs.includes(modelId);
 }
 
-async function defaultCodexModels(): Promise<readonly string[]> {
-  const { stdout } = await exec('codex', ['debug', 'models'], { timeout: 10_000 });
+async function defaultCodexModels(run: CatalogExec, bin: string): Promise<readonly string[]> {
+  const { stdout } = await run(bin, ['debug', 'models'], { timeout: 10_000 });
   return parseCodexModelSlugs(JSON.parse(stdout) as unknown).map((slug) => `codex/${slug}`);
 }
 
@@ -122,11 +125,11 @@ async function defaultPiProbe(provider: string, modelId: string): Promise<boolea
   return Boolean((await defaultModelRuntime()).getModel(provider, modelId));
 }
 
-async function defaultClaudeProbe(): Promise<boolean> {
-  try { await exec('which', ['claude'], { timeout: 2_000 }); return true; } catch { return false; }
+async function defaultClaudeProbe(run: CatalogExec, bin: string): Promise<boolean> {
+  try { await run(bin, ['--version'], { timeout: 2_000 }); return true; } catch { return false; }
 }
 
-export function createModelCatalog(options: { getSettings?: () => Settings; probe?: CatalogProbe; sources?: CatalogSources; home?: string; claudeLaneRegistered?: boolean }): ModelCatalog {
+export function createModelCatalog(options: { getSettings?: () => Settings; probe?: CatalogProbe; sources?: CatalogSources; home?: string; claudeLaneRegistered?: boolean; exec?: CatalogExec; env?: NodeJS.ProcessEnv }): ModelCatalog {
   type Result = { available: boolean; reason?: string };
   type Entry = { at: number; result: Result };
   const cache = new Map<string, Entry>();
@@ -136,6 +139,9 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
   const probe = options.probe ?? {};
   const sources = options.sources ?? {};
   const home = options.home ?? homedir();
+  const run = options.exec ?? exec;
+  const codexBin = defaultCodexBin(options.env);
+  const claudeBin = defaultClaudeBin(options.env);
   const getSettings = options.getSettings ?? (() => { throw new Error('routing catalog settings are not configured'); });
 
   async function availability(model: string, force = false): Promise<Result> {
@@ -147,14 +153,14 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
     const operation = (async () => {
       if (model.startsWith('claude/')) {
         if (!options.claudeLaneRegistered) return { available: false, reason: 'no worker lane for claude' };
-        const available = await (sources.claudeAvailable ?? probe.claude ?? defaultClaudeProbe)();
+        const available = await (sources.claudeAvailable ?? probe.claude ?? (() => defaultClaudeProbe(run, claudeBin)))();
         return available ? { available: true } : { available: false, reason: 'claude binary is unavailable' };
       }
       const parts = modelParts(model);
       if (!parts) return { available: false, reason: 'model has no provider lane' };
       if (model.startsWith('codex/')) {
-        const available = await (probe.codex ?? defaultCodexProbe)(parts.id);
-        return available ? { available: true } : { available: false, reason: 'Codex CLI did not accept this model id' };
+        const available = await (probe.codex ?? ((id) => defaultCodexProbe(id, run, codexBin)))(parts.id);
+        return available ? { available: true } : { available: false, reason: 'not accepted by Codex CLI' };
       }
       const available = await (probe.pi ?? defaultPiProbe)(parts.provider, parts.id);
       return available ? { available: true } : { available: false, reason: 'Pi model cannot be resolved' };
@@ -183,7 +189,7 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
     if (active) return active;
     const operation = (async () => {
       if (probe.models) return probe.models(lane);
-      if (lane === 'codex') return sources.codexModels ? sources.codexModels() : defaultCodexModels();
+      if (lane === 'codex') return sources.codexModels ? sources.codexModels() : defaultCodexModels(run, codexBin);
       if (lane === 'pi') return sources.piModels ? sources.piModels() : [...new Set([
         ...piModelsFromJson(readJson(join(home, '.pi', 'agent', 'models.json'))),
         ...piBuiltInModels(),

@@ -174,6 +174,15 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
       return;
     }
 
+    if (url.pathname === '/api/progress' && req.method === 'GET') {
+      const workerIds = (url.searchParams.get('workerIds') ?? '').split(',').filter(Boolean).slice(0, 20);
+      const timeoutMs = Number(url.searchParams.get('timeoutMs'));
+      const startedAt = Number(url.searchParams.get('startedAt'));
+      if (!workerIds.length || !Number.isFinite(timeoutMs) || !Number.isFinite(startedAt)) { res.writeHead(400).end('invalid progress query'); return; }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(await helm.progress(workerIds, timeoutMs, startedAt)));
+      return;
+    }
+
     if (url.pathname === '/api/status' && req.method === 'GET') {
       const status = await helm.runStatus();
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(status));

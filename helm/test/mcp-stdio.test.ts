@@ -9,14 +9,15 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { serve } from '../src/server.ts';
 import { CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.ts';
 
-function stdioFrontEnd(home: string, tools = 'core', defaultPort?: number) {
+function stdioFrontEnd(home: string, tools = 'core', options: { progressPollMs?: number; defaultPort?: number } = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['--import', 'tsx', 'src/cli.ts', 'serve', '--stdio'],
     cwd: process.cwd(),
-    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools, ...(defaultPort ? { HELM_DEFAULT_PORT: String(defaultPort) } : {}) } as Record<string, string>,
+    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools, ...(options.progressPollMs ? { HELM_PROGRESS_POLL_MS: String(options.progressPollMs) } : {}), ...(options.defaultPort ? { HELM_DEFAULT_PORT: String(options.defaultPort) } : {}) } as Record<string, string>,
     stderr: 'pipe',
   });
   return { transport, client: new Client({ name: 'helm-test', version: '0' }) };
@@ -40,6 +41,15 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
   return check();
 }
 
+const PROGRESS_TIMEOUT_MS = 10_000;
+
+type ProgressUpdate = { progress?: number; _meta?: { helm?: { state?: string; position?: number | null; etaMs?: number; activity?: string } } };
+
+async function waitForProgressState(updates: ProgressUpdate[], state: string) {
+  assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === state), PROGRESS_TIMEOUT_MS), true, `did not receive ${state} progress`);
+  return updates.find((update) => update._meta?.helm?.state === state)!;
+}
+
 function daemonOf(home: string): { port: number; pid: number; token: string } {
   return JSON.parse(readFileSync(join(home, 'serve.json'), 'utf8')) as { port: number; pid: number; token: string };
 }
@@ -53,10 +63,118 @@ async function stopDaemon(home: string): Promise<void> {
 
 const text = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? '');
 
+function waitingDaemon(home: string) {
+  let state = 'queued';
+  let lastEvent: { kind: string; data: Record<string, string> } = { kind: 'capacity.queued', data: { reason: 'capacity' } };
+  let progressCalls = 0;
+  let waitStarted = false;
+  let resolveWait!: (outcome: Record<string, unknown>) => void;
+  const helm = {
+    config: { home, spendCapUsd: 0, maxWorkers: 1, gateTimeoutMs: 1_000 },
+    wait: async () => new Promise((resolve) => {
+      waitStarted = true;
+      resolveWait = (outcome) => resolve(outcome);
+    }),
+    progress: async (_ids: string[], timeoutMs: number, startedAt: number) => {
+      progressCalls += 1;
+      return {
+        ok: true,
+        workers: [{ workerId: 'w-progress', state, position: state === 'queued' ? 1 : null, etaMs: Math.max(0, startedAt + timeoutMs - Date.now()), lastEvent }],
+      };
+    },
+  };
+  return {
+    helm,
+    setState(next: string, kind = 'turn.start') { state = next; lastEvent = { kind, data: { summary: `${next} activity` } }; },
+    finish() { state = 'succeeded'; lastEvent = { kind: 'result', data: { summary: 'done' } }; resolveWait({ ok: true, settled: [{ workerId: 'w-progress', state, head: null, result: null }], pending: [], timedOut: false, waitedMs: 1 }); },
+    timeout() { resolveWait({ ok: true, settled: [], pending: ['w-progress'], timedOut: true, waitedMs: 1 }); },
+    progressCalls: () => progressCalls,
+    waitStarted: () => waitStarted,
+  };
+}
+
+async function progressProxy(home: string) {
+  const daemon = waitingDaemon(home);
+  const daemonHandle = await serve({ helm: daemon.helm as never });
+  const { transport, client } = stdioFrontEnd(home, 'all', { progressPollMs: 50 });
+  await client.connect(transport);
+  return {
+    daemon,
+    client,
+    transport,
+    async close() {
+      await client.close();
+      if (transport.pid) await until(() => !alive(transport.pid!), 5_000);
+      await daemonHandle.close();
+    },
+  };
+}
+
+test('mcp stdio: worker.wait forwards token-scoped queued, running, and done progress', { timeout: 30_000 }, async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
+  const harness = await progressProxy(home);
+  try {
+    const updates: ProgressUpdate[] = [];
+    const waiting = harness.client.callTool(
+      { name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } },
+      undefined,
+      { onprogress: (update) => updates.push(update as unknown as ProgressUpdate) },
+    );
+    const queued = await waitForProgressState(updates, 'queued');
+    assert.ok(harness.transport.pid && alive(harness.transport.pid), 'the proxy remains alive after progress notification');
+    assert.equal(harness.daemon.waitStarted(), true);
+    assert.equal(queued._meta!.helm!.position, 1);
+    assert.equal(typeof queued._meta!.helm!.etaMs, 'number');
+    assert.match(queued._meta!.helm!.activity ?? '', /capacity\.queued/);
+
+    harness.daemon.setState('running');
+    await waitForProgressState(updates, 'running');
+
+    harness.daemon.finish();
+    await waiting;
+    assert.ok(harness.transport.pid && alive(harness.transport.pid), 'the final progress publish keeps the proxy alive');
+    await waitForProgressState(updates, 'succeeded');
+    assert.ok(updates.every((update, index) => index === 0 || update.progress! > updates[index - 1]!.progress!));
+  } finally {
+    await harness.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('mcp stdio: worker.wait does not poll or emit progress without a progress token', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
+  const harness = await progressProxy(home);
+  try {
+    const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(harness.daemon.progressCalls(), 0);
+    harness.daemon.finish();
+    await waiting;
+    assert.equal(harness.daemon.progressCalls(), 0);
+  } finally {
+    await harness.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('mcp stdio: a timed-out worker.wait sends a final progress update', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
+  const harness = await progressProxy(home);
+  try {
+    const updates: ProgressUpdate[] = [];
+    const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } }, undefined, { onprogress: (update) => updates.push(update as unknown as ProgressUpdate) });
+    await waitForProgressState(updates, 'queued');
+    const before = updates.length;
+    harness.daemon.timeout();
+    await waiting;
+    assert.equal(await until(() => updates.length > before, PROGRESS_TIMEOUT_MS), true, 'timed out wait sends final progress');
+  } finally { await harness.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
 test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const defaultPort = await freePort();
-  const { transport, client } = stdioFrontEnd(home, 'core', defaultPort);
+  const { transport, client } = stdioFrontEnd(home, 'core', { defaultPort });
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
@@ -91,8 +209,8 @@ test('mcp stdio: a real client lists core tools and calls them through helm serv
 test('mcp stdio: the front-end exits with its client, the daemon outlives it, and a second client attaches to the same daemon', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const defaultPort = await freePort();
-  const a = stdioFrontEnd(home, 'core', defaultPort);
-  const b = stdioFrontEnd(home, 'supervisor', defaultPort);
+  const a = stdioFrontEnd(home, 'core', { defaultPort });
+  const b = stdioFrontEnd(home, 'supervisor', { defaultPort });
   try {
     await a.client.connect(a.transport);
     const daemon = daemonOf(home);

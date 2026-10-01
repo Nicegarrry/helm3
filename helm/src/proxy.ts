@@ -161,20 +161,25 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       try { await publish(force); }
       catch (error) { logProgressError(error); }
     };
-    const publishTerminal = async (outcome: { settled?: Array<{ workerId?: string; state?: string }> }) => {
-      if (extra.signal.aborted) return;
-      for (const settled of outcome.settled ?? []) {
-        if (!settled.workerId || !settled.state) continue;
+    const publishTerminal = async (outcome: { settled?: Array<{ workerId?: string; id?: string; state?: string; status?: string }>; workers?: Array<{ workerId?: string; id?: string; state?: string; status?: string }> }) => {
+      if (extra.signal.aborted) return false;
+      let sentTerminal = false;
+      for (const settled of outcome.settled ?? outcome.workers ?? []) {
+        const workerId = settled.workerId ?? settled.id;
+        const state = settled.state ?? settled.status;
+        if (!workerId || !state) continue;
         await extra.sendNotification({
           method: 'notifications/progress',
           params: {
             progressToken,
             progress: ++progressValue,
-            message: `worker=${settled.workerId}; state=${settled.state}; position=-; etaMs=0; activity=worker wait completed`,
-            _meta: { helm: { state: settled.state, position: null, etaMs: 0, activity: 'worker wait completed' } },
+            message: `worker=${workerId}; state=${state}; position=-; etaMs=0; activity=worker wait completed`,
+            _meta: { helm: { state, position: null, etaMs: 0, activity: 'worker wait completed' } },
           },
         });
+        sentTerminal = true;
       }
+      return sentTerminal;
     };
     let publishing = false;
     const pollProgress = () => {
@@ -192,7 +197,8 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
     try {
       const outcome = await wait;
       stopProgress();
-      await publishTerminal(outcome).catch(logProgressError);
+      const terminalSent = await publishTerminal(outcome).catch((error) => { logProgressError(error); return false; });
+      if (!terminalSent) await publishSafely(true);
       return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
     } finally {
       stopProgress();

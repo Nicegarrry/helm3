@@ -2,7 +2,7 @@
 import { request } from 'node:http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, EmptyResultSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { daemonConnection } from '../bin/daemon-auth.mjs';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
@@ -12,6 +12,7 @@ export const SHIM_RESTART_NOTE = 'Restart this MCP session: its Helm shim is bel
 const WAIT_PROGRESS_MS = 30_000;
 const WAIT_PROGRESS_POLL_MS = 10_000;
 const PROGRESS_READ_TIMEOUT_MS = 2_000;
+const PROGRESS_FLUSH_TIMEOUT_MS = 5_000;
 
 function configuredProgressPollMs() {
   const configured = Number(process.env.HELM_PROGRESS_POLL_MS);
@@ -204,6 +205,12 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       await publishingNow;
       const terminalSent = await publishTerminal(outcome).catch((error) => { logProgressError(error); return false; });
       if (!terminalSent) await publishSafely(true);
+      // SDK clients dispatch notifications on a microtask but responses synchronously, then drop progress for
+      // a settled request: a final update read in the same chunk as the response is lost. Requests queue behind
+      // notifications, so an answered ping proves the client dispatched every update sent before it.
+      if (progressValue > 0 && !extra.signal.aborted) {
+        await extra.sendRequest({ method: 'ping' }, EmptyResultSchema, { signal: extra.signal, timeout: PROGRESS_FLUSH_TIMEOUT_MS }).catch(() => {});
+      }
       return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
     } finally {
       stopProgress();

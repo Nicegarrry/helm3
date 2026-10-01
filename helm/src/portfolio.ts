@@ -43,16 +43,17 @@ const humanTokens = (n: number): string => n >= 1_000_000 ? `${+(n / 1_000_000).
 export function formatPortfolio(report: Awaited<ReturnType<typeof portfolio>>): string {
   const pct = (n: number) => `${(n * 100).toFixed(0)}%`; const money = (n: number) => `$${n.toFixed(2)}`;
   const short = (project: string) => project.split('/').pop()!.replace(/[\r\n]/g, ' ');
+  const word = (n: number, one: string, many: string) => n === 1 ? one : many;
   type Row = Awaited<ReturnType<typeof portfolio>>['projects'][number];
   const active = (r: Row) => r.usd > 0 || r.codexTokens > 0 || r.merged > 0 || r.openPrs.length > 0 || r.stuck.length > 0 || r.inbox > 0 || r.taps > 0;
-  const prsFact = (open: number, review: number) => open === 0 ? null : review > 0 ? `${open} PR${open === 1 ? '' : 's'} open (${review} needs review)` : `${open} PR${open === 1 ? '' : 's'} waiting merge`;
+  const prsFact = (open: number, review: number) => open === 0 ? null : review > 0 ? `${open} ${word(open, 'PR', 'PRs')} open (${review} ${word(review, 'needs', 'need')} review)` : `${open} ${word(open, 'PR', 'PRs')} waiting merge`;
   const t = report.total;
   const day = new Date(report.until).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
   const lines = [`**Helm · ${day}**`];
   if (t.merged === 0 && t.openPrs === 0 && t.stuck === 0 && t.inbox === 0 && t.taps === 0 && t.usd === 0 && t.codexTokens === 0) lines.push('Nothing needs you');
   else {
     const review = report.projects.reduce((a, r) => a + r.openPrs.filter((p) => p.waiting === 'review').length, 0);
-    const headline = [`${t.merged} merged`, t.openPrs ? (review ? `${t.openPrs} PRs open (${review} needs review)` : `${t.openPrs} PRs open`) : null, t.stuck ? `${t.stuck} stuck` : null, t.inbox ? `${t.inbox} asks` : null].filter(Boolean);
+    const headline = [`${t.merged} merged`, t.openPrs ? (review ? `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open (${review} ${word(review, 'needs', 'need')} review)` : `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open`) : null, t.stuck ? `${t.stuck} stuck` : null, t.inbox ? `${t.inbox} ${word(t.inbox, 'ask', 'asks')}` : null].filter(Boolean);
     lines.push(headline.join(' · '));
   }
   const budgeted = report.projects.filter((r) => r.budget);
@@ -61,7 +62,7 @@ export function formatPortfolio(report: Awaited<ReturnType<typeof portfolio>>): 
   const idle: string[] = [];
   const blocks = report.projects.filter(active).map((r) => {
     const review = r.openPrs.filter((p) => p.waiting === 'review').length;
-    const facts = [r.merged ? `${r.merged} merged` : null, prsFact(r.openPrs.length, review), r.merged > 0 ? `${pct(r.firstPassGateRate)} gates pass first time` : null, r.stuck.length ? `${r.stuck.length} stuck` : null, r.inbox ? `${r.inbox} ask${r.inbox === 1 ? '' : 's'}` : null, r.usd > 0 ? money(r.usd) : null].filter(Boolean);
+    const facts = [r.merged ? `${r.merged} merged` : null, prsFact(r.openPrs.length, review), r.merged > 0 ? `${pct(r.firstPassGateRate)} gates pass first time` : null, r.stuck.length ? `${r.stuck.length} stuck` : null, r.inbox ? `${r.inbox} ${word(r.inbox, 'ask', 'asks')}` : null, r.usd > 0 ? money(r.usd) : null].filter(Boolean);
     return facts.length ? `**${short(r.project)}**: ${facts.join(', ')}` : null;
   }).filter((line): line is string => line !== null);
   for (const r of report.projects) if (!active(r)) idle.push(short(r.project));

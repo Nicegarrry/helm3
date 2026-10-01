@@ -51,7 +51,7 @@ test('seeded portfolio reuses scorecard activity, includes old workers, budget a
     const content = formatPortfolio(report);
     const lines = content.split('\n');
     assert.match(lines[0]!, /^\*\*Helm · [A-Za-z]{3} \d{1,2} [A-Za-z]{3}\*\*$/);
-    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 asks', '$5.00 of $10.00 budget · Codex 120 tokens', '',
+    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 ask', '$5.00 of $10.00 budget · Codex 120 tokens', '',
       '**one**: 1 merged, 2 PRs open (1 needs review), 50% gates pass first time, $2.00', '**two**: 1 stuck, 1 ask', 'Idle: empty']);
     assert.doesNotMatch(content, /\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}/, 'no ISO timestamps in the report');
     assert.doesNotMatch(content, /acme\//, 'repo names drop the owner prefix');
@@ -74,10 +74,30 @@ test('one compact line per active project; idle collapse after a blank line; a z
     f.store.insertPr({ repoSlug: 'acme/idle-a', workerId: 'paid', number: 201, head: 'b', state: 'open', url: 'https://pr/201', createdAt: old });
     const second = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
     assert.ok(second.includes('**idle-a**: 1 PR open (1 needs review)'), 'open PRs alone make a project active');
+    assert.ok(second.includes('· 1 PR open (1 needs review)'), 'singular PR and needs in the headline');
     assert.match(second, /^Idle: idle-b$/m);
     f.store.insertPr({ repoSlug: 'acme/idle-b', workerId: 'paid', number: 202, head: 'b', state: 'open', url: 'https://pr/202', createdAt: old });
-    assert.doesNotMatch(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)), /Idle:/, 'no Idle line when none are idle');
-    assert.ok(!formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes('stuck'), 'stuck is omitted from the headline when zero');
+    const third = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
+    assert.doesNotMatch(third, /Idle:/, 'no Idle line when none are idle');
+    assert.ok(!third.includes('stuck'), 'stuck is omitted from the headline when zero');
+    assert.ok(third.includes('· 2 PRs open (2 need review)'), 'plural PRs and need review in the headline');
+    assert.ok(third.includes('**idle-b**: 1 PR open (1 needs review)'), 'project line stays singular');
+    assert.doesNotMatch(third, /1 PRs|1 asks|1 needs review\) · 2 PRs/);
+  } finally { f.close(); }
+});
+
+test('asks pluralise: 1 ask vs 2 asks on the project line and in the headline', async () => {
+  const f = fixture();
+  try {
+    insertInbox(f.store.sql, { id: 'a1', project: 'acme/x', workerId: 'w', question: 'q', createdAt: old });
+    let content = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
+    assert.ok(content.includes('0 merged · 1 ask'), 'singular headline ask');
+    assert.ok(content.includes('**x**: 1 ask'));
+    insertInbox(f.store.sql, { id: 'a2', project: 'acme/x', workerId: 'w', question: 'q', createdAt: old });
+    content = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
+    assert.ok(content.includes('0 merged · 2 asks'), 'plural headline asks');
+    assert.ok(content.includes('**x**: 2 asks'));
+    assert.doesNotMatch(content, /1 asks/);
   } finally { f.close(); }
 });
 

@@ -239,6 +239,13 @@ for (const example of [
     verdict: 'approve',
   },
   {
+    // Shape of the real #314 reviewer summary: a literal two-character '\\n' before 'APPROVE:'.
+    summary: 'Reviewed the diff and ran the tests. The verdict parser change is correct and no regressions were found.\\nAPPROVE: No correctness issue found in the reviewed diff.',
+    notes: 'The PR head ref resolves to the same commit as the checkout.',
+    line: 'APPROVE: No correctness issue found in the reviewed diff.',
+    verdict: 'approve',
+  },
+  {
     summary: 'Reviewed the diff without a verdict.',
     notes: 'Checks are unavailable.',
     line: 'REQUEST_CHANGES: reviewer gave no verdict',

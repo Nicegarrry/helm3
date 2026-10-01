@@ -970,7 +970,8 @@ export class Helm {
       this.store.appendEvent(workerId, 'review.warning', { project, number, summary: 'reviewer produced no result; no review recorded' });
       return;
     }
-    const raw = `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}`;
+    // Reviewers sometimes write a literal two-character '\n' instead of a real newline (#290, #314); normalise before extracting the verdict.
+    const raw = `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}`.replace(/\\r\\n|\\n/g, '\n');
     let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
     // Move verdict lines or trailing verdict sentences below the summary and notes.
     const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (match, prefix: string, line: string, offset: number, whole: string) => {

@@ -970,8 +970,11 @@ export class Helm {
       this.store.appendEvent(workerId, 'review.warning', { project, number, summary: 'reviewer produced no result; no review recorded' });
       return;
     }
-    // Reviewers sometimes write a literal two-character '\n' instead of a real newline (#290, #314); normalise before extracting the verdict.
-    const raw = `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}`.replace(/\\r\\n|\\n/g, '\n');
+    // Reviewers sometimes write a literal two-character '\n' before a trailing verdict (#290, #314).
+    // Normalise only when that literal '\n' immediately precedes the summary-tail verdict; a literal '\n' elsewhere (quotes, notes, code) stays untouched.
+    const verdictKey = /(?:APPROVE|REQUEST_CHANGES):/g;
+    const summary = result.summary.replace(/\\n((?:APPROVE|REQUEST_CHANGES):[^\n]*)$/, (match, line: string) => (line.match(verdictKey)?.length === 1 ? `\n${line}` : match));
+    const raw = `${summary}${result.notes ? `\n\n${result.notes}` : ''}`;
     let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
     // Move verdict lines or trailing verdict sentences below the summary and notes.
     const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (match, prefix: string, line: string, offset: number, whole: string) => {

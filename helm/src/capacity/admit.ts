@@ -1,11 +1,12 @@
 import { loadSettings, type Settings } from '../settings.js';
 import { existsSync } from 'node:fs';
 import type { Store, LoadClass } from '../types.js';
+import { agingPoints, type AdmissionRank } from './priority.js';
 import { createCapacitySampler, type CapacityExec, type CapacitySampler, type CapacitySnapshot } from './sampler.js';
 
 export type CapacityJobKind = 'builder' | 'review' | 'gate' | 'validator';
-export type CapacityJob = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; priority?: number; dedupeKey?: string; payload?: unknown; pid?: number }>;
-export type CapacityQueueEntry = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; queuedAt: string; waitMs: number; priority: number; dedupeKey?: string }>;
+export type CapacityJob = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; priority?: number; rank?: AdmissionRank; dedupeKey?: string; payload?: unknown; pid?: number }>;
+export type CapacityQueueEntry = Readonly<{ id: string; workerId: string; kind: CapacityJobKind; loadClass: LoadClass; queuedAt: string; waitMs: number; priority: number; score: number; reasons: readonly string[]; dedupeKey?: string }>;
 export type CapacityStatus = Readonly<{
   budget: number;
   usedUnits: number;
@@ -98,7 +99,7 @@ export function createCapacityAdmission(options: Readonly<{
     );
     CREATE INDEX IF NOT EXISTS capacity_jobs_queue ON capacity_jobs (endedAt, startedAt, priority, queuedAt);
   `);
-  for (const column of ['payload TEXT', 'pid INTEGER', 'dedupeKey TEXT']) {
+  for (const column of ['payload TEXT', 'pid INTEGER', 'dedupeKey TEXT', 'rank TEXT']) {
     try { options.store.sql.exec(`ALTER TABLE capacity_jobs ADD COLUMN ${column}`); } catch { /* already present */ }
   }
   function unit(loadClass: LoadClass): number { return settings().units[loadClass]; }
@@ -111,6 +112,16 @@ export function createCapacityAdmission(options: Readonly<{
       }
     } catch { /* the optional supervisor service may not have initialized its table */ }
     return [...values];
+  }
+
+  function queueEntries(rows: Array<Record<string, unknown>>): CapacityQueueEntry[] {
+    return rows.map((row) => {
+      const { base, reasons } = jobFromRow(row).rank ?? { base: 10, reasons: [] }, waitMs = Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))), aging = agingPoints(waitMs);
+      return {
+        id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs, priority: Number(row.priority),
+        score: base + aging, reasons: aging ? [...reasons, `aging +${aging}`] : reasons, ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}),
+      };
+    }).sort((a, b) => a.priority - b.priority || b.score - a.score || a.queuedAt.localeCompare(b.queuedAt));
   }
 
   function processAlert(snapshot: CapacitySnapshot, current: NonNullable<Settings['capacity']>): void {
@@ -141,7 +152,7 @@ export function createCapacityAdmission(options: Readonly<{
     return {
       id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind,
       loadClass: String(row.loadClass) as LoadClass, priority: Number(row.priority),
-      ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}), ...(payload === undefined ? {} : { payload }),
+      ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}), ...(payload === undefined ? {} : { payload }), ...(row.rank ? { rank: JSON.parse(String(row.rank)) as AdmissionRank } : {}),
       ...(row.pid === null || row.pid === undefined ? {} : { pid: Number(row.pid) }),
     };
   }
@@ -179,9 +190,7 @@ export function createCapacityAdmission(options: Readonly<{
     const ramUnits = testWithoutCapacityOverrides ? Number.MAX_SAFE_INTEGER : Math.floor(Math.max(0, availableGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
     const resourceBudget = Math.max(0, ramUnits - snapshot.bootedSimulators * current.simulatorPenalty);
     const budget = processLimited ? 0 : resourceBudget;
-    const queue = rows.filter((row) => row.startedAt === null || row.startedAt === undefined).sort((a, b) => Number(a.priority) - Number(b.priority) || String(a.queuedAt).localeCompare(String(b.queuedAt))).map((row) => ({
-      id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))), priority: Number(row.priority), ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}),
-    }));
+    const queue = queueEntries(rows.filter((row) => row.startedAt === null || row.startedAt === undefined));
     const runningClasses: Record<LoadClass, number> = { light: 0, medium: 0, heavy: 0 };
     for (const row of running) { const loadClass = String(row.loadClass) as LoadClass; if (loadClass in runningClasses) runningClasses[loadClass] += 1; }
     return { budget, usedUnits, availableUnits: Math.max(0, budget - usedUnits), runningJobs: running.length, maxWorkers: ceiling, processLimited, runningClasses, queue, snapshot };
@@ -209,7 +218,8 @@ export function createCapacityAdmission(options: Readonly<{
     const startedAt = now().toISOString();
     const changed = options.store.sql.prepare('UPDATE capacity_jobs SET startedAt = ?, pid = ? WHERE id = ? AND startedAt IS NULL AND endedAt IS NULL').run(startedAt, row.pid ?? null, row.id);
     if (!Number(changed.changes)) return;
-    options.store.appendEvent(row.workerId, 'capacity.started', { kind: row.kind, loadClass: row.loadClass, units: unit(row.loadClass) });
+    const { score, reasons } = queueEntries([options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE id = ?').get(row.id) as Record<string, unknown>])[0]!;
+    options.store.appendEvent(row.workerId, 'capacity.started', { kind: row.kind, loadClass: row.loadClass, units: unit(row.loadClass), score, reasons });
     const timer = setInterval(() => { sampleRssTracked(row.id); }, 1000);
     timer.unref?.();
     timers.set(row.id, timer);
@@ -256,15 +266,16 @@ export function createCapacityAdmission(options: Readonly<{
 
   async function admit(job: CapacityJob, callback: Callback): Promise<{ started: true } | { queued: true }> {
     callbacks.set(job.id, callback);
-    options.store.sql.prepare(`INSERT OR IGNORE INTO capacity_jobs (id, workerId, kind, loadClass, priority, queuedAt, payload, pid, dedupeKey) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(job.id, job.workerId, job.kind, job.loadClass, job.priority ?? priority(job.kind), now().toISOString(), job.payload === undefined ? null : JSON.stringify(job.payload), job.pid ?? null, job.dedupeKey ?? null);
+    options.store.sql.prepare(`INSERT OR IGNORE INTO capacity_jobs (id, workerId, kind, loadClass, priority, queuedAt, payload, pid, dedupeKey, rank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(job.id, job.workerId, job.kind, job.loadClass, job.priority ?? priority(job.kind), now().toISOString(), job.payload === undefined ? null : JSON.stringify(job.payload), job.pid ?? null, job.dedupeKey ?? null, job.rank ? JSON.stringify(job.rank) : null);
     const current = await status();
     const countFits = current.maxWorkers === 0 || current.runningJobs < current.maxWorkers;
     const resourceFits = current.runningJobs === 0 || current.availableUnits >= unit(job.loadClass);
     const newPriority = job.priority ?? priority(job.kind);
-    const hasEarlierJob = current.queue.some((entry) => entry.id !== job.id && (entry.priority < newPriority || entry.priority === newPriority && entry.queuedAt <= String(now().toISOString())));
+    const self = current.queue.find((entry) => entry.id === job.id);
+    const hasEarlierJob = current.queue.some((entry) => entry.id !== job.id && (entry.priority < newPriority || entry.priority === newPriority && entry.score >= (self?.score ?? 10)));
     if ((current.processLimited && processSensitive(job.kind)) || !countFits || !resourceFits || hasEarlierJob) {
-      options.store.appendEvent(job.workerId, 'capacity.queued', { kind: job.kind, loadClass: job.loadClass, units: unit(job.loadClass), budget: current.budget, usedUnits: current.usedUnits });
+      options.store.appendEvent(job.workerId, 'capacity.queued', { kind: job.kind, loadClass: job.loadClass, units: unit(job.loadClass), budget: current.budget, usedUnits: current.usedUnits, score: self?.score, reasons: self?.reasons });
       return { queued: true };
     }
     start(job);
@@ -325,13 +336,7 @@ export function createCapacityAdmission(options: Readonly<{
   }
 
   function findQueued(workerId: string, kind: CapacityJobKind, dedupeKey?: string): CapacityQueueEntry | undefined {
-    return statusRows().find((row) => String(row.workerId) === workerId && row.kind === kind && (dedupeKey === undefined || row.dedupeKey === dedupeKey));
-  }
-
-  function statusRows(): CapacityQueueEntry[] {
-    return (options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE endedAt IS NULL AND startedAt IS NULL ORDER BY priority, queuedAt').all() as Array<Record<string, unknown>>).map((row) => ({
-      id: String(row.id), workerId: String(row.workerId), kind: String(row.kind) as CapacityJobKind, loadClass: String(row.loadClass) as LoadClass, queuedAt: String(row.queuedAt), waitMs: Math.max(0, now().getTime() - Date.parse(String(row.queuedAt))), priority: Number(row.priority), ...(row.dedupeKey ? { dedupeKey: String(row.dedupeKey) } : {}),
-    }));
+    return queueEntries(options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE endedAt IS NULL AND startedAt IS NULL').all() as Array<Record<string, unknown>>).find((row) => String(row.workerId) === workerId && row.kind === kind && (dedupeKey === undefined || row.dedupeKey === dedupeKey));
   }
 
   return { admit, finish, cancel, setPid, updatePayload, rehydrate, findQueued, tick, close, status, sampler };

@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { hardenedGitArgs } from './git.js';
 import type { z } from 'zod';
@@ -69,11 +69,11 @@ import { Lifecycle } from './lifecycle.js';
 import { loadSettings, updateSpendSettings, type Settings } from './settings.js';
 import { createEffectiveSpendReader, spendLimitRaises, type EffectiveSpend, type EffectiveSpendReader } from './config.js';
 import { attachWorker, budgetForWorker, budgetStatus, budgetWarningEmitted, closeBudget, ensureBudgetTables, listBudgetStatuses, openBudget, openBudgetFor, type BudgetStatus } from './budget.js';
-import { checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
+import { NO_TAP_CHANNEL, checkEnvelope, commitTap, confirmTap, ensureTapTable, envelopeBudgetGuard, envelopePath, expireTaps, expireTapsOnStartup, readEnvelope, requestTap, reserveTap, rollbackTap, spendCapAction, SPEND_CAP_TAP_KIND, SPEND_CAP_TAP_PROJECT, tapReservationOwned, type EnvelopeDecision, type EnvelopeView, type TapMemory, type TapReservation } from './envelope.js';
 import type { SupervisorRegisterInput, SupervisorRotateInput, SupervisorService, WakeListInput } from './supervise.js';
 import type { DiscordService } from './discord.js';
 import type { ReviewRecordInput, ReviewService } from './review.js';
-import { verdictLine } from './review.js';
+import { isQuoted, verdictLine } from './review.js';
 import { inferPrIssue, recordPrMerge } from './pr-watch.js';
 import type { JevCheckService } from './jevcheck.js';
 import type { ClaimsService } from './claims.js';
@@ -91,9 +91,11 @@ import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTa
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
 import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
 import { askLoadClass } from './capacity/classify.js';
+import { admissionRank, effectivePriority, quickCheck, type QuickCheck } from './capacity/priority.js';
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 import { sandboxEnabled } from './gate.js';
+import { installManager } from './sandbox.js';
 
 const exec = promisify(execFile);
 const INFRA_GATE_FAILURE = /EAGAIN|ENOMEM|resource temporarily unavailable/i;
@@ -127,6 +129,8 @@ export type HelmDeps = Readonly<{
   stopTimeoutMs?: number;
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
+  /** Install dependencies before builder/validator turns (the daemon enables it; off keeps turn start synchronous for fake runners). */
+  workerInstall?: boolean;
   settings?: Settings;
   spendStartup?: boolean;
   supervisor?: SupervisorService;
@@ -258,8 +262,11 @@ export class Helm {
   private readonly stopRequested = new Set<string>();
   /** Workers whose current turn actually observed the stop request via hooks.shouldContinue(). */
   private readonly stopObserved = new Set<string>();
+  private readonly installedLocks = new Map<string, string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
+  private readonly workerInstall: boolean;
+  private readonly installAborts = new Map<string, AbortController>();
   private readonly settings: Settings;
   private readonly spendSettings: EffectiveSpendReader;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
@@ -300,6 +307,7 @@ export class Helm {
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
+    this.workerInstall = deps.workerInstall === true;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
     this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog, skipStartup: deps.routingSkipStartup });
@@ -423,7 +431,7 @@ export class Helm {
       const action = spendCapAction(current, input);
       let reservation: TapReservation | undefined;
       if (raising) {
-        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}`);
+        if (!input.tapId) return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${action}${this.settings.discord.tapWebhookEnv ? '' : ` (${NO_TAP_CHANNEL})`}`);
         const reserved = reserveTap(this.store, this.taps, SPEND_CAP_TAP_PROJECT, SPEND_CAP_TAP_KIND, actionHash(action), input.tapId, this.nowDate());
         if (typeof reserved === 'string') return refuse(`tap required for ${SPEND_CAP_TAP_KIND}: ${reserved}`);
         reservation = reserved;
@@ -576,7 +584,8 @@ export class Helm {
       if (reason) return refuse(reason);
       let selection: Selection;
       try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
-      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice));
+      const check = await quickCheck(this.jev, { objective: chosen.input.objective, project: chosen.input.repo });
+      const outcome = await this.withLock(() => this.spawnLocked(chosen.input, undefined, selection, chosen.choice, check));
       if (outcome.ok) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice).catch((error) => {
         try { this.store.appendEvent(outcome.workerId, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
       });
@@ -589,7 +598,7 @@ export class Helm {
     input: SpawnInput,
     onDone?: OnDone,
     selection: Selection = { guidance: '', skills: [] },
-    choice?: ModelChoice,
+    choice?: ModelChoice, check: QuickCheck = {},
   ): Promise<ToolOutcome<{ workerId: string; branch: string; worktree: string; warning?: string; queued?: true; loadClass?: LoadClass }>> {
     if (input.idempotencyKey) {
       const existing = this.store.findByIdempotencyKey(input.idempotencyKey);
@@ -606,6 +615,8 @@ export class Helm {
     if (baseline && baseline.repoSlug !== repoSlug) return refuse(`baseline belongs to ${baseline.repoSlug}, not ${repoSlug}`);
     const baseRef = baseline?.testCommit ?? input.baseRef ?? (await this.workspace.defaultBranch(repo));
     const baseSha = await this.workspace.resolveSha(repo, baseRef);
+    const stated = input.priority ?? (await loadRepoConfig(repo, baseSha, true, { timeout: 5_000 }).catch(() => undefined))?.priority ?? 'normal';
+    const effective = effectivePriority(stated, check), rank = admissionRank(effective, input.requestedBy ?? 'auto', check.size);
     const workerId = genId('w');
     const branch = `helm/${workerId}`;
     const worktree = join(this.config.home, 'worktrees', repoSlug.replace(/\//g, '__'), workerId);
@@ -641,16 +652,13 @@ export class Helm {
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
     const issueNumber = input.issue ?? baseline?.issue;
     const issueText = issueNumber !== undefined ? await this.fetchIssueText(repoSlug, issueNumber) : undefined;
-    const promptInput: PromptInput = {
-      objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths,
-      ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}),
-      ...(issueText ? { issueText } : {}),
-    };
+    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}), ...(issueText ? { issueText } : {}) };
+    this.store.appendEvent(workerId, 'admission.priority', { stated, requestedBy: input.requestedBy ?? 'auto', class: check.class ?? null, size: check.size ?? null, effective, score: rank.base, reasons: rank.reasons });
     let message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
     if (issueText && !message.includes(issueText)) message = `${message}\n\n${issueText}`;
-    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
+    const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, rank, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
     const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
     if ('queued' in admitted) warnings.push('queued: capacity');
     return { ok: true, workerId, branch, worktree, loadClass, ...(warnings.length ? { warning: warnings.join('; ') } : {}), ...('queued' in admitted ? { queued: true as const } : {}) };
@@ -781,6 +789,7 @@ export class Helm {
       }
       must(row.state === 'running', `worker is not running (state: ${row.state})`);
       this.stopRequested.add(input.workerId);
+      this.installAborts.get(input.workerId)?.abort();
       this.store.appendEvent(input.workerId, 'stop.requested');
       const settled = await this.waitForSettle(input.workerId, this.stopTimeoutMs);
       if (!settled) {
@@ -963,6 +972,7 @@ export class Helm {
       must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
         `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
       const head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      try { await this.workspace.fetch(sourceWorker.repo, `pull-${pr.number}`, `refs/pull/${pr.number}/head`); } catch { /* offline: use local objects */ }
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {
         repo: sourceWorker.repo, objective, model, baseRef: head,
@@ -979,10 +989,15 @@ export class Helm {
   }
 
   private async finishReview(workerId: string, result: WorkerResult | null, project: string, number: number, head: string, reviewer: string): Promise<void> {
-    const raw = result ? `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}` : 'Review did not produce a usable result.';
+    if (!result) {
+      this.store.appendEvent(workerId, 'review.warning', { project, number, summary: 'reviewer produced no result; no review recorded' });
+      return;
+    }
+    const raw = `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}`;
     let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
     // Move verdict lines or trailing verdict sentences below the summary and notes.
-    const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (_match, prefix: string, line: string) => {
+    const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (match, prefix: string, line: string, offset: number, whole: string) => {
+      if (isQuoted(whole, offset + prefix.length)) return match;
       lastVerdict = line.trim();
       return prefix.trimEnd();
     }).trim();
@@ -1127,7 +1142,7 @@ export class Helm {
         randomInt: this.tapRandomInt,
         taps: this.taps,
         pepper: this.tapPepper,
-        post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: 'no tap channel configured' }),
+        post: (content) => this.discord?.postTap(content) ?? Promise.resolve({ ok: false, reason: NO_TAP_CHANNEL }),
       });
       return result;
     });
@@ -1194,8 +1209,8 @@ export class Helm {
     });
   }
 
-  async notifyNick(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
-    if (!this.discord) return { ok: false, reason: 'Discord is not configured' };
+  async notifyOwner(input: { project: string; text: string }): Promise<ToolOutcome<{ sent: true }>> {
+    if (!this.discord) return { ok: false, reason: 'no notify channel: set discord.projects.<project>.webhookEnv in helm.json' };
     const result = await this.discord.notifyNick(input.project, input.text);
     return result.ok ? { ok: true, sent: true } : result;
   }
@@ -1215,6 +1230,34 @@ export class Helm {
       allowedRoot: this.workerWorktreeRoot(row),
       onError: (message) => this.store.appendEvent(row.workerId, 'hygiene.warning', { message }),
     });
+  }
+
+  /** Give a worker turn node_modules by running the repo's install gate step (sandboxed, install network only); hygiene removes it when the turn settles. */
+  private async installWorkerDeps(row: WorkerRow): Promise<string | undefined> {
+    let refused: string | undefined;
+    const lock = createHash('sha256');
+    for (const name of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) if (existsSync(join(row.worktree, name))) lock.update(readFileSync(join(row.worktree, name)));
+    const digest = lock.digest('hex');
+    const abort = new AbortController();
+    this.installAborts.set(row.workerId, abort);
+    try {
+      const config = await loadRepoConfig(row.repo, row.baseSha, false).catch(() => undefined);
+      const checks = (config?.gates ?? []).filter((gate) => installManager(gate.command));
+      if (config?.workerInstall === false || checks.length === 0) return;
+      if (this.installedLocks.get(row.workerId) === digest && existsSync(join(row.worktree, 'node_modules'))) return;
+      const outcome = await this.gates.run(row.worktree, checks, join(this.config.home, 'logs', row.workerId, `install-${Date.now()}`), {
+        timeoutMs: this.config.gateTimeoutMs, nodeModulesRoot: this.workerWorktreeRoot(row), keepNodeModules: true, signal: abort.signal, sandbox: await sandboxEnabled(row.repo, row.baseSha),
+        onPid: (pid) => this.capacity.setPid(row.workerId, pid),
+        onRefused: (reason) => { refused = reason; this.store.appendEvent(row.workerId, 'worker.install.refused', { reason }); },
+      });
+      if (outcome.passed) this.installedLocks.set(row.workerId, digest);
+      this.store.appendEvent(row.workerId, 'worker.install', { passed: outcome.passed, lock: digest });
+      const failed = outcome.checks.find((check) => check.exitCode !== 0);
+      return outcome.passed ? undefined : refused ?? (failed ? `${failed.name} exited ${failed.exitCode ?? 'abnormally'}` : 'install did not complete');
+    } catch (err) {
+      this.store.appendEvent(row.workerId, 'worker.install', { passed: false, error: errMessage(err) });
+      return errMessage(err).split(/\r?\n/, 1)[0]!.slice(0, 120);
+    } finally { this.installAborts.delete(row.workerId); }
   }
 
   private workerTempDir(workerId: string): string {
@@ -1362,9 +1405,13 @@ export class Helm {
       },
     };
     try {
-      const outcome = await this.runner.run(runInput, message, hooks);
+      const installError = this.workerInstall && row.role !== 'reviewer' ? await this.installWorkerDeps(row) : undefined;
+      const turnMessage = installError ? `Dependency install failed: ${installError}; typecheck/tests may not run locally; the gate will run them.\n\n${message}` : message;
+      const skipped = this.stopRequested.has(workerId);
+      if (skipped) this.stopObserved.add(workerId);
+      const outcome: WorkerRunOutcome = skipped ? { result: null, rawText: '', sessionFile: row.sessionFile } : await this.runner.run(runInput, turnMessage, hooks);
       const result = outcome.result;
-      if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {
+      if ((row.role === 'builder' || row.role === 'validator') && !skipped && result?.status !== 'failed') {
         try {
           const commitMessage = result?.summary ?? `helm: ${workerId} turn complete`;
           const head = await this.workspace.commitAll(row.worktree, commitMessage, row.repo);

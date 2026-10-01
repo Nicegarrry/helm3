@@ -22,6 +22,7 @@ export type ScorecardJson = Readonly<{
   capacity?: Readonly<Record<LoadClass, Readonly<{ jobs: number; durationMs: number; avgDurationMs: number; peakRssMb: number }>>>;
 }>;
 export type ScorecardService = Readonly<{
+  read(input: ScorecardExportInput): Promise<ToolOutcome<{ markdown: string; json: ScorecardJson }>>;
   export(input: ScorecardExportInput): Promise<ToolOutcome<{ markdown: string; json: ScorecardJson }>>;
   consume(): Promise<void>;
 }>;
@@ -107,16 +108,19 @@ function markdown(json: ScorecardJson): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function createScorecard(options: { store: Store; memory: MemoryService; now?: () => Date }): ScorecardService {
+export function createScorecard(options: { store: Store; memory?: MemoryService; now?: () => Date }): ScorecardService {
   const { store, memory } = options; const now = options.now ?? (() => new Date());
-  async function exportScorecard(input: ScorecardExportInput): Promise<ToolOutcome<{ markdown: string; json: ScorecardJson }>> {
+  async function exportScorecard(input: ScorecardExportInput, readOnly = false): Promise<ToolOutcome<{ markdown: string; json: ScorecardJson }>> {
     if (input.since && !scorecardExportInput.safeParse(input).success) return { ok: false, reason: 'since must be an ISO date' };
     const budget = input.budgetId ? store.sql.prepare('SELECT * FROM budgets WHERE id = ?').get(input.budgetId) as Row | undefined : undefined;
     if (input.budgetId && !budget) return { ok: false, reason: `budget not found: ${input.budgetId}` };
     if (budget && String(budget.project) !== input.project) return { ok: false, reason: `budget ${input.budgetId} belongs to ${String(budget.project)}` };
-    const from = budget ? String(budget.openedAt) : input.since; const to = budget ? (budget.closedAt ? String(budget.closedAt) : now().toISOString()) : undefined;
+    const from = budget ? String(budget.openedAt) : input.since; const to = budget ? (budget.closedAt ? String(budget.closedAt) : now().toISOString()) : readOnly ? now().toISOString() : undefined;
     const budgetWorkers = input.budgetId ? (store.sql.prepare('SELECT workerId FROM worker_budget WHERE budgetId = ?').all(input.budgetId) as Row[]).map((row) => String(row.workerId)) : [];
-    const workerRows = (input.budgetId ? budgetWorkers.length ? store.sql.prepare(`SELECT w.workerId,w.role,w.model,w.state,w.createdAt,wm.issue,wm.tier,wm.band FROM workers w LEFT JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.workerId IN (${budgetWorkers.map(() => '?').join(',')}) ORDER BY w.createdAt,w.workerId`).all(...budgetWorkers) : [] : store.sql.prepare(`SELECT w.workerId,w.role,w.model,w.state,w.createdAt,wm.issue,wm.tier,wm.band FROM workers w LEFT JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.repoSlug = ?${from ? ' AND w.createdAt >= ?' : ''} ORDER BY w.createdAt,w.workerId`).all(input.project, ...(from ? [from] : []))) as Row[];
+    // A daily activity window includes work started earlier that spent or merged today.
+    const activity = between('w.createdAt', undefined, to);
+    if (readOnly && from) { activity.sql += ` AND (w.createdAt >= ? OR w.workerId IN (SELECT workerId FROM events WHERE at >= ? AND at <= ? UNION SELECT workerId FROM spend WHERE at >= ? AND at <= ? UNION SELECT workerId FROM gates WHERE at >= ? AND at <= ?))`; activity.args.push(from, from, to!, from, to!, from, to!); }
+    const workerRows = (input.budgetId ? budgetWorkers.length ? store.sql.prepare(`SELECT w.workerId,w.role,w.model,w.state,w.createdAt,wm.issue,wm.tier,wm.band FROM workers w LEFT JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.workerId IN (${budgetWorkers.map(() => '?').join(',')}) ORDER BY w.createdAt,w.workerId`).all(...budgetWorkers) : [] : store.sql.prepare(`SELECT w.workerId,w.role,w.model,w.state,w.createdAt,wm.issue,wm.tier,wm.band FROM workers w LEFT JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.repoSlug = ?${readOnly ? activity.sql : from ? ' AND w.createdAt >= ?' : ''} ORDER BY w.createdAt,w.workerId`).all(input.project, ...(readOnly ? activity.args : from ? [from] : []))) as Row[];
     const workers: Worker[] = workerRows.map((row) => ({ workerId: String(row.workerId), issue: row.issue === null || row.issue === undefined ? null : n(row.issue), role: String(row.role), model: String(row.model), tier: row.tier === null || row.tier === undefined ? tierFromBand(row.band) : n(row.tier), state: String(row.state), createdAt: String(row.createdAt) }));
     const ids = workers.map((worker) => worker.workerId); const inList = ids.map(() => '?').join(',');
     const empty = (): ScorecardJson => ({ project: input.project, window: { ...(input.budgetId ? { budgetId: input.budgetId } : {}), ...(budget ? { label: String(budget.label), openedAt: String(budget.openedAt), ...(budget.closedAt ? { closedAt: String(budget.closedAt) } : {}) } : input.since ? { since: input.since } : {}) }, tickets: 0, merged: 0, firstPassGateRate: 0, claimsPassRate: 0, firstReviewApprovalRate: 0, retriesPerTicket: {}, activeMinutes: 0, codexTokens: 0, usd: 0, jevCalls: 0, jevCost: null, deploys: 0, rollbacks: 0, taps: 0, outcomes: [] });
@@ -150,8 +154,8 @@ export function createScorecard(options: { store: Store; memory: MemoryService; 
       }
     }
     const projectWindow = between('at', from, to); if (hasTable(store, 'deploys')) { const rows = store.sql.prepare(`SELECT id,state,at FROM deploys WHERE project=?${projectWindow.sql}`).all(input.project, ...projectWindow.args) as Row[]; json.deploys = rows.length; json.rollbacks = rows.filter((row) => String(row.state).toLowerCase() === 'rolledback').length; } if (hasTable(store, 'taps')) json.taps = (store.sql.prepare(`SELECT COUNT(*) AS count FROM taps WHERE project=?${between('requestedAt', from, to).sql}`).get(input.project, ...between('requestedAt', from, to).args) as Row).count as number;
-    const result = { markdown: markdown(json), json }; const label = json.window.label ?? input.since ?? 'all'; const title = `Scorecard ${label}${input.budgetId ? ` ${input.budgetId}` : ''}`; const saved = await memory.write({ scope: 'project', project: input.project, type: 'scorecard', title, summary: `${json.tickets} tickets; ${json.merged} merged`, truth: result.markdown }); if (!saved.ok) return saved; return { ok: true, ...result };
+    const result = { markdown: markdown(json), json }; if (readOnly) return { ok: true, ...result }; if (!memory) return { ok: false, reason: 'scorecard memory is not configured' }; const label = json.window.label ?? input.since ?? 'all'; const title = `Scorecard ${label}${input.budgetId ? ` ${input.budgetId}` : ''}`; const saved = await memory.write({ scope: 'project', project: input.project, type: 'scorecard', title, summary: `${json.tickets} tickets; ${json.merged} merged`, truth: result.markdown }); if (!saved.ok) return saved; return { ok: true, ...result };
   }
   const consume = consumer(store, 'scorecard-export', async (events) => { for (const event of events.filter((candidate) => candidate.kind === 'budget.closed')) { const project = typeof event.data.project === 'string' ? event.data.project : event.workerId.replace(/^project:/, ''); const budgetId = typeof event.data.budgetId === 'string' ? event.data.budgetId : undefined; if (!project) continue; try { const result = await exportScorecard({ project, ...(budgetId ? { budgetId } : {}) }); if (!result.ok) throw new Error(result.reason); } catch (error) { store.appendEvent(event.workerId, 'scorecard.failed', { project, ...(budgetId ? { budgetId } : {}), error: redactError(error) }); } } });
-  return { export: exportScorecard, consume };
+  return { read: (input) => exportScorecard(input, true), export: (input) => exportScorecard(input), consume };
 }

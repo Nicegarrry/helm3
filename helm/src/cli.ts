@@ -35,6 +35,7 @@ import { createRetry } from './retry.js';
 import { createEnvelopeTicker } from './envelope.js';
 import { createMemorySync } from './memory-sync.js';
 import { createHygiene } from './hygiene.js';
+import { portfolio, formatPortfolio, createReportTicker, startNotificationTickers } from './portfolio.js';
 import { createPrTicker } from './pr-watch.js';
 import type { CapacityExec } from './capacity/sampler.js';
 import { resolveToolProfile, type ToolProfile } from './tools.js';
@@ -56,7 +57,7 @@ const capacityExec: CapacityExec = async (file, args, options) => {
 function usage(): void {
   console.error(`usage: helm <command> [options]
   spawn --repo <path> --objective <text> [--issue n] [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
-        [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k]
+        [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k] [--priority low|normal|high|urgent] [--requested-by owner|auto]
   ps [--repo path] [--state s] [--json]
   logs <id> [-f] [--json]
   inspect <id> [--tail n] [--json]
@@ -70,6 +71,7 @@ function usage(): void {
   pr-status <id|#n> [--json]
   review <id|#n> [--model m] [--json]
   merge <#n> --head <sha> [--json]
+  portfolio [--json] [--since <iso>]
   status [--json]
   cap --usd N [--warn N] [--workers N] [--tap <id>] [--json]
   budget open <project> <label> <capUsd> [--codex-tokens n]
@@ -192,11 +194,12 @@ const cmdSpawn = (args: string[]) =>
   simpleCmd('worker.spawn', args, (_p, v) => (v.repo && v.objective
     ? { repo: resolve(process.cwd(), v.repo as string), objective: v.objective, issue: v.issue ? Number(v.issue) : undefined, acceptance: v.acceptance, model: v.model, difficulty: v.difficulty,
         baseRef: v['base-ref'], role: v.role, contextPaths: v.context ?? [], allowWorkflows: v['allow-workflows'] ?? false,
-        idempotencyKey: v['idempotency-key'], lanes: v.lanes }
+        idempotencyKey: v['idempotency-key'], lanes: v.lanes, priority: v.priority, requestedBy: v['requested-by'] }
     : undefined), {
     repo: { type: 'string' }, objective: { type: 'string' }, issue: { type: 'string' }, acceptance: { type: 'string' }, model: { type: 'string' }, difficulty: { type: 'string' },
     'base-ref': { type: 'string' }, role: { type: 'string' }, context: { type: 'string', multiple: true },
     'allow-workflows': { type: 'boolean' }, 'idempotency-key': { type: 'string' }, lanes: { type: 'string', multiple: true },
+    priority: { type: 'string' }, 'requested-by': { type: 'string' },
   });
 
 const cmdPs = (args: string[]) =>
@@ -441,14 +444,15 @@ export async function startSupervisor(input: StartSupervisorInput, deps: StartSu
   const hosts = deps.hosts ?? { herdr: herdrHost(exec), tmux: tmuxHost(exec) };
   const host = deps.host ?? hosts[hostName];
   const command = supervisorCommand(input.project, label, settings, env);
-  let pane = await host.resolve(label);
+  const hostCall = <T>(fn: () => Promise<T>) => fn().catch((err: NodeJS.ErrnoException) => { throw err.code === 'ENOENT' ? new Error(`supervisor host ${hostName} is not installed; install it or pass --host herdr|tmux`) : err; });
+  let pane = await hostCall(() => host.resolve(label));
   let launched = false;
   if (pane) {
     const status = await host.status(pane);
     if (status === 'unknown') { await host.send(pane, command); launched = true; }
     else if (!input.json) console.log(`attached ${label} ${pane.id}`);
   } else {
-    pane = await host.create(label, repo, command);
+    pane = await hostCall(() => host.create(label, repo, command));
     if (!pane) throw new Error(`host did not create a pane for ${label}`);
     launched = true;
   }
@@ -533,7 +537,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const github = ghGitHub();
   const helm = new Helm({
     config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules, allowUnsandboxed: settings.gates?.allowUnsandboxed === true, denyLocalPorts: settings.gates?.denyLocalPorts, daemonHome: config.home }), github,
-    claudeLaneRegistered: claudeAvailable(),
+    claudeLaneRegistered: claudeAvailable(), workerInstall: true,
     runner: laneRunner({
       pi: piWorkerRunner(),
       codex: codexWorkerRunner(),
@@ -561,11 +565,11 @@ async function cmdServe(args: string[]): Promise<void> {
   const stopWatch = startTicker(settings.watch.tickSec * 1000, [createWatcher({ store, settings, jev })]);
   const stopQueue = startTicker(settings.queue.tickSec * 1000, [helm.queue.tick]);
   const stopCapacity = startTicker(1000, [helm.capacityTick.bind(helm)]);
-  const stopDiscord = startTicker(1000, [discord.tick]);
+  const notifications = startNotificationTickers(discord.tick, createReportTicker({ store, home: config.home }));
   const stopPrWatch = startTicker(5 * 60_000, [createPrTicker({ store, github })]);
   const stopMemory = startTicker(1000, [createMemorySync({ store, settings })]);
   const stopHygiene = startTicker(settings.hygiene.gcSec * 1000, [hygiene.tick]);
-  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); stopDiscord(); stopPrWatch(); stopMemory(); stopHygiene(); };
+  const stopTicker = () => { stopWake(); stopWatch(); stopQueue(); stopCapacity(); notifications.stop(); stopPrWatch(); stopMemory(); stopHygiene(); };
   console.error(`helm serve listening on http://127.0.0.1:${handle.port}`);
   const shutdown = async () => {
     stopTicker();
@@ -616,6 +620,12 @@ async function cmdShutdown(): Promise<void> {
   printOutcome(await postTool('daemon.control', { action: 'shutdown' }), false);
 }
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
+async function cmdPortfolio(args: string[]): Promise<void> {
+  const { values } = parseArgs({ args, options: { json: { type: 'boolean' }, since: { type: 'string' } } });
+  const { config, store } = openReadStore();
+  try { const report = await portfolio(store, loadSettings(config.home), values.since); console.log(values.json ? JSON.stringify(report, null, 2) : formatPortfolio(report)); }
+  finally { store.close(); }
+}
 const cmdScorecard = (args: string[]) => simpleCmd('scorecard.export', args, (p, v) => (p[0] ? { project: p[0], ...(v.budget ? { budgetId: v.budget } : {}), ...(v.since ? { since: v.since } : {}) } : undefined), { budget: { type: 'string' }, since: { type: 'string' } });
 const cmdRouting = async (args: string[]): Promise<void> => {
   const [verb, ...rest] = args;
@@ -634,7 +644,7 @@ const cmdDeploy = async (args: string[]): Promise<void> => {
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
   pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
-  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, routing: cmdRouting, deploy: cmdDeploy,
+  inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, portfolio: cmdPortfolio, routing: cmdRouting, deploy: cmdDeploy,
 };
 
 async function main(): Promise<void> {

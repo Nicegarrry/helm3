@@ -1,7 +1,6 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { statfs as fsStatfs } from 'node:fs/promises';
 import { cpus, freemem, loadavg, totalmem } from 'node:os';
-import { promisify } from 'node:util';
 import type { Store } from '../types.js';
 import type { StatfsResult } from '../hygiene.js';
 
@@ -18,7 +17,7 @@ export type CapacitySnapshot = Readonly<{
   load1: number;
   cpuCount: number;
   freeDiskGb: number | null;
-  bootedSimulators: number;
+  bootedSimulators: number | null;
   processCount?: number;
   maxProcesses?: number | null;
   processHeadroomPct?: number | null;
@@ -26,18 +25,27 @@ export type CapacitySnapshot = Readonly<{
   running: CapacityRunning;
 }>;
 
-const realExec = promisify(execFile);
 const GB = 1024 ** 3;
 
-const defaultExec: CapacityExec = async (file, args, options) => {
-  try {
-    const result = await realExec(file, args, { timeout: options.timeoutMs, maxBuffer: 2 * 1024 * 1024 });
-    return { stdout: result.stdout, stderr: result.stderr, code: 0 };
-  } catch (error) {
-    const value = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number };
-    return { stdout: String(value.stdout ?? ''), stderr: String(value.stderr ?? value.message ?? ''), code: typeof value.code === 'number' ? value.code : 1 };
-  }
-};
+export const defaultExec: CapacityExec = (file, args, options) => new Promise((resolve) => {
+  const child = spawn(file, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '', failed = false;
+  const killGroup = () => {
+    if (!child.pid) return;
+    try { process.kill(-child.pid, 'SIGKILL'); }
+    catch { child.kill('SIGKILL'); }
+  };
+  const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
+    if (target === 'stdout') stdout += chunk.toString(); else stderr += chunk.toString();
+    if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 2 * 1024 * 1024) { failed = true; killGroup(); }
+  };
+  child.stdout.on('data', (chunk: Buffer) => { append('stdout', chunk); });
+  child.stderr.on('data', (chunk: Buffer) => { append('stderr', chunk); });
+  child.on('error', (error) => { failed = true; stderr ||= error.message; });
+  child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, code: failed ? 1 : code ?? 1 }); });
+  const timer = setTimeout(() => { failed = true; killGroup(); }, options.timeoutMs);
+  timer.unref?.();
+});
 
 export function availableRamGbFromVmStat(output: string): number | null {
   const pageSize = Number(output.match(/page size of (\d+) bytes/i)?.[1] ?? 4096);
@@ -82,6 +90,21 @@ export function countBootedSimulators(output: string): number {
   }
 }
 
+export function createSimulatorProbe(exec: CapacityExec): () => Promise<{ stdout: string; stderr?: string; code?: number }> {
+  let firstLaunchReady: boolean | undefined;
+  let inFlight: Promise<{ stdout: string; stderr?: string; code?: number }> | undefined;
+  const safeExec = (file: string, args: string[], timeoutMs: number) => exec(file, args, { timeoutMs }).catch(() => ({ stdout: '', code: 1 }));
+  return () => {
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      if (firstLaunchReady === undefined) firstLaunchReady = (await safeExec('xcodebuild', ['-checkFirstLaunchStatus'], 1_000)).code === 0;
+      if (!firstLaunchReady) return { stdout: '', code: 1 };
+      return safeExec('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], 300);
+    })().finally(() => { inFlight = undefined; });
+    return inFlight;
+  };
+}
+
 function runningFromStore(store: Store): CapacityRunning {
   const workers = store.listWorkers().filter((worker) => worker.state === 'running');
   let gates = 0;
@@ -118,6 +141,7 @@ export function createCapacitySampler(options: Readonly<{
   let timer: ReturnType<typeof setInterval> | undefined;
   let sampling: Promise<CapacitySnapshot> | undefined;
   const safeExec = (file: string, args: string[], timeoutMs: number) => exec(file, args, { timeoutMs }).catch(() => ({ stdout: '', code: 1 }));
+  const probeSimulators = createSimulatorProbe(exec);
 
   async function sample(): Promise<CapacitySnapshot> {
     if (cached && Date.parse(cached.sampledAt) + (options.sampleSec ?? 5) * 1000 > now().getTime()) return cached;
@@ -127,7 +151,7 @@ export function createCapacitySampler(options: Readonly<{
         safeExec('vm_stat', [], 500),
         safeExec('memory_pressure', ['-Q'], 500),
         statfs(options.home).catch(() => null),
-        safeExec('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], 300),
+        probeSimulators(),
       ]);
       const uid = typeof process.getuid === 'function' ? String(process.getuid()) : undefined;
       const [processes, names, maxProcesses] = uid ? await Promise.all([
@@ -149,7 +173,7 @@ export function createCapacitySampler(options: Readonly<{
         load1: loadavg()[0] ?? 0,
         cpuCount: Math.max(1, cpus().length),
         freeDiskGb: disk ? (disk.bavail * disk.bsize) / GB : null,
-        bootedSimulators: simulators.code === 0 ? countBootedSimulators(simulators.stdout) : 0,
+        bootedSimulators: simulators.code === 0 ? countBootedSimulators(simulators.stdout) : null,
         ...(processCount !== undefined ? { processCount } : {}),
         maxProcesses: maxCount,
         processHeadroomPct: processCount !== undefined && maxCount ? Math.max(0, (maxCount - processCount) / maxCount) : null,

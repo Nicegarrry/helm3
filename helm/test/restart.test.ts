@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { callDaemon } from '../src/server.js';
+import { cleanupTestDaemons, spawnTestDaemon } from './daemon-fixture.js';
 
 // Real daemon processes, isolated state, disabled provider discovery and no workers.
 test('SIGTERM then start accepts work; helm restart rotates identity and waits for ready', { timeout: 45_000 }, async (t) => {
@@ -38,18 +39,19 @@ test('SIGTERM then start accepts work; helm restart rotates identity and waits f
     await childClosed;
   };
   const start = () => {
-    child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'serve', '--http'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawnTestDaemon(home, process.execPath, ['--import', 'tsx', 'src/cli.ts', 'serve', '--http'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
     childClosed = once(child, 'close');
     child.stderr?.on('data', (chunk) => { output += chunk; });
     child.stdout?.resume();
   };
   t.after(async () => {
-    if (existsSync(join(home, 'serve.json'))) {
-      const data = metadata();
-      await callDaemon(data.port, 'daemon.control', { action: 'shutdown' }, false, undefined, home);
-    }
-    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-    await waitStopped();
+    try {
+      if (existsSync(join(home, 'serve.json'))) {
+        const data = metadata();
+        await callDaemon(data.port, 'daemon.control', { action: 'shutdown' }, false, undefined, home);
+      }
+    } catch { /* hard cleanup below */ }
+    await cleanupTestDaemons(home);
     rmSync(home, { recursive: true, force: true });
   });
   start();

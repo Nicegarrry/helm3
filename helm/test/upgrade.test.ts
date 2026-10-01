@@ -1,6 +1,6 @@
 /** Real daemon handover and recovery checks for the standalone upgrade helper. */
 import assert from 'node:assert/strict';
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -13,6 +13,7 @@ import { openStore } from '../src/store.js';
 import { Lifecycle } from '../src/lifecycle.js';
 import { serve } from '../src/server.js';
 import type { Helm } from '../src/helm.js';
+import { cleanupTestDaemons, spawnTestDaemon } from './daemon-fixture.js';
 
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8'));
@@ -36,7 +37,7 @@ function candidate(root: string, version = '1.5.1-test') {
   return { root, version, revision: 'a'.repeat(40), digest: digestRelease(root) };
 }
 async function start(home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ child: ChildProcess; port: number; errors: () => string }> {
-  const child = spawn(process.execPath, ['--import', 'tsx', join(packageRoot, 'src', 'cli.ts'), 'serve', '--http'], {
+  const child = spawnTestDaemon(home, process.execPath, ['--import', 'tsx', join(packageRoot, 'src', 'cli.ts'), 'serve', '--http'], {
     cwd: packageRoot, env: { ...process.env, HELM_HOME: home, HELM_UPGRADE_ID: '', HELM_SPEND_CAP_USD: '3.75', HELM_MAX_WORKERS: '2', HELM_ROUTING_STARTUP_CHECK: '0', ...extraEnv }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   let errors = '';
@@ -49,10 +50,7 @@ async function start(home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<{ 
 function testHome(t: { after: (fn: () => void | Promise<void>) => void }) {
   const home = mkdtempSync(join(tmpdir(), 'helm-upgrade-'));
   t.after(async () => {
-    // Every PID here came from this test's private home, never the operator's daemon.
-    for (const file of ['serve.json', 'upgrade.json']) {
-      try { const value = read(join(home, file)); const pid = value.pid ?? value.helperPid; if (pid && pid !== process.pid) process.kill(pid, 'SIGKILL'); } catch { /* already exited */ }
-    }
+    await cleanupTestDaemons(home);
     rmSync(home, { recursive: true, force: true });
   });
   return home;
@@ -225,7 +223,7 @@ test('a second real daemon is refused without interrupting the first owner', asy
   const home = testHome(t);
   const old = await start(home);
   const before = await control(old.port, { action: 'status' }, home);
-  const second = spawn(process.execPath, ['--import', 'tsx', join(packageRoot, 'src', 'cli.ts'), 'serve', '--http'], {
+  const second = spawnTestDaemon(home, process.execPath, ['--import', 'tsx', join(packageRoot, 'src', 'cli.ts'), 'serve', '--http'], {
     cwd: packageRoot, env: { ...process.env, HELM_HOME: home }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';

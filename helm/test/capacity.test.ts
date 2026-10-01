@@ -6,7 +6,7 @@ import test from 'node:test';
 import { createCapacityAdmission } from '../src/capacity/admit.js';
 import { askLoadClass, classifyLoad } from '../src/capacity/classify.js';
 import { admissionRank } from '../src/capacity/priority.js';
-import { createCapacitySampler, type CapacitySnapshot } from '../src/capacity/sampler.js';
+import { createCapacitySampler, createSimulatorProbe, defaultExec, type CapacitySnapshot } from '../src/capacity/sampler.js';
 import { openStore } from '../src/store.js';
 import { loadSettings } from '../src/settings.js';
 
@@ -197,6 +197,7 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
         calls.push(`${file}:${options.timeoutMs}`);
         if (file === 'vm_stat') return { stdout: 'page size of 4096 bytes\nPages free: 1048576\nPages inactive: 524288\nPages speculative: 262144\nPages purgeable: 262144\n' };
         if (file === 'memory_pressure') return { stdout: 'System-wide memory free percentage: 20%\n' };
+        if (file === 'xcodebuild') return { stdout: '', code: 0 };
         if (file === 'xcrun') return { stdout: JSON.stringify({ devices: { iOS: [{ state: 'Booted' }, { state: 'Shutdown' }] } }), code: 0 };
         if (file === 'ps' && args.includes('comm=')) return { stdout: 'xcodebuild\nxcodebuild\nnode\n', code: 0 };
         if (file === 'ps') return { stdout: '1\n2\n3\n', code: 0 };
@@ -215,9 +216,65 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
     assert.equal(first.maxProcesses, 100);
     assert.equal(first.processHeadroomPct, 0.97);
     assert.deepEqual(first.topProcesses, [{ name: 'xcodebuild', count: 2 }, { name: 'node', count: 1 }]);
-    assert.deepEqual(calls.sort(), ['memory_pressure:500', 'ps:500', 'ps:500', 'sysctl:500', 'vm_stat:500', 'xcrun:300']);
+    assert.deepEqual(calls.sort(), ['memory_pressure:500', 'ps:500', 'ps:500', 'sysctl:500', 'vm_stat:500', 'xcodebuild:1000', 'xcrun:300']);
     sampler.stop();
   } finally { store.close(); }
+});
+
+test('a timed capacity probe kills its grandchild process group', { timeout: 5_000 }, async () => {
+  const result = await defaultExec(process.execPath, ['-e', `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    console.log(child.pid);
+    setInterval(() => {}, 1000);
+  `], { timeoutMs: 100 });
+  const pid = Number(result.stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, result.stderr);
+  await assert.rejects(async () => {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try { process.kill(pid, 0); } catch (error) { throw error; }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }, (error: NodeJS.ErrnoException) => error.code === 'ESRCH');
+});
+
+test('the sampler caches a failed first-launch check and skips simctl', async () => {
+  const store = openStore(':memory:');
+  const calls: string[] = [];
+  try {
+    const sampler = createCapacitySampler({
+      home: '/helm-home', store, sampleSec: 0, statfs: async () => { throw new Error('unavailable'); },
+      exec: async (file) => {
+        calls.push(file);
+        return { stdout: '', code: file === 'xcodebuild' ? 69 : 1 };
+      },
+    });
+    assert.equal((await sampler.sample()).bootedSimulators, null);
+    sampler.invalidate();
+    assert.equal((await sampler.sample()).bootedSimulators, null);
+    assert.equal(calls.filter((file) => file === 'xcodebuild').length, 1);
+    assert.equal(calls.includes('xcrun'), false);
+  } finally { store.close(); }
+});
+
+test('simctl probes are single-flight', async () => {
+  let simctlCalls = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const probe = createSimulatorProbe(async (file) => {
+      if (file === 'xcodebuild') return { stdout: '', code: 0 };
+      if (file === 'xcrun') { simctlCalls += 1; await blocked; return { stdout: '{"devices":{}}', code: 0 }; }
+      return { stdout: '', code: 1 };
+    });
+    const first = probe();
+    const second = probe();
+    assert.equal(first, second);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(simctlCalls, 1);
+    release();
+    await Promise.all([first, second]);
+  } finally { release(); }
 });
 
 /** One worker slot, so every job after `first` queues; each admit advances the clock one second. */

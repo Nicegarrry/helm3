@@ -68,12 +68,12 @@ function waitingDaemon(home: string) {
   let lastEvent: { kind: string; data: Record<string, string> } = { kind: 'capacity.queued', data: { reason: 'capacity' } };
   let progressCalls = 0;
   let waitStarted = false;
-  let resolveWait!: () => void;
+  let resolveWait!: (outcome: Record<string, unknown>) => void;
   const helm = {
     config: { home, spendCapUsd: 0, maxWorkers: 1, gateTimeoutMs: 1_000 },
     wait: async () => new Promise((resolve) => {
       waitStarted = true;
-      resolveWait = () => resolve({ ok: true, settled: [{ workerId: 'w-progress', state, head: null, result: null }], pending: [], timedOut: false, waitedMs: 1 });
+      resolveWait = (outcome) => resolve(outcome);
     }),
     progress: async (_ids: string[], timeoutMs: number, startedAt: number) => {
       progressCalls += 1;
@@ -86,7 +86,8 @@ function waitingDaemon(home: string) {
   return {
     helm,
     setState(next: string, kind = 'turn.start') { state = next; lastEvent = { kind, data: { summary: `${next} activity` } }; },
-    finish() { state = 'succeeded'; lastEvent = { kind: 'result', data: { summary: 'done' } }; resolveWait(); },
+    finish() { state = 'succeeded'; lastEvent = { kind: 'result', data: { summary: 'done' } }; resolveWait({ ok: true, settled: [{ workerId: 'w-progress', state, head: null, result: null }], pending: [], timedOut: false, waitedMs: 1 }); },
+    timeout() { resolveWait({ ok: true, settled: [], pending: ['w-progress'], timedOut: true, waitedMs: 1 }); },
     progressCalls: () => progressCalls,
     waitStarted: () => waitStarted,
   };
@@ -154,6 +155,20 @@ test('mcp stdio: worker.wait does not poll or emit progress without a progress t
     await harness.close();
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('mcp stdio: a timed-out worker.wait sends a final progress update', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
+  const harness = await progressProxy(home);
+  try {
+    const updates: ProgressUpdate[] = [];
+    const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } }, undefined, { onprogress: (update) => updates.push(update as unknown as ProgressUpdate) });
+    await waitForProgressState(updates, 'queued');
+    const before = updates.length;
+    harness.daemon.timeout();
+    await waiting;
+    assert.equal(await until(() => updates.length > before, PROGRESS_TIMEOUT_MS), true, 'timed out wait sends final progress');
+  } finally { await harness.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
 test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {

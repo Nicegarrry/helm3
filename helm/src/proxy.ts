@@ -127,7 +127,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
     const sent = new Map<string, string>();
     const sentAt = new Map<string, number>();
     const publish = async (force = false) => {
-      if (done || extra.signal.aborted) return;
+      if ((done && !force) || extra.signal.aborted) return;
       const query = new URLSearchParams({ workerIds: workerIds.join(','), timeoutMs: String(timeoutMs), startedAt: String(started) });
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let snapshot: ProgressState & { ok?: boolean };
@@ -139,7 +139,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       } finally { clearTimeout(timeout); }
       if (snapshot.ok !== true || !Array.isArray(snapshot.workers)) throw new Error(String((snapshot as { reason?: unknown }).reason ?? 'progress read failed'));
       for (const workerId of workerIds) {
-        if (done || extra.signal.aborted) return;
+        if ((done && !force) || extra.signal.aborted) return;
         const update = waitProgress(snapshot, workerId);
         const signature = progressSignature(update);
         const last = sent.get(workerId);

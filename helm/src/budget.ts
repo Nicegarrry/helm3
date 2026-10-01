@@ -141,13 +141,7 @@ function budgetSpend(store: Store, budget: BudgetRow): { spentUsd: number; spent
 }
 
 function budgetWorkers(store: Store, budgetId: string): string[] {
-  return (store.sql.prepare(`
-    SELECT DISTINCT workerId FROM (
-      SELECT workerId FROM worker_budget WHERE budgetId = ?
-      UNION
-      SELECT workerId FROM worker_budget_history WHERE budgetId = ?
-    ) ORDER BY workerId
-  `).all(budgetId, budgetId) as Array<{ workerId: string }>).map((row) => row.workerId);
+  return (store.sql.prepare('SELECT workerId FROM worker_budget WHERE budgetId = ? ORDER BY workerId').all(budgetId) as Array<{ workerId: string }>).map((row) => row.workerId);
 }
 
 export function budgetStatus(store: Store, budget: BudgetRow): BudgetStatus {

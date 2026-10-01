@@ -74,3 +74,23 @@ test('spend before re-attach stays on the closed budget and spend after lands on
     store.close();
   }
 });
+
+test('budgetWorkers shows re-attached worker only under current budget without double-counting', () => {
+  const store = openStore(':memory:');
+  try {
+    const first = openBudget(store, { project: 'acme/one', label: 'sprint-1', capUsd: 10, openedAt: '2026-09-29T00:00:00.000Z' });
+    attachWorker(store, 'w-one', first.id, '2026-09-29T00:01:00.000Z');
+    assert.deepEqual(budgetStatus(store, first).workers, ['w-one']);
+    assert.equal(budgetStatus(store, first).workerCount, 1);
+
+    const second = openBudget(store, { project: 'acme/one', label: 'sprint-2', capUsd: 10, openedAt: '2026-09-30T00:00:00.000Z' });
+    attachWorker(store, 'w-one', second.id, '2026-09-30T00:01:00.000Z');
+
+    assert.deepEqual(budgetStatus(store, first).workers, []);
+    assert.equal(budgetStatus(store, first).workerCount, 0);
+    assert.deepEqual(budgetStatus(store, second).workers, ['w-one']);
+    assert.equal(budgetStatus(store, second).workerCount, 1);
+  } finally {
+    store.close();
+  }
+});

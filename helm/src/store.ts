@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendLimitRow, SpendLimitState, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
+import { ensureTickets } from './tickets.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',
@@ -299,6 +300,7 @@ export function openStore(path: string): Store {
   const setSpendLimitStmt = db.prepare('INSERT INTO spend_limits (name, value, source, at, tapId) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, source = excluded.source, at = excluded.at, tapId = excluded.tapId');
   const getSpendLimitStateStmt = db.prepare('SELECT checksum, rows, at FROM spend_limit_state WHERE id = 1');
   const setSpendLimitStateStmt = db.prepare('INSERT INTO spend_limit_state (id, checksum, rows, at) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET checksum = excluded.checksum, rows = excluded.rows, at = excluded.at');
+  ensureTickets({ sql: db });
   return {
     sql: db,
     insertWorker(row: WorkerRow): void {

@@ -79,6 +79,7 @@ test('e2e: spawn -> faux Pi writes a file -> commit -> gate -> pr.open -> daemon
     const spawned = await helm.spawn({ repo, objective: 'Create hello.txt containing a greeting.', model: 'e2e-faux/offline', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
+    assert.ok(spawned.ok && spawned.workerId); assert.ok(spawned.ok && spawned.worktree);
     assert.equal(spawned.branch, `helm/${spawned.workerId}`);
     await helm.settle(spawned.workerId);
 
@@ -149,6 +150,7 @@ test('e2e: daemon restart marks a running worker interrupted; steer resumes it',
     const spawned = await helm.spawn({ repo, objective: 'Start something.', model: 'e2e-faux2/offline', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
+    assert.ok(spawned.ok && spawned.workerId);
     await helm.settle(spawned.workerId);
     assert.equal(store.getWorker(spawned.workerId)?.state, 'idle');
     store.updateWorker(spawned.workerId, { state: 'running' });

@@ -51,6 +51,7 @@ import {
 import { scorecardExportInput } from './scorecard.js';
 import { READ_TOOLS } from './lifecycle.js';
 import type { Helm } from './helm.js';
+import { statusLines } from './tickets.js';
 
 type ToolDef = Readonly<{
   name: ToolName;
@@ -172,11 +173,12 @@ function compactPr(outcome: ToolOutcome<unknown>, verbose: boolean): ToolOutcome
   };
 }
 
-function compactRunStatus(outcome: ToolOutcome<unknown>, verbose: boolean): ToolOutcome<unknown> {
-  if (verbose || !outcome.ok) return outcome;
+function compactRunStatus(outcome: ToolOutcome<unknown>, verbose: boolean): ToolOutcome<Record<string, unknown>> {
+  if (verbose || !outcome.ok) return outcome as ToolOutcome<Record<string, unknown>>;
   const source = outcome as JsonObject;
   const keys = ['spendUsd', 'spendCapUsd', 'spendWarnUsd', 'aboveSoftCap', 'activeWorkers', 'maxWorkers', 'unknownCostEvents', 'warning'];
-  return { ok: true, ...Object.fromEntries(keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])) };
+  const sections = source.sections as Parameters<typeof statusLines>[0] | undefined;
+  return { ok: true, ...Object.fromEntries(keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])), sections: statusLines(sections ?? { backlog: [], working: [], recent: [] }) };
 }
 
 function compactOutcome(name: string, input: unknown, outcome: ToolOutcome<unknown>): ToolOutcome<unknown> {
@@ -262,7 +264,9 @@ const TOOLS: readonly ToolDef[] = [
   def('worker.spawn', 'Start an isolated worker.', spawnInput, (h, i) => h.spawn(i)),
   def('worker.inspect', 'Inspect worker state and recent activity.', inspectInput, (h, i) => h.inspect(i)),
   def('worker.list', 'List workers by repository or state.', listInput, (h, i) => h.list(i)),
-  def('worker.wait', 'Wait for workers to settle.', waitInput, (h, i) => h.wait(i)),
+  def('ticket.cancel', 'Cancel queued work.', z.object({ ticketId: z.string().regex(/^t-[0-9a-f]+$/) }).strict(), (h, i) => h.ticketCancel(i)),
+  def('ticket.bump', 'Change queued priority.', z.object({ ticketId: z.string().regex(/^t-[0-9a-f]+$/), priority: z.enum(['low', 'normal', 'high', 'urgent']) }).strict(), (h, i) => h.ticketBump(i)),
+  def('worker.wait', 'Wait for workers or ticket changes.', waitInput, (h, i) => h.wait(i)),
   def('worker.steer', 'Send a follow-up turn to a worker.', steerInput, (h, i) => h.steer(i)),
   def('worker.retry', 'Retry a named worker failure.', retryInput, (h, i) => h.retryWorker(i)),
   def('worker.stop', 'Stop a worker at its next turn boundary.', stopInput, (h, i) => h.stop(i)),

@@ -68,6 +68,7 @@ export function createCapacityAdmission(options: Readonly<{
   statfs?: (path: string) => Promise<{ bavail: number; bsize: number }>;
   now?: () => Date;
   reload?: SettingsLoader;
+  canStart?: (job: CapacityJob) => boolean;
 }>): CapacityAdmission {
   const now = options.now ?? (() => new Date());
   const maxWorkers = (): number => typeof options.maxWorkers === 'function' ? options.maxWorkers() : options.maxWorkers;
@@ -97,6 +98,7 @@ export function createCapacityAdmission(options: Readonly<{
       peakRssMb REAL,
       notifiedAt TEXT
     );
+    CREATE INDEX IF NOT EXISTS capacity_jobs_worker ON capacity_jobs(workerId);
     CREATE INDEX IF NOT EXISTS capacity_jobs_queue ON capacity_jobs (endedAt, startedAt, priority, queuedAt);
   `);
   for (const column of ['payload TEXT', 'pid INTEGER', 'dedupeKey TEXT', 'rank TEXT']) {
@@ -251,11 +253,13 @@ export function createCapacityAdmission(options: Readonly<{
       }
       let statusNow = currentStatus;
       while (statusNow.queue.length) {
-        const head = statusNow.queue[0]!;
+        const eligible = statusNow.queue.filter((entry) => !options.canStart || options.canStart(jobFromRow(options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE id = ?').get(entry.id) as Record<string, unknown>)));
+        const head = eligible[0];
+        if (!head) break;
         const fits = (entry: CapacityQueueEntry) => !(statusNow.processLimited && processSensitive(entry.kind)) && (statusNow.maxWorkers === 0 || statusNow.runningJobs < statusNow.maxWorkers) && (statusNow.runningJobs === 0 || statusNow.availableUnits >= unit(entry.loadClass));
         const headFits = fits(head);
         if (!headFits && head.waitMs >= AGING_MS) break;
-        const entry = headFits ? head : statusNow.queue.slice(1).find((candidate) => unit(candidate.loadClass) < unit(head.loadClass) && fits(candidate));
+        const entry = headFits ? head : eligible.slice(1).find((candidate) => unit(candidate.loadClass) < unit(head.loadClass) && fits(candidate));
         if (!entry || !callbacks.has(entry.id)) break;
         start(jobFromRow(options.store.sql.prepare('SELECT * FROM capacity_jobs WHERE id = ?').get(entry.id) as Record<string, unknown>));
         statusNow = await status();
@@ -274,7 +278,7 @@ export function createCapacityAdmission(options: Readonly<{
     const newPriority = job.priority ?? priority(job.kind);
     const self = current.queue.find((entry) => entry.id === job.id);
     const hasEarlierJob = current.queue.some((entry) => entry.id !== job.id && (entry.priority < newPriority || entry.priority === newPriority && entry.score >= (self?.score ?? 10)));
-    if ((current.processLimited && processSensitive(job.kind)) || !countFits || !resourceFits || hasEarlierJob) {
+    if ((options.canStart && !options.canStart(job)) || (current.processLimited && processSensitive(job.kind)) || !countFits || !resourceFits || hasEarlierJob) {
       options.store.appendEvent(job.workerId, 'capacity.queued', { kind: job.kind, loadClass: job.loadClass, units: unit(job.loadClass), budget: current.budget, usedUnits: current.usedUnits, score: self?.score, reasons: self?.reasons });
       return { queued: true };
     }

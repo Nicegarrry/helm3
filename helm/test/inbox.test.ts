@@ -51,6 +51,7 @@ test('a question waits, is persisted as an ask, steer supersedes it, and reply r
     const first = await d.helm.spawn({ repo: d.home, objective: 'do it', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(first.ok, true);
     if (!first.ok) return;
+    assert.ok(first.ok && first.workerId);
     await d.helm.settle(first.workerId);
     assert.equal(d.store.getWorker(first.workerId)?.state, 'waiting');
     const firstItem = listInbox(d.store.sql)[0];
@@ -66,6 +67,7 @@ test('a question waits, is persisted as an ask, steer supersedes it, and reply r
     const second = await d.helm.spawn({ repo: d.home, objective: 'do it again', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(second.ok, true);
     if (!second.ok) return;
+    assert.ok(second.ok && second.workerId);
     await d.helm.settle(second.workerId);
     const secondItem = listInbox(d.store.sql, { state: 'open' }).find((item) => item.workerId === second.workerId);
     assert.ok(secondItem);
@@ -89,6 +91,7 @@ test('reply to a non-waiting worker is refused', async () => {
     const spawned = await d.helm.spawn({ repo: d.home, objective: 'do it', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
+    assert.ok(spawned.ok && spawned.workerId);
     await d.helm.settle(spawned.workerId);
     await d.helm.steer({ workerId: spawned.workerId, message: 'decide yourself' });
     await d.helm.settle(spawned.workerId);
@@ -107,6 +110,7 @@ async function triageCase(answers: JevResult) {
   const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', acceptance: 'tests pass', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
   assert.equal(spawned.ok, true);
   if (!spawned.ok) throw new Error('spawn failed');
+  assert.ok(spawned.ok && spawned.workerId);
   await d.helm.settle(spawned.workerId);
   const item = listInbox(d.store.sql, { state: 'open' }).find((row) => row.workerId === spawned.workerId);
   assert.ok(item);
@@ -122,6 +126,7 @@ test('A5b triage sends the envelope context and routes human probability to need
     const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', acceptance: 'tests pass', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
+    assert.ok(spawned.ok && spawned.workerId);
     await d.helm.settle(spawned.workerId);
     const item = listInbox(d.store.sql, { state: 'open' })[0]!;
     const fake: Jev = { shadow: true, async ask(...args) { captured = args; return { ok: true, answers: { route: { choice: 'needs_supervisor', probabilities: { needs_human: 0.35 }, confidence: 0.8 }, outside: { noul: false }, inIssue: { noul: false } } }; } };
@@ -143,6 +148,7 @@ test('A5b basename-slug projects use the built-in envelope rules', async () => {
     const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
+    assert.ok(spawned.ok && spawned.workerId);
     await d.helm.settle(spawned.workerId);
     let captured: Parameters<Jev['ask']> | undefined;
     const fake: Jev = { shadow: true, async ask(...args) { captured = args; return { ok: false, reason: 'no key' }; } };
@@ -156,6 +162,7 @@ test('A5b advances past a throwing item and triages the next ask', async () => {
   try {
     for (let i = 0; i < 2; i += 1) {
       const spawned = await d.helm.spawn({ repo: d.home, objective: `choose API ${i}`, model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
+      assert.ok(spawned.ok && spawned.workerId);
       assert.equal(spawned.ok, true);
       if (spawned.ok) await d.helm.settle(spawned.workerId);
     }
@@ -214,6 +221,7 @@ test('A5b real Jev triage records route confidence in jev_calls', async () => {
     const spawned = await d.helm.spawn({ repo: d.home, objective: 'choose an API', acceptance: 'tests pass', model: 'test/model', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
+    assert.ok(spawned.ok && spawned.workerId);
     await d.helm.settle(spawned.workerId);
     const jev = createJev({
       settings: loadSettings('/definitely/missing/helm-home'),

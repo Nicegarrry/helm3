@@ -59,6 +59,7 @@ test('spawn defaults to the Codex normal model before any chooser is registered'
   const repo = mkdtempSync(join(tmpdir(), 'helm-b0-repo-'));
   try {
     const result = await d.helm.spawn({ repo, objective: 'test', role: 'builder', contextPaths: [], allowWorkflows: false });
+    assert.ok(result.ok && result.workerId);
     assert.equal(result.ok, true);
     if (result.ok) {
       await d.helm.settle(result.workerId);
@@ -74,14 +75,17 @@ test('a model chooser runs only for an unclassified spawn', async () => {
   try {
     d.helm.chooseModel(() => { calls += 1; return 'codex/gpt-6-luna:medium'; });
     const explicit = await d.helm.spawn({ repo, objective: 'explicit', role: 'builder', model: 'acme/model', contextPaths: [], allowWorkflows: false });
+    assert.ok(explicit.ok && explicit.workerId);
     assert.equal(explicit.ok, true);
     if (explicit.ok) await d.helm.settle(explicit.workerId);
     assert.equal(calls, 0);
     const classified = await d.helm.spawn({ repo, objective: 'classified', role: 'builder', difficulty: 'easy', contextPaths: [], allowWorkflows: false });
+    assert.ok(classified.ok && classified.workerId);
     assert.equal(classified.ok, true);
     if (classified.ok) await d.helm.settle(classified.workerId);
     assert.equal(calls, 0);
     const unclassified = await d.helm.spawn({ repo, objective: 'unclassified', role: 'builder', contextPaths: [], allowWorkflows: false });
+    assert.ok(unclassified.ok && unclassified.workerId);
     assert.equal(unclassified.ok, true);
     if (unclassified.ok) {
       assert.equal(d.store.getWorker(unclassified.workerId)?.model, 'codex/gpt-6-luna:medium');

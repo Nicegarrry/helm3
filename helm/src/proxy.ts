@@ -11,6 +11,7 @@ export const MIN_SHIM_VERSION = 1;
 export const SHIM_RESTART_NOTE = 'Restart this MCP session: its Helm shim is below the supported minimum.';
 const WAIT_PROGRESS_MS = 30_000;
 const WAIT_PROGRESS_POLL_MS = 10_000;
+const PROGRESS_READ_TIMEOUT_MS = 2_000;
 
 function configuredProgressPollMs() {
   const configured = Number(process.env.HELM_PROGRESS_POLL_MS);
@@ -124,9 +125,19 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
     const sent = new Map<string, string>();
     const sentAt = new Map<string, number>();
     const publish = async (force = false) => {
+      if (extra.signal.aborted) return;
       const query = new URLSearchParams({ workerIds: workerIds.join(','), timeoutMs: String(timeoutMs), startedAt: String(started) });
-      const snapshot = await proxyRequest(port, `/api/progress?${query}`, undefined, profile, home, observe) as ProgressState;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let snapshot: ProgressState & { ok?: boolean };
+      try {
+        snapshot = await Promise.race([
+          proxyRequest(port, `/api/progress?${query}`, undefined, profile, home, observe, PROGRESS_READ_TIMEOUT_MS),
+          new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('progress read timed out')), PROGRESS_READ_TIMEOUT_MS); }),
+        ]) as ProgressState & { ok?: boolean };
+      } finally { clearTimeout(timeout); }
+      if (snapshot.ok !== true || !Array.isArray(snapshot.workers)) throw new Error('progress read failed');
       for (const workerId of workerIds) {
+        if (extra.signal.aborted) return;
         const update = waitProgress(snapshot, workerId);
         const signature = progressSignature(update);
         const last = sent.get(workerId);
@@ -139,8 +150,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
           params: {
             progressToken,
             progress: ++progressValue,
-            total: timeoutMs,
-            message: `state=${update.state}; position=${update.position ?? '-'}; etaMs=${update.etaMs}; activity=${update.activity}`,
+            message: `worker=${workerId}; state=${update.state}; position=${update.position ?? '-'}; etaMs=${update.etaMs}; activity=${update.activity}`,
             _meta: { helm: update },
           },
         });
@@ -151,23 +161,25 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       try { await publish(force); }
       catch (error) { logProgressError(error); }
     };
-    await publishSafely(true);
     let publishing = false;
-    let publishingNow: Promise<void> | undefined;
-    const progress = setInterval(() => {
-      if (publishing) return;
+    const pollProgress = () => {
+      if (publishing || extra.signal.aborted) return;
       publishing = true;
-      publishingNow = publishSafely().finally(() => { publishing = false; });
+      void publishSafely().finally(() => { publishing = false; });
+    };
+    pollProgress();
+    const progress = setInterval(() => {
+      pollProgress();
     }, progressPollMs);
     progress.unref();
+    const stopProgress = () => clearInterval(progress);
+    extra.signal.addEventListener('abort', stopProgress, { once: true });
     try {
       const outcome = await wait;
-      clearInterval(progress);
-      await publishingNow;
-      await publishSafely(true);
       return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
     } finally {
-      clearInterval(progress);
+      stopProgress();
+      extra.signal.removeEventListener('abort', stopProgress);
     }
   });
   let finish!: () => void;

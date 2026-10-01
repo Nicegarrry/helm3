@@ -83,7 +83,7 @@ for its lifetime; each daemon boot creates a fresh cache.
 
 An MCP front-end over stdio that forwards every tool call to the current daemon. It owns nothing: no store, no workers. Any number of these can attach to one daemon, one per orchestrator session, and each exits with its client. Calls go over `node:http` rather than `fetch` because undici gives up on a response after five silent minutes, and `worker.wait` may hold a response open for twenty-five.
 
-For a `worker.wait` request with an MCP `progressToken`, the stdio shim reads the daemon's targeted `/api/progress` endpoint while the single wait request remains in flight. It emits `notifications/progress` on state, queue-position, or activity changes and at least every 30 seconds; metadata includes the state, one-based queue position when queued, wait-timeout ETA, and one-line latest activity. Without a token it makes no progress reads or notifications.
+For a `worker.wait` request with an MCP `progressToken`, the stdio shim reads the daemon's targeted `/api/progress` endpoint every 10 seconds while the single wait request remains in flight. It emits `notifications/progress` on state, queue-position, or activity changes and at least every 30 seconds; metadata includes the state, one-based queue position when queued, wait-timeout ETA, and one-line latest activity. Without a token it makes no progress reads or notifications.
 
 Every daemon HTTP route requires `Authorization: Bearer <token>` as well as the Host
 check. The token rotates at startup and is stored with port/pid in the private `0600`

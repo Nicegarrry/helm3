@@ -51,7 +51,7 @@ test('seeded portfolio reuses scorecard activity, includes old workers, budget a
     const content = formatPortfolio(report);
     const lines = content.split('\n');
     assert.match(lines[0]!, /^\*\*Helm · [A-Za-z]{3} \d{1,2} [A-Za-z]{3}\*\*$/);
-    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 ask', '$2.00 spent · $10.00 budgeted · Codex 120 tokens', '',
+    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 ask · 1 tap pending', '$2.00 spent · $10.00 budgeted · Codex 120 tokens', '',
       '**one**: 1 merged, 2 PRs open (1 needs review), 50% gates pass first time, $2.00, 1 tap pending', '**two**: 1 stuck, 1 ask', 'Idle: empty']);
     assert.doesNotMatch(content, /\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}/, 'no ISO timestamps in the report');
     assert.doesNotMatch(content, /acme\//, 'repo names drop the owner prefix');
@@ -75,6 +75,7 @@ test('one compact line per active project; idle collapse after a blank line; a z
     const second = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
     assert.ok(second.includes('**idle-a**: 1 PR open (1 needs review)'), 'open PRs alone make a project active');
     assert.ok(second.includes('· 1 PR open (1 needs review)'), 'singular PR and needs in the headline');
+    assert.ok(!second.includes('tap'), 'no taps segment when fleet taps are zero');
     assert.match(second, /^Idle: idle-b$/m);
     f.store.insertPr({ repoSlug: 'acme/idle-b', workerId: 'paid', number: 202, head: 'b', state: 'open', url: 'https://pr/202', createdAt: old });
     const third = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
@@ -198,7 +199,10 @@ test('Discord truncation keeps the first three summary lines and marks dropped l
   const fallback = reportContent(['a'.repeat(1_200), 'b'.repeat(1_200), 'c'.repeat(1_200), 'd'].join('\n'));
   assert.ok(fallback.length <= 2000); assert.match(fallback, /\n…and 4 more$/);
   const f = fixture({ report: { webhookEnv: 'REPORT' }, discord: { projects: Object.fromEntries(Array.from({ length: 200 }, (_, i) => ['project-' + i, { webhookEnv: 'EMPTY' }])) } }); const sent: { url: string; content: string }[] = [];
-  try { for (let i = 0; i < 200; i++) insertInbox(f.store.sql, { id: 'bulk-' + i, project: 'project-' + i, workerId: 'w', question: 'q', createdAt: old }); await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /\n…and \d+ more$/); assert.ok(sent[0]!.content.startsWith('**Helm')); assert.ok(sent[0]!.content.includes('200 asks'), 'headline totals survive the webhook truncation'); } finally { f.close(); }
+  try { for (let i = 0; i < 200; i++) insertInbox(f.store.sql, { id: 'bulk-' + i, project: 'project-' + i, workerId: 'w', question: 'q', createdAt: old });
+    ensureTapTable(f.store); const tapAt = new Date(2026, 9, 1, 6).toISOString();
+    f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('tr1', 'project-0', 'test', 'a', 'h', 'h', 'used', tapAt, tapAt); f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('tr2', 'project-1', 'test', 'a', 'h', 'h', 'used', tapAt, tapAt);
+    await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /\n…and \d+ more$/); assert.ok(sent[0]!.content.startsWith('**Helm')); assert.ok(sent[0]!.content.includes('200 asks · 2 taps pending'), 'headline totals including fleet taps survive the webhook truncation'); } finally { f.close(); }
 });
 
 test('unsuccessful webhook sends do not advance the persisted date and can retry', async () => {

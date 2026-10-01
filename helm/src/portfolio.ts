@@ -53,7 +53,7 @@ export function formatPortfolio(report: Awaited<ReturnType<typeof portfolio>>): 
   if (t.merged === 0 && t.openPrs === 0 && t.stuck === 0 && t.inbox === 0 && t.taps === 0 && t.usd === 0 && t.codexTokens === 0) lines.push('Nothing needs you');
   else {
     const review = report.projects.reduce((a, r) => a + r.openPrs.filter((p) => p.waiting === 'review').length, 0);
-    const headline = [`${t.merged} merged`, t.openPrs ? (review ? `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open (${review} ${word(review, 'needs', 'need')} review)` : `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open`) : null, t.stuck ? `${t.stuck} stuck` : null, t.inbox ? `${t.inbox} ${word(t.inbox, 'ask', 'asks')}` : null].filter(Boolean);
+    const headline = [`${t.merged} merged`, t.openPrs ? (review ? `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open (${review} ${word(review, 'needs', 'need')} review)` : `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open`) : null, t.stuck ? `${t.stuck} stuck` : null, t.inbox ? `${t.inbox} ${word(t.inbox, 'ask', 'asks')}` : null, t.taps ? `${t.taps} ${word(t.taps, 'tap', 'taps')} pending` : null].filter(Boolean);
     lines.push(headline.join(' · '));
   }
   const caps = report.projects.filter((r) => r.budget);

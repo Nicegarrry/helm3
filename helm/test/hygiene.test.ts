@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -181,6 +181,13 @@ test('GC removes old terminal deploys, keeps recent or long-running deploy workt
     assert.equal(existsSync(recentPath), true);
     assert.equal(existsSync(runningPath), true);
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('repository does not commit a stray helm/package-lock.json and .gitignore ignores it', () => {
+  const helmDir = process.cwd(); // tests run from helm/
+  const gitignore = readFileSync(join(helmDir, '..', '.gitignore'), 'utf8');
+  assert.ok(gitignore.split('\n').map((line) => line.trim()).includes('helm/package-lock.json'));
+  assert.equal(existsSync(join(helmDir, 'package-lock.json')), false);
 });
 
 test('node_modules cleanup refuses symlink targets outside the worker worktree', async () => {

@@ -3,8 +3,8 @@ import test from 'node:test';
 import { openStore } from '../src/store.js';
 import { attachWorker, budgetStatus, closeBudget, listBudgetStatuses, openBudget, openBudgetFor } from '../src/budget.js';
 
-function spend(store: ReturnType<typeof openStore>, workerId: string, model: string, costUsd: number, inputTokens = 0, outputTokens = 0): void {
-  store.addSpend({ workerId, model, inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd, at: new Date().toISOString() });
+function spend(store: ReturnType<typeof openStore>, workerId: string, model: string, costUsd: number, inputTokens = 0, outputTokens = 0, at = new Date().toISOString()): void {
+  store.addSpend({ workerId, model, inputTokens, outputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd, at });
 }
 
 test('budgets are independent, rotate on open, and keep worker attribution on the old sprint', () => {
@@ -51,6 +51,25 @@ test('closing an absent budget is a no-op and status keeps closed budgets', () =
     const closed = closeBudget(store, budget.project, '2026-09-29T01:00:00.000Z');
     assert.equal(closed?.closedAt, '2026-09-29T01:00:00.000Z');
     assert.equal(listBudgetStatuses(store, budget.project).length, 1);
+  } finally {
+    store.close();
+  }
+});
+
+test('spend before re-attach stays on the closed budget and spend after lands on the new one', () => {
+  const store = openStore(':memory:');
+  try {
+    const first = openBudget(store, { project: 'acme/one', label: 'sprint-1', capUsd: 10, openedAt: '2026-09-29T00:00:00.000Z' });
+    attachWorker(store, 'w-one', first.id, '2026-09-29T00:01:00.000Z');
+    spend(store, 'w-one', 'pi/model', 6, 0, 0, '2026-09-29T00:05:00.000Z');
+    assert.equal(budgetStatus(store, first).spentUsd, 6);
+
+    const second = openBudget(store, { project: 'acme/one', label: 'sprint-2', capUsd: 10, openedAt: '2026-09-30T00:00:00.000Z' });
+    attachWorker(store, 'w-one', second.id, '2026-09-30T00:01:00.000Z');
+    spend(store, 'w-one', 'pi/model', 4, 0, 0, '2026-09-30T00:05:00.000Z');
+
+    assert.equal(budgetStatus(store, first).spentUsd, 6);
+    assert.equal(budgetStatus(store, second).spentUsd, 4);
   } finally {
     store.close();
   }

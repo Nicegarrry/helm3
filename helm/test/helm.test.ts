@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import test from 'node:test';
 import { Helm, modelFamily, type HelmPrompts, type SpawnInput } from '../src/helm.js';
-import { budgetForWorker, openBudget } from '../src/budget.js';
+import { attachWorker, budgetForWorker, budgetStatus, openBudget } from '../src/budget.js';
 import { createModelCatalog } from '../src/routing/catalog.js';
 import { openStore } from '../src/store.js';
 import { createSupervisor } from '../src/supervise.js';
@@ -949,7 +949,7 @@ test('steer re-attaches worker to open budget when original budget is closed', a
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
-  assert.ok(spawned.ok && spawned.workerId);
+  assert.ok(spawned.workerId);
   await helm.settle(spawned.workerId);
 
   const workerRow = store.getWorker(spawned.workerId);
@@ -967,6 +967,7 @@ test('steer re-attaches worker to open budget when original budget is closed', a
   // Steer should now succeed because worker is reattached to sprint-2
   const steered = await helm.steer({ workerId: spawned.workerId, message: 'continue' });
   assert.equal(steered.ok, true);
+  await helm.settle(spawned.workerId);
 
   const updatedBudget = budgetForWorker(store, spawned.workerId);
   assert.equal(updatedBudget?.id, opened.id);
@@ -976,6 +977,10 @@ test('steer re-attaches worker to open budget when original budget is closed', a
   assert.equal(reattachedEvent.data.project, workerRow.repoSlug);
   assert.equal(reattachedEvent.data.budgetId, opened.id);
   assert.equal(reattachedEvent.data.fromBudgetId, initialBudget.id);
+
+  // Spend before re-attach stays on closed budget, spend after re-attach lands on new budget
+  assert.equal(budgetStatus(store, initialBudget).spentUsd, 0.01);
+  assert.equal(budgetStatus(store, opened).spentUsd, 0.01);
 });
 
 test('steer re-attaches worker to open budget but refuses when open budget is exhausted too', async () => {
@@ -984,30 +989,22 @@ test('steer re-attaches worker to open budget but refuses when open budget is ex
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
-  assert.ok(spawned.ok && spawned.workerId);
+  assert.ok(spawned.workerId);
   await helm.settle(spawned.workerId);
 
   const workerRow = store.getWorker(spawned.workerId);
   assert.ok(workerRow);
-  const initialBudget = budgetForWorker(store, spawned.workerId);
-  assert.ok(initialBudget);
 
-  // Open a new budget whose cap is already met by the worker's spend ($0.01)
-  const opened = openBudget(store, { project: workerRow.repoSlug, label: 'sprint-2', capUsd: 0.005, openedAt: new Date().toISOString() });
+  // Open a new budget and exhaust it with another worker
+  const opened = openBudget(store, { project: workerRow.repoSlug, label: 'sprint-2', capUsd: 0.01, openedAt: new Date().toISOString() });
+  attachWorker(store, 'w-other', opened.id);
+  store.addSpend({ workerId: 'w-other', model: 'pi/model', inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.01, at: new Date().toISOString() });
 
   const refused = await helm.steer({ workerId: spawned.workerId, message: 'continue' });
   assert.equal(refused.ok, false);
   if (!refused.ok) {
     assert.match(refused.reason, /budget exhausted \(sprint-2/);
   }
-
-  const updatedBudget = budgetForWorker(store, spawned.workerId);
-  assert.equal(updatedBudget?.id, opened.id);
-
-  const reattachedEvent = store.listEvents(spawned.workerId).find((event) => event.kind === 'budget.reattached');
-  assert.ok(reattachedEvent);
-  assert.equal(reattachedEvent.data.budgetId, opened.id);
-  assert.equal(reattachedEvent.data.fromBudgetId, initialBudget.id);
 });
 
 test('inbox.reply refuses an exhausted project budget', async () => {

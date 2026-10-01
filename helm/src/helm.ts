@@ -1485,11 +1485,11 @@ export class Helm {
 
   private assertBudget(project: string, workerId?: string): BudgetStatus {
     let budget = workerId ? budgetForWorker(this.store, workerId) : undefined;
-    if (workerId && budget?.closedAt) {
+    if (budget?.closedAt) {
       const previous = budget;
       budget = this.ensureProjectBudget(project);
-      attachWorker(this.store, workerId, budget.id);
-      this.store.appendEvent(workerId, 'budget.reattached', {
+      attachWorker(this.store, workerId!, budget.id, this.nowIso());
+      this.store.appendEvent(workerId!, 'budget.reattached', {
         project,
         budgetId: budget.id,
         fromBudgetId: previous.id,
@@ -1497,7 +1497,7 @@ export class Helm {
     }
     if (!budget) {
       budget = this.ensureProjectBudget(project);
-      if (workerId) attachWorker(this.store, workerId, budget.id);
+      if (workerId) attachWorker(this.store, workerId, budget.id, this.nowIso());
     }
     const current = budgetStatus(this.store, budget);
     must(!current.exhausted, `budget exhausted (${budget.label} $${current.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`);

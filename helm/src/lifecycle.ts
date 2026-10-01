@@ -31,6 +31,7 @@ export class Lifecycle {
   private stopping = false;
   private readonly marker: string;
   shutdown?: () => void;
+  restart?: () => void;
   upgrade?: (timeoutMs: number) => void;
   constructor(readonly home: string, private readonly workers: () => string[]) {
     this.marker = join(home, 'drain.json');
@@ -48,8 +49,8 @@ export class Lifecycle {
     this.active.set(token, name);
     return () => { this.active.delete(token); };
   }
-  drain(): void {
-    atomicMetadata(this.marker, { requestedAt: new Date().toISOString() });
+  drain(persist = true): void {
+    if (persist) atomicMetadata(this.marker, { requestedAt: new Date().toISOString() });
     this.draining = true;
   }
   async control(input: { action: string; timeoutMs?: number; upgradeId?: string; expectedBootId?: string }): Promise<ToolOutcome<ReturnType<Lifecycle['status']>>> {
@@ -61,12 +62,13 @@ export class Lifecycle {
         rmSync(this.marker, { force: true });
         this.draining = false;
       }
-      if (input.action === 'shutdown' && !this.stopping) {
-        this.drain();
+      if ((input.action === 'shutdown' || input.action === 'restart') && !this.stopping) {
+        this.drain(false);
         if (this.status().blockers.length) throw new Error(`still draining: ${this.status().blockers.join(', ')}`);
-        if (!this.shutdown) throw new Error('shutdown handler unavailable');
+        const stop = input.action === 'restart' ? this.restart : this.shutdown;
+        if (!stop) throw new Error('shutdown handler unavailable');
         this.stopping = true;
-        setImmediate(this.shutdown);
+        setImmediate(stop);
       }
       if (input.action === 'upgrade') {
         if (!this.upgrade || this.stopping) throw new Error('upgrade handler unavailable');

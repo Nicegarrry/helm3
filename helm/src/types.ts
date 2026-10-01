@@ -352,7 +352,7 @@ export const prMergeInput = z.object({ project: z.string().min(1).optional(), re
 export const reviewRecordInput = z.object({
   project: z.string().min(1).optional(), repoSlug: z.string().min(1).optional(), number: z.number().int().positive(), head: z.string().regex(/^[0-9a-f]{40}$/), commentUrl: z.string().url(), reviewer: z.string().min(1), verdict: z.enum(['approve', 'request_changes']),
 }).strict();
-export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
+export const daemonInput = z.object({ action: z.enum(['status', 'drain', 'resume', 'shutdown', 'restart', 'upgrade']), upgradeId: z.string().uuid().optional(), expectedBootId: z.string().uuid().optional(), timeoutMs: z.number().int().min(1).max(86_400_000).optional() }).strict();
 export const emptyInput = z.object({}).strict();
 export const runStatusInput = z.object({ verbose: z.boolean().optional() }).strict();
 export const supervisorRegisterInput = z.object({ project: z.string().min(1), repo: z.string().min(1), host: z.enum(['herdr', 'tmux']), label: z.string().min(1) }).strict();

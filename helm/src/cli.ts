@@ -90,7 +90,8 @@ function usage(): void {
   deploy rollback <id> [--tap-id <id>] [--json]
   jev check --preset <issue|dedupe|verdict|raw> --file <json|md> [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
-  shutdown`);
+  shutdown
+  restart`);
 }
 
 function openReadStore() {
@@ -580,11 +581,19 @@ async function cmdServe(args: string[]): Promise<void> {
     process.exit(0);
   };
   helm.lifecycle.shutdown = () => { void shutdown(); };
+  helm.lifecycle.restart = () => {
+    // The helper inherits the running daemon environment without serializing credentials.
+    const log = openSync(join(config.home, 'daemon.log'), 'a');
+    const child = spawn(process.execPath, ['--import', 'tsx', process.argv[1]!, 'restart', '--handover', '--port', String(handle.port)], { detached: true, stdio: ['ignore', log, log], env: process.env });
+    closeSync(log);
+    child.once('spawn', () => { child.unref(); void shutdown(); });
+    child.once('error', (err) => console.error(`restart helper failed: ${err.message}`));
+  };
   helm.lifecycle.upgrade = (timeout) => launchUpgrade(config.home, handle.port!, helm.lifecycle.status(), timeout);
   let signaling = false;
   const drainOnSignal = async () => {
     if (signaling) return;
-    signaling = true; helm.lifecycle.drain();
+    signaling = true; helm.lifecycle.drain(false);
     const deadline = Date.now() + 600_000;
     while (helm.lifecycle.status().blockers.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
     const result = await helm.lifecycle.control({ action: 'shutdown' });
@@ -619,7 +628,34 @@ async function startDetachedDaemon(home: string, serveJsonPath: string, port: nu
 async function cmdShutdown(): Promise<void> {
   printOutcome(await postTool('daemon.control', { action: 'shutdown' }), false);
 }
-const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
+const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (p, v) => ({ action: p[0] === 'stop' ? 'shutdown' : v.action ?? p[0] ?? 'status' }), { action: { type: 'string' } });
+async function cmdRestart(args: string[]): Promise<void> {
+  const { values } = parseArgs({ args, options: { handover: { type: 'boolean' }, port: { type: 'string' } } });
+  const config = loadConfig();
+  const path = join(config.home, 'serve.json');
+  const deadline = Date.now() + 60_000;
+  if (values.handover) {
+    while (existsSync(join(config.home, 'daemon.lock')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    if (existsSync(join(config.home, 'daemon.lock'))) throw new Error('restart timed out waiting for daemon stop');
+    await startDetachedDaemon(config.home, path, Number(values.port), resolveToolProfile(process.env.HELM_TOOLS));
+    return;
+  }
+  const live = readLiveServeJson(path);
+  if (!live) throw new Error('daemon is not running');
+  const before = await callDaemon(live.port, 'daemon.control', { action: 'status' }, false, undefined, config.home) as { ok: boolean; bootId?: string; reason?: string };
+  if (!before.ok || !before.bootId) throw new Error(before.reason ?? 'daemon identity unavailable');
+  const result = await callDaemon(live.port, 'daemon.control', { action: 'restart', expectedBootId: before.bootId }, false, undefined, config.home) as { ok: boolean; reason?: string };
+  if (!result.ok) throw new Error(result.reason);
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    const next = readLiveServeJson(path);
+    if (!next) continue;
+    const status = await callDaemon(next.port, 'daemon.control', { action: 'status' }, false, undefined, config.home) as { ok: boolean; bootId?: string; phase?: string };
+    if (status.ok && status.bootId !== before.bootId && status.phase === 'accepting') { console.log('helm daemon restarted and ready'); return; }
+  }
+  throw new Error('restart did not become accepting within 60s; inspect daemon.log and lifecycle status');
+}
+
 async function cmdPortfolio(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { json: { type: 'boolean' }, since: { type: 'string' } } });
   const { config, store } = openReadStore();
@@ -643,7 +679,7 @@ const cmdDeploy = async (args: string[]): Promise<void> => {
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
-  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
+  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown, restart: cmdRestart,
   inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, portfolio: cmdPortfolio, routing: cmdRouting, deploy: cmdDeploy,
 };
 

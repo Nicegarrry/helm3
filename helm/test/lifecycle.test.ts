@@ -45,3 +45,16 @@ test('a stale updater cannot drain or shut down a replacement daemon', async (t)
     assert.equal(replacement.status().phase, 'accepting');
   }
 });
+
+test('plain shutdown and signal-style drain leave the next daemon accepting', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  for (const signalStyle of [false, true]) {
+    const first = new Lifecycle(home, () => []);
+    first.shutdown = () => {};
+    if (signalStyle) first.drain(false);
+    assert.ok((await first.control({ action: 'shutdown' })).ok);
+    const next = new Lifecycle(home, () => []);
+    assert.equal(next.status().phase, 'accepting');
+  }
+});

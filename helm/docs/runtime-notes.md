@@ -67,7 +67,14 @@ Codex CLI runtime: one `codex exec` (or `codex exec resume <thread>`) process pe
 a loopback HTTP API whose internal calls retain the full registry. See DESIGN.md and
 one-shot-brief.md section 3.
 
-An MCP front-end over stdio that forwards every tool call to the daemon on `port`. It owns nothing: no store, no workers. Any number of these can attach to one daemon, one per orchestrator session, and each exits with its client. Calls go over `node:http` rather than `fetch` because undici gives up on a response after five silent minutes, and `worker.wait` may hold a response open for twenty-five.
+The stable `proxy.ts` stdio shim fetches descriptions and JSON schemas from authenticated
+`GET /mcp/tools?profile=<profile>` at startup and each tools/list. It forwards arguments unchanged;
+only the daemon validates. It re-reads serve.json port/token per attempt, retries refusals before
+admission for up to 60 seconds, observes x-helm-tools-hash on responses and polls every 60 seconds
+to emit notifications/tools/list_changed. x-helm-shim identifies its protocol version; only an
+unsupported old shim receives the one-line session restart note.
+
+An MCP front-end over stdio that forwards every tool call to the current daemon. It owns nothing: no store, no workers. Any number of these can attach to one daemon, one per orchestrator session, and each exits with its client. Calls go over `node:http` rather than `fetch` because undici gives up on a response after five silent minutes, and `worker.wait` may hold a response open for twenty-five.
 
 Every daemon HTTP route requires `Authorization: Bearer <token>` as well as the Host
 check. The token rotates at startup and is stored with port/pid in the private `0600`

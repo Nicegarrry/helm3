@@ -1,10 +1,9 @@
 /** `helm serve`: exposes the tool registry over MCP (stdio and Streamable HTTP) plus a small loopback HTTP API the CLI uses. */
 import { createServer, type IncomingMessage, type ServerResponse, request as httpRequest } from 'node:http';
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { compactInputSchema, compactInputValidator, createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
@@ -23,23 +22,8 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   return serveHttp(opts.helm, createToolRegistry(opts.helm, 'all'), opts.port ?? 0);
 }
 
-/** Stdio proxy: owns no workers or store; forwards calls without replay. See docs/runtime-notes.md. */
-export async function serveStdioProxy(port: number, tools?: ToolProfile, home?: string): Promise<ServeHandle> {
-  const profile = tools ?? resolveToolProfile(process.env.HELM_TOOLS);
-  const local = createToolRegistry(undefined as unknown as Helm, profile, true); // schemas only; `call` forwards here
-  const registry: Registry = {
-    list: () => local.list(),
-    call: (name, input) => callDaemon(port, name, input, true, profile, home) as ReturnType<Registry['call']>,
-  };
-  const mcp = buildMcpServer(registry);
-  const transport = new StdioServerTransport();
-  const closed = new Promise<void>((resolve) => {
-    transport.onclose = () => resolve();
-    process.stdin.once('end', () => resolve());
-  });
-  await mcp.connect(transport);
-  return { port, closed, async close() { await mcp.close(); } };
-}
+export { serveStdioProxy } from './proxy.js';
+import { MIN_SHIM_VERSION, SHIM_RESTART_NOTE } from './proxy.js';
 
 export function callDaemon(port: number, name: string, input: unknown, fromMcp = false, tools?: ToolProfile, home?: string): Promise<unknown> {
   let authorization: string;
@@ -58,9 +42,13 @@ export function callDaemon(port: number, name: string, input: unknown, fromMcp =
   });
 }
 
+function advertisedTools(registry: Registry) {
+  return registry.list().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) }));
+}
+
 function buildMcpServer(registry: Registry): McpServer {
   const server = new McpServer({ name: 'helm', version: VERSION });
-  const advertisedTools = registry.list().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) }));
+  const tools = advertisedTools(registry);
   for (const tool of registry.list()) {
     server.registerTool(
       tool.name,
@@ -68,7 +56,7 @@ function buildMcpServer(registry: Registry): McpServer {
       async (args: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(await registry.call(tool.name, args)) }] }),
     );
   }
-  server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: advertisedTools }));
+  server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   return server;
 }
 
@@ -130,7 +118,19 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
       res.writeHead(401).end();
       return;
     }
+    const profile = resolveToolProfile(req.headers['x-helm-tools']);
+    const catalog = advertisedTools(createToolRegistry(helm, profile, true));
+    res.setHeader('x-helm-tools-hash', createHash('sha256').update(JSON.stringify(catalog)).digest('hex'));
+    const oldShim = req.headers['x-helm-shim'] !== undefined && Number(req.headers['x-helm-shim']) < MIN_SHIM_VERSION;
+    if (oldShim) res.setHeader('x-helm-shim-note', SHIM_RESTART_NOTE);
     const url = new URL(req.url ?? '/', `http://${host}`);
+
+    if (url.pathname === '/mcp/tools' && req.method === 'GET') {
+      const tools = advertisedTools(createToolRegistry(helm, resolveToolProfile(url.searchParams.get('profile') ?? profile), true));
+      res.setHeader('x-helm-tools-hash', createHash('sha256').update(JSON.stringify(tools)).digest('hex'));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ tools, ...(oldShim ? { note: SHIM_RESTART_NOTE } : {}) }));
+      return;
+    }
 
     if (url.pathname === '/mcp') {
       const header = req.headers['x-helm-tools'];
@@ -182,7 +182,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
         ? createToolRegistry(helm, resolveToolProfile(req.headers['x-helm-tools']), true)
         : internalRegistry;
       const outcome = await registry.call(name, input);
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(outcome));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(oldShim ? { ...outcome, note: SHIM_RESTART_NOTE } : outcome));
       return;
     }
 

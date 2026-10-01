@@ -220,7 +220,9 @@ const FAKE_PROMPTS: HelmPrompts = {
 
 const cleanupDirs: string[] = [];
 const cleanupStores: Store[] = [];
-test.after(() => {
+const cleanupHelms: Helm[] = [];
+test.after(async () => {
+  for (const helm of cleanupHelms) await helm.close();
   for (const store of cleanupStores) store.close();
   for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
 });
@@ -267,6 +269,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     headWaitMs: 50,
     headPollMs: 5,
   });
+  cleanupHelms.push(helm);
   return { helm, store, workspace, pushed, cloned, fetched, created, removed, markDirty, github: githubFake, config };
 }
 
@@ -349,31 +352,60 @@ test('a repo helm.json priority is the project default and an explicit priority 
   if (plain.ok) assert.equal(admissionEvent(store, plain.workerId)?.stated, 'normal');
 });
 
-test('dispatched issue-title lookup runs after spawn admission and falls back on failure', async () => {
+test('dispatched issue-title lookup runs after spawn admission and falls back on failure', { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dispatchedEvent = (store: Store) => new Promise<void>((resolve) => {
+    const append = store.appendEvent.bind(store);
+    store.appendEvent = (workerId, kind, data, at) => {
+      const event = append(workerId, kind, data, at);
+      if (kind === 'dispatched') resolve();
+      return event;
+    };
+  });
   let resolveTitle!: (title: string) => void;
   const lookup = new Promise<string>((resolve) => { resolveTitle = resolve; });
-  const seed = makeHelm();
-  const first = makeHelm({ github: { ...seed.github.github, issueTitle: async () => lookup } });
+  const github = createFakeGitHub().github;
+  const first = makeHelm({ github: { ...github, issueTitle: async () => {
+    assert.equal(first.store.listWorkers().length, 1, 'lookup starts after admission');
+    return lookup;
+  } } });
+  const firstDispatched = dispatchedEvent(first.store);
+  t.after(async () => { resolveTitle('Issue title'); await firstDispatched; await first.helm.close(); });
   const repo = mkTempDir('helm-dispatched-title-');
-  const started = Date.now();
   const outcome = await first.helm.spawn(spawnBody(repo, { issue: 42, objective: 'first objective line\nmore detail' }));
   assert.ok(outcome.ok);
-  assert.ok(Date.now() - started < 500, 'spawn should not wait for issue title lookup');
   if (!outcome.ok) return;
+  t.after(() => first.helm.settle(outcome.workerId));
+  assert.equal(first.store.listEvents(outcome.workerId, { limit: 100 }).some((event) => event.kind === 'dispatched'), false, 'spawn returns while the title lookup is pending');
   resolveTitle('Issue title');
-  await new Promise((resolve) => setImmediate(resolve));
+  await firstDispatched;
   const dispatched = first.store.listEvents(outcome.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched');
   assert.equal(dispatched?.data.issue, 42);
   assert.equal(dispatched?.data.title, 'Issue title');
   assert.equal(dispatched?.data.model, 'acme/model-1');
 
-  const second = makeHelm({ github: { ...seed.github.github, issueTitle: async () => { throw new Error('unavailable'); } } });
+  const second = makeHelm({ github: { ...github, issueTitle: async () => { throw new Error('unavailable'); } } });
+  const secondDispatched = dispatchedEvent(second.store);
+  t.after(async () => { await secondDispatched; await second.helm.close(); });
   const fallback = await second.helm.spawn(spawnBody(mkTempDir('helm-dispatched-fallback-'), { issue: 43, objective: 'fallback title\nother detail' }));
   assert.ok(fallback.ok);
   if (fallback.ok) {
-    await new Promise((resolve) => setImmediate(resolve));
+    t.after(() => second.helm.settle(fallback.workerId));
+    await secondDispatched;
     assert.equal(second.store.listEvents(fallback.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched')?.data.title, 'fallback title');
   }
+
+  const third = makeHelm({ github: { ...github, issueTitle: () => new Promise(() => {}) } });
+  const thirdDispatched = dispatchedEvent(third.store);
+  const timedOut = await third.helm.spawn(spawnBody(mkTempDir('helm-dispatched-timeout-'), { issue: 45, objective: 'timeout title\nother detail' }));
+  assert.ok(timedOut.ok);
+  if (!timedOut.ok) return;
+  t.after(async () => { t.mock.timers.tick(3_000); await thirdDispatched; await third.helm.settle(timedOut.workerId); await third.helm.close(); });
+  t.mock.timers.tick(2_999);
+  assert.equal(third.store.listEvents(timedOut.workerId, { limit: 100 }).some((event) => event.kind === 'dispatched'), false);
+  t.mock.timers.tick(1);
+  await thirdDispatched;
+  assert.equal(third.store.listEvents(timedOut.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched')?.data.title, 'timeout title');
 });
 
 test('dispatch milestone rejection becomes a warning event instead of an unhandled rejection', async () => {

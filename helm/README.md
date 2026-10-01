@@ -12,6 +12,11 @@ the full harness catalog on every session.
 
 ## Five-minute start
 
+The default is one shared daemon per machine: every repo uses `HELM_HOME=~/.helm` and an
+auto-started daemon binds port `4747`. That pools the spend cap, capacity view, priority queue and routing data,
+while projects retain separate budgets and supervisors in the shared store. Set `HELM_HOME` only
+when you deliberately need an isolated store and daemon.
+
 Run `helm init` in a target repo (or `helm init --repo /path/to/repo`) to generate
 package-script gates and print the `.mcp.json` snippet. Existing repo configuration
 requires `--force`; existing operator configuration is preserved. A new operator
@@ -40,8 +45,7 @@ falls back across tiers; routing fails only when no tier has an available allowe
 2. Give the tools to an orchestrator. For Claude Code, add to the project's `.mcp.json`:
 
    ```json
-   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio", "--port", "4747", "--tools", "core"],
-                             "env": { "HELM_SPEND_CAP_USD": "5" } } } }
+   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio", "--tools", "core"] } } }
    ```
 
    That is all the setup there is. `serve --stdio` is a front-end for one session: it attaches
@@ -49,8 +53,9 @@ falls back across tiers; routing fails only when no tier has an available allowe
    when its client does. The daemon (`helm serve --http`) owns the store and the workers,
    keeps running between sessions, and is shared by every project that points at the same
    `$HELM_HOME` (default `~/.helm`) — so two Claude Code sessions in two repos see one store,
-   one cap. Its environment is whichever session started it; to give a project its own daemon
-   and cap, give it its own `HELM_HOME` in `env`.
+   one cap. Use a different `HELM_HOME` only for deliberate isolation, because it creates a
+   separate daemon, capacity queue and spend state. Isolated homes auto-start on a random port
+   when the shared default is occupied; set top-level `port` in that home's `helm.json` to pin one.
 
    For Codex or anything that speaks Streamable HTTP, point it at `http://127.0.0.1:<port>/mcp`
    with `Authorization: Bearer <token>` on every request. The daemon generates a new
@@ -62,8 +67,11 @@ falls back across tiers; routing fails only when no tier has an available allowe
    a restart. A fixed token in client configuration becomes stale on restart. Prefer
    `helm serve --stdio` when the client supports stdio: its proxy re-reads the port and token on
    every call, so no token needs to be copied into the client's configuration.
-   (the port is in `$HELM_HOME/serve.json`; start the daemon by hand with
-   `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http --port 4747` if nothing has yet).
+   (the actual port is in `$HELM_HOME/serve.json`; start the daemon by hand with
+   `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http` if nothing has yet). Set a top-level
+   `port` in `$HELM_HOME/helm.json` to choose the auto-start port. If another non-Helm process
+   owns the default port, auto-start waits briefly for a same-home startup, otherwise warns and
+   selects a random port; read `serve.json` rather than assuming one.
 
 3. Safely stop an idle daemon with `helm shutdown`. If busy, it refuses without changing admissions and
    reports blockers; let them finish, then repeat the command. See safe updates below.

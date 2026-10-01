@@ -39,6 +39,7 @@ const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
 const HYGIENE_DEFAULTS = { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 };
 
 const settingsSchema = z.object({
+  port: z.number().int().min(1).max(65_535).optional(),
   jev: z.object({
     shadow: z.boolean().default(true),
     model: z.string().default('jev-latest'),

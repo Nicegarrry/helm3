@@ -48,3 +48,13 @@ test('loadSettings logs one line and returns defaults for an invalid file', () =
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('loadSettings accepts an optional daemon port', () => {
+  const home = tempHome();
+  try {
+    writeFileSync(join(home, 'helm.json'), '{"port":4751}');
+    assert.equal(loadSettings(home).port, 4751);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

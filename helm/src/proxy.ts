@@ -19,7 +19,8 @@ export async function proxyRequest(port: number, path: string, input: unknown, p
       let connection;
       try { connection = daemonConnection(home); }
       catch { resolve({ value: { ok: false, reason: 'daemon authentication unavailable' }, retry: true }); return; }
-      const req = request({ host: '127.0.0.1', port: connection.port ?? port, path,
+      // Each attempt gets a fresh socket; an idle socket can belong to the stopped daemon.
+      const req = request({ host: '127.0.0.1', port: connection.port ?? port, path, agent: false,
         method: input === undefined ? 'GET' : 'POST',
         headers: { authorization: connection.authorization, 'content-type': 'application/json', 'x-helm-mcp': '1', 'x-helm-tools': profile, 'x-helm-shim': String(SHIM_VERSION) } }, (res) => {
         const hash = res.headers['x-helm-tools-hash'];

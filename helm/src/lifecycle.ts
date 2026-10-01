@@ -51,6 +51,8 @@ export class Lifecycle {
   }
   drain(persist = true): void {
     if (persist) atomicMetadata(this.marker, { requestedAt: new Date().toISOString() });
+    // Preserve metadata failure handling on signals without creating a persistent marker.
+    else readMetadata(this.marker);
     this.draining = true;
   }
   async control(input: { action: string; timeoutMs?: number; upgradeId?: string; expectedBootId?: string }): Promise<ToolOutcome<ReturnType<Lifecycle['status']>>> {

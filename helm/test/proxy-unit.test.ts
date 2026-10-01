@@ -26,6 +26,7 @@ test('stable shim uses live metadata, forwards future params, announces changes 
   let input: unknown;
   let options: any;
   t.mock.method(http, 'request', (opts: any, callback: (res: any) => void) => {
+    assert.equal(opts.agent, false, 'a restart call must not reuse an idle socket from the previous daemon');
     options = opts;
     const req = new EventEmitter() as any;
     req.destroy = (err: Error) => req.emit('error', err);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -57,4 +57,40 @@ test('plain shutdown and signal-style drain leave the next daemon accepting', as
     const next = new Lifecycle(home, () => []);
     assert.equal(next.status().phase, 'accepting');
   }
+});
+
+
+test('transient drain refuses invalid metadata before closing admissions or scheduling shutdown', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lifecycle = new Lifecycle(home, () => []);
+  let stopped = false;
+  lifecycle.shutdown = () => { stopped = true; };
+  const marker = join(home, 'drain.json');
+  mkdirSync(marker);
+  assert.throws(() => lifecycle.drain(false), /EISDIR/);
+  const result = await lifecycle.control({ action: 'shutdown' });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /EISDIR/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.equal(lifecycle.status().phase, 'accepting');
+  lifecycle.admit('worker.spawn')();
+  rmSync(marker, { recursive: true });
+  lifecycle.drain(false);
+  assert.equal(existsSync(marker), false);
+  assert.equal((await lifecycle.control({ action: 'shutdown' })).ok, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, true);
+});
+
+test('transient drain preserves an existing explicit drain marker', (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lifecycle = new Lifecycle(home, () => []);
+  lifecycle.drain();
+  const marker = join(home, 'drain.json');
+  const original = readFileSync(marker, 'utf8');
+  lifecycle.drain(false);
+  assert.equal(readFileSync(marker, 'utf8'), original);
 });

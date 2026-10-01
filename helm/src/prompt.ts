@@ -6,7 +6,26 @@ export type PromptInput = Readonly<{
   acceptance: string | null;
   contextPaths: readonly string[];
   guidance?: string;
+  issueText?: string;
 }>;
+
+export function formatIssueBrief(
+  issue: number,
+  data: { title?: string; body?: string; comments?: ReadonlyArray<{ author?: string; body: string }> },
+  maxChars = 8000,
+): string | undefined {
+  const parts: string[] = [];
+  if (data.title?.trim()) parts.push(`Issue #${issue}: ${data.title.trim()}`);
+  else if (data.body?.trim()) parts.push(`Issue #${issue}`);
+  if (data.body?.trim()) parts.push(data.body.trim());
+  const comments = (data.comments ?? []).slice(-3).filter((c) => c.body?.trim());
+  if (comments.length > 0) {
+    parts.push(`Recent comments:\n${comments.map((c) => (c.author ? `${c.author}: ${c.body.trim()}` : c.body.trim())).join('\n\n')}`);
+  }
+  if (parts.length === 0) return undefined;
+  const text = parts.join('\n\n');
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
+}
 
 /** Appended to every turn so the model ends with a machine-parseable result. */
 export const RESULT_INSTRUCTION = [
@@ -38,10 +57,11 @@ function contextSection(contextPaths: readonly string[]): string {
 
 /** Prompt for a builder worker: make the change, then report a WorkerResult. */
 export function builderPrompt(input: PromptInput): string {
+  const issue = input.issueText ? `\n\n${input.issueText}` : '';
   const acceptance = input.acceptance ? `\n\nAcceptance criteria:\n${input.acceptance}` : '';
   const guidance = input.guidance ? `\n\nGuidance selected for this task\n\n${input.guidance}` : '';
   return [
-    `You are a coding agent working in a git worktree. Objective:\n${input.objective}${acceptance}${contextSection(input.contextPaths)}${guidance}`,
+    `You are a coding agent working in a git worktree. Objective:\n${input.objective}${issue}${acceptance}${contextSection(input.contextPaths)}${guidance}`,
     '',
     'For succeeded or partial work, include claims when useful: each claim must be atomic and directly checkable from the committed diff. Keep claims concrete (names, values, files, counts); leave process facts such as tests or commits to commandsRun and the gate.',
     '',
@@ -53,9 +73,10 @@ export function builderPrompt(input: PromptInput): string {
 
 /** Prompt for a reviewer worker: read-only, reports findings and a verdict. */
 export function reviewerPrompt(input: PromptInput): string {
+  const issue = input.issueText ? `\n\n${input.issueText}` : '';
   const acceptance = input.acceptance ? `\n\nAcceptance criteria to check against:\n${input.acceptance}` : '';
   return [
-    `You are a reviewing coding agent working in a read-only checkout. Review objective:\n${input.objective}${acceptance}${contextSection(input.contextPaths)}`,
+    `You are a reviewing coding agent working in a read-only checkout. Review objective:\n${input.objective}${issue}${acceptance}${contextSection(input.contextPaths)}`,
     '',
     'You may only read, grep, find, ls and run read-only bash commands (e.g. tests, linters). You must',
     'not edit or write any file, and must not run bash commands that modify files or git state.',
@@ -65,9 +86,10 @@ export function reviewerPrompt(input: PromptInput): string {
   ].join('\n');
 }
 export function validatorPrompt(input: PromptInput): string {
+  const issue = input.issueText ? `\n\n${input.issueText}` : '';
   const acceptance = input.acceptance ? `\n\nAcceptance criteria:\n${input.acceptance}` : '';
   return [
-    `You are a validator coding agent working in a git worktree. Objective:\n${input.objective}${acceptance}${contextSection(input.contextPaths)}`,
+    `You are a validator coding agent working in a git worktree. Objective:\n${input.objective}${issue}${acceptance}${contextSection(input.contextPaths)}`,
     '', 'Write only test files for the issue acceptance. Do not edit production code, configuration, documentation, fixtures, or any non-test file.',
     'The tests must fail on the current code because the requested behaviour is missing; do not weaken assertions or change production code. Run the acceptance command if useful, then report acceptance as {"command":"...","files":["test/file.ts"]}.',
     'Use the read, grep, find and ls tools to understand the code before editing. Use edit or write to',

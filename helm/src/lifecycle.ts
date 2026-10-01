@@ -31,7 +31,7 @@ export class Lifecycle {
   private stopping = false;
   private readonly marker: string;
   shutdown?: () => void;
-  restart?: () => void;
+  restart?: () => void | Promise<void>;
   upgrade?: (timeoutMs: number) => void;
   constructor(readonly home: string, private readonly workers: () => string[]) {
     this.marker = join(home, 'drain.json');
@@ -64,13 +64,31 @@ export class Lifecycle {
         rmSync(this.marker, { force: true });
         this.draining = false;
       }
+      if (input.action === 'restart') {
+        if (existsSync(join(this.home, 'upgrade.lock')) || ['draining', 'stopping', 'starting', 'healthy'].includes(String(readMetadata(join(this.home, 'upgrade.json'))?.phase))) throw new Error('upgrade in progress; restart refused');
+        if (this.stopping) throw new Error('shutdown/restart in progress; restart refused');
+      }
       if ((input.action === 'shutdown' || input.action === 'restart') && !this.stopping) {
+        const workers = this.workers().length;
+        if (workers || this.active.size) {
+          const busy = [workers ? `${workers} worker${workers === 1 ? '' : 's'} running` : '', this.active.size ? `${this.active.size} operation${this.active.size === 1 ? '' : 's'} in progress` : ''].filter(Boolean).join(' and ');
+          throw new Error(`${busy}; stop them or wait for them to finish`);
+        }
+        if (!this.shutdown || (input.action === 'restart' && !this.restart)) throw new Error('shutdown handler unavailable');
+        const wasDraining = this.draining;
         this.drain(false);
-        if (this.status().blockers.length) throw new Error(`still draining: ${this.status().blockers.join(', ')}`);
-        const stop = input.action === 'restart' ? this.restart : this.shutdown;
-        if (!stop) throw new Error('shutdown handler unavailable');
         this.stopping = true;
-        setImmediate(stop);
+        if (input.action === 'restart') {
+          try { await this.restart!(); }
+          catch (err) {
+            this.stopping = false;
+            this.draining = wasDraining || existsSync(this.marker);
+            const reason = `restart helper failed: ${err instanceof Error ? err.message : String(err)}`;
+            console.error(reason);
+            throw new Error(reason);
+          }
+        }
+        setImmediate(this.shutdown);
       }
       if (input.action === 'upgrade') {
         if (!this.upgrade || this.stopping) throw new Error('upgrade handler unavailable');

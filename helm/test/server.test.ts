@@ -295,3 +295,13 @@ test('authenticated daemon catalog matches MCP core schemas and old shims receiv
     assert.equal(current.headers.get('x-helm-shim-note'), null);
   });
 });
+
+
+test('pre-version stdio shims without x-helm-shim receive the one-time session refresh note', async () => {
+  await withServer(async (port, _helm, authorization) => {
+    const response = await fetch(`http://127.0.0.1:${port}/tools/run.status`, {
+      method: 'POST', headers: { authorization, 'x-helm-mcp': '1' }, body: '{}',
+    });
+    assert.match((await response.json() as { note: string }).note, /Restart this MCP session/);
+  });
+});

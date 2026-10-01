@@ -581,14 +581,7 @@ async function cmdServe(args: string[]): Promise<void> {
     process.exit(0);
   };
   helm.lifecycle.shutdown = () => { void shutdown(); };
-  helm.lifecycle.restart = () => {
-    // The helper inherits the running daemon environment without serializing credentials.
-    const log = openSync(join(config.home, 'daemon.log'), 'a');
-    const child = spawn(process.execPath, ['--import', 'tsx', process.argv[1]!, 'restart', '--handover', '--port', String(handle.port)], { detached: true, stdio: ['ignore', log, log], env: process.env });
-    closeSync(log);
-    child.once('spawn', () => { child.unref(); void shutdown(); });
-    child.once('error', (err) => console.error(`restart helper failed: ${err.message}`));
-  };
+  helm.lifecycle.restart = () => launchRestartHelper(config.home, handle.port!);
   helm.lifecycle.upgrade = (timeout) => launchUpgrade(config.home, handle.port!, helm.lifecycle.status(), timeout);
   let signaling = false;
   const drainOnSignal = async () => {
@@ -601,6 +594,19 @@ async function cmdServe(args: string[]): Promise<void> {
     signaling = false;
   };
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void drainOnSignal().catch((err) => { signaling = false; console.error(err); }); });
+}
+
+/** Resolve only when the helper has launched; lifecycle owns rollback and shutdown. */
+export async function launchRestartHelper(home: string, port: number, spawnHelper: typeof spawn = spawn): Promise<void> {
+  const log = openSync(join(home, 'daemon.log'), 'a');
+  try {
+    // Inherit the daemon environment without serializing credentials.
+    const child = spawnHelper(process.execPath, ['--import', 'tsx', process.argv[1]!, 'restart', '--handover', '--port', String(port)], { detached: true, stdio: ['ignore', log, log], env: process.env });
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', () => { child.unref(); resolve(); });
+      child.once('error', reject);
+    });
+  } finally { closeSync(log); }
 }
 
 /** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */

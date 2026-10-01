@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -93,4 +93,97 @@ test('transient drain preserves an existing explicit drain marker', (t) => {
   const original = readFileSync(marker, 'utf8');
   lifecycle.drain(false);
   assert.equal(readFileSync(marker, 'utf8'), original);
+});
+
+test('restart helper failure returns an error and restores admissions', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lifecycle = new Lifecycle(home, () => []);
+  const failure = Promise.reject(new Error('synthetic helper spawn failure'));
+  void failure.catch(() => {});
+  lifecycle.restart = () => failure;
+  let stopped = false;
+  lifecycle.shutdown = () => { stopped = true; };
+  const logged: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logged.push(args); });
+  const result = await lifecycle.control({ action: 'restart' });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /restart helper failed: synthetic helper spawn failure/);
+  assert.equal(lifecycle.status().phase, 'accepting');
+  lifecycle.admit('worker.spawn')();
+  assert.equal(existsSync(join(home, 'drain.json')), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.match(String(logged.flat()), /synthetic helper spawn failure/);
+});
+
+test('busy restart and shutdown refuse before changing admissions', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lifecycle = new Lifecycle(home, () => ['w-1', 'w-2']);
+  let stopped = false;
+  lifecycle.restart = lifecycle.shutdown = () => { stopped = true; };
+  for (const action of ['restart', 'shutdown']) {
+    const result = await lifecycle.control({ action });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /2 workers running; stop them or wait for them to finish/);
+    assert.equal(lifecycle.status().phase, 'accepting');
+    lifecycle.admit('worker.spawn')();
+    assert.equal(existsSync(join(home, 'drain.json')), false);
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+});
+
+test('restart refuses an upgrade lock before closing admissions or launching a helper', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lifecycle = new Lifecycle(home, () => []);
+  let spawned = false;
+  lifecycle.restart = lifecycle.shutdown = () => { spawned = true; };
+  mkdirSync(join(home, 'upgrade.lock'));
+  const result = await lifecycle.control({ action: 'restart' });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /upgrade in progress; restart refused/);
+  assert.equal(lifecycle.status().phase, 'accepting');
+  lifecycle.admit('worker.spawn')();
+  assert.equal(existsSync(join(home, 'drain.json')), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawned, false);
+});
+
+
+test('busy operations refuse shutdown and restart without closing admissions', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lifecycle = new Lifecycle(home, () => []);
+  const release = lifecycle.admit('gate.run');
+  for (const action of ['shutdown', 'restart']) {
+    const result = await lifecycle.control({ action });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /1 operation in progress/);
+    assert.equal(lifecycle.status().phase, 'accepting');
+  }
+  release();
+  lifecycle.admit('worker.spawn')();
+});
+
+test('restart refuses active upgrade phases even when the upgrade lock is missing', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-life-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const lifecycle = new Lifecycle(home, () => []);
+  let spawned = false;
+  lifecycle.restart = () => { spawned = true; };
+  lifecycle.shutdown = () => {};
+  for (const phase of ['draining', 'stopping', 'starting', 'healthy']) {
+    writeFileSync(join(home, 'upgrade.json'), JSON.stringify({ phase }));
+    const result = await lifecycle.control({ action: 'restart' });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /upgrade in progress; restart refused/);
+    assert.equal(lifecycle.status().phase, 'accepting');
+    assert.equal(spawned, false);
+  }
+  writeFileSync(join(home, 'upgrade.json'), JSON.stringify({ phase: 'completed' }));
+  assert.equal((await lifecycle.control({ action: 'restart' })).ok, true);
+  assert.equal(spawned, true);
 });

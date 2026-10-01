@@ -32,7 +32,10 @@ The `helm` command line. Reads (ps, logs, inspect, status) open the store direct
 
 Shared shape for the thin read commands: parse args, open the store, run, close the store. `run` prints its own output (JSON or text); a `run` that never returns (e.g. `logs -f`) simply leaves the store open, same as the write commands leave the daemon call outstanding.
 
-`serve --http` is the daemon. `serve --stdio` is a front-end for one MCP client: it attaches to the running daemon, or starts one detached first, and exits when its client does. The daemon outlives sessions on purpose — workers keep running and the dashboard stays up — and every project on the machine shares it. `helm shutdown` stops it.
+`serve --http` is the daemon. `serve --stdio` is a front-end for one MCP client: it attaches to the running daemon, or starts one detached first, and exits when its client does. The daemon outlives sessions on purpose — workers keep running and the dashboard stays up — and every project on the machine shares it. `helm shutdown` stops it. Busy restart/shutdown requests refuse before changing admissions.
+Restart refuses an upgrade lock or an active upgrade phase. Lifecycle waits for helper spawn
+before acknowledging restart; launch failure logs and returns an error while restoring
+admissions. Shutdown is scheduled only after a successful helper launch.
 
 ## types.ts
 
@@ -72,7 +75,11 @@ The stable `proxy.ts` stdio shim fetches descriptions and JSON schemas from auth
 only the daemon validates. It re-reads serve.json port/token per attempt, retries refusals before
 admission for up to 60 seconds, observes x-helm-tools-hash on responses and polls every 60 seconds
 to emit notifications/tools/list_changed. x-helm-shim identifies its protocol version; only an
-unsupported old shim receives the one-line session restart note.
+unsupported old shim receives the one-line session restart note. Sessions started before
+this version need one MCP refresh because their proxies send no `x-helm-shim` and use local
+schemas. After that one refresh, daemon restarts and upgrades need no client refresh.
+The daemon caches registries, advertised schemas, validators and tool hashes per profile
+for its lifetime; each daemon boot creates a fresh cache.
 
 An MCP front-end over stdio that forwards every tool call to the current daemon. It owns nothing: no store, no workers. Any number of these can attach to one daemon, one per orchestrator session, and each exits with its client. Calls go over `node:http` rather than `fetch` because undici gives up on a response after five silent minutes, and `worker.wait` may hold a response open for twenty-five.
 

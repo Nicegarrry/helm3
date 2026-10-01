@@ -49,7 +49,7 @@ the full harness catalog on every session.
    (the port is in `$HELM_HOME/serve.json`; start the daemon by hand with
    `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http --port 4747` if nothing has yet).
 
-3. Safely stop an idle daemon with `helm shutdown`. If busy, it closes admissions and
+3. Safely stop an idle daemon with `helm shutdown`. If busy, it refuses without changing admissions and
    reports blockers; let them finish, then repeat the command. See safe updates below.
 
 ## Deploys
@@ -293,7 +293,9 @@ explicit worker stops remain available. Orchestrators should pause dispatch when
 When all work settles, the helper stops the old daemon and starts the validated release on
 the **same port and state directory**, with admissions still closed. It checks the new
 process, version and revision before reopening admissions. Existing stdio proxies discover the current port, token, tool descriptions and schemas from
-the daemon. Restarts and upgrades need no client refresh: the shim announces tool-list changes
+the daemon. **Sessions started before this version need one MCP refresh: their old proxies
+send no `x-helm-shim` and cannot discover the daemon's new schemas.** After that refresh,
+restarts and upgrades need no client refresh: the shim announces tool-list changes
 and retries connection refusal, authentication rotation and pre-admission drain replies for up
 to 60 seconds. Interrupted responses are not replayed because their mutation outcome is unknown.
 Only a shim below the daemon's minimum protocol version receives a note to restart that MCP session.
@@ -307,7 +309,9 @@ rollback. A release changed after validation is refused before shutdown.
 
 `helm restart` safely stops an idle daemon, starts it with the same daemon environment, and
 waits up to 60 seconds for accepting readiness. Busy daemons report blockers; finish that work
-and retry. `helm daemon stop` and SIGINT/SIGTERM temporarily close admissions without creating
+and retry; restart and shutdown refusals leave admissions unchanged. Restart is refused
+while an upgrade is in progress. A helper launch failure returns an error, logs the failure,
+and restores the prior admission state. `helm daemon stop` and SIGINT/SIGTERM temporarily close admissions without creating
 `drain.json`; the next start accepts work. An explicit drain or upgrade retains its marker.
 
 Manual controls are `helm daemon --action drain`, `status` and `resume`. `helm shutdown`

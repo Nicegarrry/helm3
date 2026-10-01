@@ -48,33 +48,48 @@ test('seeded portfolio reuses scorecard activity, includes old workers, budget a
     assert.equal(one.merged, 1); assert.equal(one.cleanRate, 0.5); assert.equal(one.firstPassGateRate, 0.5); assert.equal(one.taps, 1);
     assert.deepEqual(one.openPrs, [{ number: 1, waiting: 'review' }, { number: 2, waiting: 'merge' }]);
     assert.equal(report.total.stuck, 1); assert.equal(report.total.inbox, 1);
-    const content = formatPortfolio(report); assert.ok(content.split('\n').length <= 25); assert.match(content, /Fleet: \$2.00; Codex 120 tokens; merged 1/);
-    assert.match(content, /^Idle: acme\/empty$/m); assert.equal(content.match(/acme\/empty/g)!.length, 1);
-    assert.ok(content.indexOf('Idle: acme/empty') < content.indexOf('Fleet: '), 'idle line precedes the fleet total');
+    const content = formatPortfolio(report);
+    const lines = content.split('\n');
+    assert.match(lines[0]!, /^\*\*Helm · [A-Za-z]{3} \d{1,2} [A-Za-z]{3}\*\*$/);
+    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 asks', '$5.00 of $10.00 budget · Codex 120 tokens', '',
+      '**one**: 1 merged, 2 PRs open (1 needs review), 50% gates pass first time, $2.00', '**two**: 1 stuck, 1 ask', 'Idle: empty']);
+    assert.doesNotMatch(content, /\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}/, 'no ISO timestamps in the report');
+    assert.doesNotMatch(content, /acme\//, 'repo names drop the owner prefix');
+    assert.ok(!content.includes('clean'), 'clean rate is dropped');
     assert.equal(f.store.sql.prepare("SELECT 1 FROM sqlite_master WHERE name='memory_outbox'").get(), undefined);
     assert.equal((await portfolio(f.store, f.settings, '2026-10-01T11:00:00Z', now)).total.usd, 0);
     await assert.rejects(portfolio(f.store, f.settings, 'yesterday', now), /ISO date/);
   } finally { f.close(); }
 });
 
-test('projects with zero window activity collapse to one Idle line; any signal keeps a full block; no Idle line when none are idle', async () => {
+test('one compact line per active project; idle collapse after a blank line; a zero fleet says Nothing needs you', async () => {
   const f = fixture({ discord: { projects: { 'acme/idle-a': { webhookEnv: 'E1' }, 'acme/idle-b': { webhookEnv: 'E2' } } } });
   try {
+    const zero = formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n');
+    assert.equal(zero[1], 'Nothing needs you');
+    assert.deepEqual(zero.slice(2), ['$0.00 · Codex 0 tokens', '', 'Idle: idle-a, idle-b']);
     f.store.insertWorker(worker('paid', 'acme/active'));
     f.store.addSpend({ workerId: 'paid', model: 'pi/paid', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1, at: recent });
-    const report = await portfolio(f.store, f.settings, undefined, now);
-    assert.equal(report.projects.length, 3);
-    const lines = formatPortfolio(report).split('\n');
-    assert.ok(lines.includes('acme/active') && lines.some((l) => l.startsWith('  Window: $1.00')), 'active project keeps its full block');
-    assert.deepEqual(lines.filter((l) => /^Idle: /.test(l)), ['Idle: acme/idle-a, acme/idle-b']);
-    assert.ok(lines[lines.length - 1]!.startsWith('Fleet: '), 'fleet total stays last');
+    assert.deepEqual(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n').slice(1), ['0 merged', '$1.00 · Codex 0 tokens', '', '**active**: $1.00', 'Idle: idle-a, idle-b']);
     f.store.insertPr({ repoSlug: 'acme/idle-a', workerId: 'paid', number: 201, head: 'b', state: 'open', url: 'https://pr/201', createdAt: old });
     const second = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
-    assert.ok(second.includes('acme/idle-a\n'), 'open PRs alone make a project active');
-    assert.match(second, /^Idle: acme\/idle-b$/m);
+    assert.ok(second.includes('**idle-a**: 1 PR open (1 needs review)'), 'open PRs alone make a project active');
+    assert.match(second, /^Idle: idle-b$/m);
     f.store.insertPr({ repoSlug: 'acme/idle-b', workerId: 'paid', number: 202, head: 'b', state: 'open', url: 'https://pr/202', createdAt: old });
     assert.doesNotMatch(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)), /Idle:/, 'no Idle line when none are idle');
+    assert.ok(!formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes('stuck'), 'stuck is omitted from the headline when zero');
   } finally { f.close(); }
+});
+
+test('fleet token counts are humanised (17M, 850k)', async () => {
+  for (const [tokens, expected] of [[17_000_000, 'Codex 17M tokens'], [850_000, 'Codex 850k tokens']] as const) {
+    const f = fixture();
+    try {
+      f.store.insertWorker(worker('big', 'acme/big'));
+      f.store.addSpend({ workerId: 'big', model: 'codex/luna', inputTokens: tokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, at: recent });
+      assert.ok(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes(expected));
+    } finally { f.close(); }
+  }
 });
 
 test('CLI portfolio supports compact text, --json and --since without a daemon', () => {
@@ -83,7 +98,7 @@ test('CLI portfolio supports compact text, --json and --since without a daemon',
     for (const args of [[], ['--json', '--since', '2026-10-01T00:00:00Z']]) {
       const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'portfolio', ...args], { cwd: new URL('..', import.meta.url), env: { ...process.env, HELM_HOME: f.home }, encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
-      if (args.length) assert.equal(JSON.parse(result.stdout).since, '2026-10-01T00:00:00.000Z'); else assert.match(result.stdout, /Fleet:/);
+      if (args.length) assert.equal(JSON.parse(result.stdout).since, '2026-10-01T00:00:00.000Z'); else assert.match(result.stdout, /\*\*Helm · /);
     }
   } finally { f.close(); }
 });
@@ -127,8 +142,8 @@ test('Discord payload truncates cleanly at 2000 chars and preserves fleet total'
   assert.equal(reportContent('x'.repeat(2000)).length, 2000);
   const text = Array.from({ length: 100 }, () => 'a project line').join('\n') + '\n' + '😀'.repeat(1000) + '\nFleet: total';
   const bounded = reportContent(text); assert.ok(bounded.length <= 2000); assert.match(bounded, /… report truncated\nFleet: total$/); assert.doesNotMatch(bounded, /[\uD800-\uDBFF]\n/);
-  const f = fixture({ report: { webhookEnv: 'REPORT' }, discord: { projects: Object.fromEntries(Array.from({ length: 50 }, (_, i) => ['project-' + i, { webhookEnv: 'EMPTY' }])) } }); const sent: { url: string; content: string }[] = [];
-  try { for (let i = 0; i < 50; i++) insertInbox(f.store.sql, { id: 'bulk-' + i, project: 'project-' + i, workerId: 'w', question: 'q', createdAt: old }); await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /truncated/); } finally { f.close(); }
+  const f = fixture({ report: { webhookEnv: 'REPORT' }, discord: { projects: Object.fromEntries(Array.from({ length: 200 }, (_, i) => ['project-' + i, { webhookEnv: 'EMPTY' }])) } }); const sent: { url: string; content: string }[] = [];
+  try { for (let i = 0; i < 200; i++) insertInbox(f.store.sql, { id: 'bulk-' + i, project: 'project-' + i, workerId: 'w', question: 'q', createdAt: old }); await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /truncated/); } finally { f.close(); }
 });
 
 test('unsuccessful webhook sends do not advance the persisted date and can retry', async () => {

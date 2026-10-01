@@ -39,19 +39,33 @@ export async function portfolio(store: Store, settings: Settings, since?: string
   const total = rows.reduce((a, r) => ({ usd: a.usd + r.usd, codexTokens: a.codexTokens + r.codexTokens, merged: a.merged + r.merged, openPrs: a.openPrs + r.openPrs.length, stuck: a.stuck + r.stuck.length, inbox: a.inbox + r.inbox, taps: a.taps + r.taps }), { usd: 0, codexTokens: 0, merged: 0, openPrs: 0, stuck: 0, inbox: 0, taps: 0 });
   return { since, until: now.toISOString(), projects: rows, total };
 }
+const humanTokens = (n: number): string => n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${+(n / 1_000).toFixed(1)}k` : `${n}`;
 export function formatPortfolio(report: Awaited<ReturnType<typeof portfolio>>): string {
   const pct = (n: number) => `${(n * 100).toFixed(0)}%`; const money = (n: number) => `$${n.toFixed(2)}`;
-  const active = (r: Awaited<ReturnType<typeof portfolio>>['projects'][number]) => r.usd > 0 || r.codexTokens > 0 || r.merged > 0 || r.openPrs.length > 0 || r.stuck.length > 0 || r.inbox > 0 || r.taps > 0;
-  const lines = [`Portfolio ${report.since} .. ${report.until}`]; const idle: string[] = [];
-  for (const r of report.projects) {
-    if (!active(r)) { idle.push(r.project); continue; }
-    lines.push(r.project.replace(/[\r\n]/g, ' '), `  Window: ${money(r.usd)}; Codex ${r.codexTokens} tokens`,
-      r.budget ? `  Budget: ${money(r.budget.usd)}/${money(r.budget.capUsd)}; Codex ${r.budget.codexTokens}/${r.budget.capCodexTokens ?? 'uncapped'} tokens` : '  Budget: none',
-      `  Merged ${r.merged}; clean ${pct(r.cleanRate)}; first-pass gate ${pct(r.firstPassGateRate)}`,
-      `  PRs ${r.openPrs.length} (${r.openPrs.filter((p) => p.waiting === 'review').length} review, ${r.openPrs.filter((p) => p.waiting === 'merge').length} merge); stuck >2h ${r.stuck.length}; inbox ${r.inbox}; taps ${r.taps}`);
+  const short = (project: string) => project.split('/').pop()!.replace(/[\r\n]/g, ' ');
+  type Row = Awaited<ReturnType<typeof portfolio>>['projects'][number];
+  const active = (r: Row) => r.usd > 0 || r.codexTokens > 0 || r.merged > 0 || r.openPrs.length > 0 || r.stuck.length > 0 || r.inbox > 0 || r.taps > 0;
+  const prsFact = (open: number, review: number) => open === 0 ? null : review > 0 ? `${open} PR${open === 1 ? '' : 's'} open (${review} needs review)` : `${open} PR${open === 1 ? '' : 's'} waiting merge`;
+  const t = report.total;
+  const day = new Date(report.until).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+  const lines = [`**Helm · ${day}**`];
+  if (t.merged === 0 && t.openPrs === 0 && t.stuck === 0 && t.inbox === 0 && t.taps === 0 && t.usd === 0 && t.codexTokens === 0) lines.push('Nothing needs you');
+  else {
+    const review = report.projects.reduce((a, r) => a + r.openPrs.filter((p) => p.waiting === 'review').length, 0);
+    const headline = [`${t.merged} merged`, t.openPrs ? (review ? `${t.openPrs} PRs open (${review} needs review)` : `${t.openPrs} PRs open`) : null, t.stuck ? `${t.stuck} stuck` : null, t.inbox ? `${t.inbox} asks` : null].filter(Boolean);
+    lines.push(headline.join(' · '));
   }
-  if (idle.length) lines.push(`Idle: ${idle.join(', ')}`);
-  const t = report.total; lines.push(`Fleet: ${money(t.usd)}; Codex ${t.codexTokens} tokens; merged ${t.merged}; PRs ${t.openPrs}; stuck ${t.stuck}; inbox ${t.inbox}; taps ${t.taps}`);
+  const budgeted = report.projects.filter((r) => r.budget);
+  const spend = budgeted.length ? `${money(budgeted.reduce((a, r) => a + r.budget!.usd, 0))} of ${money(budgeted.reduce((a, r) => a + r.budget!.capUsd, 0))} budget` : money(t.usd);
+  lines.push(`${spend} · Codex ${humanTokens(t.codexTokens)} tokens`);
+  const idle: string[] = [];
+  const blocks = report.projects.filter(active).map((r) => {
+    const review = r.openPrs.filter((p) => p.waiting === 'review').length;
+    const facts = [r.merged ? `${r.merged} merged` : null, prsFact(r.openPrs.length, review), r.merged > 0 ? `${pct(r.firstPassGateRate)} gates pass first time` : null, r.stuck.length ? `${r.stuck.length} stuck` : null, r.inbox ? `${r.inbox} ask${r.inbox === 1 ? '' : 's'}` : null, r.usd > 0 ? money(r.usd) : null].filter(Boolean);
+    return facts.length ? `**${short(r.project)}**: ${facts.join(', ')}` : null;
+  }).filter((line): line is string => line !== null);
+  for (const r of report.projects) if (!active(r)) idle.push(short(r.project));
+  if (blocks.length || idle.length) { lines.push(''); lines.push(...blocks); if (idle.length) lines.push(`Idle: ${idle.join(', ')}`); }
   return lines.join('\n');
 }
 /** Bound a single Discord message, retaining the fleet total and a truncation marker. */

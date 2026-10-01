@@ -9,6 +9,41 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 export const SHIM_VERSION = 1;
 export const MIN_SHIM_VERSION = 1;
 export const SHIM_RESTART_NOTE = 'Restart this MCP session: its Helm shim is below the supported minimum.';
+const WAIT_PROGRESS_MS = 30_000;
+
+type ProgressWorker = Readonly<{
+  workerId: string;
+  state: string;
+  lastEvent?: Readonly<{ kind?: unknown; data?: unknown }> | null;
+}>;
+
+type ProgressState = Readonly<{
+  workers?: readonly ProgressWorker[];
+  run?: Readonly<{ capacity?: Readonly<{ queue?: readonly Readonly<{ workerId?: unknown }>[] }> }>;
+}>;
+
+function activity(worker: ProgressWorker): string {
+  const event = worker.lastEvent;
+  if (!event) return 'waiting for worker activity';
+  const data = typeof event.data === 'string' ? event.data : JSON.stringify(event.data) ?? '';
+  return `${String(event.kind ?? 'activity')}: ${data}`.replace(/\s+/g, ' ').slice(0, 240);
+}
+
+function waitProgress(state: ProgressState, workerId: string, started: number, timeoutMs: number) {
+  const worker = state.workers?.find((candidate) => candidate.workerId === workerId);
+  const position = state.run?.capacity?.queue?.findIndex((candidate) => candidate.workerId === workerId);
+  const etaMs = Math.max(0, started + timeoutMs - Date.now());
+  return {
+    state: worker?.state ?? 'unknown',
+    position: position === undefined || position < 0 ? null : position + 1,
+    etaMs,
+    activity: worker ? activity(worker) : 'worker is no longer visible',
+  };
+}
+
+function progressSignature(progress: ReturnType<typeof waitProgress>): string {
+  return JSON.stringify({ state: progress.state, position: progress.position, activity: progress.activity });
+}
 
 /** Only failures proving no admission are replayed; interrupted responses are ambiguous. */
 export async function proxyRequest(port: number, path: string, input: unknown, profile: string, home?: string, onHash?: (hash: string) => void, retryMs = 60_000): Promise<any> {
@@ -51,7 +86,7 @@ export async function proxyRequest(port: number, path: string, input: unknown, p
   }
 }
 
-export async function serveStdioProxy(port: number, profile = process.env.HELM_TOOLS ?? 'core', home?: string, transport: Transport = new StdioServerTransport(), pollMs = 60_000) {
+export async function serveStdioProxy(port: number, profile = process.env.HELM_TOOLS ?? 'core', home?: string, transport: Transport = new StdioServerTransport(), pollMs = 60_000, progressPollMs = 1_000) {
   const server = new Server({ name: 'helm', version: String(SHIM_VERSION) }, { capabilities: { tools: { listChanged: true } } });
   let hash: string | undefined;
   let connected = false;
@@ -68,7 +103,57 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
   // Fetch before initialize completes, and always serve tools/list from the live daemon.
   await list();
   server.setRequestHandler(ListToolsRequestSchema, list);
-  server.setRequestHandler(CallToolRequestSchema, async ({ params }) => ({ content: [{ type: 'text', text: JSON.stringify(await proxyRequest(port, `/tools/${encodeURIComponent(params.name)}`, params.arguments ?? {}, profile, home, observe)) }] }));
+  server.setRequestHandler(CallToolRequestSchema, async ({ params }, extra) => {
+    const input = params.arguments ?? {};
+    const progressToken = params._meta?.progressToken;
+    if (params.name !== 'worker.wait' || (typeof progressToken !== 'string' && typeof progressToken !== 'number')) {
+      return { content: [{ type: 'text', text: JSON.stringify(await proxyRequest(port, `/tools/${encodeURIComponent(params.name)}`, input, profile, home, observe)) }] };
+    }
+    const workerIds = Array.isArray((input as { workerIds?: unknown }).workerIds)
+      ? (input as { workerIds: unknown[] }).workerIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    const timeoutMs = typeof (input as { timeoutMs?: unknown }).timeoutMs === 'number' ? (input as { timeoutMs: number }).timeoutMs : 600_000;
+    const started = Date.now();
+    const sent = new Map<string, string>();
+    const sentAt = new Map<string, number>();
+    const publish = async (force = false) => {
+      const snapshot = await proxyRequest(port, '/api/state', undefined, profile, home, observe) as ProgressState;
+      for (const workerId of workerIds) {
+        const update = waitProgress(snapshot, workerId, started, timeoutMs);
+        const signature = progressSignature(update);
+        const last = sent.get(workerId);
+        const now = Date.now();
+        if (!force && last === signature && now - (sentAt.get(workerId) ?? 0) < WAIT_PROGRESS_MS) continue;
+        sent.set(workerId, signature);
+        sentAt.set(workerId, now);
+        await extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            progressToken,
+            progress: Math.min(timeoutMs, Date.now() - started),
+            total: timeoutMs,
+            message: `state=${update.state}; position=${update.position ?? '-'}; etaMs=${update.etaMs}; activity=${update.activity}`,
+            _meta: { helm: update },
+          },
+        });
+      }
+    };
+    await publish(true).catch(() => undefined);
+    let publishing = false;
+    const progress = setInterval(() => {
+      if (publishing) return;
+      publishing = true;
+      void publish().catch(() => undefined).finally(() => { publishing = false; });
+    }, progressPollMs);
+    progress.unref();
+    try {
+      const outcome = await proxyRequest(port, `/tools/${encodeURIComponent(params.name)}`, input, profile, home, observe);
+      await publish().catch(() => undefined);
+      return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
+    } finally {
+      clearInterval(progress);
+    }
+  });
   let finish!: () => void;
   const closed = new Promise<void>((resolve) => { finish = resolve; });
   let poll: ReturnType<typeof setInterval> | undefined;

@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { serve } from '../src/server.ts';
 import { CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.ts';
 
 function stdioFrontEnd(home: string, tools = 'core') {
@@ -43,6 +44,93 @@ async function stopDaemon(home: string): Promise<void> {
 }
 
 const text = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? '');
+
+function waitingDaemon(home: string) {
+  let state = 'queued';
+  let lastEvent: { kind: string; data: Record<string, string> } = { kind: 'capacity.queued', data: { reason: 'capacity' } };
+  let overviewCalls = 0;
+  let resolveWait!: () => void;
+  const helm = {
+    config: { home, spendCapUsd: 0, maxWorkers: 1, gateTimeoutMs: 1_000 },
+    wait: async () => new Promise((resolve) => {
+      resolveWait = () => resolve({ ok: true, settled: [{ workerId: 'w-progress', state, head: null, result: null }], pending: [], timedOut: false, waitedMs: 1 });
+    }),
+    overview: async () => {
+      overviewCalls += 1;
+      return {
+        ok: true,
+        workers: [{ workerId: 'w-progress', state, lastEvent }],
+        run: { capacity: { queue: state === 'queued' ? [{ workerId: 'w-progress' }] : [] } },
+      };
+    },
+  };
+  return {
+    helm,
+    setState(next: string, kind = 'turn.start') { state = next; lastEvent = { kind, data: { summary: `${next} activity` } }; },
+    finish() { state = 'succeeded'; lastEvent = { kind: 'result', data: { summary: 'done' } }; resolveWait(); },
+    overviewCalls: () => overviewCalls,
+  };
+}
+
+async function progressProxy(home: string) {
+  const daemon = waitingDaemon(home);
+  const daemonHandle = await serve({ helm: daemon.helm as never });
+  const { transport, client } = stdioFrontEnd(home, 'all');
+  await client.connect(transport);
+  return {
+    daemon,
+    client,
+    async close() {
+      await client.close();
+      if (transport.pid) await until(() => !alive(transport.pid!), 5_000);
+      await daemonHandle.close();
+    },
+  };
+}
+
+test('mcp stdio: worker.wait forwards token-scoped queued, running, and done progress', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
+  const harness = await progressProxy(home);
+  try {
+    const updates: Array<{ _meta?: { helm?: { state?: string; position?: number | null; etaMs?: number; activity?: string } } }> = [];
+    const waiting = harness.client.callTool(
+      { name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } },
+      undefined,
+      { onprogress: (update) => updates.push(update as unknown as (typeof updates)[number]) },
+    );
+    assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'queued'), 3_000), true);
+    const queued = updates.find((update) => update._meta?.helm?.state === 'queued')!._meta!.helm!;
+    assert.equal(queued.position, 1);
+    assert.equal(typeof queued.etaMs, 'number');
+    assert.match(queued.activity ?? '', /capacity\.queued/);
+
+    harness.daemon.setState('running');
+    assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'running'), 3_000), true);
+
+    harness.daemon.finish();
+    await waiting;
+    assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'succeeded'), 3_000), true);
+  } finally {
+    await harness.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('mcp stdio: worker.wait does not poll or emit progress without a progress token', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
+  const harness = await progressProxy(home);
+  try {
+    const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(harness.daemon.overviewCalls(), 0);
+    harness.daemon.finish();
+    await waiting;
+    assert.equal(harness.daemon.overviewCalls(), 0);
+  } finally {
+    await harness.close();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));

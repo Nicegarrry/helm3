@@ -730,13 +730,25 @@ test('soft spend cap defaults to 80% of the hard cap', async () => {
   assert.equal(none.helm.spendWarnUsd(), 0);
 });
 
-test('modelFamily strips provider and vendor prefixes', () => {
-  assert.equal(modelFamily('opencode-go/qwen3.8-flash'), 'qwen');
-  assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'glm');
-  assert.equal(modelFamily('google/gemini-3.8-flash'), 'gemini');
-  assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nemotron');
-  assert.equal(modelFamily('openai-codex/gpt-6-luna'), 'gpt');
-  assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'claude');
+test('modelFamily returns the model vendor and strips lane and provider prefixes', () => {
+  assert.equal(modelFamily('opencode-go/qwen3.8-flash'), 'alibaba');
+  assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'zhipu');
+  assert.equal(modelFamily('opencode-go/kimi-k3'), 'moonshot');
+  assert.equal(modelFamily('opencode-go/deepseek-v4'), 'deepseek');
+  assert.equal(modelFamily('google/gemini-3.8-flash'), 'google');
+  assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nvidia');
+  assert.equal(modelFamily('openai-codex/gpt-6-luna'), 'openai');
+  assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'anthropic');
+  assert.equal(modelFamily('claude/sonnet:high'), 'anthropic');
+  assert.equal(modelFamily('codex/gpt-6-luna:high'), 'openai');
+  assert.equal(modelFamily('acme/reviewer'), 'reviewer');
+});
+
+test('modelFamily groups models by vendor', () => {
+  assert.equal(modelFamily('claude-sonnet-5'), modelFamily('claude-opus-5'));
+  assert.equal(modelFamily('codex/gpt-6-luna'), modelFamily('codex/gpt-6.1-sol'));
+  assert.notEqual(modelFamily('claude/sonnet'), modelFamily('codex/gpt-6-luna'));
+  assert.equal(modelFamily('openrouter/qwen/qwen3.7-plus'), modelFamily('opencode-go/qwen3.8-flash'));
 });
 
 test('review.request refuses the builder model and its family unless allowSameFamily', async () => {
@@ -754,7 +766,7 @@ test('review.request refuses the builder model and its family unless allowSameFa
   if (!same.ok) assert.match(same.reason, /builder's model/);
   const family = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: false });
   assert.equal(family.ok, false);
-  if (!family.ok) assert.match(family.reason, /family 'qwen'/);
+  if (!family.ok) assert.match(family.reason, /family 'alibaba'/);
   const forced = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: true });
   assert.equal(forced.ok, true);
   if (forced.ok) await helm.settle(forced.reviewWorkerId);

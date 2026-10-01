@@ -146,7 +146,7 @@ test('pr.merge refuses a review from the builder model family', async () => {
   try {
   const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-14', reviewer: 'codex/gpt-6-luna:high', verdict: 'approve' });
     assert.equal(recorded.ok, true);
-    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: "reviewer model family 'gpt' matches the builder's" });
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: "reviewer model family 'openai' matches the builder's" });
   } finally { d.store.close(); }
 });
 

@@ -650,7 +650,7 @@ export class Helm {
     for (const skipped of choice?.skippedCandidates ?? []) this.store.appendEvent(workerId, 'route.skipped', skipped);
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
-    const issueNumber = input.issue ?? baseline?.issue;
+    const issueNumber = baseline?.issue ?? input.issue;
     const issueText = issueNumber !== undefined ? await this.fetchIssueText(repoSlug, issueNumber) : undefined;
     const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}), ...(issueText ? { issueText } : {}) };
     this.store.appendEvent(workerId, 'admission.priority', { stated, requestedBy: input.requestedBy ?? 'auto', class: check.class ?? null, size: check.size ?? null, effective, score: rank.base, reasons: rank.reasons });

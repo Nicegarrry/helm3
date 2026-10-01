@@ -98,6 +98,10 @@ test('call() validates and dispatches a valid call to the matching Helm method',
   assert.equal(calls[0]?.method, 'spawn');
   assert.deepEqual(calls[0]?.input, { repo: '/abs/repo', objective: 'do it', model: 'acme/m', role: 'builder', contextPaths: [], allowWorkflows: false });
 
+  const networkOutcome = await registry.call('worker.spawn', { repo: '/abs/repo', objective: 'download packages', model: 'claude/sonnet', network: { allow: ['registry.npmjs.org'] } });
+  assert.equal(networkOutcome.ok, true);
+  assert.deepEqual(calls.at(-1)?.input, { repo: '/abs/repo', objective: 'download packages', model: 'claude/sonnet', role: 'builder', contextPaths: [], allowWorkflows: false, network: { allow: ['registry.npmjs.org'] } });
+
   const statusOutcome = await registry.call('run.status', {});
   assert.equal(statusOutcome.ok, true);
   assert.equal(calls.at(-1)?.method, 'runStatus');

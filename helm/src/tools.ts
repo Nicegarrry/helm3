@@ -118,6 +118,7 @@ function compactInspect(outcome: ToolOutcome<unknown>, verbose: boolean): ToolOu
     model: source.model,
     branch: source.branch,
     head: source.head,
+    ...(source.network ? { network: source.network } : {}),
     spendUsd: source.spendUsd,
     tokens: source.tokens,
     diffStat: truncate(String(source.diffStat ?? '').split('\n')[0] ?? '', 200),

@@ -97,6 +97,7 @@ import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 import { ensureTickets, getTicket, insertTicket, refreshTickets, ticketView, ticketRank, ticketLane, bumpTicket, statusSections, type Ticket } from './tickets.js';
 import { sandboxEnabled } from './gate.js';
 import { installManager } from './sandbox.js';
+import { parseClaudeModel } from './claude.js';
 
 const exec = promisify(execFile);
 const INFRA_GATE_FAILURE = /EAGAIN|ENOMEM|resource temporarily unavailable/i;
@@ -512,6 +513,13 @@ export class Helm {
     this.modelChoosers.push(fn);
   }
   private async refusal(tool: string, input: unknown): Promise<string | null> {
+    if (tool === 'worker.spawn') {
+      const spawn = input as SpawnInput;
+      if (spawn.network?.allow.length) {
+        if (spawn.role !== 'builder') return 'network allowlist is available to builders only';
+        if (!spawn.model || !parseClaudeModel(spawn.model)) return 'network allowlist supported on claude lane only';
+      }
+    }
     for (const fn of this.guards.get(tool) ?? []) {
       const reason = await fn(input);
       if (reason) return reason;
@@ -777,7 +785,7 @@ export class Helm {
     const createdAt = this.nowIso();
     const row: WorkerRow = {
       workerId, repo, repoSlug, role: input.role, model, objective: input.objective,
-      acceptance: input.acceptance ?? null, contextPaths: [...input.contextPaths], allowWorkflows: input.allowWorkflows,
+      acceptance: input.acceptance ?? null, contextPaths: [...input.contextPaths], allowWorkflows: input.allowWorkflows, ...(input.network ? { network: { allow: [...input.network.allow] } } : {}),
       baseRef, baseSha, branch, worktree, state: 'queued', head: null, sessionFile: null, result: null,
       rawResultText: null, idempotencyKey: input.idempotencyKey ?? null, createdAt, updatedAt: createdAt,
     };
@@ -794,7 +802,7 @@ export class Helm {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
     }
-    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, loadClass, baseRef, baseSha, branch, worktree });
+    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, loadClass, baseRef, baseSha, branch, worktree, ...(input.network ? { network: input.network } : {}) });
     if (choice?.model) this.store.appendEvent(workerId, 'route.selected', {
       tier: choice.tier ?? null, ...(choice.score === undefined ? {} : { score: choice.score }), policyApplied: choice.policyApplied ?? null, chosenModel: choice.model,
       ...(choice.skippedCandidates?.length ? { skippedCandidates: choice.skippedCandidates } : {}),
@@ -876,6 +884,7 @@ export class Helm {
       const events = input.tail > 0 ? all.slice(-input.tail) : [];
       return {
         ok: true, state: row.state, model: row.model, branch: row.branch, head: row.head,
+        ...(row.network ? { network: row.network } : {}),
         spendUsd: spend.spendUsd, tokens: spend.tokens, diffStat, result: row.result, events,
       };
     });
@@ -1577,6 +1586,7 @@ export class Helm {
     const runInput: WorkerRunInput = {
       workerId, role: row.role, model: row.model, worktree: row.worktree, objective: row.objective,
       acceptance: row.acceptance, contextPaths: row.contextPaths, allowWorkflows: row.allowWorkflows,
+      ...(row.network ? { network: row.network } : {}),
       sessionFile: row.sessionFile, sessionDir: join(this.config.home, 'sessions', workerId), tempDir: this.workerTempDir(workerId),
     };
     const hooks: WorkerHooks = {

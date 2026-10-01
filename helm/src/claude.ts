@@ -88,7 +88,11 @@ export function claudeSandboxSettings(
   gitDirs: ClaudeGitDirs,
   reviewer = false,
   helmHome = join(homedir(), '.helm'),
+  networkAllowlist: readonly string[] = [],
 ): string {
+  const network = !reviewer && networkAllowlist.length
+    ? { allowedDomains: [...networkAllowlist], deniedDomains: ['localhost', '127.0.0.1', '::1'], strictAllowlist: true, allowUnixSockets: [], allowAllUnixSockets: false, allowLocalBinding: false }
+    : { allowedDomains: [], deniedDomains: ['*'] };
   return JSON.stringify({
     sandbox: {
       enabled: true,
@@ -102,16 +106,13 @@ export function claudeSandboxSettings(
         denyWrite: [gitDirs.gitDir, gitDirs.commonDir, join(worktree, '.git')],
         denyRead: [...credentialPaths(homedir(), helmHome), join(helmHome, 'serve.json.*.tmp')],
       },
-      network: {
-        allowedDomains: [],
-        deniedDomains: ['*'],
-      },
+      network,
     },
   });
 }
 
 export function claudeArgs(
-  input: Pick<WorkerRunInput, 'role' | 'worktree'>,
+  input: Pick<WorkerRunInput, 'role' | 'worktree' | 'network'>,
   spec: { model: string; effort?: string },
   sessionId: string | null,
   temporaryDirectory: string,
@@ -132,7 +133,7 @@ export function claudeArgs(
     '--restricted', '--safe-mode',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--setting-sources', '', '--permission-prompts', 'none',
-    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory, gitDirs, reviewer, helmHome),
+    '--settings', claudeSandboxSettings(input.worktree, temporaryDirectory, gitDirs, reviewer, helmHome, input.network?.allow),
     '--permission-mode', reviewer ? 'plan' : 'acceptEdits',
     '--tools', allowedTools,
     ...disallowedTools.flatMap((tool) => ['--disallowedTools', tool]),

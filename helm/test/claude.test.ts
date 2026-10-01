@@ -129,6 +129,23 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
   assert.ok(!review.slice(review.indexOf('--disallowedTools')).includes('Bash'));
 });
 
+test('claudeArgs: builder allowlist enables only requested domains while reviewer stays offline', () => {
+  const gitDirs = { gitDir: '/home/.helm/worktrees/repo/w-1/.git', commonDir: '/home/.helm/repos/repo/.git' };
+  const builder = claudeArgs({ role: 'builder', worktree: '/wt', network: { allow: ['registry.npmjs.org', '*.github.com'] } }, { model: 'sonnet' }, null, '/tmp/helm-claude', gitDirs);
+  const builderSettings = JSON.parse(builder[builder.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { denyRead: string[] }; network: Record<string, unknown> } };
+  assert.deepEqual(builderSettings.sandbox.network.allowedDomains, ['registry.npmjs.org', '*.github.com']);
+  assert.deepEqual(builderSettings.sandbox.network.deniedDomains, ['localhost', '127.0.0.1', '::1']);
+  assert.equal(builderSettings.sandbox.network.strictAllowlist, true);
+  assert.equal(builderSettings.sandbox.network.allowAllUnixSockets, false);
+  assert.deepEqual(builderSettings.sandbox.network.allowUnixSockets, []);
+  assert.equal(builderSettings.sandbox.network.allowLocalBinding, false);
+  assert.ok(builderSettings.sandbox.filesystem.denyRead.includes(join(homedir(), '.helm', 'serve.json')));
+
+  const reviewer = claudeArgs({ role: 'reviewer', worktree: '/wt', network: { allow: ['registry.npmjs.org'] } }, { model: 'opus' }, null, '/tmp/helm-claude', gitDirs);
+  const reviewerSettings = JSON.parse(reviewer[reviewer.indexOf('--settings') + 1]!) as { sandbox: { network: Record<string, unknown> } };
+  assert.deepEqual(reviewerSettings.sandbox.network, { allowedDomains: [], deniedDomains: ['*'] });
+});
+
 test('resolveClaudeGitDirs: linked worktree exposes its git dir and ~/.helm common dir as read-only paths', async () => {
   const root = await mkdtemp(join(tmpdir(), 'helm-claude-git-test-'));
   const repo = join(root, '.helm', 'repos', 'owner__repo');
@@ -183,6 +200,16 @@ test('run: a recorded Claude session resumes with --resume', async () => {
   const outcome = await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir, sessionFile: `${CLAUDE_SESSION_PREFIX}session-previous` }), 'Fix it', hooks);
   assert.equal(outcome.sessionFile, `${CLAUDE_SESSION_PREFIX}session-previous`);
   const [call] = await f.calls();
+  assert.deepEqual(call!.args.slice(-2), ['--resume', 'session-previous']);
+});
+
+test('run: a recorded Claude session resumes with its network allowlist', async () => {
+  const f = await fixture('ok');
+  const { hooks } = collectHooks();
+  await f.runner.run(input({ worktree: f.worktree, sessionDir: f.sessionDir, sessionFile: `${CLAUDE_SESSION_PREFIX}session-previous`, network: { allow: ['registry.npmjs.org'] } }), 'Fix it', hooks);
+  const [call] = await f.calls();
+  const settings = JSON.parse(call!.args[call!.args.indexOf('--settings') + 1]!);
+  assert.deepEqual(settings.sandbox.network.allowedDomains, ['registry.npmjs.org']);
   assert.deepEqual(call!.args.slice(-2), ['--resume', 'session-previous']);
 });
 

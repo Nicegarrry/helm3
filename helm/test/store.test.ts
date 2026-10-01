@@ -40,16 +40,18 @@ function makeWorker(overrides: Partial<WorkerRow> = {}): WorkerRow {
   };
 }
 
-test('contextPaths and allowWorkflows round-trip through insert and update', () => {
+test('contextPaths, allowWorkflows, and network allowlist round-trip through insert and update', () => {
   const dir = mkdtempSync(join(tmpdir(), 'helm-store-'));
   const store = openStore(join(dir, 'helm.sqlite'));
   try {
-    store.insertWorker(makeWorker({ workerId: 'w-ctx', contextPaths: ['docs/a.md', 'src'], allowWorkflows: true }));
+    store.insertWorker(makeWorker({ workerId: 'w-ctx', contextPaths: ['docs/a.md', 'src'], allowWorkflows: true, network: { allow: ['registry.npmjs.org'] } }));
     assert.deepEqual(store.getWorker('w-ctx')?.contextPaths, ['docs/a.md', 'src']);
     assert.equal(store.getWorker('w-ctx')?.allowWorkflows, true);
-    store.updateWorker('w-ctx', { contextPaths: ['only.md'], allowWorkflows: false });
+    assert.deepEqual(store.getWorker('w-ctx')?.network, { allow: ['registry.npmjs.org'] });
+    store.updateWorker('w-ctx', { contextPaths: ['only.md'], allowWorkflows: false, network: { allow: [] } });
     assert.deepEqual(store.getWorker('w-ctx')?.contextPaths, ['only.md']);
     assert.equal(store.getWorker('w-ctx')?.allowWorkflows, false);
+    assert.deepEqual(store.getWorker('w-ctx')?.network, { allow: [] });
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

@@ -279,6 +279,7 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   const outcome = await helm.spawn(spawnBody(repo));
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
+  assert.ok(outcome.ok && outcome.workerId);
   await helm.settle(outcome.workerId);
   const row = store.getWorker(outcome.workerId);
   assert.equal(row?.state, 'succeeded');
@@ -303,11 +304,13 @@ test('a security-classified objective is bumped to high and recorded in admissio
   const outcome = await helm.spawn(spawnBody(mkTempDir('helm-priority-security-'), { priority: 'low', requestedBy: 'owner' }));
   assert.ok(outcome.ok);
   if (!outcome.ok) return;
+  assert.ok(outcome.ok && outcome.workerId);
   assert.deepEqual(admissionEvent(store, outcome.workerId), {
     stated: 'low', requestedBy: 'owner', class: 'security', size: 's', effective: 'high', score: 45,
     reasons: ['priority high +20', 'requested by owner +15', 'quick win (s) +10'],
   });
   const urgent = await helm.spawn(spawnBody(mkTempDir('helm-priority-urgent-'), { priority: 'urgent' }));
+  assert.ok(urgent.ok && urgent.workerId);
   assert.ok(urgent.ok);
   if (urgent.ok) assert.equal(admissionEvent(store, urgent.workerId)?.effective, 'urgent');
 });
@@ -318,6 +321,7 @@ test('a Jev failure or unusable answer falls back to the stated priority without
     const outcome = await helm.spawn(spawnBody(mkTempDir('helm-priority-fallback-'), { priority: 'high' }));
     assert.ok(outcome.ok);
     if (!outcome.ok) return;
+    assert.ok(outcome.ok && outcome.workerId);
     assert.deepEqual(admissionEvent(store, outcome.workerId), { stated: 'high', requestedBy: 'auto', class: null, size: null, effective: 'high', score: 20, reasons: ['priority high +20'] });
   }
 });
@@ -327,12 +331,15 @@ test('a repo helm.json priority is the project default and an explicit priority 
   const repo = mkTempDir('helm-priority-default-');
   writeFileSync(join(repo, 'helm.json'), JSON.stringify({ priority: 'urgent' }));
   const defaulted = await helm.spawn(spawnBody(repo));
+  assert.ok(defaulted.ok && defaulted.workerId);
   const explicit = await helm.spawn(spawnBody(repo, { priority: 'low' }));
+  assert.ok(explicit.ok && explicit.workerId);
   assert.ok(defaulted.ok && explicit.ok);
   if (!defaulted.ok || !explicit.ok) return;
   assert.equal(admissionEvent(store, defaulted.workerId)?.stated, 'urgent');
   assert.equal(admissionEvent(store, explicit.workerId)?.stated, 'low');
   const plain = await helm.spawn(spawnBody(mkTempDir('helm-priority-none-')));
+  assert.ok(plain.ok && plain.workerId);
   assert.ok(plain.ok);
   if (plain.ok) assert.equal(admissionEvent(store, plain.workerId)?.stated, 'normal');
 });
@@ -348,6 +355,7 @@ test('dispatched issue-title lookup runs after spawn admission and falls back on
   assert.ok(outcome.ok);
   assert.ok(Date.now() - started < 500, 'spawn should not wait for issue title lookup');
   if (!outcome.ok) return;
+  assert.ok(outcome.ok && outcome.workerId);
   resolveTitle('Issue title');
   await new Promise((resolve) => setImmediate(resolve));
   const dispatched = first.store.listEvents(outcome.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched');
@@ -357,6 +365,7 @@ test('dispatched issue-title lookup runs after spawn admission and falls back on
 
   const second = makeHelm({ github: { ...seed.github.github, issueTitle: async () => { throw new Error('unavailable'); } } });
   const fallback = await second.helm.spawn(spawnBody(mkTempDir('helm-dispatched-fallback-'), { issue: 43, objective: 'fallback title\nother detail' }));
+  assert.ok(fallback.ok && fallback.workerId);
   assert.ok(fallback.ok);
   if (fallback.ok) {
     await new Promise((resolve) => setImmediate(resolve));
@@ -374,6 +383,7 @@ test('dispatch milestone rejection becomes a warning event instead of an unhandl
   const outcome = await helm.spawn(spawnBody(mkTempDir('helm-dispatched-warning-'), { issue: 44 }));
   assert.ok(outcome.ok);
   if (!outcome.ok) return;
+  assert.ok(outcome.ok && outcome.workerId);
   await new Promise((resolve) => setImmediate(resolve));
   const warning = store.listEvents(outcome.workerId).find((event) => event.kind === 'dispatched.warning');
   assert.equal(warning?.data.message, 'dispatch milestone failed: milestone write failed');
@@ -393,6 +403,7 @@ test('a settled worker turn removes node_modules from every top-level package', 
   const outcome = await helm.spawn(spawnBody(mkTempDir('helm-repo-cleanup-')));
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
+  assert.ok(outcome.ok && outcome.workerId);
   const waited = await helm.wait({ workerIds: [outcome.workerId], timeoutMs: 2000 });
   assert.equal(waited.ok, true);
   const row = store.getWorker(outcome.workerId)!;
@@ -416,6 +427,7 @@ test('gate node_modules cleanup failures are hygiene warnings', async () => {
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-cleanup-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
   assert.equal(result.ok, true);
@@ -440,6 +452,7 @@ test('gate refreshes the current base ref for policy and records its resolved sh
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-current-base-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const result = await helm.gate({ workerId: spawned.workerId });
   assert.equal(result.ok, true);
@@ -468,6 +481,7 @@ test('an infrastructure gate failure is retried once instead of steering the wor
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-infra-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
   assert.equal(result.ok, true);
@@ -489,6 +503,7 @@ test('gate sandbox fallback is recorded as an event for Discord milestones', asy
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-unsandboxed-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
   assert.equal(result.ok, true);
@@ -507,6 +522,7 @@ test('gate refusal is recorded when the runner rejects the worktree', async () =
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-gate-refused-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const result = await helm.gate({ workerId: spawned.workerId, checks: [{ name: 'test', command: 'npm test' }] });
   assert.equal(result.ok, true);
@@ -518,6 +534,7 @@ test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on re
   const first = await helm.spawn(spawnBody('acme/widgets'));
   assert.equal(first.ok, true);
   if (!first.ok) return;
+  assert.ok(first.ok && first.workerId);
   await helm.settle(first.workerId);
   const expectedRepo = join(config.home, 'repos', 'acme__widgets');
   assert.deepEqual(cloned, [`acme/widgets -> ${expectedRepo}`]);
@@ -525,6 +542,7 @@ test('spawn with owner/name clones once under $HELM_HOME/repos and fetches on re
   const second = await helm.spawn(spawnBody('acme/widgets'));
   assert.equal(second.ok, true);
   if (!second.ok) return;
+  assert.ok(second.ok && second.workerId);
   await helm.settle(second.workerId);
   assert.equal(cloned.length, 1, 'no second clone');
   assert.deepEqual(fetched, [expectedRepo]);
@@ -620,6 +638,7 @@ test('spawn refuses once the spend cap is reached', async () => {
   const { helm } = makeHelm({ config: { spendCapUsd: 0.005 } }); // succeeded() records $0.01 per turn
   const repo = mkTempDir('helm-repo-');
   const first = await helm.spawn(spawnBody(repo));
+  assert.ok(first.ok && first.workerId);
   assert.equal(first.ok, true);
   if (first.ok) await helm.settle(first.workerId);
   const second = await helm.spawn(spawnBody(repo));
@@ -634,6 +653,7 @@ test('spawn refuses an exhausted project budget while another project still spaw
   const first = await helm.spawn(spawnBody(firstRepo));
   assert.equal(first.ok, true);
   if (!first.ok) return;
+  assert.ok(first.ok && first.workerId);
   await helm.settle(first.workerId);
 
   const refused = await helm.spawn(spawnBody(firstRepo));
@@ -641,6 +661,7 @@ test('spawn refuses an exhausted project budget while another project still spaw
   if (!refused.ok) assert.match(refused.reason, /budget exhausted/);
 
   const other = await helm.spawn(spawnBody(otherRepo));
+  assert.ok(other.ok && other.workerId);
   assert.equal(other.ok, true);
   if (other.ok) await helm.settle(other.workerId);
 });
@@ -661,6 +682,7 @@ test('steer refuses an exhausted project budget', async () => {
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
 
   const refused = await helm.steer({ workerId: spawned.workerId, message: 'continue' });
@@ -674,6 +696,7 @@ test('inbox.reply refuses an exhausted project budget', async () => {
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const ask = store.listEvents(spawned.workerId).find((event) => event.kind === 'ask');
   assert.ok(ask?.data.inboxId);
@@ -693,6 +716,7 @@ test('budget spend.warning fires once at 80% and includes project and label', as
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
 
   const warnings = store.listEvents(spawned.workerId).filter((event) => event.kind === 'spend.warning');
@@ -707,12 +731,14 @@ test('soft spend cap: warning event, run.status flag, and spawn warning, without
   const first = await helm.spawn(spawnBody(repo));
   assert.equal(first.ok, true);
   if (!first.ok) return;
+  assert.ok(first.ok && first.workerId);
   await helm.settle(first.workerId);
   let status = await helm.runStatus();
   assert.equal(status.ok && status.aboveSoftCap, false);
   const second = await helm.spawn(spawnBody(repo));
   assert.equal(second.ok, true);
   if (!second.ok) return;
+  assert.ok(second.ok && second.workerId);
   await helm.settle(second.workerId);
   status = await helm.runStatus();
   assert.equal(status.ok && status.spendWarnUsd, 0.015);
@@ -745,6 +771,7 @@ test('review.request refuses the builder model and its family unless allowSameFa
   const spawned = await helm.spawn(spawnBody(repo, { model: 'opencode-go/qwen3.8-flash' }));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   await helm.gate({ workerId: spawned.workerId });
   const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
@@ -769,6 +796,7 @@ test('gate.run refuses on a dirty worktree', async () => {
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId); assert.ok(spawned.ok && spawned.worktree);
   await helm.settle(spawned.workerId);
   markDirty(spawned.worktree);
   const outcome = await helm.gate({ workerId: spawned.workerId });
@@ -782,6 +810,7 @@ test('gate.run and gate.baseline refuse while a worker turn is running', async (
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-running-gate-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
 
   const gate = await helm.gate({ workerId: spawned.workerId });
   assert.equal(gate.ok, false);
@@ -800,6 +829,7 @@ test('pr.open is refused without a passing gate at head, then allowed once gated
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
 
   const refused = await helm.prOpen({ workerId: spawned.workerId, draft: true });
@@ -820,6 +850,7 @@ test('pr.open updates an existing PR row after pushing and only edits passed met
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const worker = store.getWorker(spawned.workerId);
   assert.ok(worker?.head);
@@ -844,6 +875,7 @@ test('pr.open refuses an existing PR before pushing when its head has no passing
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
 
@@ -858,6 +890,7 @@ test('pr.open records an existing GitHub PR when the local row is missing', asyn
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const worker = store.getWorker(spawned.workerId);
   assert.ok(worker?.head);
@@ -874,6 +907,7 @@ test('pr.open refuses closed or merged existing PRs before pushing', async () =>
     const { helm, store, pushed, github } = makeHelm();
     const repo = mkTempDir('helm-repo-');
     const spawned = await helm.spawn(spawnBody(repo));
+    assert.ok(spawned.ok && spawned.workerId);
     assert.equal(spawned.ok, true);
     if (!spawned.ok) continue;
     await helm.settle(spawned.workerId);
@@ -894,6 +928,7 @@ test('pr.open uses the default branch, worker prBase, and explicit base in order
   const first = await helm.spawn(spawnBody(repo, { baseRef: 'release' }));
   assert.equal(first.ok, true);
   if (!first.ok) return;
+  assert.ok(first.ok && first.workerId);
   await helm.settle(first.workerId);
   assert.equal((await helm.gate({ workerId: first.workerId })).ok, true);
   assert.equal((await helm.prOpen({ workerId: first.workerId, draft: true })).ok, true);
@@ -901,6 +936,7 @@ test('pr.open uses the default branch, worker prBase, and explicit base in order
   const second = await helm.spawn(spawnBody(repo, { baseRef: 'release-2' }));
   assert.equal(second.ok, true);
   if (!second.ok) return;
+  assert.ok(second.ok && second.workerId);
   await helm.settle(second.workerId);
   store.setMeta(second.workerId, { prBase: 'develop' });
   assert.equal((await helm.gate({ workerId: second.workerId })).ok, true);
@@ -909,6 +945,7 @@ test('pr.open uses the default branch, worker prBase, and explicit base in order
   const third = await helm.spawn(spawnBody(repo, { baseRef: 'release-3' }));
   assert.equal(third.ok, true);
   if (!third.ok) return;
+  assert.ok(third.ok && third.workerId);
   await helm.settle(third.workerId);
   assert.equal((await helm.gate({ workerId: third.workerId })).ok, true);
   assert.equal((await helm.prOpen({ workerId: third.workerId, base: 'hotfix', draft: true })).ok, true);
@@ -921,6 +958,7 @@ test('merge.enqueue after an existing PR update uses the updated head', async ()
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   store.insertPr({ number: 230, workerId: spawned.workerId, url: 'https://example.invalid/230', head: 'old-head', createdAt: new Date().toISOString() });
   github.setPrStatus(230, { head: store.getWorker(spawned.workerId)?.head ?? 'unknown' });
@@ -943,6 +981,7 @@ test('steer is refused while running and allowed once idle', async () => {
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
 
   const whileRunning = await helm.steer({ workerId: spawned.workerId, message: 'keep going' });
   assert.equal(whileRunning.ok, false);
@@ -962,6 +1001,7 @@ test('steer refuses a worker whose worktree was removed and explains how to reco
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   store.appendEvent(spawned.workerId, 'worktree.removed');
   assert.deepEqual(await helm.steer({ workerId: spawned.workerId, message: 'continue' }), { ok: false, reason: 'worktree removed; respawn' });
@@ -974,6 +1014,7 @@ test('two concurrent steer() calls on an idle worker: exactly one succeeds (F2)'
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   resolveNext({ result: { status: 'succeeded', summary: 'first turn done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null });
   await helm.settle(spawned.workerId);
 
@@ -991,6 +1032,7 @@ test('steer refuses once the spend cap is reached (F3)', async () => {
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
 
   const outcome = await helm.steer({ workerId: spawned.workerId, message: 'keep going' });
@@ -1005,6 +1047,7 @@ test('stop marks a running worker stopped once its turn observes the stop and se
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
 
   const stopPromise = helm.stop({ workerId: spawned.workerId });
   await new Promise((r) => setImmediate(r));
@@ -1024,6 +1067,7 @@ test('stop does not force "stopped" when the turn never observed the stop reques
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
 
   const stopPromise = helm.stop({ workerId: spawned.workerId });
   await new Promise((r) => setImmediate(r));
@@ -1040,6 +1084,7 @@ test('stop refuses when the worker is not running', async () => {
   const repo = mkTempDir('helm-repo-');
   const spawned = await helm.spawn(spawnBody(repo));
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const outcome = await helm.stop({ workerId: spawned.workerId });
   assert.equal(outcome.ok, false);
@@ -1052,6 +1097,7 @@ test('stop returns unknown and keeps the stop flag set when the turn never settl
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
 
   const outcome = await helm.stop({ workerId: spawned.workerId });
   assert.equal(outcome.ok, true);
@@ -1065,6 +1111,7 @@ test('review.request spawns a reviewer that posts its result as a PR comment', a
   const repo = mkTempDir('helm-repo-');
   const spawned = await helm.spawn(spawnBody(repo));
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   await helm.gate({ workerId: spawned.workerId });
   const opened = await helm.prOpen({ workerId: spawned.workerId, draft: true });
@@ -1088,6 +1135,7 @@ test('pr.merge guards on open state, mergeability, exact head, and green checks'
   const repo = mkTempDir('helm-repo-');
   const spawned = await helm.spawn(spawnBody(repo));
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   await helm.gate({ workerId: spawned.workerId });
   const opened = await helm.prOpen({ workerId: spawned.workerId, draft: false });
@@ -1116,6 +1164,7 @@ test('markInterruptedOnStart flips running workers to interrupted', async () => 
   const repo = mkTempDir('helm-repo-');
   const spawned = await helm.spawn(spawnBody(repo));
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   assert.equal(store.getWorker(spawned.workerId)?.state, 'running');
   const ids = await helm.markInterruptedOnStart();
   assert.deepEqual(ids, [spawned.workerId]);
@@ -1139,7 +1188,9 @@ test('overview includes a cumulative spendSeries', async () => {
   const { helm } = makeHelm();
   const repo = mkTempDir('helm-repo-');
   const first = await helm.spawn(spawnBody(repo));
+  assert.ok(first.ok && first.workerId);
   const second = await helm.spawn(spawnBody(repo));
+  assert.ok(second.ok && second.workerId);
   assert.equal(first.ok && second.ok, true);
   if (!first.ok || !second.ok) return;
   await helm.settle(first.workerId);
@@ -1171,6 +1222,7 @@ test('a turn killed before it returns still leaves a session file to resume from
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
 
   assert.equal(store.getWorker(spawned.workerId)?.sessionFile, sessionFile);
@@ -1191,6 +1243,7 @@ test('the end-of-turn write does not reinstate a session file that predates onSe
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
 
   assert.equal(store.getWorker(spawned.workerId)?.sessionFile, sessionFile);
@@ -1208,6 +1261,7 @@ test('worker.wait blocks while the worker runs and returns it the moment it sett
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
 
   let resolved = false;
   const waiting = helm.wait({ workerIds: [spawned.workerId], timeoutMs: 5000 }).then((r) => { resolved = true; return r; });
@@ -1232,6 +1286,7 @@ test('worker.wait times out with the worker still pending and reports how long i
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
 
   const outcome = await helm.wait({ workerIds: [spawned.workerId], timeoutMs: 40 });
   assert.equal(outcome.ok, true);
@@ -1249,7 +1304,9 @@ test('worker.wait returns as soon as any one of several workers settles, naming 
   const { runner, resolveNext } = createControllableRunner();
   const { helm } = makeHelm({ runner, waitPollMs: 5 });
   const first = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.ok(first.ok && first.workerId);
   const second = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
+  assert.ok(second.ok && second.workerId);
   assert.equal(first.ok && second.ok, true);
   if (!first.ok || !second.ok) return;
 
@@ -1278,6 +1335,7 @@ test('worker.wait sees an interrupted worker as settled: that is the state the o
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   store.updateWorker(spawned.workerId, { state: 'interrupted' });
 
   const outcome = await helm.wait({ workerIds: [spawned.workerId], timeoutMs: 1000 });
@@ -1292,6 +1350,7 @@ async function openedPr(helm: Helm, github: ReturnType<typeof createFakeGitHub>)
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-repo-')));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) throw new Error('spawn failed');
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   const gate = await helm.gate({ workerId: spawned.workerId });
   assert.equal(gate.ok, true);
@@ -1374,6 +1433,7 @@ test('explicit models override difficulty; a Gemini builder gets an independent 
   const { helm, store } = makeHelm();
   const repo = mkTempDir('helm-routing-');
   const build = await helm.spawn(spawnBody(repo, { difficulty: 'super-easy', model: 'google/gemini-3.8-flash' }));
+  assert.ok(build.ok && build.workerId);
   assert.ok(build.ok);
   await helm.settle(build.workerId);
   assert.equal(store.getWorker(build.workerId)?.model, 'google/gemini-3.8-flash');
@@ -1384,6 +1444,7 @@ test('explicit models override difficulty; a Gemini builder gets an independent 
   await helm.settle(review.reviewWorkerId);
   assert.equal(store.getWorker(review.reviewWorkerId)?.model, 'codex/gpt-6-luna:high');
   const direct = await helm.spawn(spawnBody(repo, { model: undefined, role: 'reviewer', difficulty: 'super-easy' }));
+  assert.ok(direct.ok && direct.workerId);
   assert.ok(direct.ok);
   await helm.settle(direct.workerId);
     assert.equal(store.getWorker(direct.workerId)?.model, 'openrouter/qwen/qwen3.8-flash');
@@ -1442,6 +1503,7 @@ test('drain tracks a gate after the builder settled and counts accepted requests
     entered.release(); await gate.promise; return real.run(...args);
   } } });
   const build = await helm.spawn(spawnBody(mkTempDir('helm-drain-')));
+  assert.ok(build.ok && build.workerId);
   assert.ok(build.ok);
   await helm.settle(build.workerId);
   const registry = createToolRegistry(helm);
@@ -1463,6 +1525,7 @@ test('drain waits for the review callback even after the reviewer state is succe
     entered.release(); await comment.promise; return gh.postComment(...args);
   } } });
   const build = await helm.spawn(spawnBody(mkTempDir('helm-drain-')));
+  assert.ok(build.ok && build.workerId);
   assert.ok(build.ok);
   await helm.settle(build.workerId);
   await helm.gate({ workerId: build.workerId });
@@ -1498,6 +1561,7 @@ test('pr.open infers a missing issue from the new or updated PR body', async () 
   const { helm, store } = makeHelm();
   const spawned = await helm.spawn(spawnBody(mkTempDir('helm-issue-repo-')));
   assert.equal(spawned.ok, true); if (!spawned.ok) return;
+  assert.ok(spawned.ok && spawned.workerId);
   await helm.settle(spawned.workerId);
   await helm.gate({ workerId: spawned.workerId });
   assert.equal((await helm.prOpen({ workerId: spawned.workerId, body: 'Closes #279', draft: false })).ok, true);
@@ -1507,4 +1571,155 @@ test('pr.open infers a missing issue from the new or updated PR body', async () 
   assert.equal(store.getMeta(spawned.workerId)?.issue, 280);
   assert.equal((await helm.prOpen({ workerId: spawned.workerId, body: 'Resolves #281', draft: false })).ok, true);
   assert.equal(store.getMeta(spawned.workerId)?.issue, 280);
+});
+
+// Backlog integration: these use the real store and capacity admission, with only the worker lane faked.
+const backlogDone: WorkerRunOutcome = { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+
+test('queued ticket intake and idempotency create no worker, branch or worktree', async () => {
+  const control = createControllableRunner();
+  const { helm, store, created } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const repo = mkTempDir('helm-ticket-repo-');
+  const active = await helm.spawn(spawnBody(repo)); assert.ok(active.ok && active.workerId);
+  const queued = await helm.spawn(spawnBody(repo, { idempotencyKey: 'queued-key' }));
+  assert.ok(queued.ok && queued.ticketId); assert.equal(queued.queued, true);
+  assert.equal(queued.workerId, undefined); assert.equal(queued.branch, undefined); assert.equal(queued.worktree, undefined);
+  assert.equal(created.length, 1); assert.equal(store.listWorkers().length, 1);
+  const duplicate = await helm.spawn(spawnBody(repo, { idempotencyKey: 'queued-key' }));
+  assert.ok(duplicate.ok); assert.equal(duplicate.ticketId, queued.ticketId);
+  assert.equal(duplicate.position, 1); assert.equal(created.length, 1);
+  control.resolveNext(backlogDone); await helm.settle(active.workerId);
+  await helm.close();
+});
+
+test('owner and urgent tickets skip even an aged high priority backlog', async () => {
+  const control = createControllableRunner();
+  const { helm, store } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const repo = mkTempDir('helm-ticket-owner-');
+  await helm.spawn(spawnBody(repo));
+  const high = await helm.spawn(spawnBody(repo, { priority: 'high' })); assert.ok(high.ok && high.ticketId);
+  store.sql.prepare('UPDATE capacity_jobs SET queuedAt = ? WHERE id = ?').run(new Date(Date.now() - 3 * 86400_000).toISOString(), high.ticketId);
+  const owner = await helm.spawn(spawnBody(repo, { priority: 'low', requestedBy: 'owner' })); assert.ok(owner.ok && owner.ticketId); assert.equal(owner.position, 1);
+  const urgent = await helm.spawn(spawnBody(repo, { priority: 'urgent' })); assert.ok(urgent.ok && urgent.ticketId); assert.equal(urgent.position, 1);
+  await helm.ticketCancel({ ticketId: urgent.ticketId }); await helm.ticketCancel({ ticketId: owner.ticketId }); await helm.ticketCancel({ ticketId: high.ticketId });
+  control.resolveNext(backlogDone); await helm.close();
+});
+
+test('dispatcher promotes by score with aging, and queued cancel never creates a worker', async () => {
+  const control = createControllableRunner();
+  const { helm, store, created } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const repo = mkTempDir('helm-ticket-score-');
+  const active = await helm.spawn(spawnBody(repo)); assert.ok(active.ok && active.workerId);
+  const low = await helm.spawn(spawnBody(repo, { priority: 'low' })); assert.ok(low.ok && low.ticketId);
+  const high = await helm.spawn(spawnBody(repo, { priority: 'high' })); assert.ok(high.ok && high.ticketId);
+  const cancelled = await helm.spawn(spawnBody(repo)); assert.ok(cancelled.ok && cancelled.ticketId);
+  const registry = createToolRegistry(helm, 'core');
+  assert.equal(registry.list().some((tool) => tool.name.startsWith('ticket.')), false);
+  const cancel = await registry.call('helm.call', { tool: 'ticket.cancel', input: { ticketId: cancelled.ticketId } }); assert.equal(cancel.ok, true);
+  store.sql.prepare('UPDATE capacity_jobs SET queuedAt = ? WHERE id = ?').run(new Date(Date.now() - 150 * 60_000).toISOString(), low.ticketId);
+  control.resolveNext(backlogDone); await helm.settle(active.workerId); await helm.capacityTick();
+  const dispatched = await helm.wait({ workerIds: [low.ticketId], timeoutMs: 1000 }); assert.ok(dispatched.ok && dispatched.workerId, JSON.stringify(dispatched));
+  assert.equal(dispatched.state, 'dispatched'); assert.equal(created.length, 2);
+  assert.equal((store.sql.prepare('SELECT state FROM tickets WHERE id = ?').get(high.ticketId) as { state: string }).state, 'queued');
+  await helm.ticketCancel({ ticketId: high.ticketId });
+  control.resolveNext(backlogDone); await helm.settle(dispatched.workerId); await helm.close();
+});
+
+test('ticket wait returns on bump position changes, dispatch and worker completion', async () => {
+  const control = createControllableRunner();
+  const { helm, store } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner, waitPollMs: 2 });
+  const repo = mkTempDir('helm-ticket-wait-');
+  const active = await helm.spawn(spawnBody(repo)); assert.ok(active.ok && active.workerId);
+  const first = await helm.spawn(spawnBody(repo)); assert.ok(first.ok && first.ticketId);
+  const second = await helm.spawn(spawnBody(repo)); assert.ok(second.ok && second.ticketId);
+  const positionWait = helm.wait({ workerIds: [second.ticketId], timeoutMs: 1000 });
+  const bump = await createToolRegistry(helm).call('helm.call', { tool: 'ticket.bump', input: { ticketId: second.ticketId, priority: 'urgent' } }); assert.equal(bump.ok, true);
+  const moved = await positionWait; assert.ok(moved.ok); assert.equal(moved.position, 1); assert.equal(moved.timedOut, false);
+  const dispatchWait = helm.wait({ workerIds: [second.ticketId], timeoutMs: 1000 });
+  control.resolveNext(backlogDone); await helm.settle(active.workerId); await helm.capacityTick();
+  const dispatched = await dispatchWait; assert.ok(dispatched.ok && dispatched.workerId, JSON.stringify(dispatched)); assert.equal(dispatched.state, 'dispatched');
+  const resultWait = helm.wait({ workerIds: [second.ticketId], timeoutMs: 1000 });
+  await helm.ticketCancel({ ticketId: first.ticketId });
+  control.resolveNext(backlogDone); const completed = await resultWait; assert.ok(completed.ok); assert.equal(completed.state, 'done'); assert.equal(completed.settled[0]?.result?.summary, 'done');
+  const row = store.sql.prepare('SELECT dispatchedAt, finishedAt FROM tickets WHERE id = ?').get(second.ticketId) as { dispatchedAt: string; finishedAt: string };
+  assert.ok(row.dispatchedAt && row.finishedAt); await helm.close();
+});
+
+test('compact MCP status includes three bounded sections and verbose status keeps the backlog', async () => {
+  const control = createControllableRunner();
+  const { helm } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const repo = mkTempDir('helm-ticket-status-');
+  const active = await helm.spawn(spawnBody(repo)); assert.ok(active.ok && active.workerId);
+  const ids: string[] = [];
+  for (let i = 0; i < 7; i++) { const queued = await helm.spawn(spawnBody(repo)); assert.ok(queued.ok && queued.ticketId); ids.push(queued.ticketId); }
+  const registry = createToolRegistry(helm, 'core', true);
+  const compact = await registry.call('run.status', {}); assert.ok(compact.ok);
+  assert.match(String(compact.sections), /Backlog\n/); assert.match(String(compact.sections), /Working\n/); assert.match(String(compact.sections), /Recent/);
+  assert.ok(String(compact.sections).split('\n').length <= 25);
+  const verbose = await registry.call('run.status', { verbose: true }); assert.ok(verbose.ok);
+  assert.equal((verbose.sections as { backlog: unknown[] }).backlog.length, 7);
+  for (const ticketId of ids) await helm.ticketCancel({ ticketId });
+  control.resolveNext(backlogDone); await helm.settle(active.workerId); await helm.close();
+});
+
+test('drain leaves queued tickets intact until admission resumes', async () => {
+  const control = createControllableRunner();
+  const { helm, store, created } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const repo = mkTempDir('helm-ticket-drain-');
+  const active = await helm.spawn(spawnBody(repo)); assert.ok(active.ok && active.workerId);
+  const queued = await helm.spawn(spawnBody(repo)); assert.ok(queued.ok && queued.ticketId);
+  await helm.lifecycle.control({ action: 'drain' });
+  control.resolveNext(backlogDone); await helm.settle(active.workerId); await helm.capacityTick();
+  assert.equal(created.length, 1); assert.equal((store.sql.prepare('SELECT state FROM tickets WHERE id = ?').get(queued.ticketId) as { state: string }).state, 'queued');
+  await helm.lifecycle.control({ action: 'resume' }); await helm.capacityTick();
+  const dispatched = await helm.wait({ workerIds: [queued.ticketId], timeoutMs: 1000 }); assert.ok(dispatched.ok && dispatched.workerId);
+  control.resolveNext(backlogDone); await helm.settle(dispatched.workerId); await helm.close();
+});
+
+test('a queued remote repository is not cloned or fetched before dispatch', async () => {
+  const control = createControllableRunner();
+  const { helm, cloned, fetched, created } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const active = await helm.spawn(spawnBody(mkTempDir('helm-ticket-local-'))); assert.ok(active.ok && active.workerId);
+  const queued = await helm.spawn(spawnBody('acme/new-repo')); assert.ok(queued.ok && queued.ticketId);
+  assert.deepEqual(cloned, []); assert.deepEqual(fetched, []); assert.equal(created.length, 1);
+  await helm.ticketCancel({ ticketId: queued.ticketId });
+  control.resolveNext(backlogDone); await helm.settle(active.workerId); await helm.close();
+});
+
+test('queued tickets rehydrate their spawn payload after restart', async () => {
+  const control = createControllableRunner();
+  const f = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const repo = mkTempDir('helm-ticket-restart-');
+  const active = await f.helm.spawn(spawnBody(repo)); assert.ok(active.ok && active.workerId);
+  const queued = await f.helm.spawn(spawnBody(repo, { objective: 'persisted objective', acceptance: 'persisted acceptance' })); assert.ok(queued.ok && queued.ticketId);
+  const interrupted = await f.helm.spawn(spawnBody(repo, { objective: 'interrupted creation' })); assert.ok(interrupted.ok && interrupted.ticketId);
+  f.store.sql.prepare('UPDATE capacity_jobs SET startedAt = ? WHERE id = ?').run(new Date().toISOString(), interrupted.ticketId);
+  await f.helm.close(); control.resolveNext(backlogDone); await f.helm.settle(active.workerId);
+  const restarted = new Helm({ config: f.config, store: f.store, workspace: f.workspace, gates: createFakeGates(), github: f.github.github, runner: control.runner, prompts: FAKE_PROMPTS, routingSkipStartup: true, waitPollMs: 2 });
+  assert.equal((f.store.sql.prepare('SELECT state FROM tickets WHERE id = ?').get(interrupted.ticketId) as { state: string }).state, 'failed');
+  await restarted.capacityTick();
+  const dispatched = await restarted.wait({ workerIds: [queued.ticketId], timeoutMs: 1000 }); assert.ok(dispatched.ok && dispatched.workerId);
+  assert.equal(f.store.getWorker(dispatched.workerId)?.objective, 'persisted objective');
+  assert.equal(f.store.getWorker(dispatched.workerId)?.acceptance, 'persisted acceptance');
+  control.resolveNext(backlogDone); await restarted.settle(dispatched.workerId); await restarted.close();
+});
+
+test('a failed worker settles its ticket as failed and waiting hands back the result', async () => {
+  const { helm } = makeHelm({ runner: createFakeRunner(async () => ({ result: { status: 'failed', summary: 'failed task', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null })) });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-ticket-failed-'))); assert.ok(spawned.ok && spawned.workerId && spawned.ticketId);
+  await helm.settle(spawned.workerId);
+  const waited = await helm.wait({ workerIds: [spawned.ticketId], timeoutMs: 1000 }); assert.ok(waited.ok);
+  assert.equal(waited.state, 'failed'); assert.equal(waited.settled[0]?.result?.summary, 'failed task'); await helm.close();
+});
+
+test('ticket timeout carries position and ETA without a worker, and mixed waits preserve ticket snapshots', async () => {
+  const control = createControllableRunner();
+  const { helm } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner, waitPollMs: 2 });
+  const active = await helm.spawn(spawnBody(mkTempDir('helm-ticket-timeout-'))); assert.ok(active.ok && active.workerId);
+  const queued = await helm.spawn(spawnBody(mkTempDir('helm-ticket-timeout-'))); assert.ok(queued.ok && queued.ticketId);
+  const timeout = await helm.wait({ workerIds: [queued.ticketId], timeoutMs: 1000 }); assert.ok(timeout.ok);
+  assert.equal(timeout.timedOut, true); assert.equal(timeout.state, 'queued'); assert.equal(timeout.position, 1); assert.ok(typeof timeout.etaMinutes === 'number'); assert.equal(timeout.workerId, undefined);
+  const mixed = helm.wait({ workerIds: [active.workerId, queued.ticketId], timeoutMs: 1000 });
+  await helm.ticketCancel({ ticketId: queued.ticketId }); const changed = await mixed; assert.ok(changed.ok); assert.equal(changed.tickets?.[0]?.state, 'cancelled'); assert.ok(changed.pending.includes(active.workerId));
+  control.resolveNext(backlogDone); await helm.settle(active.workerId); await helm.close();
 });

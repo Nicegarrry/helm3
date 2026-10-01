@@ -1,3 +1,4 @@
+import { ensureTickets } from './tickets.js';
 /** SQLite storage for the core tables: workers, events, gates, prs, and spend. Feature modules own their tables via Store.sql. */
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -299,6 +300,7 @@ export function openStore(path: string): Store {
   const setSpendLimitStmt = db.prepare('INSERT INTO spend_limits (name, value, source, at, tapId) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, source = excluded.source, at = excluded.at, tapId = excluded.tapId');
   const getSpendLimitStateStmt = db.prepare('SELECT checksum, rows, at FROM spend_limit_state WHERE id = 1');
   const setSpendLimitStateStmt = db.prepare('INSERT INTO spend_limit_state (id, checksum, rows, at) VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET checksum = excluded.checksum, rows = excluded.rows, at = excluded.at');
+  ensureTickets({ sql: db });
   return {
     sql: db,
     insertWorker(row: WorkerRow): void {

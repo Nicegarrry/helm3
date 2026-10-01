@@ -87,3 +87,12 @@ Accept strict JSON or a ```json fenced block. Strict-JSON-whole-message is tried
 Tokenizer-based classifier for bash commands, exported so it can be unit tested without a Pi session. Finds every `git` invocation in the command (across `;`, `&&`, `||`, `|`, `( )`, backticks and `$(`), skips its option tokens (and the value argument of options that take one) to find the actual subcommand, and denies push/worktree/checkout(without `--` for the reviewer or `switch`)/switch regardless of how many flags precede it. This closes the `git -C .. push`, `git --no-pager push`, `git -C .. worktree remove` style bypasses that a flat `/git\s+push/` regex misses.
 
 Resolve `rawPath` against the worktree and realpath it. When the path does not exist yet (the write tool's normal case), realpath throws; falling back to the lexical path there would let a symlink such as `evil -> /tmp` plus a write to `evil/x.txt` escape the worktree undetected. Instead walk up to the deepest ancestor that does exist, realpath that (resolving any symlink in the existing prefix), and re-append the remaining, not-yet-existing components before the containment check.
+
+## tickets.ts
+
+SQLite tickets hold spawn requests before capacity admission creates workers. Capacity jobs
+reserve the resource slot under the ticket ID; dispatch updates their workerId for process
+telemetry. Ticket callbacks own their capacity release, and `settle` waits for ticket cleanup.
+Queued callbacks rehydrate from the persisted payload. Maintenance leaves tickets queued.
+ETA refresh reads fourteen-day builder durations once, computes three load-class medians,
+and ranks queued tickets using the same priority/aging rules as capacity admission.

@@ -56,6 +56,7 @@ test('empty HELM_HOME and empty env: spawn, gate and status work and nothing tri
     const spawned = await helm.spawn({ repo, objective: 'Create hello.txt.', model: 'opt-faux/offline', role: 'builder', contextPaths: [], allowWorkflows: false });
     assert.equal(spawned.ok, true);
     if (!spawned.ok) return;
+    assert.ok(spawned.ok && spawned.workerId);
     await helm.settle(spawned.workerId);
     const gate = await helm.gate({ workerId: spawned.workerId });
     assert.equal(gate.ok && (gate as { passed: boolean }).passed, true);

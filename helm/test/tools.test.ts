@@ -201,3 +201,13 @@ test('routing inputs accept omitted worker models and reject invalid difficulty 
   assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'task', model: '' })).ok, false);
   assert.equal(calls.length, 2);
 });
+
+test('ticket management preserves the serialized core and supervisor MCP context budgets', async () => {
+  const { compactInputSchema } = await import('../src/tools.js');
+  const { helm } = createFakeHelm();
+  for (const profile of ['core', 'supervisor'] as const) {
+    const advertised = createToolRegistry(helm, profile).list().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) }));
+    assert.equal(advertised.some((tool) => tool.name.startsWith('ticket.')), false);
+    assert.ok(JSON.stringify(advertised).length <= (profile === 'core' ? 3600 : 8500));
+  }
+});

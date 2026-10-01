@@ -57,7 +57,9 @@ test('B5b binds spawn base, gate acceptance, PR base, and red/green body', async
   const fixture = repoFixture(); const d = harness(fixture); baseline(d.store, basename(fixture.repo), fixture.baseSha, fixture.testCommit);
   try {
     const spawned = await d.helm.spawn({ repo: fixture.repo, objective: 'build', model: 'test/model', baselineId: 'b-test', role: 'builder', contextPaths: [], allowWorkflows: false });
+    assert.ok(spawned.ok && spawned.workerId);
     assert.equal(spawned.ok, true); if (!spawned.ok) return; await d.helm.settle(spawned.workerId);
+    assert.ok(spawned.ok && spawned.workerId);
     assert.deepEqual(d.created, [`${spawned.branch}:${fixture.testCommit}`]);
     assert.equal(d.store.getMeta(spawned.workerId)?.prBase, 'main');
     const gate = await d.helm.gate({ workerId: spawned.workerId, checks: [{ name: 'typecheck', command: 'listed' }] });

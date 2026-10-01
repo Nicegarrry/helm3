@@ -6,7 +6,7 @@ without spending its own context on the mechanics. Three lanes serve the workers
 on cheap API models, the Codex CLI on the operator's ChatGPT subscription, and the Claude CLI
 on the operator's Claude subscription (both at $0 marginal cost).
 
-Forty-five operational tools plus two meta tools, one SQLite file, and one daemon shared by
+Forty-seven operational tools plus two meta tools, one SQLite file, and one daemon shared by
 every project on the machine. MCP uses small tool profiles so an orchestrator does not pay for
 the full harness catalog on every session.
 
@@ -92,10 +92,10 @@ blobs. Pass `verbose: true` in the target input to opt into the full response.
 
 | Tool | What it does |
 | --- | --- |
-| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`), or `claude/<model>[:<effort>]` for the Claude CLI (`claude/sonnet:high`). Optional `priority` (`low|normal|high|urgent`, default from `<repo>/helm.json` `priority`, else `normal`) and `requestedBy` (`owner|auto`, default `auto`) order the capacity queue: same-kind jobs score base 0/10/20/40 by effective priority, +15 owner, +10 when a Jev quick check sizes the objective xs or s, +1 per 5 minutes queued; highest score first, ties FIFO. A security classification raises the effective priority to at least `high`; if Jev is unavailable the stated priority is used. `admission.priority`, `capacity.queued` and `capacity.started` events record the inputs, score and reasons. |
+| `worker.spawn` | Create a worktree on a new branch and start a worker on it. `repo` is a local path or `owner/name` (cloned once under `$HELM_HOME/repos`). `model` is optional; `difficulty` selects the default (see below). An explicit model picks the lane: `provider/model` as Pi names it, `codex/<model>[:<effort>]` for the Codex CLI (`codex/gpt-6-astra:medium`), or `claude/<model>[:<effort>]` for the Claude CLI (`claude/sonnet:high`). Optional `priority` (`low|normal|high|urgent`, default from `<repo>/helm.json` `priority`, else `normal`) and `requestedBy` (`owner|auto`, default `auto`) order the backlog: owner and urgent tickets precede all ordinary tickets; ordinary same-kind jobs score base 0/10/20/40 by effective priority, +15 owner, +10 when a Jev quick check sizes the objective xs or s, +1 per 5 minutes queued; highest score first, ties FIFO. A security classification raises the effective priority to at least `high`; if Jev is unavailable the stated priority is used. `admission.priority`, `capacity.queued` and `capacity.started` events record the inputs, score and reasons. |
 | `worker.inspect` | State, head, spend, diff stat, result and recent events for one worker. |
 | `worker.list` | Compact active/recent worker lines; call through `helm.call` in core. |
-| `worker.wait` | Block until any of the given workers settles (leaves `queued`/`running`) or a timeout passes. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
+| `worker.wait` | Accept worker or ticket IDs in `workerIds`. Ticket waits return on state/position changes, then follow the dispatched worker through completion, or return on timeout. One call per state change instead of polling `worker.inspect`; on `timedOut`, call it again. |
 | `worker.steer` | Send a follow-up message to an idle or interrupted worker in its own session (a Pi session, or a Codex thread resumed with the same model). |
 | `worker.stop` | Ask a running worker to stop. |
 | `gate.run` | Run the repo's checks in the worktree at its exact head and record the result. |
@@ -103,7 +103,8 @@ blobs. Pass `verbose: true` in the target input to opt into the full response.
 | `pr.status` | Mergeability, checks and reviews from GitHub. |
 | `review.request` | Spawn a read-only reviewer on the PR head; posts the verdict as a PR comment. Refused if the reviewer is the builder's model or the same model family (`allowSameFamily` overrides). |
 | `review.record` | Record an external review comment and its exact-head merge verdict. |
-| `run.status` | Spend, cap, per-project budgets, active workers and daemon lifecycle. |
+| `run.status` | Spend, cap, Backlog / Working / Recent sections and daemon lifecycle. |
+| `ticket.cancel` / `ticket.bump` | Cancel a queued ticket or change its priority through `helm.call`. |
 | `budget.open` / `budget.close` / `budget.status` | Open, close and inspect per-project sprint budgets. A new budget closes the previous one; worker spend remains attributed to the budget active at spawn. |
 | `daemon.control` | Inspect lifecycle, drain new work, resume admissions, safely shut down, or apply a staged upgrade when idle. |
 | `pr.merge` | Merge only when the PR is open, not a draft, mergeable, every check has finished and succeeded, and the head matches. |
@@ -317,6 +318,25 @@ until recovery is complete, then use `resume`. Normal shutdown releases ownershi
 pause dispatch across clients, and install v1.5 during a quiet window. Update client launch
 paths too. The new updater refuses legacy daemons; it never sends them a shutdown signal.
 Merging a PR alone does not install or activate an update.
+
+## Backlog
+
+Every `worker.spawn` request gets a durable `t-<hex>` ticket. Capacity-blocked requests
+return `{ ok, ticketId, queued: true, position, etaMinutes }`, without creating a worker,
+branch or worktree. Uncached remote repositories are cloned only at dispatch; intake uses
+normal priority and a conservative heavy load class unless explicitly supplied. The dispatcher creates the worker after admission. Tickets retain the
+spawn input and Jev priority classification across daemon restarts. Drain pauses dispatch.
+Cancel queued work with `helm.call { tool: "ticket.cancel", input: { ticketId } }`, or change
+its priority with `ticket.bump` and `{ ticketId, priority }`. Owner and urgent tickets skip
+ordinary tickets, while resource ceilings still apply.
+
+ETAs use median builder active minutes by load class from the last fourteen days of
+`capacity_jobs`, defaulting to twenty minutes. Each tick divides predicted work ahead plus
+running work remaining by the current concurrency. `worker.wait` accepts ticket IDs in
+`workerIds`; it reports state and position changes with an updated ETA, then returns the worker result once
+settled. Call again after dispatch or a timeout. `helm status` and compact `run.status` show
+Backlog, Working and the ten most recent completed/failed tickets within twenty-four hours.
+CLI `--json` and MCP `verbose: true` retain all backlog and working rows.
 
 ## Waiting, not polling
 

@@ -98,6 +98,10 @@ test('call() validates and dispatches a valid call to the matching Helm method',
   assert.equal(calls[0]?.method, 'spawn');
   assert.deepEqual(calls[0]?.input, { repo: '/abs/repo', objective: 'do it', model: 'acme/m', role: 'builder', contextPaths: [], allowWorkflows: false });
 
+  const networkOutcome = await registry.call('worker.spawn', { repo: '/abs/repo', objective: 'download packages', model: 'claude/sonnet', network: { allow: ['registry.npmjs.org'] } });
+  assert.equal(networkOutcome.ok, true);
+  assert.deepEqual(calls.at(-1)?.input, { repo: '/abs/repo', objective: 'download packages', model: 'claude/sonnet', role: 'builder', contextPaths: [], allowWorkflows: false, network: { allow: ['registry.npmjs.org'] } });
+
   const statusOutcome = await registry.call('run.status', {});
   assert.equal(statusOutcome.ok, true);
   assert.equal(calls.at(-1)?.method, 'runStatus');
@@ -200,6 +204,21 @@ test('routing inputs accept omitted worker models and reject invalid difficulty 
   assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'task', difficulty: 'unknown' })).ok, false);
   assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'task', model: '' })).ok, false);
   assert.equal(calls.length, 2);
+});
+
+test('worker.spawn network allowlist accepts DNS domains and rejects unsafe host forms', async () => {
+  const { helm, calls } = createFakeHelm();
+  const registry = createToolRegistry(helm);
+  const spawn = (allow: string[]) => registry.call('worker.spawn', { repo: '/repo', objective: 'task', model: 'claude/sonnet', network: { allow } });
+  assert.equal((await spawn(['registry.npmjs.org', '*.npmjs.org'])).ok, true);
+  for (const domain of [
+    '*', '127.0.0.1', '127.1', '::1', '[::1]', '::ffff:127.0.0.1',
+    'localhost', 'LOCALHOST.', '*.localhost', 'api.localhost', 'printer.local', '*.service.local',
+    '169.254.169.254', 'metadata.google.internal', 'instance-data.ec2.internal',
+    'https://npmjs.org', 'npmjs.org:443', 'bad_label.example', '-bad.example', 'bad-.example', '*.bad.*.example',
+  ]) assert.equal((await spawn([domain])).ok, false, domain);
+  assert.equal((await spawn(Array.from({ length: 65 }, (_, i) => `host-${i}.example.com`))).ok, false);
+  assert.equal(calls.length, 1);
 });
 
 test('ticket management preserves the serialized core and supervisor MCP context budgets', async () => {

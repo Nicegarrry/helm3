@@ -302,6 +302,55 @@ test('spawn runs a builder turn, commits on success, and reaches succeeded', asy
   assert.equal(row?.result?.status, 'succeeded');
 });
 
+test('network allowlist is Claude-builder-only and is persisted, inspected, emitted, and reused on steer', async () => {
+  const inputs: WorkerRunInput[] = [];
+  const runner: WorkerRunner = { run: async (input) => {
+    inputs.push(input);
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: 'claude-session:session-1' };
+  } };
+  const { helm, store } = makeHelm({ runner });
+  const denied = [
+    spawnBody(mkTempDir('helm-network-codex-'), { model: 'codex/gpt-6-luna', network: { allow: ['registry.npmjs.org'] } }),
+    spawnBody(mkTempDir('helm-network-pi-'), { model: 'openrouter/qwen/qwen3.8-flash', network: { allow: ['registry.npmjs.org'] } }),
+    spawnBody(mkTempDir('helm-network-malformed-claude-'), { model: 'claude/sonnet:', network: { allow: ['registry.npmjs.org'] } }),
+  ];
+  for (const input of denied) assert.deepEqual(await helm.spawn(input), { ok: false, reason: 'network allowlist supported on claude lane only' });
+  assert.deepEqual(await helm.spawn(spawnBody(mkTempDir('helm-network-reviewer-'), { model: 'claude/sonnet', role: 'reviewer', network: { allow: ['registry.npmjs.org'] } })), { ok: false, reason: 'network allowlist is available to builders only' });
+
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-network-claude-'), { model: 'claude/sonnet', network: { allow: ['registry.npmjs.org'] } }));
+  assert.ok(spawned.ok && spawned.workerId);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId!);
+  assert.deepEqual(store.getWorker(spawned.workerId!)?.network, { allow: ['registry.npmjs.org'] });
+  assert.deepEqual(inputs[0]?.network, { allow: ['registry.npmjs.org'] });
+  assert.deepEqual(store.listEvents(spawned.workerId!).find((event) => event.kind === 'spawned')?.data.network, { allow: ['registry.npmjs.org'] });
+  const inspected = await helm.inspect({ workerId: spawned.workerId!, tail: 5 });
+  assert.ok(inspected.ok);
+  if (inspected.ok) assert.deepEqual(inspected.network, { allow: ['registry.npmjs.org'] });
+  assert.equal((await helm.steer({ workerId: spawned.workerId!, message: 'continue' })).ok, true);
+  await helm.settle(spawned.workerId!);
+  assert.deepEqual(inputs[1]?.network, { allow: ['registry.npmjs.org'] });
+});
+
+test('an explicit empty network allowlist is treated as no network field', async () => {
+  const inputs: WorkerRunInput[] = [];
+  const runner: WorkerRunner = { run: async (input) => {
+    inputs.push(input);
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  } };
+  const { helm, store } = makeHelm({ runner });
+  const spawned = await helm.spawn(spawnBody(mkTempDir('helm-network-empty-'), { model: 'claude/sonnet', network: { allow: [] } }));
+  assert.ok(spawned.ok && spawned.workerId);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId!);
+  assert.equal(inputs[0]?.network, undefined);
+  assert.equal(store.getWorker(spawned.workerId!)?.network, undefined);
+  assert.equal(store.listEvents(spawned.workerId!).find((event) => event.kind === 'spawned')?.data.network, undefined);
+  const inspected = await helm.inspect({ workerId: spawned.workerId!, tail: 0 });
+  assert.ok(inspected.ok);
+  if (inspected.ok) assert.equal('network' in inspected, false);
+});
+
 function priorityJev(choices: { class?: string; size?: string } | Error): Jev {
   return { shadow: false, async ask(_purpose, input) {
     if (!('class' in input.questions)) return { ok: false, reason: 'unexpected question' };

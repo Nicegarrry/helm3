@@ -1,6 +1,7 @@
 /** Shared contracts for the Helm harness. */
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
+import { isIP } from 'node:net';
 function omitEmptyStrings(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(omitEmptyStrings);
   if (value && typeof value === 'object') {
@@ -31,6 +32,7 @@ export const WORKER_STATES = ['queued', 'running', 'idle', 'waiting', 'succeeded
 export type WorkerState = (typeof WORKER_STATES)[number];
 export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
+export type WorkerNetwork = Readonly<{ allow: readonly string[] }>;
 export const LOAD_CLASSES = ['light', 'medium', 'heavy'] as const;
 export type LoadClass = (typeof LOAD_CLASSES)[number];
 export const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const; export type Priority = (typeof PRIORITIES)[number];
@@ -59,6 +61,7 @@ export type WorkerRow = Readonly<{
   acceptance: string | null;
   contextPaths: readonly string[];
   allowWorkflows: boolean;
+  network?: WorkerNetwork;
   baseRef: string;
   baseSha: string;
   branch: string;
@@ -253,6 +256,7 @@ export type WorkerRunInput = Readonly<{
   acceptance: string | null;
   contextPaths: readonly string[];
   allowWorkflows: boolean;
+  network?: WorkerNetwork;
   sessionFile: string | null; // resume when set
   sessionDir: string;         // where new session files go
   tempDir?: string;            // per-worker temp directory for sandboxed CLI processes
@@ -303,6 +307,28 @@ export type WakeRow = Readonly<{
   deliveredAt: string | null;
   ackedAt: string | null;
 }>;
+
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+const LOCAL_HOSTS = new Set(['localhost', 'localhost.localdomain', 'localhost6', 'localhost6.localdomain6', 'ip6-localhost', 'ip6-loopback', 'broadcasthost']);
+const METADATA_HOSTS = ['metadata.google.internal', 'instance-data.ec2.internal'];
+
+function ipLiteral(host: string): boolean {
+  if (isIP(host)) return true;
+  try {
+    const parsed = new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, '');
+    return isIP(parsed) !== 0;
+  } catch { return false; }
+}
+
+function networkDomain(value: string): boolean {
+  const host = value.startsWith('*.') ? value.slice(2) : value;
+  const lower = host.toLowerCase();
+  if (!host || host.length > 253 || host.endsWith('.') || ipLiteral(host)) return false;
+  if (LOCAL_HOSTS.has(lower) || lower.endsWith('.localhost') || lower.endsWith('.local')) return false;
+  if (METADATA_HOSTS.some((metadata) => lower === metadata || lower.endsWith(`.${metadata}`))) return false;
+  return host.split('.').every((label) => DNS_LABEL.test(label));
+}
+
 export const spawnInput = z.object({
   repo: z.string().min(1),
   objective: z.string().min(1).max(20000),
@@ -315,6 +341,7 @@ export const spawnInput = z.object({
   role: z.enum(WORKER_ROLES).default('builder'),
   contextPaths: z.array(z.string().min(1)).max(64).default([]),
   allowWorkflows: z.boolean().default(false),
+  network: z.object({ allow: z.array(z.string().refine(networkDomain, 'DNS hostname or leading-wildcard subdomain required')).max(64) }).strict().optional(),
   idempotencyKey: z.string().min(1).max(200).optional(),
   skills: z.array(z.string().min(1)).optional(),
   loadClass: z.enum(LOAD_CLASSES).optional(),

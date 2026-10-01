@@ -542,7 +542,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const github = ghGitHub();
   const helm = new Helm({
     config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules, allowUnsandboxed: settings.gates?.allowUnsandboxed === true, denyLocalPorts: settings.gates?.denyLocalPorts, daemonHome: config.home }), github,
-    claudeLaneRegistered: claudeAvailable(),
+    claudeLaneRegistered: claudeAvailable(), workerInstall: true,
     runner: laneRunner({
       pi: piWorkerRunner(),
       codex: codexWorkerRunner(),

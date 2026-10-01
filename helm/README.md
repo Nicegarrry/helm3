@@ -226,6 +226,14 @@ marked failed and the raw text is saved.
 Gates come from `<repo>/helm.json` (`{ "gates": [{ "name", "command" }] }`) or default to
 the `test`, `typecheck` and `lint` scripts in `package.json`.
 
+Before each builder or validator turn, Helm runs the install gate steps of the base
+`helm.json` (for example `npm ci`) through the gate runner: sandboxed, with install network
+only, then `npm rebuild --offline`. The worker therefore finds a real `node_modules` and can
+run typecheck and tests; it must not symlink one. Hygiene removes `node_modules` when the turn
+settles, and the next turn (for example after a steer) installs again. A failed install is
+logged as a `worker.install` event and does not block the turn. Set `"workerInstall": false`
+in `helm.json` to opt a repo out.
+
 ### The Codex lane
 
 A `codex/…` model runs `codex exec` (non-interactive) in the worktree instead of a Pi

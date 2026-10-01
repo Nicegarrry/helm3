@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { hardenedGitArgs } from './git.js';
 import type { z } from 'zod';
@@ -95,6 +95,7 @@ import { admissionRank, effectivePriority, quickCheck, type QuickCheck } from '.
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
 import type { CapacityExec, CapacitySampler } from './capacity/sampler.js';
 import { sandboxEnabled } from './gate.js';
+import { installManager } from './sandbox.js';
 
 const exec = promisify(execFile);
 const INFRA_GATE_FAILURE = /EAGAIN|ENOMEM|resource temporarily unavailable/i;
@@ -128,6 +129,8 @@ export type HelmDeps = Readonly<{
   stopTimeoutMs?: number;
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
+  /** Install dependencies before builder/validator turns (the daemon enables it; off keeps turn start synchronous for fake runners). */
+  workerInstall?: boolean;
   settings?: Settings;
   spendStartup?: boolean;
   supervisor?: SupervisorService;
@@ -259,8 +262,11 @@ export class Helm {
   private readonly stopRequested = new Set<string>();
   /** Workers whose current turn actually observed the stop request via hooks.shouldContinue(). */
   private readonly stopObserved = new Set<string>();
+  private readonly installedLocks = new Map<string, string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
+  private readonly workerInstall: boolean;
+  private readonly installAborts = new Map<string, AbortController>();
   private readonly settings: Settings;
   private readonly spendSettings: EffectiveSpendReader;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
@@ -301,6 +307,7 @@ export class Helm {
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
+    this.workerInstall = deps.workerInstall === true;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
     this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog, skipStartup: deps.routingSkipStartup });
@@ -767,6 +774,7 @@ export class Helm {
       }
       must(row.state === 'running', `worker is not running (state: ${row.state})`);
       this.stopRequested.add(input.workerId);
+      this.installAborts.get(input.workerId)?.abort();
       this.store.appendEvent(input.workerId, 'stop.requested');
       const settled = await this.waitForSettle(input.workerId, this.stopTimeoutMs);
       if (!settled) {
@@ -1209,6 +1217,34 @@ export class Helm {
     });
   }
 
+  /** Give a worker turn node_modules by running the repo's install gate step (sandboxed, install network only); hygiene removes it when the turn settles. */
+  private async installWorkerDeps(row: WorkerRow): Promise<string | undefined> {
+    let refused: string | undefined;
+    const lock = createHash('sha256');
+    for (const name of ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock']) if (existsSync(join(row.worktree, name))) lock.update(readFileSync(join(row.worktree, name)));
+    const digest = lock.digest('hex');
+    const abort = new AbortController();
+    this.installAborts.set(row.workerId, abort);
+    try {
+      const config = await loadRepoConfig(row.repo, row.baseSha, false).catch(() => undefined);
+      const checks = (config?.gates ?? []).filter((gate) => installManager(gate.command));
+      if (config?.workerInstall === false || checks.length === 0) return;
+      if (this.installedLocks.get(row.workerId) === digest && existsSync(join(row.worktree, 'node_modules'))) return;
+      const outcome = await this.gates.run(row.worktree, checks, join(this.config.home, 'logs', row.workerId, `install-${Date.now()}`), {
+        timeoutMs: this.config.gateTimeoutMs, nodeModulesRoot: this.workerWorktreeRoot(row), keepNodeModules: true, signal: abort.signal, sandbox: await sandboxEnabled(row.repo, row.baseSha),
+        onPid: (pid) => this.capacity.setPid(row.workerId, pid),
+        onRefused: (reason) => { refused = reason; this.store.appendEvent(row.workerId, 'worker.install.refused', { reason }); },
+      });
+      if (outcome.passed) this.installedLocks.set(row.workerId, digest);
+      this.store.appendEvent(row.workerId, 'worker.install', { passed: outcome.passed, lock: digest });
+      const failed = outcome.checks.find((check) => check.exitCode !== 0);
+      return outcome.passed ? undefined : refused ?? (failed ? `${failed.name} exited ${failed.exitCode ?? 'abnormally'}` : 'install did not complete');
+    } catch (err) {
+      this.store.appendEvent(row.workerId, 'worker.install', { passed: false, error: errMessage(err) });
+      return errMessage(err).split(/\r?\n/, 1)[0]!.slice(0, 120);
+    } finally { this.installAborts.delete(row.workerId); }
+  }
+
   private workerTempDir(workerId: string): string {
     return join(this.config.home, 'tmp', workerId);
   }
@@ -1354,9 +1390,13 @@ export class Helm {
       },
     };
     try {
-      const outcome = await this.runner.run(runInput, message, hooks);
+      const installError = this.workerInstall && row.role !== 'reviewer' ? await this.installWorkerDeps(row) : undefined;
+      const turnMessage = installError ? `Dependency install failed: ${installError}; typecheck/tests may not run locally; the gate will run them.\n\n${message}` : message;
+      const skipped = this.stopRequested.has(workerId);
+      if (skipped) this.stopObserved.add(workerId);
+      const outcome: WorkerRunOutcome = skipped ? { result: null, rawText: '', sessionFile: row.sessionFile } : await this.runner.run(runInput, turnMessage, hooks);
       const result = outcome.result;
-      if ((row.role === 'builder' || row.role === 'validator') && result?.status !== 'failed') {
+      if ((row.role === 'builder' || row.role === 'validator') && !skipped && result?.status !== 'failed') {
         try {
           const commitMessage = result?.summary ?? `helm: ${workerId} turn complete`;
           const head = await this.workspace.commitAll(row.worktree, commitMessage, row.repo);

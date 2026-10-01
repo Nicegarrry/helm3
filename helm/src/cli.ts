@@ -1,6 +1,4 @@
 /** The `helm` command line. */
-// tsx has registered its loader; keep its onboarding override out of daemon/worker environments.
-delete process.env.TSX_TSCONFIG_PATH;
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -43,6 +41,9 @@ import { resolveToolProfile, type ToolProfile } from './tools.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
+
+// tsx has already registered; keep its override out of daemon/worker environments.
+delete process.env.TSX_TSCONFIG_PATH;
 
 const runCapacityExec = promisify(execFile);
 const capacityExec: CapacityExec = async (file, args, options) => {

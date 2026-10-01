@@ -23,7 +23,8 @@ export async function doctor(repo = process.cwd()) {
   const home = loadConfig().home, checks: Check[] = [];
   const add = (name: string, status: Check['status'], detail: string, next: string) => checks.push({ name, status, detail, next });
   const probe = async (file: string, args: string[]) => { try { return (await exec(file, args, { timeout: 5000, maxBuffer: 1024 * 1024 })).stdout; } catch { return undefined; } };
-  add('node', Number(process.versions.node.split('.')[0]) >= 22 && await probe(process.execPath, ['-e', "require('node:sqlite')"]) !== undefined ? 'ok' : 'fail', 'Node >= 22 with node:sqlite', 'nvm install 22');
+  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
+  add('node', (major > 22 || major === 22 && minor >= 22) && await probe(process.execPath, ['-e', "require('node:sqlite')"]) !== undefined ? 'ok' : 'fail', 'Node >= 22.22.0 with node:sqlite', 'nvm install 22.22.0');
   add('git', await probe('git', ['--version']) !== undefined ? 'ok' : 'fail', 'git available', 'brew install git');
   add('gh', await probe('gh', ['auth', 'status']) !== undefined ? 'ok' : 'fail', 'GitHub authentication', 'gh auth login');
   try { if (!statSync(home).isDirectory()) throw new Error(); accessSync(home, constants.W_OK); add('home', 'ok', 'HELM_HOME exists and is writable', 'helm doctor'); }
@@ -64,18 +65,18 @@ export async function doctor(repo = process.cwd()) {
   const servePath = join(home, 'serve.json');
   if (!existsSync(servePath)) add('daemon', 'warn', 'serve.json absent', 'helm serve --stdio');
   else {
-    let alive = false, authenticated = false;
+    let alive = false, authenticated = false, stale = false;
     try {
       const metadata = jsonFile(servePath);
       if (!Number.isInteger(metadata.pid) || metadata.pid <= 0 || !Number.isInteger(metadata.port) || metadata.port < 1 || metadata.port > 65535 || typeof metadata.token !== 'string' || !metadata.token) throw new Error();
-      try { process.kill(metadata.pid, 0); alive = true; } catch (e) { alive = (e as NodeJS.ErrnoException).code === 'EPERM'; }
+      try { process.kill(metadata.pid, 0); alive = true; } catch (e) { alive = (e as NodeJS.ErrnoException).code === 'EPERM'; stale = (e as NodeJS.ErrnoException).code === 'ESRCH'; }
       if (alive) { const res = await fetch(`http://127.0.0.1:${metadata.port}/tools/daemon.control`, { method: 'POST', headers: { authorization: `Bearer ${metadata.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'status' }), signal: AbortSignal.timeout(3000), redirect: 'error' }); authenticated = res.ok && (await res.json() as { ok?: boolean }).ok === true; }
     } catch { /* metadata and remote error bodies are never printed */ }
-    add('daemon-pid', alive ? 'ok' : 'fail', 'serve.json present; pid checked', 'helm doctor');
-    add('daemon-status', authenticated ? 'ok' : 'fail', 'authenticated status checked', 'helm doctor');
+    add('daemon-pid', alive ? 'ok' : stale ? 'warn' : 'fail', 'serve.json present; pid checked', stale ? 'start the daemon: helm serve' : 'helm doctor');
+    if (!stale) add('daemon-status', authenticated ? 'ok' : 'fail', 'authenticated status checked', 'helm doctor');
   }
   const ok = !checks.some((c) => c.status === 'fail');
-  return { ok, checks, lanes, tiers, nextCommand: (checks.find((c) => c.status === 'fail') ?? checks.find((c) => c.status === 'warn' && ['config', 'daemon'].includes(c.name)))?.next ?? 'helm spawn --repo . --objective "Describe your task"' };
+  return { ok, checks, lanes, tiers, nextCommand: (checks.find((c) => c.status === 'fail') ?? checks.find((c) => c.status === 'warn' && ['config', 'daemon', 'daemon-pid'].includes(c.name)))?.next ?? `helm spawn --repo '${resolve(repo).replaceAll("'", "'\\''")}' --objective "Describe your task"` };
 }
 export async function init(repo: string, force = false): Promise<string> {
   repo = resolve(repo); const home = resolve(loadConfig().home), path = join(repo, 'helm.json');
@@ -99,10 +100,9 @@ export async function init(repo: string, force = false): Promise<string> {
     for (const name of ['test', 'typecheck', 'lint']) if (typeof scripts[name] === 'string') gates.push({ name, command: `${manager} run ${name}` });
   } else if (files.includes('Package.swift')) gates.push({ name: 'swift', command: 'swift test' });
   else gates.push({ name: 'TODO', command: `echo '${files.some((f) => /\.(xcodeproj|xcworkspace)$/.test(f)) ? 'TODO: configure xcodebuild test with your scheme and destination' : 'TODO: configure a project test gate'}'; exit 1` });
-  writeFileSync(path, `${JSON.stringify({ gates }, null, 2)}\n`, { flag: force ? 'w' : 'wx' });
-  mkdirSync(home, { recursive: true });
-  try { writeFileSync(join(home, 'helm.json'), `${JSON.stringify({ spend: { capUsd: 5 }, routing: { policy: { subscriptionOnly: !apiKeysPresent() } } }, null, 2)}\n`, { flag: 'wx', mode: 0o600 }); }
+  try { mkdirSync(home, { recursive: true }); writeFileSync(join(home, 'helm.json'), `${JSON.stringify({ spend: { capUsd: 5 }, routing: { policy: { subscriptionOnly: !apiKeysPresent() } } }, null, 2)}\n`, { flag: 'wx', mode: 0o600 }); }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw new OnboardingError('could not create operator helm.json'); }
+  writeFileSync(path, `${JSON.stringify({ gates }, null, 2)}\n`, { flag: force ? 'w' : 'wx' });
   return JSON.stringify({ mcpServers: { helm: { command: 'helm', args: ['serve', '--stdio'] } } }, null, 2);
 }
 export async function onboard(command: 'doctor' | 'init', args: string[]): Promise<void> {

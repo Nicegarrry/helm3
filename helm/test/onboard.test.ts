@@ -125,8 +125,8 @@ test('doctor checks live pid and authenticated status without leaking tokens or 
   assert.ok(!result.stdout.includes(secret) && !result.stdout.includes(token));
   assert.equal(await readFile(join(f.home, 'serve.json'), 'utf8'), metadata);
   await writeFile(join(f.home, 'serve.json'), JSON.stringify({ pid: 2147483647, port: address.port, token }));
-  result = await f.cli('doctor', '--json'); assert.equal(result.code, 1);
-  assert.equal(JSON.parse(result.stdout).checks.find((c: { name: string }) => c.name === 'daemon-pid').status, 'fail');
+  result = await f.cli('doctor', '--json'); assert.equal(result.code, 0);
+  assert.equal(JSON.parse(result.stdout).checks.find((c: { name: string }) => c.name === 'daemon-pid').status, 'warn');
   assert.ok((await readdir(f.home)).includes('serve.json'));
 });
 test('doctor preserves stale or malformed metadata and rejects non-writable home', async (t) => {
@@ -135,8 +135,14 @@ test('doctor preserves stale or malformed metadata and rejects non-writable home
   for (const metadata of [JSON.stringify({ pid: 2147483647, port: 4747, token: secret }), `{"token":"${secret}",broken`]) {
     await writeFile(join(f.home, 'serve.json'), metadata);
     const result = await f.cli('doctor', '--json');
-    assert.equal(result.code, 1);
-    assert.equal(JSON.parse(result.stdout).checks.find((c: { name: string }) => c.name === 'daemon-pid').status, 'fail');
+    const stale = metadata.startsWith('{"pid":');
+    assert.equal(result.code, stale ? 0 : 1);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.checks.find((c: { name: string }) => c.name === 'daemon-pid').status, stale ? 'warn' : 'fail');
+    if (stale) {
+      assert.equal(report.nextCommand, 'start the daemon: helm serve');
+      assert.ok(!report.checks.some((c: { name: string }) => c.name === 'daemon-status'));
+    }
     assert.ok(!result.stdout.includes(secret));
     assert.equal(await readFile(join(f.home, 'serve.json'), 'utf8'), metadata);
   }
@@ -144,6 +150,56 @@ test('doctor preserves stale or malformed metadata and rejects non-writable home
   try {
     const result = await f.cli('doctor', '--json');
     assert.equal(JSON.parse(result.stdout).checks.find((c: { name: string }) => c.name === 'home').status, 'fail');
+  } finally { await chmod(f.home, 0o755); }
+});
+test('doctor success hint shell-quotes the absolute target repo', async (t) => {
+  const f = await fixture(t);
+  const repo = join(f.root, "repo ' $cash $(echo unsafe)");
+  await mkdir(repo); await exec('git', ['init', '-q', repo]);
+  await writeFile(join(repo, 'package.json'), '{"name":"hint-target"}');
+  await writeFile(join(f.home, 'helm.json'), JSON.stringify(f.config));
+  await writeFile(join(f.home, 'serve.json'), JSON.stringify({ pid: process.pid, port: 4747, token: secret }));
+  const hook = join(f.root, 'doctor-status.mjs');
+  await writeFile(hook, 'globalThis.fetch = async () => new Response(JSON.stringify({ok:true}));');
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  const result = await f.cli('doctor', '--repo', repo, '--json');
+  assert.equal(result.code, 0, result.stderr);
+  const hint = JSON.parse(result.stdout).nextCommand;
+  assert.match(hint, /^helm spawn --repo '\//);
+  const parsed = await exec('/bin/sh', ['-c', `helm() { printf '%s\\n' "$@"; }; ${hint}`], { cwd: dirname(launcher) });
+  assert.deepEqual(parsed.stdout.trimEnd().split('\n'), ['spawn', '--repo', repo, '--objective', 'Describe your task']);
+});
+test('doctor enforces the package engine minimum Node 22.22.0', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.home, 'helm.json'), JSON.stringify(f.config));
+  const hook = join(f.root, 'node-version.mjs');
+  for (const [version, status] of [['21.99.0', 'fail'], ['22.0.0', 'fail'], ['22.21.9', 'fail'], ['22.22.0', 'ok'], ['22.23.0', 'ok'], ['23.0.0', 'ok']]) {
+    await writeFile(hook, `Object.defineProperty(process.versions, 'node', {value:${JSON.stringify(version)}});`);
+    f.env.NODE_OPTIONS = `--import=${hook}`;
+    const result = await f.cli('doctor', '--json');
+    assert.equal(result.code, status === 'ok' ? 0 : 1, result.stderr);
+    const check = JSON.parse(result.stdout).checks.find((c: { name: string }) => c.name === 'node');
+    assert.equal(check.status, status, version);
+    assert.equal(check.detail, 'Node >= 22.22.0 with node:sqlite');
+  }
+});
+test('init leaves repo config untouched when operator config creation fails', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.repo, 'package.json'), '{"name":"write-failure","scripts":{"test":"node --test"}}');
+  await chmod(f.home, 0o555);
+  try {
+    const result = await f.cli('init');
+    assert.equal(result.code, 1); assert.match(result.stderr, /could not create operator helm.json/);
+    await assert.rejects(readFile(join(f.repo, 'helm.json')), { code: 'ENOENT' });
+    const original = '{"gates":[]}';
+    await writeFile(join(f.repo, 'helm.json'), original);
+    const forced = await f.cli('init', '--force');
+    assert.equal(forced.code, 1); assert.equal(await readFile(join(f.repo, 'helm.json'), 'utf8'), original);
+    const blocker = join(f.root, 'file'); await writeFile(blocker, 'not a directory');
+    f.env.HELM_HOME = join(blocker, 'state');
+    const mkdirFailure = await f.cli('init', '--force');
+    assert.equal(mkdirFailure.code, 1); assert.match(mkdirFailure.stderr, /could not create operator helm.json/);
+    assert.equal(await readFile(join(f.repo, 'helm.json'), 'utf8'), original);
   } finally { await chmod(f.home, 0o755); }
 });
 test('init guesses real package scripts, prints MCP, runs doctor and protects both configs', async (t) => {

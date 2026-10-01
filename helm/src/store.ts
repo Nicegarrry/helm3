@@ -311,7 +311,7 @@ export function openStore(path: string): Store {
     insertWorker(row: WorkerRow): void {
       insertWorkerStmt.run(
         row.workerId, row.repo, row.repoSlug, row.role, row.model, row.objective, row.acceptance,
-        JSON.stringify(row.contextPaths), row.allowWorkflows ? 1 : 0, row.network ? JSON.stringify(row.network) : null, row.baseRef, row.baseSha, row.branch, row.worktree, row.state, row.head, row.sessionFile,
+        JSON.stringify(row.contextPaths), row.allowWorkflows ? 1 : 0, row.network?.allow.length ? JSON.stringify(row.network) : null, row.baseRef, row.baseSha, row.branch, row.worktree, row.state, row.head, row.sessionFile,
         row.result ? JSON.stringify(row.result) : null, row.rawResultText, row.idempotencyKey,
         row.createdAt, row.updatedAt,
       );
@@ -327,7 +327,7 @@ export function openStore(path: string): Store {
         if (key === 'result') return value ? JSON.stringify(value) : null;
         if (key === 'contextPaths') return JSON.stringify(value ?? []);
         if (key === 'allowWorkflows') return value ? 1 : 0;
-        if (key === 'network') return value ? JSON.stringify(value) : null;
+        if (key === 'network') return (value as WorkerRow['network'])?.allow.length ? JSON.stringify(value) : null;
         return value;
       }) as (string | number | null)[];
       db.prepare(`UPDATE workers SET ${sets} WHERE workerId = ?`).run(...values, workerId);

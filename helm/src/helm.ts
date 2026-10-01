@@ -785,7 +785,7 @@ export class Helm {
     const createdAt = this.nowIso();
     const row: WorkerRow = {
       workerId, repo, repoSlug, role: input.role, model, objective: input.objective,
-      acceptance: input.acceptance ?? null, contextPaths: [...input.contextPaths], allowWorkflows: input.allowWorkflows, ...(input.network ? { network: { allow: [...input.network.allow] } } : {}),
+      acceptance: input.acceptance ?? null, contextPaths: [...input.contextPaths], allowWorkflows: input.allowWorkflows, ...(input.network?.allow.length ? { network: { allow: [...input.network.allow] } } : {}),
       baseRef, baseSha, branch, worktree, state: 'queued', head: null, sessionFile: null, result: null,
       rawResultText: null, idempotencyKey: input.idempotencyKey ?? null, createdAt, updatedAt: createdAt,
     };
@@ -802,7 +802,7 @@ export class Helm {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
     }
-    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, loadClass, baseRef, baseSha, branch, worktree, ...(input.network ? { network: input.network } : {}) });
+    this.store.appendEvent(workerId, 'spawned', { repo, repoSlug, role: input.role, model, loadClass, baseRef, baseSha, branch, worktree, ...(input.network?.allow.length ? { network: input.network } : {}) });
     if (choice?.model) this.store.appendEvent(workerId, 'route.selected', {
       tier: choice.tier ?? null, ...(choice.score === undefined ? {} : { score: choice.score }), policyApplied: choice.policyApplied ?? null, chosenModel: choice.model,
       ...(choice.skippedCandidates?.length ? { skippedCandidates: choice.skippedCandidates } : {}),

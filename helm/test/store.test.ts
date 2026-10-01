@@ -51,7 +51,30 @@ test('contextPaths, allowWorkflows, and network allowlist round-trip through ins
     store.updateWorker('w-ctx', { contextPaths: ['only.md'], allowWorkflows: false, network: { allow: [] } });
     assert.deepEqual(store.getWorker('w-ctx')?.contextPaths, ['only.md']);
     assert.equal(store.getWorker('w-ctx')?.allowWorkflows, false);
-    assert.deepEqual(store.getWorker('w-ctx')?.network, { allow: [] });
+    assert.equal(store.getWorker('w-ctx')?.network, undefined);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('openStore adds the network column to a pre-network workers database', () => {
+  const { dir, path } = tempDbPath();
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`CREATE TABLE workers (
+    workerId TEXT PRIMARY KEY, repo TEXT NOT NULL, repoSlug TEXT NOT NULL, role TEXT NOT NULL,
+    model TEXT NOT NULL, objective TEXT NOT NULL, acceptance TEXT, contextPaths TEXT NOT NULL DEFAULT '[]',
+    allowWorkflows INTEGER NOT NULL DEFAULT 0, baseRef TEXT NOT NULL, baseSha TEXT NOT NULL,
+    branch TEXT NOT NULL, worktree TEXT NOT NULL, state TEXT NOT NULL, head TEXT, sessionFile TEXT,
+    result TEXT, rawResultText TEXT, idempotencyKey TEXT, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+  )`);
+  legacy.close();
+  const store = openStore(path);
+  try {
+    const columns = (store.sql.prepare('PRAGMA table_info(workers)').all() as Array<{ name: string }>).map((row) => row.name);
+    assert.ok(columns.includes('network'));
+    store.insertWorker(makeWorker({ workerId: 'w-migrated', network: { allow: ['registry.npmjs.org'] } }));
+    assert.deepEqual(store.getWorker('w-migrated')?.network, { allow: ['registry.npmjs.org'] });
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

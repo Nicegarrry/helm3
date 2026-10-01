@@ -332,7 +332,7 @@ test('network allowlist is Claude-builder-only and is persisted, inspected, emit
   assert.deepEqual(inputs[1]?.network, { allow: ['registry.npmjs.org'] });
 });
 
-test('an explicit empty network allowlist stays visible without enabling Claude network', async () => {
+test('an explicit empty network allowlist is treated as no network field', async () => {
   const inputs: WorkerRunInput[] = [];
   const runner: WorkerRunner = { run: async (input) => {
     inputs.push(input);
@@ -343,11 +343,12 @@ test('an explicit empty network allowlist stays visible without enabling Claude 
   assert.ok(spawned.ok && spawned.workerId);
   if (!spawned.ok) return;
   await helm.settle(spawned.workerId!);
-  assert.deepEqual(inputs[0]?.network, { allow: [] });
-  assert.deepEqual(store.listEvents(spawned.workerId!).find((event) => event.kind === 'spawned')?.data.network, { allow: [] });
+  assert.equal(inputs[0]?.network, undefined);
+  assert.equal(store.getWorker(spawned.workerId!)?.network, undefined);
+  assert.equal(store.listEvents(spawned.workerId!).find((event) => event.kind === 'spawned')?.data.network, undefined);
   const inspected = await helm.inspect({ workerId: spawned.workerId!, tail: 0 });
   assert.ok(inspected.ok);
-  if (inspected.ok) assert.deepEqual(inspected.network, { allow: [] });
+  if (inspected.ok) assert.equal('network' in inspected, false);
 });
 
 function priorityJev(choices: { class?: string; size?: string } | Error): Jev {

@@ -81,6 +81,11 @@ function workerTempDir(input: Pick<WorkerRunInput, 'workerId' | 'sessionDir'>): 
   return join(dirname(dirname(input.sessionDir)), 'tmp', input.workerId);
 }
 
+const CLAUDE_DENIED_DOMAINS = [
+  'localhost', 'localhost.', '*.localhost', 'ip6-localhost', 'ip6-loopback', 'broadcasthost',
+  '127.0.0.1', '0.0.0.0', '::1', '[::1]', '169.254.169.254', 'metadata.google.internal', 'instance-data.ec2.internal',
+];
+
 /** Claude Code's OS sandbox policy; fail closed if the sandbox backend is unavailable. */
 export function claudeSandboxSettings(
   worktree: string,
@@ -91,7 +96,7 @@ export function claudeSandboxSettings(
   networkAllowlist: readonly string[] = [],
 ): string {
   const network = !reviewer && networkAllowlist.length
-    ? { allowedDomains: [...networkAllowlist], deniedDomains: ['localhost', '127.0.0.1', '::1'], strictAllowlist: true, allowUnixSockets: [], allowAllUnixSockets: false, allowLocalBinding: false }
+    ? { allowedDomains: [...networkAllowlist], deniedDomains: CLAUDE_DENIED_DOMAINS, strictAllowlist: true, allowUnixSockets: [], allowAllUnixSockets: false, allowLocalBinding: false }
     : { allowedDomains: [], deniedDomains: ['*'] };
   return JSON.stringify({
     sandbox: {

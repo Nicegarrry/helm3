@@ -206,6 +206,21 @@ test('routing inputs accept omitted worker models and reject invalid difficulty 
   assert.equal(calls.length, 2);
 });
 
+test('worker.spawn network allowlist accepts DNS domains and rejects unsafe host forms', async () => {
+  const { helm, calls } = createFakeHelm();
+  const registry = createToolRegistry(helm);
+  const spawn = (allow: string[]) => registry.call('worker.spawn', { repo: '/repo', objective: 'task', model: 'claude/sonnet', network: { allow } });
+  assert.equal((await spawn(['registry.npmjs.org', '*.npmjs.org'])).ok, true);
+  for (const domain of [
+    '*', '127.0.0.1', '127.1', '::1', '[::1]', '::ffff:127.0.0.1',
+    'localhost', 'LOCALHOST.', '*.localhost', 'api.localhost', 'printer.local', '*.service.local',
+    '169.254.169.254', 'metadata.google.internal', 'instance-data.ec2.internal',
+    'https://npmjs.org', 'npmjs.org:443', 'bad_label.example', '-bad.example', 'bad-.example', '*.bad.*.example',
+  ]) assert.equal((await spawn([domain])).ok, false, domain);
+  assert.equal((await spawn(Array.from({ length: 65 }, (_, i) => `host-${i}.example.com`))).ok, false);
+  assert.equal(calls.length, 1);
+});
+
 test('ticket management preserves the serialized core and supervisor MCP context budgets', async () => {
   const { compactInputSchema } = await import('../src/tools.js');
   const { helm } = createFakeHelm();

@@ -134,7 +134,10 @@ test('claudeArgs: builder allowlist enables only requested domains while reviewe
   const builder = claudeArgs({ role: 'builder', worktree: '/wt', network: { allow: ['registry.npmjs.org', '*.github.com'] } }, { model: 'sonnet' }, null, '/tmp/helm-claude', gitDirs);
   const builderSettings = JSON.parse(builder[builder.indexOf('--settings') + 1]!) as { sandbox: { filesystem: { denyRead: string[] }; network: Record<string, unknown> } };
   assert.deepEqual(builderSettings.sandbox.network.allowedDomains, ['registry.npmjs.org', '*.github.com']);
-  assert.deepEqual(builderSettings.sandbox.network.deniedDomains, ['localhost', '127.0.0.1', '::1']);
+  assert.deepEqual(builderSettings.sandbox.network.deniedDomains, [
+    'localhost', 'localhost.', '*.localhost', 'ip6-localhost', 'ip6-loopback', 'broadcasthost',
+    '127.0.0.1', '0.0.0.0', '::1', '[::1]', '169.254.169.254', 'metadata.google.internal', 'instance-data.ec2.internal',
+  ]);
   assert.equal(builderSettings.sandbox.network.strictAllowlist, true);
   assert.equal(builderSettings.sandbox.network.allowAllUnixSockets, false);
   assert.deepEqual(builderSettings.sandbox.network.allowUnixSockets, []);

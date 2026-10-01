@@ -230,9 +230,13 @@ OS-level isolation you need.
 
 Workers are offline by default. `worker.spawn` accepts `network: { "allow": ["registry.npmjs.org"] }`
 for Claude builders only; the listed domains are passed to Claude's sandbox for every fresh or
-resumed turn. Loopback hosts and Unix sockets remain blocked, and `$HELM_HOME/serve.json` remains
-unreadable. Reviewers always stay offline. A non-empty allowlist is refused for Pi and Codex
-workers; `HELM_CODEX_NETWORK=1` remains the separate daemon-wide Codex setting.
+resumed turn. Entries must be DNS hostnames or leading-wildcard subdomains such as `*.npmjs.org`;
+at most 64 are accepted. Helm rejects bare wildcards, IP literals (including IPv4-mapped IPv6),
+localhost names, `.local` names, and known link-local/metadata endpoints. Claude's sandbox also
+denies common loopback and metadata host forms, all Unix sockets, and local binding, while
+`$HELM_HOME/serve.json` remains unreadable. An empty list is treated as no network request.
+Reviewers always stay offline. A non-empty allowlist is refused for Pi and Codex workers;
+`HELM_CODEX_NETWORK=1` remains the separate daemon-wide Codex setting.
 
 A worker's final message must be one JSON object: `status`, `summary`, `changedFiles`,
 `commandsRun`, optional `notes`. One correction turn is allowed; after that the worker is

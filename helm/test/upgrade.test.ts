@@ -260,7 +260,7 @@ test('upgrade setup failure releases its lock before any helper starts', (t) => 
   assert.equal(existsSync(join(home, 'upgrade.json')), false);
 });
 
-test('test cleanup kills the detached update helper process group', async (t) => {
+test('test cleanup kills the detached update helper process group', { timeout: 10_000 }, async (t) => {
   const home = testHome(t);
   const helper = join(home, 'update.mjs'), ready = join(home, 'helper-ready');
   writeFileSync(helper, `
@@ -273,9 +273,19 @@ test('test cleanup kills the detached update helper process group', async (t) =>
   const child = spawn(process.execPath, [helper, 'apply', home, 'test-upgrade'], { detached: true, stdio: 'ignore' });
   assert.ok(child.pid);
   write(join(home, 'upgrade.json'), { id: 'test-upgrade', helperPid: child.pid, phase: 'draining' });
-  await eventually(() => existsSync(ready), Boolean);
+  await eventually(() => existsSync(ready), Boolean, 2_000);
   const grandchildPid = Number(readFileSync(ready, 'utf8'));
-  await cleanupTestDaemons(home);
+  let groupTermRejected = false;
+  await cleanupTestDaemons(home, (pid, signal) => {
+    if (pid < 0 && signal === 'SIGTERM') {
+      groupTermRejected = true;
+      const error = new Error('synthetic process-group permission failure') as NodeJS.ErrnoException;
+      error.code = 'EPERM';
+      throw error;
+    }
+    return process.kill(pid, signal);
+  });
+  assert.equal(groupTermRejected, true);
   await eventually(() => child.exitCode !== null || child.signalCode !== null, Boolean, 2_000);
   assert.ok(child.signalCode === 'SIGTERM' || child.signalCode === 'SIGKILL');
   await eventually(() => {

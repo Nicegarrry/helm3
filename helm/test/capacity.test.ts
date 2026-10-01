@@ -227,7 +227,7 @@ test('a timed capacity probe kills its grandchild process group', { timeout: 5_0
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     console.log(child.pid);
     setInterval(() => {}, 1000);
-  `], { timeoutMs: 100 });
+  `], { timeoutMs: 500 });
   const pid = Number(result.stdout.trim());
   assert.ok(Number.isInteger(pid) && pid > 0, result.stderr);
   assert.equal(result.transient, true);

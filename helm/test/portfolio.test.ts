@@ -52,7 +52,7 @@ test('seeded portfolio reuses scorecard activity, includes old workers, budget a
     const lines = content.split('\n');
     assert.match(lines[0]!, /^\*\*Helm · [A-Za-z]{3} \d{1,2} [A-Za-z]{3}\*\*$/);
     assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 ask', '$2.00 spent · $10.00 budgeted · Codex 120 tokens', '',
-      '**one**: 1 merged, 2 PRs open (1 needs review), 50% gates pass first time, $2.00', '**two**: 1 stuck, 1 ask', 'Idle: empty']);
+      '**one**: 1 merged, 2 PRs open (1 needs review), 50% gates pass first time, $2.00, 1 tap pending', '**two**: 1 stuck, 1 ask', 'Idle: empty']);
     assert.doesNotMatch(content, /\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}/, 'no ISO timestamps in the report');
     assert.doesNotMatch(content, /acme\//, 'repo names drop the owner prefix');
     assert.ok(!content.includes('clean'), 'clean rate is dropped');
@@ -117,6 +117,17 @@ test('spend line totals window spend across all projects and shows the budget ca
   } finally { f.close(); }
 });
 
+test('taps count as visible activity: taps-only projects show 1 tap pending / 2 taps pending', async () => {
+  const f = fixture();
+  try {
+    ensureTapTable(f.store);
+    f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('t1', 'acme/taps', 'test', 'a', 'h', 'h', 'used', recent, recent);
+    assert.ok(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes('**taps**: 1 tap pending'), 'taps-only project is not dropped');
+    f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('t2', 'acme/taps', 'test', 'a', 'h', 'h', 'used', recent, recent);
+    assert.ok(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes('**taps**: 2 taps pending'));
+  } finally { f.close(); }
+});
+
 test('fleet token counts are humanised (17M, 850k)', async () => {
   for (const [tokens, expected] of [[17_000_000, 'Codex 17M tokens'], [850_000, 'Codex 850k tokens']] as const) {
     const f = fixture();
@@ -174,12 +185,20 @@ test('fallback uses first configured Discord project when report env is unset or
   }
 });
 
-test('Discord payload truncates cleanly at 2000 chars and preserves fleet total', async () => {
+test('Discord truncation keeps the first three summary lines and marks dropped lines', async () => {
   assert.equal(reportContent('x'.repeat(2000)).length, 2000);
-  const text = Array.from({ length: 100 }, () => 'a project line').join('\n') + '\n' + '😀'.repeat(1000) + '\nFleet: total';
-  const bounded = reportContent(text); assert.ok(bounded.length <= 2000); assert.match(bounded, /… report truncated\nFleet: total$/); assert.doesNotMatch(bounded, /[\uD800-\uDBFF]\n/);
+  const rows = ['**Helm · Wed 1 Oct**', '1 merged · 2 asks', '$2.43 spent · $50.00 budgeted · Codex 17.5M tokens',
+    ...Array.from({ length: 120 }, (_, i) => `**project-${i}**: 1 ask, ${'😀'.repeat(30)}`)];
+  const bounded = reportContent(rows.join('\n'));
+  assert.ok(bounded.length <= 2000);
+  assert.ok(bounded.startsWith(rows.slice(0, 3).join('\n') + '\n'), 'title, headline and spend/totals lines survive truncation');
+  const dropped = Number(bounded.match(/\n…and (\d+) more$/)![1]);
+  assert.equal(bounded.split('\n').length - 1 + dropped, rows.length, 'marker counts exactly the dropped lines');
+  assert.doesNotMatch(bounded, /[\uD800-\uDBFF]\n/);
+  const fallback = reportContent(['a'.repeat(1_200), 'b'.repeat(1_200), 'c'.repeat(1_200), 'd'].join('\n'));
+  assert.ok(fallback.length <= 2000); assert.match(fallback, /\n…and 4 more$/);
   const f = fixture({ report: { webhookEnv: 'REPORT' }, discord: { projects: Object.fromEntries(Array.from({ length: 200 }, (_, i) => ['project-' + i, { webhookEnv: 'EMPTY' }])) } }); const sent: { url: string; content: string }[] = [];
-  try { for (let i = 0; i < 200; i++) insertInbox(f.store.sql, { id: 'bulk-' + i, project: 'project-' + i, workerId: 'w', question: 'q', createdAt: old }); await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /truncated/); } finally { f.close(); }
+  try { for (let i = 0; i < 200; i++) insertInbox(f.store.sql, { id: 'bulk-' + i, project: 'project-' + i, workerId: 'w', question: 'q', createdAt: old }); await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /\n…and \d+ more$/); assert.ok(sent[0]!.content.startsWith('**Helm')); assert.ok(sent[0]!.content.includes('200 asks'), 'headline totals survive the webhook truncation'); } finally { f.close(); }
 });
 
 test('unsuccessful webhook sends do not advance the persisted date and can retry', async () => {

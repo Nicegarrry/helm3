@@ -62,19 +62,23 @@ export function formatPortfolio(report: Awaited<ReturnType<typeof portfolio>>): 
   const idle: string[] = [];
   const blocks = report.projects.filter(active).map((r) => {
     const review = r.openPrs.filter((p) => p.waiting === 'review').length;
-    const facts = [r.merged ? `${r.merged} merged` : null, prsFact(r.openPrs.length, review), r.merged > 0 ? `${pct(r.firstPassGateRate)} gates pass first time` : null, r.stuck.length ? `${r.stuck.length} stuck` : null, r.inbox ? `${r.inbox} ${word(r.inbox, 'ask', 'asks')}` : null, r.usd > 0 ? money(r.usd) : null].filter(Boolean);
+    const facts = [r.merged ? `${r.merged} merged` : null, prsFact(r.openPrs.length, review), r.merged > 0 ? `${pct(r.firstPassGateRate)} gates pass first time` : null, r.stuck.length ? `${r.stuck.length} stuck` : null, r.inbox ? `${r.inbox} ${word(r.inbox, 'ask', 'asks')}` : null, r.usd > 0 ? money(r.usd) : null, r.taps ? `${r.taps} ${word(r.taps, 'tap', 'taps')} pending` : null].filter(Boolean);
     return facts.length ? `**${short(r.project)}**: ${facts.join(', ')}` : null;
   }).filter((line): line is string => line !== null);
   for (const r of report.projects) if (!active(r)) idle.push(short(r.project));
   if (blocks.length || idle.length) { lines.push(''); lines.push(...blocks); if (idle.length) lines.push(`Idle: ${idle.join(', ')}`); }
   return lines.join('\n');
 }
-/** Bound a single Discord message, retaining the fleet total and a truncation marker. */
+/** Bound a single Discord message: keep the first three summary lines (title, headline, spend/tokens) and mark how many trailing lines were dropped. */
 export function reportContent(text: string): string {
   if (text.length <= 2000) return text;
-  const tail = `\n… report truncated\n${text.split('\n').at(-1)!.slice(0, 500)}`;
-  const prefix = text.slice(0, 2000 - tail.length); const end = prefix.lastIndexOf('\n');
-  return `${end > 0 ? prefix.slice(0, end) : prefix.replace(/[\uD800-\uDBFF]$/, '')}${tail}`;
+  const lines = text.split('\n');
+  for (let kept = lines.length - 1; kept >= 3; kept--) {
+    const result = `${lines.slice(0, kept).join('\n')}\n…and ${lines.length - kept} more`;
+    if (result.length <= 2000) return result;
+  }
+  const marker = `…and ${lines.length} more`;
+  return `${lines.slice(0, 3).join('\n').slice(0, 2000 - marker.length - 1).replace(/[\uD800-\uDBFF]$/, '')}\n${marker}`;
 }
 /** Separate timers ensure a slow report POST cannot hold the Discord consumer open. */
 export function startNotificationTickers(discord: () => Promise<void>, report: () => Promise<void>) {

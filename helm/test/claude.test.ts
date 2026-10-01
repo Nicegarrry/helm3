@@ -110,7 +110,7 @@ test('claudeArgs: permissions, worktree directory, model effort, and resume are 
     allowRead: ['/wt', join(homedir(), '.config', 'git'), '/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/tmp/helm-claude'],
     allowWrite: ['/wt', '/tmp/helm-claude'],
     denyWrite: ['/home/.helm/worktrees/repo/w-1/.git', '/home/.helm/repos/repo/.git', '/wt/.git'],
-    denyRead: credentialPaths(homedir()),
+    denyRead: [...credentialPaths(homedir()), join(homedir(), '.helm', 'serve.json.*.tmp')],
   });
   assert.deepEqual(settings.sandbox.network, { allowedDomains: [], deniedDomains: ['*'] });
   assert.equal(build.filter((arg) => arg === '--add-dir').length, 1);
@@ -245,7 +245,11 @@ test('available: explicit Claude binaries are discoverable', async () => {
   assert.equal(available({ bin: join(f.root, 'missing-claude') }), false);
 });
 
-test('Claude settings deny the explicitly supplied daemon metadata path', () => {
-  const settings = JSON.parse(claudeSandboxSettings('/wt', '/tmp/worker', { gitDir: '/git', commonDir: '/git' }, false, '/custom/helm'));
-  assert.ok(settings.sandbox.filesystem.denyRead.includes('/custom/helm/serve.json'));
+test('Claude fresh and resumed roles deny custom daemon metadata and temporary siblings', () => {
+  for (const role of ['builder', 'reviewer'] as const) for (const session of [null, 'existing-session']) {
+    const args = claudeArgs({ role, worktree: '/wt' }, { model: 'sonnet' }, session, '/tmp/worker', { gitDir: '/git', commonDir: '/git' }, '/custom/helm');
+    const settings = JSON.parse(args[args.indexOf('--settings') + 1]!);
+    assert.ok(settings.sandbox.filesystem.denyRead.includes('/custom/helm/serve.json'));
+    assert.ok(settings.sandbox.filesystem.denyRead.includes('/custom/helm/serve.json.*.tmp'));
+  }
 });

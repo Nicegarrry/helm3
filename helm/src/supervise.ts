@@ -3,6 +3,7 @@ import type { EventRow, Store, SupervisorHost, SupervisorRow, WakeRow, ToolOutco
 import { consumer } from './daemon.js';
 import type { Settings } from './settings.js';
 import type { Host } from './host.js';
+import { workerResultIssues } from './worker.js';
 
 export type SupervisorRegisterInput = Readonly<{ project: string; repo: string; host: SupervisorHost; label: string }>;
 export type WakeListInput = Readonly<{ project: string; ack: boolean }>;
@@ -73,8 +74,13 @@ function eventWake(event: EventRow, project: string, now: string): Omit<WakeRow,
 }
 
 function watchAlertSummary(event: EventRow): string {
-  if (event.data.rule !== 'procs.low') return String(event.data.detail ?? event.data.summary ?? event.data.rule ?? 'watch alert');
   const detail = event.data.detail;
+  if (event.data.rule !== 'procs.low') {
+    if (!detail || typeof detail !== 'object') return String(detail ?? event.data.summary ?? event.data.rule ?? 'watch alert');
+    const { rawText, reason, message } = detail as { rawText?: unknown; reason?: unknown; message?: unknown };
+    const text = typeof rawText === 'string' ? (workerResultIssues(rawText)[0] ?? rawText) : String(reason ?? message ?? JSON.stringify(detail));
+    return `${String(event.data.rule ?? 'watch alert')}: ${ascii(text).slice(0, 120)}`;
+  }
   const top = detail && typeof detail === 'object' && !Array.isArray(detail) ? (detail as { topProcesses?: unknown }).topProcesses : undefined;
   const names = Array.isArray(top) ? top.map((item) => item && typeof item === 'object' ? `${String((item as { name?: unknown }).name ?? 'unknown')} (${String((item as { count?: unknown }).count ?? 0)})` : '').filter(Boolean).slice(0, 3).join(', ') : '';
   return `process headroom low${names ? `: ${names}` : ''}`;

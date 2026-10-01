@@ -245,9 +245,18 @@ export function openStore(path: string): Store {
       skippedCandidates TEXT NOT NULL DEFAULT '[]',
       skills TEXT NOT NULL DEFAULT '[]'
     );
+    CREATE TABLE IF NOT EXISTS portfolio_report (
+      id INTEGER PRIMARY KEY CHECK(id=1), lastSentDate TEXT NOT NULL DEFAULT '',
+      attemptDate TEXT, lastAttemptAt TEXT, attempts INTEGER NOT NULL DEFAULT 0, gaveUpDate TEXT
+    );
     CREATE TABLE IF NOT EXISTS spend_limits (name TEXT PRIMARY KEY, value REAL NOT NULL, source TEXT NOT NULL, at TEXT NOT NULL, tapId TEXT);
     CREATE TABLE IF NOT EXISTS spend_limit_state (id INTEGER PRIMARY KEY CHECK (id = 1), checksum TEXT NOT NULL, rows TEXT NOT NULL, at TEXT NOT NULL);
   `);
+  // Upgrade the original daily-marker table without losing its successful-send date.
+  const reportColumns = new Set((db.prepare('PRAGMA table_info(portfolio_report)').all() as Array<{ name: string }>).map((row) => row.name));
+  for (const [name, definition] of [['attemptDate', 'TEXT'], ['lastAttemptAt', 'TEXT'], ['attempts', 'INTEGER NOT NULL DEFAULT 0'], ['gaveUpDate', 'TEXT']]) {
+    if (!reportColumns.has(name!)) db.exec(`ALTER TABLE portfolio_report ADD COLUMN ${name} ${definition}`);
+  }
   ensureWorkerMetaColumns(db);
   migratePrs(db);
   db.exec('CREATE INDEX IF NOT EXISTS prs_worker ON prs(workerId);');

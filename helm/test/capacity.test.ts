@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createCapacityAdmission } from '../src/capacity/admit.js';
 import { askLoadClass, classifyLoad } from '../src/capacity/classify.js';
+import { admissionRank } from '../src/capacity/priority.js';
 import { createCapacitySampler, type CapacitySnapshot } from '../src/capacity/sampler.js';
 import { openStore } from '../src/store.js';
 import { loadSettings } from '../src/settings.js';
@@ -216,5 +217,76 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
     assert.deepEqual(first.topProcesses, [{ name: 'xcodebuild', count: 2 }, { name: 'node', count: 1 }]);
     assert.deepEqual(calls.sort(), ['memory_pressure:500', 'ps:500', 'ps:500', 'sysctl:500', 'vm_stat:500', 'xcrun:300']);
     sampler.stop();
+  } finally { store.close(); }
+});
+
+/** One worker slot, so every job after `first` queues; each admit advances the clock one second. */
+async function queueAfterFirst(jobs: Array<{ id: string; rank: ReturnType<typeof admissionRank> }>, clockStep = 1_000) {
+  let clock = new Date('2026-10-01T00:00:00.000Z');
+  const store = openStore(':memory:');
+  const capacity = createCapacityAdmission({ home: '/tmp/helm-capacity-score', maxWorkers: 1, store, settings: { capacity: loadSettings('/missing').capacity }, sampler: fakeSampler(snapshot({ freeRamGb: 64 })), now: () => clock });
+  const started: string[] = [];
+  const admit = (id: string, rank?: ReturnType<typeof admissionRank>) => capacity.admit({ id, workerId: id, kind: 'builder', loadClass: 'light', ...(rank ? { rank } : {}) }, () => { started.push(id); });
+  await admit('first', admissionRank('normal', 'auto'));
+  for (const job of jobs) { clock = new Date(clock.getTime() + clockStep); await admit(job.id, job.rank); }
+  return { store, capacity, started, advance: (ms: number) => { clock = new Date(clock.getTime() + ms); } };
+}
+
+test('an urgent job overtakes older normal jobs of the same kind', async () => {
+  const { store, capacity, started } = await queueAfterFirst([
+    { id: 'normal-1', rank: admissionRank('normal', 'auto') }, { id: 'normal-2', rank: admissionRank('normal', 'auto') }, { id: 'urgent', rank: admissionRank('urgent', 'auto') },
+  ]);
+  try {
+    assert.deepEqual((await capacity.status()).queue.map((entry) => entry.id), ['urgent', 'normal-1', 'normal-2']);
+    capacity.finish('first');
+    await capacity.tick();
+    assert.deepEqual(started, ['first', 'urgent']);
+    capacity.finish('urgent');
+    await capacity.tick();
+    assert.deepEqual(started, ['first', 'urgent', 'normal-1']);
+  } finally { store.close(); }
+});
+
+test('owner and quick-win boosts raise the score and ties stay FIFO', async () => {
+  const { store, capacity } = await queueAfterFirst([
+    { id: 'plain', rank: admissionRank('normal', 'auto', 'm') }, { id: 'quick', rank: admissionRank('normal', 'auto', 'xs') }, { id: 'owner', rank: admissionRank('normal', 'owner', 'l') },
+    { id: 'plain-2', rank: admissionRank('normal', 'auto', 'l') }, { id: 'both', rank: admissionRank('normal', 'owner', 's') },
+  ]);
+  try {
+    const queue = (await capacity.status()).queue;
+    assert.deepEqual(queue.map((entry) => [entry.id, entry.score]), [['both', 35], ['owner', 25], ['quick', 20], ['plain', 10], ['plain-2', 10]]);
+    assert.deepEqual(queue[0]!.reasons, ['priority normal +10', 'requested by owner +15', 'quick win (s) +10']);
+  } finally { store.close(); }
+});
+
+test('aging, one point per five minutes queued, eventually admits a low job ahead of newer normal jobs', async () => {
+  const { store, capacity, started, advance } = await queueAfterFirst([{ id: 'low', rank: admissionRank('low', 'auto') }]);
+  try {
+    assert.equal((await capacity.status()).queue[0]!.score, 0);
+    advance(55 * 60_000);
+    const admitted = await capacity.admit({ id: 'normal', workerId: 'normal', kind: 'builder', loadClass: 'light', rank: admissionRank('normal', 'auto') }, () => { started.push('normal'); });
+    assert.deepEqual(admitted, { queued: true });
+    const queue = (await capacity.status()).queue;
+    assert.deepEqual(queue.map((entry) => [entry.id, entry.score]), [['low', 11], ['normal', 10]]);
+    assert.ok(queue[0]!.reasons.includes('aging +11'));
+    capacity.finish('first');
+    await capacity.tick();
+    assert.deepEqual(started, ['first', 'low']);
+  } finally { store.close(); }
+});
+
+test('capacity.queued and capacity.started events carry the score and reasons', async () => {
+  const { store, capacity, advance } = await queueAfterFirst([{ id: 'owner', rank: admissionRank('high', 'owner', 'xs') }]);
+  try {
+    const queued = store.listEvents('owner').find((event) => event.kind === 'capacity.queued');
+    assert.equal(queued?.data.score, 45);
+    assert.deepEqual(queued?.data.reasons, ['priority high +20', 'requested by owner +15', 'quick win (xs) +10']);
+    advance(10 * 60_000);
+    capacity.finish('first');
+    await capacity.tick();
+    const started = store.listEvents('owner').find((event) => event.kind === 'capacity.started');
+    assert.equal(started?.data.score, 47);
+    assert.deepEqual(started?.data.reasons, ['priority high +20', 'requested by owner +15', 'quick win (xs) +10', 'aging +2']);
+    assert.equal(store.listEvents('first').find((event) => event.kind === 'capacity.started')?.data.score, 10);
   } finally { store.close(); }
 });

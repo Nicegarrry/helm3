@@ -19,7 +19,7 @@ export const workerResultSchema = z.preprocess(omitEmptyStrings, z.object({
   commandsRun: z.array(z.string().min(1)).max(200).default([]),
   question: z.string().min(1).max(4000).optional(),
   notes: z.string().max(8000).optional(),
-  claims: z.array(z.string().max(300)).max(12).optional(),
+  claims: z.array(z.string().max(300, 'at most 300 chars')).max(12, 'at most 12').optional(),
   acceptance: z.object({ command: z.string().min(1), files: z.array(z.string().min(1)) }).optional(),
 }).strict().superRefine((result, ctx) => {
   if (result.status === 'question' && !result.question) {
@@ -33,6 +33,7 @@ export const WORKER_ROLES = ['builder', 'reviewer', 'validator'] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
 export const LOAD_CLASSES = ['light', 'medium', 'heavy'] as const;
 export type LoadClass = (typeof LOAD_CLASSES)[number];
+export const PRIORITIES = ['low', 'normal', 'high', 'urgent'] as const; export type Priority = (typeof PRIORITIES)[number];
 export const INBOX_STATES = ['open', 'answered', 'superseded'] as const;
 export type InboxState = (typeof INBOX_STATES)[number];
 export type InboxRow = Readonly<{
@@ -170,7 +171,6 @@ export interface Store {
   close(): void;
 }
 
-
 export type WorktreeInfo = Readonly<{ path: string; branch: string; baseSha: string }>;
 
 export interface Workspace {
@@ -197,19 +197,17 @@ export interface Workspace {
   /** Clone `owner/name` into `dest`, preferring `gh repo clone` (uses gh auth) and falling back to https. */
   clone(slug: string, dest: string): Promise<void>;
   /** Fetch origin, optionally pinning a branch into refs/helm/base/<branch>. */
-  fetch(repo: string, branch?: string): Promise<void>;
+  fetch(repo: string, branch?: string, source?: string): Promise<void>;
 }
-
 
 export type GateCheck = Readonly<{ name: string; command: string }>;
 
 export interface GateRunner {
   /** Run each check in `cwd` sequentially; capture output to files under `logDir`. */
-  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
+  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; keepNodeModules?: boolean; signal?: AbortSignal; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
   /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
   defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }
-
 
 export type PrStatus = Readonly<{
   number: number;
@@ -318,6 +316,8 @@ export const spawnInput = z.object({
   idempotencyKey: z.string().min(1).max(200).optional(),
   skills: z.array(z.string().min(1)).optional(),
   loadClass: z.enum(LOAD_CLASSES).optional(),
+  priority: z.enum(PRIORITIES).optional(),
+  requestedBy: z.enum(['owner', 'auto']).optional(),
   lanes: z.array(z.enum(['codex', 'pi', 'claude'])).max(3).optional(),
 }).strict();
 export const inspectInput = z.object({ workerId: z.string().min(1), tail: z.number().int().min(0).max(500).default(5), verbose: z.boolean().optional() }).strict();
@@ -359,7 +359,7 @@ export const supervisorRegisterInput = z.object({ project: z.string().min(1), re
 export const supervisorListInput = emptyInput;
 export const wakeListInput = z.object({ project: z.string().min(1), ack: z.boolean().default(false), verbose: z.boolean().optional() }).strict();
 export const supervisorRotateInput = z.object({ project: z.string().min(1), focus: z.string().min(1).max(4000) }).strict();
-export const notifyNickInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
+export const notifyOwnerInput = z.object({ project: z.string().min(1), text: z.string().min(1).max(4000) }).strict();
 export const jevCheckInput = z.object({ preset: z.enum(['issue', 'dedupe', 'verdict', 'raw']), project: z.string().min(1).optional(), input: z.unknown() }).strict();
 export const jevLabelInput = z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) }).strict();
 export { memoryWriteInput, memoryLogInput, memoryListInput } from './memory.js';
@@ -376,7 +376,7 @@ export const spendSetInput = z.object({
   capUsd: z.number().nonnegative().optional(), warnUsd: z.number().nonnegative().optional(), maxWorkers: z.number().int().nonnegative().optional(),
   tapId: z.string().regex(/^t-[0-9a-f]+$/).optional(),
 }).strict();
-export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'spend.set', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback', 'routing.check'] as const;
+export const TOOL_NAMES = ['worker.spawn', 'worker.inspect', 'worker.list', 'worker.wait', 'worker.steer', 'worker.retry', 'worker.stop', 'gate.run', 'claims.check', 'gate.baseline', 'pr.open', 'pr.status', 'review.request', 'review.record', 'run.status', 'spend.set', 'pr.merge', 'daemon.control', 'budget.open', 'budget.close', 'budget.status', 'envelope.get', 'envelope.check', 'tap.request', 'tap.confirm', 'supervisor.register', 'supervisor.list', 'wake.list', 'supervisor.rotate', 'inbox.list', 'inbox.reply', 'notify.owner', 'notify.nick', 'jev.check', 'jev.label', 'merge.enqueue', 'merge.queue', 'merge.dequeue', 'memory.write', 'memory.log', 'memory.list', 'scorecard.export', 'deploy.run', 'deploy.status', 'deploy.rollback', 'routing.check'] as const;
 export type ToolName = string;
 export type HelmConfig = Readonly<{
   home: string;            // $HELM_HOME, default ~/.helm

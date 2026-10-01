@@ -83,7 +83,7 @@ import { createScorecard, type ScorecardExportInput, type ScorecardService } fro
 import type { RetryService } from './retry.js';
 import { createSelector, type Selection } from './select.js';
 import type { Jev } from './jev.js';
-import type { PromptInput } from './prompt.js';
+import { formatIssueBrief, type PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
 import { createRoutingCheck, type RoutingCheckService } from './routing/check.js';
 import { createModelCatalog, type CatalogProbe, type ModelCatalog } from './routing/catalog.js';
@@ -673,15 +673,30 @@ export class Helm {
     for (const skipped of choice?.skippedCandidates ?? []) this.store.appendEvent(workerId, 'route.skipped', skipped);
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
-    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
+    const issueNumber = baseline?.issue ?? input.issue;
+    const issueText = issueNumber !== undefined ? await this.fetchIssueText(repoSlug, issueNumber) : undefined;
+    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}), ...(issueText ? { issueText } : {}) };
     this.store.appendEvent(workerId, 'admission.priority', { stated, requestedBy: input.requestedBy ?? 'auto', class: check.class ?? null, size: check.size ?? null, effective, score: rank.base, reasons: rank.reasons });
-    const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
+    let message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
+    if (issueText && !message.includes(issueText)) message = `${message}\n\n${issueText}`;
     const admitted = await this.capacity.admit({ id: workerId, workerId, kind: input.role === 'reviewer' ? 'review' : input.role === 'validator' ? 'validator' : 'builder', loadClass, rank, payload: { type: 'worker', workerId } }, () => this.startRun(workerId, message, onDone));
     const warnings = [choice?.warning, selection.warning, this.aboveSoftCap() ? `spend is above the soft cap of $${this.spendWarnUsd().toFixed(2)}` : undefined].filter(Boolean) as string[];
     if ('queued' in admitted) warnings.push('queued: capacity');
     return { ok: true, workerId, branch, worktree, loadClass, ...(warnings.length ? { warning: warnings.join('; ') } : {}), ...('queued' in admitted ? { queued: true as const } : {}) };
+  }
+
+  private async fetchIssueText(repoSlug: string, issue: number): Promise<string | undefined> {
+    if (!this.github.issue) return undefined;
+    let cancelTimeout: (() => void) | undefined;
+    try {
+      const lookup = this.github.issue(repoSlug, issue);
+      const data = await Promise.race([lookup, new Promise<undefined>((resolve) => { const timer = setTimeout(resolve, 5_000); cancelTimeout = () => clearTimeout(timer); })]);
+      if (data) return formatIssueBrief(issue, data);
+    } catch { /* issue lookup is best effort */ }
+    finally { cancelTimeout?.(); }
+    return undefined;
   }
 
   private async emitDispatched(workerId: string, input: SpawnInput, choice?: ModelChoice): Promise<void> {

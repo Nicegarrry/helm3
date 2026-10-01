@@ -232,6 +232,7 @@ export interface GitHub {
   findPr?(repoSlug: string, head: string): Promise<{ number: number; url: string } | undefined>;
   updatePr?(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void>;
   issueTitle?(repoSlug: string, number: number): Promise<string | undefined>;
+  issue?(repoSlug: string, number: number): Promise<GitHubIssue | undefined>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
   comment(repoSlug: string, id: number): Promise<GitHubComment>;
   postComment(repoSlug: string, number: number, body: string): Promise<string>;
@@ -240,7 +241,7 @@ export interface GitHub {
 }
 
 export type GitHubComment = Readonly<{ body: string; issueNumber?: number; issueUrl?: string; pullRequestUrl?: string }>;
-
+export type GitHubIssue = Readonly<{ title?: string; body?: string; comments?: ReadonlyArray<{ author?: string; body: string }> }>;
 
 export type WorkerRunInput = Readonly<{
   workerId: string;

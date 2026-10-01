@@ -387,6 +387,80 @@ test('dispatch milestone rejection becomes a warning event instead of an unhandl
   assert.equal(warning?.data.message, 'dispatch milestone failed: milestone write failed');
 });
 
+test('worker.spawn with issue: injects issue title, body, and last 3 comments into brief', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async (_repo, number) => ({
+      title: 'Fix widget overflow',
+      body: 'Widget overflows container when screen is narrow.',
+      comments: [
+        { author: 'carol', body: 'Old comment that should be skipped' },
+        { author: 'alice', body: 'Confirmed on mobile' },
+        { author: 'bob', body: 'Reproduced in Chrome too' },
+        { author: 'dave', body: 'I will write tests' },
+      ],
+    }),
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 294, objective: 'Fix widget' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Issue #294: Fix widget overflow'));
+  assert.ok(capturedMessage.includes('Widget overflows container when screen is narrow.'));
+  assert.ok(!capturedMessage.includes('Old comment that should be skipped'));
+  assert.ok(capturedMessage.includes('alice: Confirmed on mobile'));
+  assert.ok(capturedMessage.includes('bob: Reproduced in Chrome too'));
+  assert.ok(capturedMessage.includes('dave: I will write tests'));
+});
+
+test('worker.spawn with issue: caps injected issue at 8000 chars', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const hugeBody = 'A'.repeat(10_000);
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async () => ({
+      title: 'Huge issue',
+      body: hugeBody,
+    }),
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-cap-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 295, objective: 'Investigate' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Issue #295: Huge issue'));
+  assert.ok(!capturedMessage.includes('A'.repeat(8001)));
+  assert.ok(capturedMessage.includes('A'.repeat(7900)));
+});
+
+test('worker.spawn with issue: gracefully handles github.issue error', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async () => { throw new Error('gh CLI error'); },
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-err-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 296, objective: 'Handle error' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Handle error'));
+});
+
 test('a settled worker turn removes node_modules from every top-level package', async () => {
   const runner = createFakeRunner(async (input) => {
     mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });

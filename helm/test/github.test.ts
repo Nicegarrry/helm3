@@ -141,3 +141,28 @@ test('listWorkerPrs requests open and recently merged gh JSON and excludes unrel
   const fields = ['--limit', '1000', '--json', 'headRefName,number,state,mergedAt,body,headRefOid'];
   assert.deepEqual(calls.map((call) => call.args), [[...common, 'open', ...fields], [...common, 'merged', ...fields, '--search', 'merged:>=2026-09-01']]);
 });
+
+test('issue: views issue title, body, and comments via gh', async () => {
+  const sample = {
+    title: 'Bug report',
+    body: 'Details of the bug',
+    comments: [
+      { author: { login: 'alice' }, body: 'First comment' },
+      { author: { login: 'bob' }, body: 'Second comment' },
+    ],
+  };
+  const { exec, calls } = fakeExec(() => ({ stdout: JSON.stringify(sample), stderr: '', code: 0 }));
+  const github = ghGitHub(exec);
+  const result = await github.issue!('o/r', 42);
+
+  assert.deepEqual(result, {
+    title: 'Bug report',
+    body: 'Details of the bug',
+    comments: [
+      { author: 'alice', body: 'First comment' },
+      { author: 'bob', body: 'Second comment' },
+    ],
+  });
+  assert.deepEqual(calls[0]?.args, ['issue', 'view', '42', '--repo', 'o/r', '--json', 'title,body,comments']);
+});
+

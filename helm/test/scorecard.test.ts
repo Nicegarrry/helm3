@@ -24,7 +24,7 @@ function seed() {
   const clean = worker('w-clean', 'codex/luna'); const rework = worker('w-rework', 'codex/luna'); const failed = worker('w-failed', 'codex/terra'); const respawn = { ...worker('w-respawn', 'codex/terra'), createdAt: '2026-09-30T00:20:00.000Z' }; const validator = { ...worker('w-validator', 'codex/terra', 'succeeded', 'validator'), createdAt: '2026-09-30T00:10:00.000Z' };
   for (const row of [clean, rework, failed, respawn, validator]) store.insertWorker(row);
   store.setMeta(clean.workerId, { issue: 101, tier: 2 }); store.setMeta(rework.workerId, { issue: 102, tier: 3 }); store.setMeta(failed.workerId, { issue: 103, tier: 4 }); store.setMeta(respawn.workerId, { issue: 103, tier: 4 }); store.setMeta(validator.workerId, { issue: 101, tier: 2 });
-  for (const id of [clean.workerId, rework.workerId, failed.workerId, respawn.workerId]) attachWorker(store, id, budget.id);
+  for (const id of [clean.workerId, rework.workerId, failed.workerId, respawn.workerId]) attachWorker(store, id, budget.id, base);
   event(store, clean.workerId, 'turn.start', '01'); event(store, clean.workerId, 'turn.end', '04'); event(store, clean.workerId, 'result', '05', { status: 'succeeded' }); event(store, clean.workerId, 'pr.merged', '06');
   event(store, rework.workerId, 'turn.start', '08'); event(store, rework.workerId, 'turn.end', '09'); event(store, rework.workerId, 'result', '10', { status: 'succeeded' }); event(store, rework.workerId, 'turn.start', '11'); event(store, rework.workerId, 'turn.end', '12');
   event(store, failed.workerId, 'result', '20', { status: 'succeeded' }); event(store, respawn.workerId, 'result', '21', { status: 'succeeded' });
@@ -110,6 +110,33 @@ test('rerun overwrites one memory page and budget.closed consumer exports', asyn
     assert.equal(files.ok ? files.memories.length : -1, 1); assert.equal((seeded.store.sql.prepare('SELECT COUNT(*) AS count FROM memory_outbox').get() as { count: number }).count, 3);
     assert.ok(files.ok); assert.match(readFileSync(join(seeded.dir, 'memory', files.memories[0]!.path), 'utf8'), /# Scorecard/);
   } finally { seeded.store.close(); rmSync(seeded.dir, { recursive: true, force: true }); }
+});
+
+test('scorecard attributes spend by time for a re-attached worker', async () => {
+  const seeded = seed();
+  try {
+    const second = openBudget(seeded.store, { project: 'acme/widgets', label: 'sprint-2', capUsd: 10, openedAt: '2026-10-01T00:00:00.000Z' });
+    attachWorker(seeded.store, 'w-clean', second.id, '2026-10-01T00:01:00.000Z');
+    seeded.store.addSpend({ workerId: 'w-clean', model: 'codex/luna', inputTokens: 50, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2, at: '2026-10-01T00:05:00.000Z' });
+    seeded.store.sql.prepare('UPDATE budgets SET closedAt = ? WHERE id = ?').run('2026-10-01T00:30:00.000Z', second.id);
+
+    const card1 = await seeded.scorecard.read({ project: 'acme/widgets', budgetId: seeded.budget.id });
+    assert.equal(card1.ok, true);
+    if (card1.ok) {
+      assert.equal(card1.json.codexTokens, 160);
+      assert.equal(card1.json.usd, 0);
+    }
+
+    const card2 = await seeded.scorecard.read({ project: 'acme/widgets', budgetId: second.id });
+    assert.equal(card2.ok, true);
+    if (card2.ok) {
+      assert.equal(card2.json.codexTokens, 100);
+      assert.equal(card2.json.usd, 2);
+    }
+  } finally {
+    seeded.store.close();
+    rmSync(seeded.dir, { recursive: true, force: true });
+  }
 });
 
 test('an adopted external merge with an inferred issue counts in scorecard and routing', async () => {

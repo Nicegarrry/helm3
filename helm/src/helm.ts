@@ -789,7 +789,7 @@ export class Helm {
       });
       if (choice?.model) this.store.setMeta(workerId, { tier: choice.tier ?? null, score: choice.score ?? null, policyApplied: choice.policyApplied ?? null, chosenModel: choice.model, skippedCandidates: choice.skippedCandidates ?? [] });
       this.store.setMeta(workerId, { skills: selection.skills });
-      attachWorker(this.store, workerId, admittedBudget.id);
+      attachWorker(this.store, workerId, admittedBudget.id, this.nowIso());
     } catch (err) {
       try { await this.workspace.remove(repo, worktree); } catch { /* best effort cleanup */ }
       throw err;
@@ -1497,9 +1497,24 @@ export class Helm {
   }
 
   private assertBudget(project: string, workerId?: string): BudgetStatus {
-    let budget = workerId ? budgetForWorker(this.store, workerId) : openBudgetFor(this.store, project);
-    if (!budget) budget = this.ensureProjectBudget(project);
-    if (workerId) attachWorker(this.store, workerId, budget.id);
+    let budget = workerId ? budgetForWorker(this.store, workerId) : undefined;
+    if (budget?.closedAt) {
+      const open = openBudgetFor(this.store, project);
+      must(open !== undefined, `budget closed; open a new budget for ${project}`);
+      const current = budgetStatus(this.store, open);
+      must(!current.exhausted, `budget exhausted (${open.label} $${current.spentUsd.toFixed(2)}/$${open.capUsd.toFixed(2)})`);
+      attachWorker(this.store, workerId!, open.id, this.nowIso());
+      this.store.appendEvent(workerId!, 'budget.reattached', {
+        project,
+        budgetId: open.id,
+        fromBudgetId: budget.id,
+      });
+      return current;
+    }
+    if (!budget) {
+      budget = this.ensureProjectBudget(project);
+      if (workerId) attachWorker(this.store, workerId, budget.id, this.nowIso());
+    }
     const current = budgetStatus(this.store, budget);
     must(!current.exhausted, `budget exhausted (${budget.label} $${current.spentUsd.toFixed(2)}/$${budget.capUsd.toFixed(2)})`);
     return current;

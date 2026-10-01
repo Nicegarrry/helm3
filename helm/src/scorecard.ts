@@ -1,5 +1,6 @@
 /** Mechanical sprint scorecards. Queries are deliberately read-only; memory owns persistence. */
 import { z } from 'zod';
+import { budgetSpend, workersForBudget } from './budget.js';
 import { consumer } from './daemon.js';
 import type { MemoryService } from './memory.js';
 import type { Store, ToolOutcome } from './types.js';
@@ -116,7 +117,7 @@ export function createScorecard(options: { store: Store; memory?: MemoryService;
     if (input.budgetId && !budget) return { ok: false, reason: `budget not found: ${input.budgetId}` };
     if (budget && String(budget.project) !== input.project) return { ok: false, reason: `budget ${input.budgetId} belongs to ${String(budget.project)}` };
     const from = budget ? String(budget.openedAt) : input.since; const to = budget ? (budget.closedAt ? String(budget.closedAt) : now().toISOString()) : readOnly ? now().toISOString() : undefined;
-    const budgetWorkers = input.budgetId ? (store.sql.prepare('SELECT workerId FROM worker_budget WHERE budgetId = ?').all(input.budgetId) as Row[]).map((row) => String(row.workerId)) : [];
+    const budgetWorkers = input.budgetId ? workersForBudget(store, input.budgetId) : [];
     // A daily activity window includes work started earlier that spent or merged today.
     const activity = between('w.createdAt', undefined, to);
     if (readOnly && from) { activity.sql += ` AND (w.createdAt >= ? OR w.workerId IN (SELECT workerId FROM events WHERE at >= ? AND at <= ? UNION SELECT workerId FROM spend WHERE at >= ? AND at <= ? UNION SELECT workerId FROM gates WHERE at >= ? AND at <= ?))`; activity.args.push(from, from, to!, from, to!, from, to!); }
@@ -142,7 +143,15 @@ export function createScorecard(options: { store: Store; memory?: MemoryService;
       const retryRows = hasTable(store, 'retries') ? store.sql.prepare(`SELECT r.kind,COUNT(*) AS count FROM retries r WHERE r.workerId IN (${inList})${between('r.at', from, to).sql} GROUP BY r.kind ORDER BY r.kind`).all(...args, ...between('r.at', from, to).args) as Row[] : [];
       json.retriesPerTicket = Object.fromEntries(retryRows.map((row) => [String(row.kind), Math.round((n(row.count) / Math.max(json.tickets, 1)) * 10000) / 10000]));
       const starts = new Map<string, number>(); let active = 0; for (const event of events) { if (event.kind === 'turn.start') starts.set(String(event.workerId), Date.parse(String(event.at))); if (event.kind === 'turn.end' && starts.has(String(event.workerId))) { active += Math.max(0, Date.parse(String(event.at)) - starts.get(String(event.workerId))!); starts.delete(String(event.workerId)); } } json.activeMinutes = round(active / 60_000);
-      const spend = store.sql.prepare(`SELECT COALESCE(SUM(CASE WHEN model LIKE 'codex/%' THEN inputTokens+outputTokens ELSE 0 END),0) AS tokens,COALESCE(SUM(CASE WHEN costUsd IS NULL THEN 0 ELSE costUsd END),0) AS usd FROM spend WHERE workerId IN (${inList})${between('at', from, to).sql}`).get(...args, ...between('at', from, to).args) as Row; json.codexTokens = n(spend.tokens); json.usd = n(spend.usd);
+      if (input.budgetId) {
+        const bSpend = budgetSpend(store, input.budgetId);
+        json.codexTokens = bSpend.spentCodexTokens;
+        json.usd = bSpend.spentUsd;
+      } else {
+        const spend = store.sql.prepare(`SELECT COALESCE(SUM(CASE WHEN model LIKE 'codex/%' THEN inputTokens+outputTokens ELSE 0 END),0) AS tokens,COALESCE(SUM(CASE WHEN costUsd IS NULL THEN 0 ELSE costUsd END),0) AS usd FROM spend WHERE workerId IN (${inList})${between('at', from, to).sql}`).get(...args, ...between('at', from, to).args) as Row;
+        json.codexTokens = n(spend.tokens);
+        json.usd = n(spend.usd);
+      }
       const jev = hasTable(store, 'jev_calls'); const jevCols = jev ? columns(store, 'jev_calls') : new Set<string>(); const jevCost = jevCols.has('costUsd') ? ',SUM(costUsd) AS cost' : jevCols.has('cost') ? ',SUM(cost) AS cost' : ',NULL AS cost'; const jevRows = jev ? store.sql.prepare(`SELECT COUNT(*) AS count${jevCost} FROM jev_calls j WHERE (j.workerId IN (${inList}) OR (j.project = ? AND j.workerId IS NULL))${between('j.at', from, to).sql}`).get(...args, input.project, ...between('j.at', from, to).args) as Row : {}; json.jevCalls = n(jevRows.count); json.jevCost = jevRows.cost === null || jevRows.cost === undefined ? null : n(jevRows.cost);
       const outcomeMap = new Map<string, { model: string; tier: number | 'unbanded'; clean: number; rework: number; failed: number }>(); const projectWorkers = (store.sql.prepare("SELECT w.workerId,w.createdAt,wm.issue FROM workers w JOIN worker_meta wm ON wm.workerId=w.workerId WHERE w.repoSlug=? AND w.role='builder'").all(input.project) as Row[]);
       for (const worker of builders) { const later = projectWorkers.some((row) => n(row.issue) === worker.issue && String(row.createdAt) > worker.createdAt); const workerEvents = events.filter((event) => String(event.workerId) === worker.workerId); const turns = workerEvents.filter((event) => event.kind === 'turn.start').length; const failedGate = firstGateRows.some((row) => String(row.workerId) === worker.workerId && !Boolean(row.passed)); const requestChanges = reviews.some((row) => String(row.workerId) === worker.workerId && (row.verdict === 'changes' || row.verdict === 'disputed')); const kind = classifyOutcome({ later, state: worker.state, failedGate, requestChanges, turns }); const key = `${worker.model}\u0000${worker.tier}`; const value = outcomeMap.get(key) ?? { model: worker.model, tier: worker.tier, clean: 0, rework: 0, failed: 0 }; value[kind]++; outcomeMap.set(key, value); }

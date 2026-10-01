@@ -40,6 +40,18 @@ export function ensureBudgetTables(store: Store): void {
       budgetId TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS worker_budget_budget ON worker_budget(budgetId);
+    CREATE TABLE IF NOT EXISTS worker_budget_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workerId TEXT NOT NULL,
+      budgetId TEXT NOT NULL,
+      attachedAt TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS worker_budget_history_budget ON worker_budget_history(budgetId);
+    CREATE INDEX IF NOT EXISTS worker_budget_history_worker ON worker_budget_history(workerId, attachedAt);
+    INSERT INTO worker_budget_history (workerId, budgetId, attachedAt)
+    SELECT wb.workerId, wb.budgetId, '1970-01-01T00:00:00.000Z'
+    FROM worker_budget wb
+    WHERE NOT EXISTS (SELECT 1 FROM worker_budget_history wbh WHERE wbh.workerId = wb.workerId);
   `);
 }
 
@@ -96,17 +108,36 @@ export function budgetForWorker(store: Store, workerId: string): BudgetRow | und
   return row ? toBudget(row) : undefined;
 }
 
-export function attachWorker(store: Store, workerId: string, budgetId: string): void {
+export function attachWorker(store: Store, workerId: string, budgetId: string, attachedAt: string = new Date().toISOString()): void {
   ensureBudgetTables(store);
+  const current = budgetForWorker(store, workerId);
   store.sql.prepare('INSERT INTO worker_budget (workerId, budgetId) VALUES (?, ?) ON CONFLICT(workerId) DO UPDATE SET budgetId = excluded.budgetId').run(workerId, budgetId);
+  const hasHistory = store.sql.prepare('SELECT 1 FROM worker_budget_history WHERE workerId = ? LIMIT 1').get(workerId);
+  if (!hasHistory || current?.id !== budgetId) {
+    store.sql.prepare('INSERT INTO worker_budget_history (workerId, budgetId, attachedAt) VALUES (?, ?, ?)').run(workerId, budgetId, attachedAt);
+  }
 }
 
-function budgetSpend(store: Store, budget: BudgetRow): { spentUsd: number; spentCodexTokens: number } {
+export function budgetSpend(store: Store, budgetId: string): { spentUsd: number; spentCodexTokens: number } {
+  ensureBudgetTables(store);
   const row = store.sql.prepare(`
+    WITH intervals AS (
+      SELECT
+        workerId,
+        budgetId,
+        attachedAt,
+        LEAD(attachedAt) OVER (PARTITION BY workerId ORDER BY attachedAt ASC, id ASC) AS nextAttachedAt,
+        ROW_NUMBER() OVER (PARTITION BY workerId ORDER BY attachedAt ASC, id ASC) AS rn
+      FROM worker_budget_history
+    )
     SELECT COALESCE(SUM(CASE WHEN s.costUsd IS NULL THEN 0 ELSE s.costUsd END), 0) AS spentUsd,
            COALESCE(SUM(CASE WHEN s.model LIKE 'codex/%' THEN s.inputTokens + s.outputTokens ELSE 0 END), 0) AS spentCodexTokens
-    FROM spend s JOIN worker_budget wb ON wb.workerId = s.workerId WHERE wb.budgetId = ?
-  `).get(budget.id) as { spentUsd: number; spentCodexTokens: number };
+    FROM spend s
+    JOIN intervals i ON i.workerId = s.workerId
+      AND i.budgetId = ?
+      AND (i.rn = 1 OR s.at >= i.attachedAt)
+      AND (i.nextAttachedAt IS NULL OR s.at < i.nextAttachedAt)
+  `).get(budgetId) as { spentUsd: number; spentCodexTokens: number };
   return { spentUsd: Number(row.spentUsd), spentCodexTokens: Number(row.spentCodexTokens) };
 }
 
@@ -114,8 +145,19 @@ function budgetWorkers(store: Store, budgetId: string): string[] {
   return (store.sql.prepare('SELECT workerId FROM worker_budget WHERE budgetId = ? ORDER BY workerId').all(budgetId) as Array<{ workerId: string }>).map((row) => row.workerId);
 }
 
+export function workersForBudget(store: Store, budgetId: string): string[] {
+  ensureBudgetTables(store);
+  return (store.sql.prepare(`
+    SELECT DISTINCT workerId FROM (
+      SELECT workerId FROM worker_budget WHERE budgetId = ?
+      UNION
+      SELECT workerId FROM worker_budget_history WHERE budgetId = ?
+    ) ORDER BY workerId
+  `).all(budgetId, budgetId) as Array<{ workerId: string }>).map((row) => row.workerId);
+}
+
 export function budgetStatus(store: Store, budget: BudgetRow): BudgetStatus {
-  const spend = budgetSpend(store, budget);
+  const spend = budgetSpend(store, budget.id);
   const workers = budgetWorkers(store, budget.id);
   const remainingUsd = Math.max(0, budget.capUsd - spend.spentUsd);
   const remainingCodexTokens = budget.capCodexTokens === null ? null : Math.max(0, budget.capCodexTokens - spend.spentCodexTokens);

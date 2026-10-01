@@ -87,6 +87,11 @@ export function reviewerPrompt(input: PromptInput): string {
     '',
     "Report your findings in the WorkerResult's summary, and end the summary with a verdict line that",
     'starts with exactly "APPROVE: " or "REQUEST_CHANGES: " followed by a one-line reason.',
+    '',
+    'In a single pass, list every blocking finding you can find, numbered. Separate blocking findings',
+    'from non-blocking ones; non-blocking nits never gate a round.',
+    'On a re-review, check only that the previous findings were fixed and look for regressions in the',
+    'new diff; do not invent new nits outside it.',
   ].join('\n');
 }
 export function validatorPrompt(input: PromptInput): string {

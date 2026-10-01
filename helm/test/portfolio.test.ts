@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { attachWorker, openBudget } from '../src/budget.js';
+import { attachWorker, closeBudget, openBudget } from '../src/budget.js';
 import { ensureTapTable } from '../src/envelope.js';
 import { insertInbox } from '../src/inbox.js';
 import { createReportTicker, formatPortfolio, portfolio, reportContent, startNotificationTickers } from '../src/portfolio.js';
@@ -51,7 +51,7 @@ test('seeded portfolio reuses scorecard activity, includes old workers, budget a
     const content = formatPortfolio(report);
     const lines = content.split('\n');
     assert.match(lines[0]!, /^\*\*Helm · [A-Za-z]{3} \d{1,2} [A-Za-z]{3}\*\*$/);
-    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 ask', '$5.00 of $10.00 budget · Codex 120 tokens', '',
+    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 ask', '$2.00 spent · $10.00 budgeted · Codex 120 tokens', '',
       '**one**: 1 merged, 2 PRs open (1 needs review), 50% gates pass first time, $2.00', '**two**: 1 stuck, 1 ask', 'Idle: empty']);
     assert.doesNotMatch(content, /\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}/, 'no ISO timestamps in the report');
     assert.doesNotMatch(content, /acme\//, 'repo names drop the owner prefix');
@@ -67,10 +67,10 @@ test('one compact line per active project; idle collapse after a blank line; a z
   try {
     const zero = formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n');
     assert.equal(zero[1], 'Nothing needs you');
-    assert.deepEqual(zero.slice(2), ['$0.00 · Codex 0 tokens', '', 'Idle: idle-a, idle-b']);
+    assert.deepEqual(zero.slice(2), ['$0.00 spent · Codex 0 tokens', '', 'Idle: idle-a, idle-b']);
     f.store.insertWorker(worker('paid', 'acme/active'));
     f.store.addSpend({ workerId: 'paid', model: 'pi/paid', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1, at: recent });
-    assert.deepEqual(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n').slice(1), ['0 merged', '$1.00 · Codex 0 tokens', '', '**active**: $1.00', 'Idle: idle-a, idle-b']);
+    assert.deepEqual(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n').slice(1), ['0 merged', '$1.00 spent · Codex 0 tokens', '', '**active**: $1.00', 'Idle: idle-a, idle-b']);
     f.store.insertPr({ repoSlug: 'acme/idle-a', workerId: 'paid', number: 201, head: 'b', state: 'open', url: 'https://pr/201', createdAt: old });
     const second = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
     assert.ok(second.includes('**idle-a**: 1 PR open (1 needs review)'), 'open PRs alone make a project active');
@@ -98,6 +98,22 @@ test('asks pluralise: 1 ask vs 2 asks on the project line and in the headline', 
     assert.ok(content.includes('0 merged · 2 asks'), 'plural headline asks');
     assert.ok(content.includes('**x**: 2 asks'));
     assert.doesNotMatch(content, /1 asks/);
+  } finally { f.close(); }
+});
+
+test('spend line totals window spend across all projects and shows the budget cap only while a budget is open', async () => {
+  const f = fixture();
+  try {
+    openBudget(f.store, { project: 'acme/a', label: 'l', capUsd: 50, capCodexTokens: null, openedAt: old });
+    f.store.insertWorker(worker('wa', 'acme/a')); f.store.insertWorker(worker('wb', 'acme/b'));
+    f.store.addSpend({ workerId: 'wa', model: 'pi/paid', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.43, at: recent });
+    f.store.addSpend({ workerId: 'wb', model: 'pi/paid', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2, at: recent });
+    const lines = formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n');
+    assert.equal(lines[2], '$2.43 spent · $50.00 budgeted · Codex 0 tokens', 'unbudgeted project spend is included in the total');
+    assert.ok(lines.includes('**a**: $0.43') && lines.includes('**b**: $2.00'), 'per-project spend stays separate');
+    closeBudget(f.store, 'acme/a', recent);
+    const closed = formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n');
+    assert.equal(closed[2], '$2.43 spent · Codex 0 tokens', 'no budgeted segment when no budget is open');
   } finally { f.close(); }
 });
 

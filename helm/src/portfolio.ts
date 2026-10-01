@@ -56,8 +56,8 @@ export function formatPortfolio(report: Awaited<ReturnType<typeof portfolio>>): 
     const headline = [`${t.merged} merged`, t.openPrs ? (review ? `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open (${review} ${word(review, 'needs', 'need')} review)` : `${t.openPrs} ${word(t.openPrs, 'PR', 'PRs')} open`) : null, t.stuck ? `${t.stuck} stuck` : null, t.inbox ? `${t.inbox} ${word(t.inbox, 'ask', 'asks')}` : null].filter(Boolean);
     lines.push(headline.join(' · '));
   }
-  const budgeted = report.projects.filter((r) => r.budget);
-  const spend = budgeted.length ? `${money(budgeted.reduce((a, r) => a + r.budget!.usd, 0))} of ${money(budgeted.reduce((a, r) => a + r.budget!.capUsd, 0))} budget` : money(t.usd);
+  const caps = report.projects.filter((r) => r.budget);
+  const spend = `${money(t.usd)} spent${caps.length ? ` · ${money(caps.reduce((a, r) => a + r.budget!.capUsd, 0))} budgeted` : ''}`;
   lines.push(`${spend} · Codex ${humanTokens(t.codexTokens)} tokens`);
   const idle: string[] = [];
   const blocks = report.projects.filter(active).map((r) => {

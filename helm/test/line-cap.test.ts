@@ -88,6 +88,23 @@ test('loadAgents retries git show after git fetch if show initially fails', asyn
   assert.deepEqual(steps, ['show', 'fetch', 'show']);
 });
 
+test('loadAgents fetch never passes --depth so it never makes repos shallow', async () => {
+  const calls: Array<{ file: string; args: string[] }> = [];
+  const fakeExec = async (file: string, args: readonly string[]) => {
+    calls.push({ file, args: [...args] });
+    if (args[0] === 'show' && calls.length === 1) {
+      throw new Error('fatal: invalid object name');
+    }
+    return { stdout: 'Keep `helm/src` under 15.0k lines.\n' };
+  };
+
+  await loadAgents({ exec: fakeExec, base: 'main' });
+  const fetchCall = calls.find((c) => c.args[0] === 'fetch');
+  assert.ok(fetchCall, 'must perform fetch');
+  assert.equal(fetchCall.args.includes('--depth=1'), false);
+  assert.equal(fetchCall.args.some((arg) => arg.startsWith('--depth')), false);
+});
+
 test('loadAgents falls back to local file when git show and fetch fail', async () => {
   const root = mkdtempSync(join(tmpdir(), 'helm load-agents-fallback-'));
   const localPath = join(root, 'AGENTS.md');

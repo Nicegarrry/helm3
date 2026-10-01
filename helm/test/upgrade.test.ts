@@ -205,6 +205,20 @@ test('staging pins an archive, isolates validation, and preserves prior selectio
   assert.throws(() => stageRelease(home, repo, 'HEAD', () => { throw new Error('gate failed'); }), /gate failed/);
   assert.deepEqual(read(join(home, 'staged-release.json')), staged);
   assert.equal(existsSync(join(home, 'upgrade.lock')), false);
+  assert.equal(git('rev-parse', '--is-shallow-repository'), 'false');
+});
+
+test('staging leaves the source repository non-shallow', (t) => {
+  const home = testHome(t);
+  const repo = join(home, 'repo');
+  mkdirSync(join(repo, 'helm', 'src'), { recursive: true });
+  write(join(repo, 'helm', 'package.json'), { version: '1.5.1-test' });
+  writeFileSync(join(repo, 'helm', 'src', 'lifecycle.ts'), '// supported');
+  const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q'); git('add', 'helm'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'fixture');
+  assert.equal(git('rev-parse', '--is-shallow-repository'), 'false');
+  stageRelease(home, repo, 'HEAD', () => {});
+  assert.equal(git('rev-parse', '--is-shallow-repository'), 'false');
 });
 
 test('a second real daemon is refused without interrupting the first owner', async (t) => {

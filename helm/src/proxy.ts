@@ -161,6 +161,21 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       try { await publish(force); }
       catch (error) { logProgressError(error); }
     };
+    const publishTerminal = async (outcome: { settled?: Array<{ workerId?: string; state?: string }> }) => {
+      if (extra.signal.aborted) return;
+      for (const settled of outcome.settled ?? []) {
+        if (!settled.workerId || !settled.state) continue;
+        await extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            progressToken,
+            progress: ++progressValue,
+            message: `worker=${settled.workerId}; state=${settled.state}; position=-; etaMs=0; activity=worker wait completed`,
+            _meta: { helm: { state: settled.state, position: null, etaMs: 0, activity: 'worker wait completed' } },
+          },
+        });
+      }
+    };
     let publishing = false;
     const pollProgress = () => {
       if (publishing || extra.signal.aborted) return;
@@ -176,6 +191,8 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
     extra.signal.addEventListener('abort', stopProgress, { once: true });
     try {
       const outcome = await wait;
+      stopProgress();
+      await publishTerminal(outcome).catch(logProgressError);
       return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
     } finally {
       stopProgress();

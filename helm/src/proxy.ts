@@ -12,6 +12,16 @@ export const SHIM_RESTART_NOTE = 'Restart this MCP session: its Helm shim is bel
 const WAIT_PROGRESS_MS = 30_000;
 const WAIT_PROGRESS_POLL_MS = 10_000;
 
+function configuredProgressPollMs() {
+  const configured = Number(process.env.HELM_PROGRESS_POLL_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : WAIT_PROGRESS_POLL_MS;
+}
+
+function logProgressError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`helm stdio progress publish failed: ${message}\n`);
+}
+
 type ProgressWorker = Readonly<{
   workerId: string;
   state: string;
@@ -82,7 +92,7 @@ export async function proxyRequest(port: number, path: string, input: unknown, p
   }
 }
 
-export async function serveStdioProxy(port: number, profile = process.env.HELM_TOOLS ?? 'core', home?: string, transport: Transport = new StdioServerTransport(), pollMs = 60_000, progressPollMs = WAIT_PROGRESS_POLL_MS) {
+export async function serveStdioProxy(port: number, profile = process.env.HELM_TOOLS ?? 'core', home?: string, transport: Transport = new StdioServerTransport(), pollMs = 60_000, progressPollMs = configuredProgressPollMs()) {
   const server = new Server({ name: 'helm', version: String(SHIM_VERSION) }, { capabilities: { tools: { listChanged: true } } });
   let hash: string | undefined;
   let connected = false;
@@ -137,20 +147,24 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       }
     };
     const wait = proxyRequest(port, `/tools/${encodeURIComponent(params.name)}`, input, profile, home, observe);
-    await publish(true).catch(() => undefined);
+    const publishSafely = async (force = false) => {
+      try { await publish(force); }
+      catch (error) { logProgressError(error); }
+    };
+    await publishSafely(true);
     let publishing = false;
     let publishingNow: Promise<void> | undefined;
     const progress = setInterval(() => {
       if (publishing) return;
       publishing = true;
-      publishingNow = publish().catch(() => undefined).finally(() => { publishing = false; });
+      publishingNow = publishSafely().finally(() => { publishing = false; });
     }, progressPollMs);
     progress.unref();
     try {
       const outcome = await wait;
       clearInterval(progress);
       await publishingNow;
-      await publish().catch(() => undefined);
+      await publishSafely(true);
       return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
     } finally {
       clearInterval(progress);

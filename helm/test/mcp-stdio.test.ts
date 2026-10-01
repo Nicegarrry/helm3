@@ -11,12 +11,12 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { serve } from '../src/server.ts';
 import { CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.ts';
 
-function stdioFrontEnd(home: string, tools = 'core') {
+function stdioFrontEnd(home: string, tools = 'core', progressPollMs?: number) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['--import', 'tsx', 'src/cli.ts', 'serve', '--stdio'],
     cwd: process.cwd(),
-    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools } as Record<string, string>,
+    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools, ...(progressPollMs ? { HELM_PROGRESS_POLL_MS: String(progressPollMs) } : {}) } as Record<string, string>,
     stderr: 'pipe',
   });
   return { transport, client: new Client({ name: 'helm-test', version: '0' }) };
@@ -77,11 +77,12 @@ function waitingDaemon(home: string) {
 async function progressProxy(home: string) {
   const daemon = waitingDaemon(home);
   const daemonHandle = await serve({ helm: daemon.helm as never });
-  const { transport, client } = stdioFrontEnd(home, 'all');
+  const { transport, client } = stdioFrontEnd(home, 'all', 25);
   await client.connect(transport);
   return {
     daemon,
     client,
+    transport,
     async close() {
       await client.close();
       if (transport.pid) await until(() => !alive(transport.pid!), 5_000);
@@ -101,6 +102,7 @@ test('mcp stdio: worker.wait forwards token-scoped queued, running, and done pro
       { onprogress: (update) => updates.push(update as unknown as (typeof updates)[number]) },
     );
     assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'queued'), 3_000), true);
+    assert.ok(harness.transport.pid && alive(harness.transport.pid), 'the proxy remains alive after progress notification');
     assert.equal(harness.daemon.waitStarted(), true);
     const queued = updates.find((update) => update._meta?.helm?.state === 'queued')!._meta!.helm!;
     assert.equal(queued.position, 1);
@@ -112,6 +114,7 @@ test('mcp stdio: worker.wait forwards token-scoped queued, running, and done pro
 
     harness.daemon.finish();
     await waiting;
+    assert.ok(harness.transport.pid && alive(harness.transport.pid), 'the final progress publish keeps the proxy alive');
     assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'succeeded'), 3_000), true);
     assert.ok(updates.every((update, index) => index === 0 || update.progress! > updates[index - 1]!.progress!));
   } finally {

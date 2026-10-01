@@ -1,6 +1,7 @@
 /** Local onboarding. Diagnostics never create state or start a daemon. */
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs, promisify } from 'node:util';
 import { findEnvKeys, getProviders } from '@earendil-works/pi-ai/compat';
@@ -14,11 +15,28 @@ import { appliedPolicy } from './routing/policy.js';
 import { candidateUnavailableReason } from './routing/select.js';
 import { repoConfigSchema } from './repoconfig.js';
 type Check = { name: string; status: 'ok' | 'warn' | 'fail'; detail: string; next: string };
+type DaemonProcess = { pid: string; port: string; home: string };
 const exec = promisify(execFile);
 const apiKeysPresent = () => Boolean(process.env.GOOGLE_API_KEY?.trim()) || getProviders().some((provider) =>
   findEnvKeys(provider)?.some((key) => (key.endsWith('_API_KEY') || key === 'HF_TOKEN') && Boolean(process.env[key]?.trim())));
 export class OnboardingError extends Error {}
 const jsonFile = (path: string) => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { throw new Error('invalid JSON file'); } };
+
+/** Extract only the daemon identity from `ps eww`; never surface a full command or environment. */
+export function helmHttpDaemons(output: string, defaultHome: string): DaemonProcess[] {
+  return output.split('\n').flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    if (!match) return [];
+    const pid = match[1], command = match[2];
+    if (!pid || !command) return [];
+    if (!/(?:^|\s)(?:(?:\S+\/)?helm(?:\.js)?|(?:\S+\/)?helm\/src\/cli\.ts)(?=\s|$)/.test(command) || !/(?:^|\s)serve(?=\s|$)/.test(command) || !/(?:^|\s)--http(?=\s|$)/.test(command)) return [];
+    const requestedPort = command.match(/(?:^|\s)--port(?:=|\s+)(\d+)(?=\s|$)/)?.[1];
+    const port = requestedPort && Number(requestedPort) > 0 && Number(requestedPort) <= 65535 ? requestedPort : '4747';
+    const home = command.match(/(?:^|\s)HELM_HOME=(?:"([^"]*)"|'([^']*)'|(\S+))/)?.slice(1).find((value) => value !== undefined) || defaultHome;
+    return [{ pid, port, home }];
+  });
+}
+
 export async function doctor(repo = process.cwd()) {
   const home = loadConfig().home, checks: Check[] = [];
   const add = (name: string, status: Check['status'], detail: string, next: string) => checks.push({ name, status, detail, next });
@@ -75,6 +93,8 @@ export async function doctor(repo = process.cwd()) {
     add('daemon-pid', alive ? 'ok' : stale ? 'warn' : 'fail', 'serve.json present; pid checked', stale ? 'start the daemon: helm serve' : 'helm doctor');
     if (!stale) add('daemon-status', authenticated ? 'ok' : 'fail', 'authenticated status checked', 'helm doctor');
   }
+  const daemons = helmHttpDaemons(await probe('ps', ['eww', '-ax', '-o', 'pid=', '-o', 'command=']) ?? '', join(homedir(), '.helm'));
+  if (daemons.length > 1) add('daemon-processes', 'warn', `${daemons.length} Helm daemons: ${daemons.map((daemon) => `pid ${daemon.pid} port ${daemon.port} HELM_HOME=${daemon.home}`).join('; ')}`, 'stop an unneeded daemon with helm shutdown');
   const ok = !checks.some((c) => c.status === 'fail');
   return { ok, checks, lanes, tiers, nextCommand: (checks.find((c) => c.status === 'fail') ?? checks.find((c) => c.status === 'warn' && ['config', 'daemon', 'daemon-pid'].includes(c.name)))?.next ?? `helm spawn --repo '${resolve(repo).replaceAll("'", "'\\''")}' --objective "Describe your task"` };
 }

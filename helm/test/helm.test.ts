@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { Helm, modelFamily, type HelmPrompts, type SpawnInput } from '../src/helm.js';
+import { budgetForWorker } from '../src/budget.js';
 import { createModelCatalog } from '../src/routing/catalog.js';
 import { openStore } from '../src/store.js';
+import { createSupervisor } from '../src/supervise.js';
 import { createToolRegistry } from '../src/tools.js';
 import { loadSettings, type Settings } from '../src/settings.js';
 import type { Jev } from '../src/jev.js';
@@ -245,6 +247,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false },
     probe: { codex: () => true, pi: () => true, claude: () => false },
   });
+  const supervisor = createSupervisor({ store, settings, hosts: { herdr: {} as never, tmux: {} as never } });
   const helm = new Helm({
     config,
     store,
@@ -255,6 +258,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     prompts: FAKE_PROMPTS,
     routingCatalog,
     settings,
+    supervisor,
     workerInstall: overrides.workerInstall,
     jev: overrides.jev,
     statfs: overrides.statfs,
@@ -728,6 +732,38 @@ test('spawn queues once active workers reach maxWorkers', async () => {
   const second = await helm.spawn(spawnBody(repo));
   assert.equal(second.ok, true);
   if (second.ok) assert.equal(second.queued, true);
+});
+
+test('one daemon Helm instance admits two repos through one queue while retaining their budgets and supervisors', async () => {
+  const control = createControllableRunner();
+  const { helm, store } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const alphaRepo = mkTempDir('helm-alpha-'), betaRepo = mkTempDir('helm-beta-');
+  const alphaProject = basename(alphaRepo), betaProject = basename(betaRepo);
+  const [alphaSupervisor, betaSupervisor] = await Promise.all([
+    helm.supervisorRegister({ project: alphaProject, repo: alphaRepo, host: 'herdr', label: 'alpha' }),
+    helm.supervisorRegister({ project: betaProject, repo: betaRepo, host: 'tmux', label: 'beta' }),
+  ]);
+  assert.ok(alphaSupervisor.ok && betaSupervisor.ok);
+
+  const alpha = await helm.spawn(spawnBody(alphaRepo));
+  const beta = await helm.spawn(spawnBody(betaRepo));
+  assert.ok(alpha.ok && beta.ok);
+  if (!alpha.ok || !beta.ok) return;
+  assert.equal(beta.queued, true);
+  assert.equal(budgetForWorker(store, alpha.workerId)?.project, alphaProject);
+  assert.equal(budgetForWorker(store, beta.workerId)?.project, betaProject);
+  assert.notEqual(budgetForWorker(store, alpha.workerId)?.id, budgetForWorker(store, beta.workerId)?.id);
+  const registered = await helm.supervisorList();
+  assert.ok(registered.ok);
+  if (!registered.ok) return;
+  assert.deepEqual(registered.supervisors.map((row) => row.project), [alphaProject, betaProject].sort());
+  assert.deepEqual((await helm.capacity.status()).queue.map((job) => job.workerId), [beta.workerId]);
+
+  const succeeded: WorkerRunOutcome = { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  control.resolveNext(succeeded); await helm.settle(alpha.workerId);
+  await helm.capacity.tick();
+  assert.equal(store.getWorker(beta.workerId)?.state, 'running');
+  control.resolveNext(succeeded); await helm.settle(beta.workerId);
 });
 
 test('spawn refuses when free disk is below half the hygiene threshold', async () => {

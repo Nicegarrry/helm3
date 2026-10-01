@@ -12,6 +12,11 @@ the full harness catalog on every session.
 
 ## Five-minute start
 
+The default is one shared daemon per machine: every repo uses `HELM_HOME=~/.helm` and the
+daemon on port `4747`. That pools the spend cap, capacity view, priority queue and routing data,
+while projects retain separate budgets and supervisors in the shared store. Set `HELM_HOME` only
+when you deliberately need an isolated store and daemon.
+
 Run `helm init` in a target repo (or `helm init --repo /path/to/repo`) to generate
 package-script gates and print the `.mcp.json` snippet. Existing repo configuration
 requires `--force`; existing operator configuration is preserved. A new operator
@@ -40,8 +45,7 @@ falls back across tiers; routing fails only when no tier has an available allowe
 2. Give the tools to an orchestrator. For Claude Code, add to the project's `.mcp.json`:
 
    ```json
-   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio", "--port", "4747", "--tools", "core"],
-                             "env": { "HELM_SPEND_CAP_USD": "5" } } } }
+   { "mcpServers": { "helm": { "command": "/path/to/helm/bin/helm.js", "args": ["serve", "--stdio", "--port", "4747", "--tools", "core"] } } }
    ```
 
    That is all the setup there is. `serve --stdio` is a front-end for one session: it attaches
@@ -49,8 +53,8 @@ falls back across tiers; routing fails only when no tier has an available allowe
    when its client does. The daemon (`helm serve --http`) owns the store and the workers,
    keeps running between sessions, and is shared by every project that points at the same
    `$HELM_HOME` (default `~/.helm`) — so two Claude Code sessions in two repos see one store,
-   one cap. Its environment is whichever session started it; to give a project its own daemon
-   and cap, give it its own `HELM_HOME` in `env`.
+   one cap. Use a different `HELM_HOME` only for deliberate isolation, because it creates a
+   separate daemon, capacity queue and spend state.
 
    For Codex or anything that speaks Streamable HTTP, point it at `http://127.0.0.1:<port>/mcp`
    with `Authorization: Bearer <token>` on every request. The daemon generates a new

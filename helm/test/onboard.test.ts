@@ -129,6 +129,28 @@ test('doctor checks live pid and authenticated status without leaking tokens or 
   assert.equal(JSON.parse(result.stdout).checks.find((c: { name: string }) => c.name === 'daemon-pid').status, 'warn');
   assert.ok((await readdir(f.home)).includes('serve.json'));
 });
+test('doctor warns when ps finds multiple HTTP daemons with their ports and homes', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.home, 'helm.json'), JSON.stringify(f.config));
+  await f.script('ps', "printf '%s\\n' ' 101 node --import tsx /opt/helm/src/cli.ts serve --http --port 4747 HELM_HOME=/tmp/helm-shared PATH=/bin' ' 202 node /opt/helm/bin/helm.js serve --http --port=4748 HELM_HOME=/tmp/helm-isolated PATH=/bin' ' 303 node /opt/helm/bin/helm.js serve --stdio --port 4749 HELM_HOME=/tmp/ignore' ' 404 node /opt/other/src/cli.ts serve --http --port 4749 HELM_HOME=/tmp/ignore'");
+  const result = await f.cli('doctor', '--json');
+  assert.equal(result.code, 0, result.stderr);
+  const check = JSON.parse(result.stdout).checks.find((entry: { name: string }) => entry.name === 'daemon-processes');
+  assert.equal(check.status, 'warn');
+  assert.match(check.detail, /port 4747.*HELM_HOME=\/tmp\/helm-shared/);
+  assert.match(check.detail, /port 4748.*HELM_HOME=\/tmp\/helm-isolated/);
+  assert.doesNotMatch(check.detail, /4749/);
+});
+test('doctor reports the shared home and port defaults for HTTP daemons without overrides', async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.home, 'helm.json'), JSON.stringify(f.config));
+  await f.script('ps', "printf '%s\\n' ' 101 node /opt/helm/bin/helm.js serve --http' ' 202 node /opt/helm/bin/helm.js serve --http --port 4748 HELM_HOME=/tmp/helm-isolated'");
+  const result = await f.cli('doctor', '--json');
+  assert.equal(result.code, 0, result.stderr);
+  const check = JSON.parse(result.stdout).checks.find((entry: { name: string }) => entry.name === 'daemon-processes');
+  assert.match(check.detail, /port 4747 HELM_HOME=.*\.helm/);
+  assert.match(check.detail, /port 4748 HELM_HOME=\/tmp\/helm-isolated/);
+});
 test('doctor preserves stale or malformed metadata and rejects non-writable home', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.home, 'helm.json'), JSON.stringify(f.config));
@@ -210,6 +232,11 @@ test('init guesses real package scripts, prints MCP, runs doctor and protects bo
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /\.mcp.json snippet:/);
   assert.match(result.stdout, /"serve",\s*"--stdio"/);
+  const snippet = result.stdout.match(/\.mcp\.json snippet:\n([\s\S]*?)\nok node:/)?.[1];
+  assert.ok(snippet, result.stdout);
+  const mcp = JSON.parse(snippet);
+  assert.deepEqual(mcp, { mcpServers: { helm: { command: 'helm', args: ['serve', '--stdio'] } } });
+  assert.equal(Object.hasOwn(mcp.mcpServers.helm, 'env'), false);
   assert.match(result.stdout, /ok node:/);
   const repoConfig = JSON.parse(await readFile(join(f.repo, 'helm.json'), 'utf8'));
   assert.deepEqual(repoConfig.gates, [{ name: 'install', command: 'npm install' }, ...['test', 'typecheck', 'lint'].map((name) => ({ name, command: `npm run ${name}` }))]);

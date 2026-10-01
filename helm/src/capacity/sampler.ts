@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { statfs as fsStatfs } from 'node:fs/promises';
 import { cpus, freemem, loadavg, totalmem } from 'node:os';
 import type { Store } from '../types.js';
@@ -28,25 +28,41 @@ export type CapacitySnapshot = Readonly<{
 
 const GB = 1024 ** 3;
 
-export const defaultExec: CapacityExec = (file, args, options) => new Promise((resolve) => {
-  const child = spawn(file, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '', transient = false;
-  const killGroup = () => {
-    if (!child.pid) return;
-    try { process.kill(-child.pid, 'SIGKILL'); }
-    catch { child.kill('SIGKILL'); }
-  };
-  const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
-    if (target === 'stdout') stdout += chunk.toString(); else stderr += chunk.toString();
-    if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 2 * 1024 * 1024) { transient = true; killGroup(); }
-  };
-  child.stdout.on('data', (chunk: Buffer) => { append('stdout', chunk); });
-  child.stderr.on('data', (chunk: Buffer) => { append('stderr', chunk); });
-  child.on('error', (error) => { transient = true; stderr ||= error.message; });
-  child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, ...(code === null ? {} : { code }), ...(transient || code === null ? { transient: true } : {}) }); });
-  const timer = setTimeout(() => { transient = true; killGroup(); }, options.timeoutMs);
-  timer.unref?.();
-});
+type CapacitySpawn = (file: string, args: string[], options: { detached: boolean; stdio: ['ignore', 'pipe', 'pipe'] }) => ChildProcess;
+
+export function defaultExec(file: string, args: string[], options: { timeoutMs: number }, spawnProcess: CapacitySpawn = spawn): Promise<CapacityExecResult> {
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try { child = spawnProcess(file, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch { resolve({ stdout: '', transient: true }); return; }
+    let stdout = '', stderr = '', transient = false;
+    let timer: NodeJS.Timeout | undefined;
+    let settled = false;
+    const finish = (result: CapacityExecResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    const killGroup = () => {
+      if (!child.pid) return;
+      try { process.kill(-child.pid, 'SIGKILL'); }
+      catch { child.kill('SIGKILL'); }
+    };
+    const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
+      if (target === 'stdout') stdout += chunk.toString(); else stderr += chunk.toString();
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 2 * 1024 * 1024) { transient = true; killGroup(); }
+    };
+    child.once('error', () => { finish({ stdout: '', transient: true }); });
+    child.stdout?.on('data', (chunk: Buffer) => { append('stdout', chunk); });
+    child.stderr?.on('data', (chunk: Buffer) => { append('stderr', chunk); });
+    child.once('close', (code) => { finish({ stdout, stderr, ...(code === null ? {} : { code }), ...(transient || code === null ? { transient: true } : {}) }); });
+    if (!settled) {
+      timer = setTimeout(() => { transient = true; killGroup(); }, options.timeoutMs);
+      timer.unref?.();
+    }
+  });
+}
 
 export function availableRamGbFromVmStat(output: string): number | null {
   const pageSize = Number(output.match(/page size of (\d+) bytes/i)?.[1] ?? 4096);
@@ -92,17 +108,17 @@ export function countBootedSimulators(output: string): number {
 }
 
 export function createSimulatorProbe(exec: CapacityExec, now: () => number = Date.now): () => Promise<CapacityExecResult> {
-  let firstLaunchReady: boolean | undefined;
+  let firstLaunchReady = false;
   let retryFirstLaunchAt = 0;
   let inFlight: Promise<CapacityExecResult> | undefined;
   const safeExec = (file: string, args: string[], timeoutMs: number): Promise<CapacityExecResult> => exec(file, args, { timeoutMs }).catch(() => ({ stdout: '', transient: true }));
   return () => {
     if (inFlight) return inFlight;
     inFlight = (async () => {
-      if (firstLaunchReady === undefined && now() >= retryFirstLaunchAt) {
+      if (!firstLaunchReady && now() >= retryFirstLaunchAt) {
         const firstLaunch = await safeExec('xcodebuild', ['-checkFirstLaunchStatus'], 1_000);
-        if (firstLaunch.transient || typeof firstLaunch.code !== 'number') retryFirstLaunchAt = now() + 10 * 60_000;
-        else firstLaunchReady = firstLaunch.code === 0;
+        if (!firstLaunch.transient && firstLaunch.code === 0) firstLaunchReady = true;
+        else retryFirstLaunchAt = now() + 10 * 60_000;
       }
       if (!firstLaunchReady) return { stdout: '', code: 1 };
       return safeExec('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], 300);

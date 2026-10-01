@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -233,29 +235,42 @@ test('a timed capacity probe kills its grandchild process group', { timeout: 5_0
   assert.equal(result.transient, true);
   await assert.rejects(async () => {
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      try { process.kill(pid, 0); } catch (error) { throw error; }
+      process.kill(pid, 0);
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
   }, (error: NodeJS.ErrnoException) => error.code === 'ESRCH');
 });
 
-test('the sampler caches a failed first-launch check and skips simctl', async () => {
-  const store = openStore(':memory:');
-  const calls: string[] = [];
-  try {
-    const sampler = createCapacitySampler({
-      home: '/helm-home', store, sampleSec: 0, statfs: async () => { throw new Error('unavailable'); },
-      exec: async (file) => {
-        calls.push(file);
-        return { stdout: '', code: file === 'xcodebuild' ? 69 : 1 };
-      },
-    });
-    assert.equal((await sampler.sample()).bootedSimulators, null);
-    sampler.invalidate();
-    assert.equal((await sampler.sample()).bootedSimulators, null);
-    assert.equal(calls.filter((file) => file === 'xcodebuild').length, 1);
-    assert.equal(calls.includes('xcrun'), false);
-  } finally { store.close(); }
+test('defaultExec resolves a spawn error with null stdio as transient', async () => {
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, { pid: undefined, kill: () => true });
+  Object.defineProperty(child, 'stdout', { get() { assert.equal(child.listenerCount('error'), 1); return null; } });
+  Object.defineProperty(child, 'stderr', { get() { assert.equal(child.listenerCount('error'), 1); return null; } });
+  const result = defaultExec('unused', [], { timeoutMs: 100 }, () => {
+    queueMicrotask(() => { child.emit('error', Object.assign(new Error('too many files'), { code: 'EMFILE' })); });
+    return child;
+  });
+  assert.deepEqual(await result, { stdout: '', transient: true });
+});
+
+test('a failed first-launch check is retried after ten minutes before simctl runs', async () => {
+  let clock = 0;
+  let checks = 0;
+  let simctlCalls = 0;
+  const probe = createSimulatorProbe(async (file) => {
+    if (file === 'xcodebuild') return { stdout: '', code: ++checks === 1 ? 69 : 0 };
+    simctlCalls += 1;
+    return { stdout: '{"devices":{}}', code: 0 };
+  }, () => clock);
+  assert.equal((await probe()).code, 1);
+  assert.equal((await probe()).code, 1);
+  assert.equal(checks, 1);
+  assert.equal(simctlCalls, 0);
+  clock += 10 * 60_000;
+  assert.equal((await probe()).code, 0);
+  assert.equal((await probe()).code, 0);
+  assert.equal(checks, 2);
+  assert.equal(simctlCalls, 2);
 });
 
 test('the simulator probe retries spawn failures and timeouts after ten minutes', async () => {

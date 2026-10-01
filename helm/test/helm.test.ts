@@ -452,6 +452,7 @@ test('a failed install still runs the turn and prepends the install failure line
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.workerId);
   await helm.settle(spawned.workerId);
   assert.deepEqual(seen, ['missing']);
   assert.equal(messages.length, 1);
@@ -465,6 +466,8 @@ test('worker turns see a real node_modules from the install gate step and hygien
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.workerId);
+  assert.ok(spawned.worktree);
   await helm.settle(spawned.workerId);
   assert.deepEqual(seen, ['dir']);
   assert.deepEqual(installs, [{ commands: ['npm ci --no-audit --no-fund'], keepNodeModules: true }]);
@@ -492,6 +495,7 @@ test('stop during the pre-turn install aborts it, never runs the turn, and settl
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.workerId);
   await started;
   const stopped = await helm.stop({ workerId: spawned.workerId });
   assert.deepEqual(stopped, { ok: true, state: 'stopped' });
@@ -505,6 +509,7 @@ test('workerInstall false in helm.json skips the worker install', async () => {
   const spawned = await helm.spawn(spawnBody(repo));
   assert.equal(spawned.ok, true);
   if (!spawned.ok) return;
+  assert.ok(spawned.workerId);
   await helm.settle(spawned.workerId);
   assert.deepEqual(seen, ['missing']);
   assert.deepEqual(installs, []);

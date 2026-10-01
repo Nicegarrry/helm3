@@ -118,7 +118,8 @@ export function attachWorker(store: Store, workerId: string, budgetId: string, a
   }
 }
 
-function budgetSpend(store: Store, budget: BudgetRow): { spentUsd: number; spentCodexTokens: number } {
+export function budgetSpend(store: Store, budgetId: string): { spentUsd: number; spentCodexTokens: number } {
+  ensureBudgetTables(store);
   const row = store.sql.prepare(`
     WITH intervals AS (
       SELECT
@@ -136,7 +137,7 @@ function budgetSpend(store: Store, budget: BudgetRow): { spentUsd: number; spent
       AND i.budgetId = ?
       AND (i.rn = 1 OR s.at >= i.attachedAt)
       AND (i.nextAttachedAt IS NULL OR s.at < i.nextAttachedAt)
-  `).get(budget.id) as { spentUsd: number; spentCodexTokens: number };
+  `).get(budgetId) as { spentUsd: number; spentCodexTokens: number };
   return { spentUsd: Number(row.spentUsd), spentCodexTokens: Number(row.spentCodexTokens) };
 }
 
@@ -144,8 +145,19 @@ function budgetWorkers(store: Store, budgetId: string): string[] {
   return (store.sql.prepare('SELECT workerId FROM worker_budget WHERE budgetId = ? ORDER BY workerId').all(budgetId) as Array<{ workerId: string }>).map((row) => row.workerId);
 }
 
+export function workersForBudget(store: Store, budgetId: string): string[] {
+  ensureBudgetTables(store);
+  return (store.sql.prepare(`
+    SELECT DISTINCT workerId FROM (
+      SELECT workerId FROM worker_budget WHERE budgetId = ?
+      UNION
+      SELECT workerId FROM worker_budget_history WHERE budgetId = ?
+    ) ORDER BY workerId
+  `).all(budgetId, budgetId) as Array<{ workerId: string }>).map((row) => row.workerId);
+}
+
 export function budgetStatus(store: Store, budget: BudgetRow): BudgetStatus {
-  const spend = budgetSpend(store, budget);
+  const spend = budgetSpend(store, budget.id);
   const workers = budgetWorkers(store, budget.id);
   const remainingUsd = Math.max(0, budget.capUsd - spend.spentUsd);
   const remainingCodexTokens = budget.capCodexTokens === null ? null : Math.max(0, budget.capCodexTokens - spend.spentCodexTokens);

@@ -39,6 +39,7 @@ import { portfolio, formatPortfolio, createReportTicker, startNotificationTicker
 import { createPrTicker } from './pr-watch.js';
 import type { CapacityExec } from './capacity/sampler.js';
 import { resolveToolProfile, type ToolProfile } from './tools.js';
+import { defaultDaemonPort } from './daemon-port.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -525,7 +526,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const port = values.port ? Number(values.port) : 0;
   if (values.stdio && !values.http) {
     const configuredPort = loadSettings(config.home).port;
-    const requestedPort = values.port ? port : configuredPort ?? 4747;
+    const requestedPort = values.port ? port : configuredPort ?? defaultDaemonPort();
     const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, requestedPort, tools));
     const handle = await serveStdioProxy(live.port, tools, config.home);
     console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);

@@ -117,7 +117,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       const query = new URLSearchParams({ workerIds: workerIds.join(','), timeoutMs: String(timeoutMs), startedAt: String(started) });
       const snapshot = await proxyRequest(port, `/api/progress?${query}`, undefined, profile, home, observe) as ProgressState;
       for (const workerId of workerIds) {
-        const update = waitProgress(snapshot, workerId, started, timeoutMs);
+        const update = waitProgress(snapshot, workerId);
         const signature = progressSignature(update);
         const last = sent.get(workerId);
         const now = Date.now();

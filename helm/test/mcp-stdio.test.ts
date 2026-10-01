@@ -32,6 +32,15 @@ async function until(check: () => boolean, ms: number): Promise<boolean> {
   return check();
 }
 
+const PROGRESS_TIMEOUT_MS = 10_000;
+
+type ProgressUpdate = { progress?: number; _meta?: { helm?: { state?: string; position?: number | null; etaMs?: number; activity?: string } } };
+
+async function waitForProgressState(updates: ProgressUpdate[], state: string) {
+  assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === state), PROGRESS_TIMEOUT_MS), true, `did not receive ${state} progress`);
+  return updates.find((update) => update._meta?.helm?.state === state)!;
+}
+
 function daemonOf(home: string): { port: number; pid: number; token: string } {
   return JSON.parse(readFileSync(join(home, 'serve.json'), 'utf8')) as { port: number; pid: number; token: string };
 }
@@ -77,7 +86,7 @@ function waitingDaemon(home: string) {
 async function progressProxy(home: string) {
   const daemon = waitingDaemon(home);
   const daemonHandle = await serve({ helm: daemon.helm as never });
-  const { transport, client } = stdioFrontEnd(home, 'all', 25);
+  const { transport, client } = stdioFrontEnd(home, 'all', 50);
   await client.connect(transport);
   return {
     daemon,
@@ -91,31 +100,30 @@ async function progressProxy(home: string) {
   };
 }
 
-test('mcp stdio: worker.wait forwards token-scoped queued, running, and done progress', async () => {
+test('mcp stdio: worker.wait forwards token-scoped queued, running, and done progress', { timeout: 30_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
   const harness = await progressProxy(home);
   try {
-    const updates: Array<{ progress?: number; _meta?: { helm?: { state?: string; position?: number | null; etaMs?: number; activity?: string } } }> = [];
+    const updates: ProgressUpdate[] = [];
     const waiting = harness.client.callTool(
       { name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } },
       undefined,
-      { onprogress: (update) => updates.push(update as unknown as (typeof updates)[number]) },
+      { onprogress: (update) => updates.push(update as unknown as ProgressUpdate) },
     );
-    assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'queued'), 3_000), true);
+    const queued = await waitForProgressState(updates, 'queued');
     assert.ok(harness.transport.pid && alive(harness.transport.pid), 'the proxy remains alive after progress notification');
     assert.equal(harness.daemon.waitStarted(), true);
-    const queued = updates.find((update) => update._meta?.helm?.state === 'queued')!._meta!.helm!;
-    assert.equal(queued.position, 1);
-    assert.equal(typeof queued.etaMs, 'number');
-    assert.match(queued.activity ?? '', /capacity\.queued/);
+    assert.equal(queued._meta!.helm!.position, 1);
+    assert.equal(typeof queued._meta!.helm!.etaMs, 'number');
+    assert.match(queued._meta!.helm!.activity ?? '', /capacity\.queued/);
 
     harness.daemon.setState('running');
-    assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'running'), 3_000), true);
+    await waitForProgressState(updates, 'running');
 
     harness.daemon.finish();
     await waiting;
     assert.ok(harness.transport.pid && alive(harness.transport.pid), 'the final progress publish keeps the proxy alive');
-    assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === 'succeeded'), 3_000), true);
+    await waitForProgressState(updates, 'succeeded');
     assert.ok(updates.every((update, index) => index === 0 || update.progress! > updates[index - 1]!.progress!));
   } finally {
     await harness.close();

@@ -1,6 +1,6 @@
 /** `gh` CLI transport: pr create, status, comment, merge. See DESIGN.md. */
 import { execFile } from 'node:child_process';
-import type { GitHub, GitHubComment, PrStatus, WorkerPr } from './types.js';
+import type { GitHub, GitHubComment, GitHubIssue, PrStatus, WorkerPr } from './types.js';
 
 export type ExecFn = (
   file: string,
@@ -119,6 +119,19 @@ export function ghGitHub(exec: ExecFn = defaultExecFn): GitHub {
       const stdout = await run(exec, ['issue', 'view', String(number), '--repo', repoSlug, '--json', 'title']);
       const parsed = JSON.parse(stdout) as { title?: unknown };
       return typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : undefined;
+    },
+
+    async issue(repoSlug: string, number: number): Promise<GitHubIssue | undefined> {
+      const stdout = await run(exec, ['issue', 'view', String(number), '--repo', repoSlug, '--json', 'title,body,comments']);
+      const parsed = JSON.parse(stdout) as { title?: unknown; body?: unknown; comments?: Array<{ author?: { login?: unknown }; body?: unknown }> };
+      const comments = Array.isArray(parsed.comments) ? parsed.comments
+        .filter((c) => typeof c?.body === 'string' && c.body.trim())
+        .map((c) => ({ ...(typeof c.author?.login === 'string' && c.author.login ? { author: c.author.login } : {}), body: (c.body as string).trim() })) : [];
+      return {
+        title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : undefined,
+        body: typeof parsed.body === 'string' && parsed.body.trim() ? parsed.body.trim() : undefined,
+        comments,
+      };
     },
 
     async prStatus(repoSlug: string, number: number): Promise<PrStatus> {

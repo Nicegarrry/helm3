@@ -278,3 +278,30 @@ test('upgrade and fleet helpers authenticate against the real HTTP server', asyn
     assert.equal((await fetchState(helm.config.home) as { ok: boolean }).ok, true);
   });
 });
+
+test('authenticated daemon catalog matches MCP core schemas and old shims receive restart note', async () => {
+  await withServer(async (port, helm, authorization) => {
+    const url = `http://127.0.0.1:${port}/mcp/tools?profile=core`;
+    assert.equal((await fetch(url)).status, 401);
+    const res = await fetch(url, { headers: { authorization, 'x-helm-shim': '0' } });
+    assert.match(res.headers.get('x-helm-tools-hash')!, /^[a-f0-9]{64}$/);
+    const body = await res.json() as { tools: Array<{ name: string }>; note: string };
+    assert.deepEqual(body.tools.map((tool) => tool.name).sort(), [...CORE_TOOL_NAMES, ...META_TOOL_NAMES].sort());
+    assert.match(body.note, /Restart this MCP session/);
+    const call = await fetch(`http://127.0.0.1:${port}/tools/run.status`, { method: 'POST', headers: { authorization, 'x-helm-shim': '0' }, body: '{}' });
+    assert.match((await call.json() as { note: string }).note, /Restart this MCP session/);
+    const current = await fetch(url, { headers: { authorization, 'x-helm-shim': '1' } });
+    assert.equal((await current.json() as { note?: string }).note, undefined);
+    assert.equal(current.headers.get('x-helm-shim-note'), null);
+  });
+});
+
+
+test('pre-version stdio shims without x-helm-shim receive the one-time session refresh note', async () => {
+  await withServer(async (port, _helm, authorization) => {
+    const response = await fetch(`http://127.0.0.1:${port}/tools/run.status`, {
+      method: 'POST', headers: { authorization, 'x-helm-mcp': '1' }, body: '{}',
+    });
+    assert.match((await response.json() as { note: string }).note, /Restart this MCP session/);
+  });
+});

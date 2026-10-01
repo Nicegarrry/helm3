@@ -1,10 +1,9 @@
 /** `helm serve`: exposes the tool registry over MCP (stdio and Streamable HTTP) plus a small loopback HTTP API the CLI uses. */
 import { createServer, type IncomingMessage, type ServerResponse, request as httpRequest } from 'node:http';
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { compactInputSchema, compactInputValidator, createToolRegistry, resolveToolProfile, type ToolProfile } from './tools.js';
@@ -23,23 +22,8 @@ export async function serve(opts: ServeOptions): Promise<ServeHandle> {
   return serveHttp(opts.helm, createToolRegistry(opts.helm, 'all'), opts.port ?? 0);
 }
 
-/** Stdio proxy: owns no workers or store; forwards calls without replay. See docs/runtime-notes.md. */
-export async function serveStdioProxy(port: number, tools?: ToolProfile, home?: string): Promise<ServeHandle> {
-  const profile = tools ?? resolveToolProfile(process.env.HELM_TOOLS);
-  const local = createToolRegistry(undefined as unknown as Helm, profile, true); // schemas only; `call` forwards here
-  const registry: Registry = {
-    list: () => local.list(),
-    call: (name, input) => callDaemon(port, name, input, true, profile, home) as ReturnType<Registry['call']>,
-  };
-  const mcp = buildMcpServer(registry);
-  const transport = new StdioServerTransport();
-  const closed = new Promise<void>((resolve) => {
-    transport.onclose = () => resolve();
-    process.stdin.once('end', () => resolve());
-  });
-  await mcp.connect(transport);
-  return { port, closed, async close() { await mcp.close(); } };
-}
+export { serveStdioProxy } from './proxy.js';
+import { MIN_SHIM_VERSION, SHIM_RESTART_NOTE } from './proxy.js';
 
 export function callDaemon(port: number, name: string, input: unknown, fromMcp = false, tools?: ToolProfile, home?: string): Promise<unknown> {
   let authorization: string;
@@ -58,17 +42,39 @@ export function callDaemon(port: number, name: string, input: unknown, fromMcp =
   });
 }
 
-function buildMcpServer(registry: Registry): McpServer {
+function advertisedTools(registry: Registry) {
+  return registry.list().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) }));
+}
+
+type Catalog = { registry: Registry; tools: ReturnType<typeof advertisedTools>; inputs: Map<string, ReturnType<typeof compactInputValidator>>; hash: string };
+
+/** Catalogs are immutable for one daemon boot; a new release creates a new cache. */
+export function createDaemonCatalogs(helm: Helm) {
+  const cache = new Map<ToolProfile, Catalog>();
+  return (profile: ToolProfile): Catalog => {
+    let catalog = cache.get(profile);
+    if (!catalog) {
+      const registry = createToolRegistry(helm, profile, true);
+      const tools = advertisedTools(registry);
+      const inputs = new Map(registry.list().map((tool) => [tool.name, compactInputValidator(tool.inputSchema)]));
+      catalog = { registry, tools, inputs, hash: createHash('sha256').update(JSON.stringify(tools)).digest('hex') };
+      cache.set(profile, catalog);
+    }
+    return catalog;
+  };
+}
+
+function buildMcpServer(catalog: Catalog): McpServer {
+  const { registry, tools } = catalog;
   const server = new McpServer({ name: 'helm', version: VERSION });
-  const advertisedTools = registry.list().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: compactInputSchema(tool.inputSchema) }));
-  for (const tool of registry.list()) {
+  for (const tool of tools) {
     server.registerTool(
       tool.name,
-      { description: tool.description, inputSchema: compactInputValidator(tool.inputSchema) },
+      { description: tool.description, inputSchema: catalog.inputs.get(tool.name)! },
       async (args: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(await registry.call(tool.name, args)) }] }),
     );
   }
-  server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: advertisedTools }));
+  server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   return server;
 }
 
@@ -77,9 +83,10 @@ async function serveHttp(helm: Helm, internalRegistry: Registry, requestedPort: 
   mkdirSync(home, { recursive: true });
   let port = requestedPort;
   const token = randomBytes(32).toString('hex');
+  const getCatalog = createDaemonCatalogs(helm);
 
   const httpServer = createServer((req, res) => {
-    void handleHttpRequest(req, res, helm, internalRegistry, () => port, token);
+    void handleHttpRequest(req, res, helm, internalRegistry, getCatalog, () => port, token);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -116,7 +123,7 @@ async function serveHttp(helm: Helm, internalRegistry: Registry, requestedPort: 
   };
 }
 
-async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm: Helm, internalRegistry: Registry, getPort: () => number, token: string): Promise<void> {
+async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm: Helm, internalRegistry: Registry, getCatalog: ReturnType<typeof createDaemonCatalogs>, getPort: () => number, token: string): Promise<void> {
   try {
     const host = req.headers.host ?? '';
     if (host !== `127.0.0.1:${getPort()}` || (req.headers.origin && req.headers.origin !== `http://${host}`)) {
@@ -131,11 +138,20 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
       return;
     }
     const url = new URL(req.url ?? '/', `http://${host}`);
+    const requestedProfile = url.pathname === '/mcp/tools' ? url.searchParams.get('profile') : url.pathname === '/mcp' ? url.searchParams.get('tools') : null;
+    const catalog = getCatalog(resolveToolProfile(requestedProfile ?? req.headers['x-helm-tools']));
+    res.setHeader('x-helm-tools-hash', catalog.hash);
+    const shim = req.headers['x-helm-shim'];
+    const oldShim = (shim !== undefined || req.headers['x-helm-mcp'] === '1') && Number(shim ?? 0) < MIN_SHIM_VERSION;
+    if (oldShim) res.setHeader('x-helm-shim-note', SHIM_RESTART_NOTE);
+
+    if (url.pathname === '/mcp/tools' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ tools: catalog.tools, ...(oldShim ? { note: SHIM_RESTART_NOTE } : {}) }));
+      return;
+    }
 
     if (url.pathname === '/mcp') {
-      const header = req.headers['x-helm-tools'];
-      const requestedProfile = url.searchParams.get('tools') ?? (Array.isArray(header) ? header[0] : header);
-      const mcp = buildMcpServer(createToolRegistry(helm, resolveToolProfile(requestedProfile), true));
+      const mcp = buildMcpServer(catalog);
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on('close', () => {
         void transport.close();
@@ -179,10 +195,10 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse, helm
         throw err;
       }
       const registry = req.headers['x-helm-mcp'] === '1'
-        ? createToolRegistry(helm, resolveToolProfile(req.headers['x-helm-tools']), true)
+        ? catalog.registry
         : internalRegistry;
       const outcome = await registry.call(name, input);
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(outcome));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(oldShim ? { ...outcome, note: SHIM_RESTART_NOTE } : outcome));
       return;
     }
 

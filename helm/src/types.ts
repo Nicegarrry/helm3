@@ -204,7 +204,7 @@ export type GateCheck = Readonly<{ name: string; command: string }>;
 
 export interface GateRunner {
   /** Run each check in `cwd` sequentially; capture output to files under `logDir`. */
-  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
+  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; keepNodeModules?: boolean; signal?: AbortSignal; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
   /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
   defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }
@@ -232,6 +232,7 @@ export interface GitHub {
   findPr?(repoSlug: string, head: string): Promise<{ number: number; url: string } | undefined>;
   updatePr?(repoSlug: string, number: number, input: { title?: string; body?: string }): Promise<void>;
   issueTitle?(repoSlug: string, number: number): Promise<string | undefined>;
+  issue?(repoSlug: string, number: number): Promise<GitHubIssue | undefined>;
   prStatus(repoSlug: string, number: number): Promise<PrStatus>;
   comment(repoSlug: string, id: number): Promise<GitHubComment>;
   postComment(repoSlug: string, number: number, body: string): Promise<string>;
@@ -240,7 +241,7 @@ export interface GitHub {
 }
 
 export type GitHubComment = Readonly<{ body: string; issueNumber?: number; issueUrl?: string; pullRequestUrl?: string }>;
-
+export type GitHubIssue = Readonly<{ title?: string; body?: string; comments?: ReadonlyArray<{ author?: string; body: string }> }>;
 
 export type WorkerRunInput = Readonly<{
   workerId: string;

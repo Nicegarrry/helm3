@@ -10,6 +10,7 @@ export const SHIM_VERSION = 1;
 export const MIN_SHIM_VERSION = 1;
 export const SHIM_RESTART_NOTE = 'Restart this MCP session: its Helm shim is below the supported minimum.';
 const WAIT_PROGRESS_MS = 30_000;
+const WAIT_PROGRESS_POLL_MS = 10_000;
 
 type ProgressWorker = Readonly<{
   workerId: string;
@@ -17,10 +18,7 @@ type ProgressWorker = Readonly<{
   lastEvent?: Readonly<{ kind?: unknown; data?: unknown }> | null;
 }>;
 
-type ProgressState = Readonly<{
-  workers?: readonly ProgressWorker[];
-  run?: Readonly<{ capacity?: Readonly<{ queue?: readonly Readonly<{ workerId?: unknown }>[] }> }>;
-}>;
+type ProgressState = Readonly<{ workers?: readonly (ProgressWorker & { position?: number | null; etaMs?: number })[] }>;
 
 function activity(worker: ProgressWorker): string {
   const event = worker.lastEvent;
@@ -29,14 +27,12 @@ function activity(worker: ProgressWorker): string {
   return `${String(event.kind ?? 'activity')}: ${data}`.replace(/\s+/g, ' ').slice(0, 240);
 }
 
-function waitProgress(state: ProgressState, workerId: string, started: number, timeoutMs: number) {
+function waitProgress(state: ProgressState, workerId: string) {
   const worker = state.workers?.find((candidate) => candidate.workerId === workerId);
-  const position = state.run?.capacity?.queue?.findIndex((candidate) => candidate.workerId === workerId);
-  const etaMs = Math.max(0, started + timeoutMs - Date.now());
   return {
     state: worker?.state ?? 'unknown',
-    position: position === undefined || position < 0 ? null : position + 1,
-    etaMs,
+    position: worker?.position ?? null,
+    etaMs: worker?.etaMs ?? 0,
     activity: worker ? activity(worker) : 'worker is no longer visible',
   };
 }
@@ -86,7 +82,7 @@ export async function proxyRequest(port: number, path: string, input: unknown, p
   }
 }
 
-export async function serveStdioProxy(port: number, profile = process.env.HELM_TOOLS ?? 'core', home?: string, transport: Transport = new StdioServerTransport(), pollMs = 60_000, progressPollMs = 1_000) {
+export async function serveStdioProxy(port: number, profile = process.env.HELM_TOOLS ?? 'core', home?: string, transport: Transport = new StdioServerTransport(), pollMs = 60_000, progressPollMs = WAIT_PROGRESS_POLL_MS) {
   const server = new Server({ name: 'helm', version: String(SHIM_VERSION) }, { capabilities: { tools: { listChanged: true } } });
   let hash: string | undefined;
   let connected = false;
@@ -114,10 +110,12 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       : [];
     const timeoutMs = typeof (input as { timeoutMs?: unknown }).timeoutMs === 'number' ? (input as { timeoutMs: number }).timeoutMs : 600_000;
     const started = Date.now();
+    let progressValue = 0;
     const sent = new Map<string, string>();
     const sentAt = new Map<string, number>();
     const publish = async (force = false) => {
-      const snapshot = await proxyRequest(port, '/api/state', undefined, profile, home, observe) as ProgressState;
+      const query = new URLSearchParams({ workerIds: workerIds.join(','), timeoutMs: String(timeoutMs), startedAt: String(started) });
+      const snapshot = await proxyRequest(port, `/api/progress?${query}`, undefined, profile, home, observe) as ProgressState;
       for (const workerId of workerIds) {
         const update = waitProgress(snapshot, workerId, started, timeoutMs);
         const signature = progressSignature(update);
@@ -130,7 +128,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
           method: 'notifications/progress',
           params: {
             progressToken,
-            progress: Math.min(timeoutMs, Date.now() - started),
+            progress: ++progressValue,
             total: timeoutMs,
             message: `state=${update.state}; position=${update.position ?? '-'}; etaMs=${update.etaMs}; activity=${update.activity}`,
             _meta: { helm: update },
@@ -138,16 +136,20 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
         });
       }
     };
+    const wait = proxyRequest(port, `/tools/${encodeURIComponent(params.name)}`, input, profile, home, observe);
     await publish(true).catch(() => undefined);
     let publishing = false;
+    let publishingNow: Promise<void> | undefined;
     const progress = setInterval(() => {
       if (publishing) return;
       publishing = true;
-      void publish().catch(() => undefined).finally(() => { publishing = false; });
+      publishingNow = publish().catch(() => undefined).finally(() => { publishing = false; });
     }, progressPollMs);
     progress.unref();
     try {
-      const outcome = await proxyRequest(port, `/tools/${encodeURIComponent(params.name)}`, input, profile, home, observe);
+      const outcome = await wait;
+      clearInterval(progress);
+      await publishingNow;
       await publish().catch(() => undefined);
       return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };
     } finally {

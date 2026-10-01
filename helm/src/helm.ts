@@ -744,6 +744,19 @@ export class Helm {
     });
   }
 
+  async progress(workerIds: readonly string[], timeoutMs: number, startedAt: number) {
+    const capacity = await this.capacity.status();
+    return { ok: true, workers: workerIds.flatMap((workerId) => {
+      const row = this.store.getWorker(workerId);
+      if (!row) return [];
+      const position = capacity.queue.findIndex((entry) => entry.workerId === workerId);
+      const last = this.store.latestEvent(workerId);
+      return [{ workerId, state: row.state, position: position < 0 ? null : position + 1,
+        etaMs: Math.max(0, startedAt + timeoutMs - Date.now()),
+        lastEvent: last ? { kind: last.kind, data: last.data } : null }];
+    }) };
+  }
+
   async supervisorRegister(input: SupervisorRegisterInput): Promise<ToolOutcome<{ supervisor: SupervisorRow }>> {
     return this.supervisor ? this.supervisor.register(input) : { ok: false, reason: 'supervisor service unavailable' };
   }

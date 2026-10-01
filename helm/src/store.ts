@@ -265,6 +265,7 @@ export function openStore(path: string): Store {
     `INSERT INTO workers (${WORKER_COLUMNS.join(', ')}) VALUES (${WORKER_COLUMNS.map(() => '?').join(', ')})`,
   );
   const getWorkerStmt = db.prepare('SELECT * FROM workers WHERE workerId = ?');
+  const latestEventStmt = db.prepare('SELECT * FROM events WHERE workerId = ? ORDER BY seq DESC LIMIT 1');
   const getMetaStmt = db.prepare('SELECT * FROM worker_meta WHERE workerId = ?');
   const setMetaStmt = db.prepare(`
     INSERT INTO worker_meta (workerId, issue, prBase, baselineId, band, complexity, tier, score, chosenModel, policyApplied, skippedCandidates, skills)
@@ -328,6 +329,11 @@ export function openStore(path: string): Store {
     getWorker(workerId: string): WorkerRow | undefined {
       const row = getWorkerStmt.get(workerId) as Record<string, unknown> | undefined;
       return row ? toWorkerRow(row) : undefined;
+    },
+
+    latestEvent(workerId: string): EventRow | undefined {
+      const row = latestEventStmt.get(workerId) as Record<string, unknown> | undefined;
+      return row ? toEventRow(row) : undefined;
     },
 
     getMeta(workerId: string): WorkerMeta | undefined {

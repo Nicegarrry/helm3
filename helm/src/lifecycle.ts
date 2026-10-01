@@ -31,6 +31,7 @@ export class Lifecycle {
   private stopping = false;
   private readonly marker: string;
   shutdown?: () => void;
+  restart?: () => void | Promise<void>;
   upgrade?: (timeoutMs: number) => void;
   constructor(readonly home: string, private readonly workers: () => string[]) {
     this.marker = join(home, 'drain.json');
@@ -48,8 +49,10 @@ export class Lifecycle {
     this.active.set(token, name);
     return () => { this.active.delete(token); };
   }
-  drain(): void {
-    atomicMetadata(this.marker, { requestedAt: new Date().toISOString() });
+  drain(persist = true): void {
+    if (persist) atomicMetadata(this.marker, { requestedAt: new Date().toISOString() });
+    // Preserve metadata failure handling on signals without creating a persistent marker.
+    else readMetadata(this.marker);
     this.draining = true;
   }
   async control(input: { action: string; timeoutMs?: number; upgradeId?: string; expectedBootId?: string }): Promise<ToolOutcome<ReturnType<Lifecycle['status']>>> {
@@ -61,11 +64,30 @@ export class Lifecycle {
         rmSync(this.marker, { force: true });
         this.draining = false;
       }
-      if (input.action === 'shutdown' && !this.stopping) {
-        this.drain();
-        if (this.status().blockers.length) throw new Error(`still draining: ${this.status().blockers.join(', ')}`);
-        if (!this.shutdown) throw new Error('shutdown handler unavailable');
+      if (input.action === 'restart') {
+        if (existsSync(join(this.home, 'upgrade.lock')) || ['draining', 'stopping', 'starting', 'healthy'].includes(String(readMetadata(join(this.home, 'upgrade.json'))?.phase))) throw new Error('upgrade in progress; restart refused');
+        if (this.stopping) throw new Error('shutdown/restart in progress; restart refused');
+      }
+      if ((input.action === 'shutdown' || input.action === 'restart') && !this.stopping) {
+        const workers = this.workers().length;
+        if (workers || this.active.size) {
+          const busy = [workers ? `${workers} worker${workers === 1 ? '' : 's'} running` : '', this.active.size ? `${this.active.size} operation${this.active.size === 1 ? '' : 's'} in progress` : ''].filter(Boolean).join(' and ');
+          throw new Error(`${busy}; stop them or wait for them to finish`);
+        }
+        if (!this.shutdown || (input.action === 'restart' && !this.restart)) throw new Error('shutdown handler unavailable');
+        const wasDraining = this.draining;
+        this.drain(false);
         this.stopping = true;
+        if (input.action === 'restart') {
+          try { await this.restart!(); }
+          catch (err) {
+            this.stopping = false;
+            this.draining = wasDraining || existsSync(this.marker);
+            const reason = `restart helper failed: ${err instanceof Error ? err.message : String(err)}`;
+            console.error(reason);
+            throw new Error(reason);
+          }
+        }
         setImmediate(this.shutdown);
       }
       if (input.action === 'upgrade') {

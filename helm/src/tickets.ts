@@ -23,7 +23,10 @@ export function insertTicket(store: Store, ticket: Ticket): void {
   store.sql.prepare(`INSERT INTO tickets (${entries.map(([key]) => key).join(',')}) VALUES (${entries.map(() => '?').join(',')})`).run(...entries.map(([, value]) => value));
 }
 export function ticketRank(ticket: Ticket) { return admissionRank(ticket.effectivePriority, ticket.requestedBy, (JSON.parse(ticket.quickCheck) as QuickCheck).size); }
-export const ticketLane = (ticket: Pick<Ticket, 'effectivePriority' | 'requestedBy'>): number => ticket.requestedBy === 'owner' || ticket.effectivePriority === 'urgent' ? 0.5 : 2;
+export function ticketLane(ticket: Pick<Ticket, 'effectivePriority' | 'requestedBy' | 'payload'>): number {
+  if (JSON.parse(ticket.payload).input?.role === 'reviewer') return 1;
+  return ticket.requestedBy === 'owner' || ticket.effectivePriority === 'urgent' ? 1.5 : 2;
+}
 export function bumpTicket(store: Store, ticket: Ticket, priority: Priority): void {
   const effective = effectivePriority(priority, JSON.parse(ticket.quickCheck));
   const next = { ...ticket, statedPriority: priority, effectivePriority: effective };

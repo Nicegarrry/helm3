@@ -1,5 +1,5 @@
-import { statusSections, statusLines } from './tickets.js';
 /** The `helm` command line. */
+import { statusSections, statusLines } from './tickets.js';
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { EventRow, HelmConfig, InboxState, Store, WorkerRow } from './types.js';
 import { createEffectiveSpendReader, ensureHome, loadConfig } from './config.js';
-import { openStore } from './store.js';
 import { listBudgetStatuses } from './budget.js';
 import { gitWorkspace } from './workspace.js';
 import { gateRunner } from './gate.js';
@@ -44,6 +43,9 @@ import { resolveToolProfile, type ToolProfile } from './tools.js';
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
 
+// tsx has already registered; keep its override out of daemon/worker environments.
+delete process.env.TSX_TSCONFIG_PATH;
+
 const runCapacityExec = promisify(execFile);
 const capacityExec: CapacityExec = async (file, args, options) => {
   try {
@@ -57,6 +59,8 @@ const capacityExec: CapacityExec = async (file, args, options) => {
 
 function usage(): void {
   console.error(`usage: helm <command> [options]
+  doctor [--repo path] [--json]
+  init [--repo path] [--force]
   spawn --repo <path> --objective <text> [--issue n] [--model <m>] [--difficulty super-easy|easy|normal] [--base-ref r] [--role builder|reviewer]
         [--context path]... [--allow-workflows] [--acceptance text] [--idempotency-key k] [--priority low|normal|high|urgent] [--requested-by owner|auto]
   ps [--repo path] [--state s] [--json]
@@ -91,10 +95,12 @@ function usage(): void {
   deploy rollback <id> [--tap-id <id>] [--json]
   jev check --preset <issue|dedupe|verdict|raw> --file <json|md> [--json]
   update --stage <git-ref> [--repo path] | --when-idle [--timeout ms]
-  shutdown`);
+  shutdown
+  restart`);
 }
 
-function openReadStore() {
+async function openReadStore() {
+  const { openStore } = await import('./store.js');
   const config = loadConfig();
   return { config, store: openStore(join(config.home, 'helm.sqlite')) };
 }
@@ -183,7 +189,7 @@ async function readCmd(
   extraOptions: CliOptions = {},
 ): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { json: { type: 'boolean' }, ...extraOptions } });
-  const { config, store } = openReadStore();
+  const { config, store } = await openReadStore();
   try {
     await run(positionals, values as ParsedValues, store, config);
   } finally {
@@ -311,7 +317,7 @@ async function cmdBudget(args: string[]): Promise<void> {
     printOutcome(await postTool('budget.close', { project }), values.json === true);
     return;
   }
-  const { store } = openReadStore();
+  const { store } = await openReadStore();
   try {
     const budgets = listBudgetStatuses(store, action);
     if (values.json === true) console.log(JSON.stringify({ ok: true, budgets }, null, 2));
@@ -345,7 +351,7 @@ const cmdSupervisor = async (args: string[]): Promise<void> => {
     });
     const project = positionals[0];
     if (!project) { usage(); process.exitCode = 2; return; }
-    const { config, store } = openReadStore();
+    const { config, store } = await openReadStore();
     try {
       const listed = createSupervisor({ store, settings: loadSettings(config.home), hosts: { herdr: herdrHost(), tmux: tmuxHost() } }).list();
       const registered = listed.ok
@@ -526,6 +532,7 @@ async function cmdServe(args: string[]): Promise<void> {
   if (live) { console.error(`helm serve is already running (pid ${live.pid})`); process.exitCode = 2; return; }
   const pending = readMetadata(join(config.home, 'upgrade.json'));
   if (existsSync(join(config.home, 'upgrade.lock')) && (process.env.HELM_UPGRADE_ID !== pending?.id || pending?.phase !== 'starting' || readMetadata(join(config.home, 'upgrade.lock', 'owner.json'))?.id !== pending?.id)) throw new Error('upgrade owns startup; wait for it to finish');
+  const { openStore } = await import('./store.js');
   const releaseOwner = ownDaemon(config.home);
   const store = openStore(join(config.home, 'helm.sqlite'));
   const settings = loadSettings(config.home);
@@ -578,11 +585,12 @@ async function cmdServe(args: string[]): Promise<void> {
     process.exit(0);
   };
   helm.lifecycle.shutdown = () => { void shutdown(); };
+  helm.lifecycle.restart = () => launchRestartHelper(config.home, handle.port!);
   helm.lifecycle.upgrade = (timeout) => launchUpgrade(config.home, handle.port!, helm.lifecycle.status(), timeout);
   let signaling = false;
   const drainOnSignal = async () => {
     if (signaling) return;
-    signaling = true; helm.lifecycle.drain();
+    signaling = true; helm.lifecycle.drain(false);
     const deadline = Date.now() + 600_000;
     while (helm.lifecycle.status().blockers.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
     const result = await helm.lifecycle.control({ action: 'shutdown' });
@@ -590,6 +598,19 @@ async function cmdServe(args: string[]): Promise<void> {
     signaling = false;
   };
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void drainOnSignal().catch((err) => { signaling = false; console.error(err); }); });
+}
+
+/** Resolve only when the helper has launched; lifecycle owns rollback and shutdown. */
+export async function launchRestartHelper(home: string, port: number, spawnHelper: typeof spawn = spawn): Promise<void> {
+  const log = openSync(join(home, 'daemon.log'), 'a');
+  try {
+    // Inherit the daemon environment without serializing credentials.
+    const child = spawnHelper(process.execPath, ['--import', 'tsx', process.argv[1]!, 'restart', '--handover', '--port', String(port)], { detached: true, stdio: ['ignore', log, log], env: process.env });
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', () => { child.unref(); resolve(); });
+      child.once('error', reject);
+    });
+  } finally { closeSync(log); }
 }
 
 /** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */
@@ -617,10 +638,37 @@ async function startDetachedDaemon(home: string, serveJsonPath: string, port: nu
 async function cmdShutdown(): Promise<void> {
   printOutcome(await postTool('daemon.control', { action: 'shutdown' }), false);
 }
-const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
+const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (p, v) => ({ action: p[0] === 'stop' ? 'shutdown' : v.action ?? p[0] ?? 'status' }), { action: { type: 'string' } });
+async function cmdRestart(args: string[]): Promise<void> {
+  const { values } = parseArgs({ args, options: { handover: { type: 'boolean' }, port: { type: 'string' } } });
+  const config = loadConfig();
+  const path = join(config.home, 'serve.json');
+  const deadline = Date.now() + 60_000;
+  if (values.handover) {
+    while (existsSync(join(config.home, 'daemon.lock')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    if (existsSync(join(config.home, 'daemon.lock'))) throw new Error('restart timed out waiting for daemon stop');
+    await startDetachedDaemon(config.home, path, Number(values.port), resolveToolProfile(process.env.HELM_TOOLS));
+    return;
+  }
+  const live = readLiveServeJson(path);
+  if (!live) throw new Error('daemon is not running');
+  const before = await callDaemon(live.port, 'daemon.control', { action: 'status' }, false, undefined, config.home) as { ok: boolean; bootId?: string; reason?: string };
+  if (!before.ok || !before.bootId) throw new Error(before.reason ?? 'daemon identity unavailable');
+  const result = await callDaemon(live.port, 'daemon.control', { action: 'restart', expectedBootId: before.bootId }, false, undefined, config.home) as { ok: boolean; reason?: string };
+  if (!result.ok) throw new Error(result.reason);
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    const next = readLiveServeJson(path);
+    if (!next) continue;
+    const status = await callDaemon(next.port, 'daemon.control', { action: 'status' }, false, undefined, config.home) as { ok: boolean; bootId?: string; phase?: string };
+    if (status.ok && status.bootId !== before.bootId && status.phase === 'accepting') { console.log('helm daemon restarted and ready'); return; }
+  }
+  throw new Error('restart did not become accepting within 60s; inspect daemon.log and lifecycle status');
+}
+
 async function cmdPortfolio(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { json: { type: 'boolean' }, since: { type: 'string' } } });
-  const { config, store } = openReadStore();
+  const { config, store } = await openReadStore();
   try { const report = await portfolio(store, loadSettings(config.home), values.since); console.log(values.json ? JSON.stringify(report, null, 2) : formatPortfolio(report)); }
   finally { store.close(); }
 }
@@ -640,8 +688,10 @@ const cmdDeploy = async (args: string[]): Promise<void> => {
 
 /** Table-driven dispatch, mirroring how the write commands share `simpleCmd`. */
 const COMMANDS: Record<string, (args: string[]) => Promise<void>> = {
+  doctor: async (args) => (await import('./onboard.js')).onboard('doctor', args),
+  init: async (args) => (await import('./onboard.js')).onboard('init', args),
   spawn: cmdSpawn, ps: cmdPs, logs: cmdLogs, inspect: cmdInspect, wait: cmdWait, steer: cmdSteer, stop: cmdStop, gate: cmdGate,
-  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown,
+  pr: cmdPr, 'pr-status': cmdPrStatus, review: cmdReview, merge: cmdMerge, status: cmdStatus, cap: cmdCap, budget: cmdBudget, daemon: cmdDaemon, serve: cmdServe, shutdown: cmdShutdown, restart: cmdRestart,
   inbox: cmdInbox, reply: cmdReply, tap: cmdTap, supervisor: cmdSupervisor, wake: cmdWake, jev: cmdJev, scorecard: cmdScorecard, portfolio: cmdPortfolio, routing: cmdRouting, deploy: cmdDeploy,
 };
 

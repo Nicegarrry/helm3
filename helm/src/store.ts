@@ -1,5 +1,5 @@
-import { ensureTickets } from './tickets.js';
 /** SQLite storage for the core tables: workers, events, gates, prs, and spend. Feature modules own their tables via Store.sql. */
+import { ensureTickets } from './tickets.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';

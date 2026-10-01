@@ -307,7 +307,7 @@ export function createCapacityAdmission(options: Readonly<{
 
   function setPid(id: string, pid: number): void {
     if (!Number.isInteger(pid) || pid <= 0) return;
-    options.store.sql.prepare('UPDATE capacity_jobs SET pid = ? WHERE (id = ? OR workerId = ?) AND endedAt IS NULL').run(pid, id, id);
+    options.store.sql.prepare('UPDATE capacity_jobs SET pid = ? WHERE id = ? AND endedAt IS NULL').run(pid, id);
     sampleRssTracked(id);
   }
 

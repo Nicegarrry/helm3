@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { openStore } from '../src/store.js';
 import { createCapacityAdmission } from '../src/capacity/admit.js';
 import { loadSettings } from '../src/settings.js';
-import { getTicket, insertTicket, refreshTickets, statusLines, statusSections, ticketView, type Ticket } from '../src/tickets.js';
+import { getTicket, insertTicket, refreshTickets, statusLines, statusSections, ticketView, ticketLane, bumpTicket, type Ticket } from '../src/tickets.js';
 
 const at = new Date('2026-10-01T00:00:00.000Z');
 function fixture(path = ':memory:') {
@@ -79,4 +79,27 @@ test('CLI status shows sections and JSON retains the complete backlog', () => {
     const compact = run([]); assert.match(compact, /Backlog\n/); assert.match(compact, /Working\n/); assert.match(compact, /Recent/); assert.ok(compact.trim().split('\n').length <= 25);
     assert.equal(JSON.parse(run(['--json'])).sections.backlog.length, 30);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review tickets and review requests precede owner and urgent builders after bumps', async () => {
+  const store = openStore(':memory:');
+  const capacity = createCapacityAdmission({ home: '/tmp/helm-ticket-lanes', store, maxWorkers: 1, settings: loadSettings('/missing'), now: () => at });
+  const started: string[] = [];
+  try {
+    await capacity.admit({ id: 'active', workerId: 'active', kind: 'builder', loadClass: 'light' }, () => {});
+    const rows = [ticket('owner', { requestedBy: 'owner' }), ticket('urgent', { effectivePriority: 'urgent' }), ticket('reviewer', { payload: '{"input":{"role":"reviewer"}}' })];
+    for (const row of rows) {
+      insertTicket(store, row);
+      await capacity.admit({ id: row.id, workerId: row.id, kind: row.id === 'reviewer' ? 'review' : 'builder', loadClass: 'light', priority: ticketLane(row) }, () => { started.push(row.id); });
+    }
+    await capacity.admit({ id: 'review-request', workerId: 'review-request', kind: 'review', loadClass: 'light' }, () => { started.push('review-request'); });
+    bumpTicket(store, rows[2]!, 'urgent');
+    assert.equal((store.sql.prepare('SELECT priority FROM capacity_jobs WHERE id = ?').get('reviewer') as { priority: number }).priority, 1);
+    capacity.finish('active');
+    await capacity.tick();
+    assert.deepEqual(started, ['reviewer']);
+    capacity.finish('reviewer');
+    await capacity.tick();
+    assert.deepEqual(started, ['reviewer', 'review-request']);
+  } finally { await capacity.close(); store.close(); }
 });

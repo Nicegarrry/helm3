@@ -1,5 +1,5 @@
-import { statusLines } from './tickets.js';
 /** The tool registry: maps tool names to their zod input schemas and dispatches validated calls to a Helm instance. */
+import { statusLines } from './tickets.js';
 import { z } from 'zod';
 import {
   budgetCloseInput,

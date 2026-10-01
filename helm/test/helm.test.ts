@@ -34,6 +34,9 @@ function createFakeStore(): Store {
   return store;
 }
 
+/** Head each fake worktree last pushed; the fake GitHub reports it for the PR it opens from that worktree. */
+const pushedHeads = new Map<string, string>();
+
 function createFakeWorkspace() {
   const worktrees = new Map<string, { branch: string; baseSha: string; head: string; clean: boolean }>();
   const pushed: Array<{ path: string; branch: string }> = [];
@@ -83,6 +86,7 @@ function createFakeWorkspace() {
     },
     async push(path, branch) {
       pushed.push({ path, branch });
+      pushedHeads.set(path, worktrees.get(path)?.head ?? 'unknown');
     },
   };
 
@@ -121,11 +125,11 @@ function createFakeGitHub() {
   let nextNumber = 1;
 
   const github: GitHub = {
-    async openPr({ base, head: branch, title, body }) {
+    async openPr({ cwd, base, head: branch, title, body }) {
       opened.push({ base, head: branch, title, body });
       const number = nextNumber++;
       const url = `https://github.com/acme/repo/pull/${number}`;
-      prs.set(number, { number, state: 'open', head: `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
+      prs.set(number, { number, state: 'open', head: pushedHeads.get(cwd) ?? `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
       return { number, url };
     },
     async findPr(_repoSlug, head) { return existingByHead.get(head); },
@@ -256,6 +260,8 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
+    headWaitMs: 50,
+    headPollMs: 5,
   });
   return { helm, store, workspace, pushed, cloned, fetched, created, removed, markDirty, github: githubFake, config };
 }
@@ -346,20 +352,27 @@ test('a repo helm.json priority is the project default and an explicit priority 
   if (plain.ok) assert.equal(admissionEvent(store, plain.workerId)?.stated, 'normal');
 });
 
-test('dispatched issue-title lookup runs after spawn admission and falls back on failure', async () => {
+test('dispatched issue-title lookup runs after spawn admission and falls back on failure', async (t) => {
   let resolveTitle!: (title: string) => void;
   const lookup = new Promise<string>((resolve) => { resolveTitle = resolve; });
   const seed = makeHelm();
   const first = makeHelm({ github: { ...seed.github.github, issueTitle: async () => lookup } });
   const repo = mkTempDir('helm-dispatched-title-');
+  // A daemon ticker normally warms capacity; keep cold OS probes outside the title-lookup timing check.
+  await first.helm.capacityStatus();
   const started = Date.now();
   const outcome = await first.helm.spawn(spawnBody(repo, { issue: 42, objective: 'first objective line\nmore detail' }));
   assert.ok(outcome.ok);
+  t.after(async () => {
+    resolveTitle('Issue title');
+    if (outcome.ok && outcome.workerId) await first.helm.settle(outcome.workerId);
+    await first.helm.close();
+  });
   assert.ok(Date.now() - started < 500, 'spawn should not wait for issue title lookup');
   if (!outcome.ok) return;
   assert.ok(outcome.ok && outcome.workerId);
   resolveTitle('Issue title');
-  await new Promise((resolve) => setImmediate(resolve));
+  await first.helm.settle(outcome.workerId);
   const dispatched = first.store.listEvents(outcome.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched');
   assert.equal(dispatched?.data.issue, 42);
   assert.equal(dispatched?.data.title, 'Issue title');
@@ -370,7 +383,7 @@ test('dispatched issue-title lookup runs after spawn admission and falls back on
   assert.ok(fallback.ok && fallback.workerId);
   assert.ok(fallback.ok);
   if (fallback.ok) {
-    await new Promise((resolve) => setImmediate(resolve));
+    await second.helm.settle(fallback.workerId);
     assert.equal(second.store.listEvents(fallback.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched')?.data.title, 'fallback title');
   }
 });
@@ -386,9 +399,83 @@ test('dispatch milestone rejection becomes a warning event instead of an unhandl
   assert.ok(outcome.ok);
   if (!outcome.ok) return;
   assert.ok(outcome.ok && outcome.workerId);
-  await new Promise((resolve) => setImmediate(resolve));
+  await helm.settle(outcome.workerId);
   const warning = store.listEvents(outcome.workerId).find((event) => event.kind === 'dispatched.warning');
   assert.equal(warning?.data.message, 'dispatch milestone failed: milestone write failed');
+});
+
+test('worker.spawn with issue: injects issue title, body, and last 3 comments into brief', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async (_repo, number) => ({
+      title: 'Fix widget overflow',
+      body: 'Widget overflows container when screen is narrow.',
+      comments: [
+        { author: 'carol', body: 'Old comment that should be skipped' },
+        { author: 'alice', body: 'Confirmed on mobile' },
+        { author: 'bob', body: 'Reproduced in Chrome too' },
+        { author: 'dave', body: 'I will write tests' },
+      ],
+    }),
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 294, objective: 'Fix widget' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Issue #294: Fix widget overflow'));
+  assert.ok(capturedMessage.includes('Widget overflows container when screen is narrow.'));
+  assert.ok(!capturedMessage.includes('Old comment that should be skipped'));
+  assert.ok(capturedMessage.includes('alice: Confirmed on mobile'));
+  assert.ok(capturedMessage.includes('bob: Reproduced in Chrome too'));
+  assert.ok(capturedMessage.includes('dave: I will write tests'));
+});
+
+test('worker.spawn with issue: caps injected issue at 8000 chars', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const hugeBody = 'A'.repeat(10_000);
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async () => ({
+      title: 'Huge issue',
+      body: hugeBody,
+    }),
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-cap-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 295, objective: 'Investigate' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Issue #295: Huge issue'));
+  assert.ok(!capturedMessage.includes('A'.repeat(8001)));
+  assert.ok(capturedMessage.includes('A'.repeat(7900)));
+});
+
+test('worker.spawn with issue: gracefully handles github.issue error', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async () => { throw new Error('gh CLI error'); },
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-err-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 296, objective: 'Handle error' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Handle error'));
 });
 
 test('a settled worker turn removes node_modules from every top-level package', async () => {
@@ -858,13 +945,25 @@ test('soft spend cap defaults to 80% of the hard cap', async () => {
   assert.equal(none.helm.spendWarnUsd(), 0);
 });
 
-test('modelFamily strips provider and vendor prefixes', () => {
-  assert.equal(modelFamily('opencode-go/qwen3.8-flash'), 'qwen');
-  assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'glm');
-  assert.equal(modelFamily('google/gemini-3.8-flash'), 'gemini');
-  assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nemotron');
-  assert.equal(modelFamily('openai-codex/gpt-6-luna'), 'gpt');
-  assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'claude');
+test('modelFamily returns the model vendor and strips lane and provider prefixes', () => {
+  assert.equal(modelFamily('opencode-go/qwen3.8-flash'), 'alibaba');
+  assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'zhipu');
+  assert.equal(modelFamily('opencode-go/kimi-k3'), 'moonshot');
+  assert.equal(modelFamily('opencode-go/deepseek-v4'), 'deepseek');
+  assert.equal(modelFamily('google/gemini-3.8-flash'), 'google');
+  assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nvidia');
+  assert.equal(modelFamily('openai-codex/gpt-6-luna'), 'openai');
+  assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'anthropic');
+  assert.equal(modelFamily('claude/sonnet:high'), 'anthropic');
+  assert.equal(modelFamily('codex/gpt-6-luna:high'), 'openai');
+  assert.equal(modelFamily('acme/reviewer'), 'reviewer');
+});
+
+test('modelFamily groups models by vendor', () => {
+  assert.equal(modelFamily('claude-sonnet-5'), modelFamily('claude-opus-5'));
+  assert.equal(modelFamily('codex/gpt-6-luna'), modelFamily('codex/gpt-6.1-sol'));
+  assert.notEqual(modelFamily('claude/sonnet'), modelFamily('codex/gpt-6-luna'));
+  assert.equal(modelFamily('openrouter/qwen/qwen3.7-plus'), modelFamily('opencode-go/qwen3.8-flash'));
 });
 
 test('review.request refuses the builder model and its family unless allowSameFamily', async () => {
@@ -883,7 +982,7 @@ test('review.request refuses the builder model and its family unless allowSameFa
   if (!same.ok) assert.match(same.reason, /builder's model/);
   const family = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: false });
   assert.equal(family.ok, false);
-  if (!family.ok) assert.match(family.reason, /family 'qwen'/);
+  if (!family.ok) assert.match(family.reason, /family 'alibaba'/);
   const forced = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: true });
   assert.equal(forced.ok, true);
   if (forced.ok) await helm.settle(forced.reviewWorkerId);
@@ -1824,4 +1923,55 @@ test('ticket timeout carries position and ETA without a worker, and mixed waits 
   const mixed = helm.wait({ workerIds: [active.workerId, queued.ticketId], timeoutMs: 1000 });
   await helm.ticketCancel({ ticketId: queued.ticketId }); const changed = await mixed; assert.ok(changed.ok); assert.equal(changed.tickets?.[0]?.state, 'cancelled'); assert.ok(changed.pending.includes(active.workerId));
   control.resolveNext(backlogDone); await helm.settle(active.workerId); await helm.close();
+});
+
+test('ticket lifecycle admission failure fails intake without polling or creating a worktree', async () => {
+  const { helm, store, created } = makeHelm();
+  const admit = helm.lifecycle.admit.bind(helm.lifecycle);
+  helm.lifecycle.admit = (name) => {
+    if (name === 'ticket.dispatch') throw new Error('dispatch admission failed');
+    return admit(name);
+  };
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const result = await Promise.race([
+      helm.spawn(spawnBody(mkTempDir('helm-ticket-admit-failure-'))),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('intake did not settle')), 2000); }),
+    ]);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, 'dispatch admission failed');
+    assert.equal(created.length, 0);
+    assert.equal((store.sql.prepare('SELECT state FROM tickets').get() as { state: string }).state, 'failed');
+    assert.ok((store.sql.prepare('SELECT endedAt FROM capacity_jobs').get() as { endedAt: string }).endedAt);
+  } finally { if (timer) clearTimeout(timer); await helm.close(); }
+});
+
+test('concurrent dispatch milestones reserve before the issue title lookup', async () => {
+  let resolveTitle!: (title: string) => void;
+  const lookup = new Promise<string>((resolve) => { resolveTitle = resolve; });
+  const seed = makeHelm();
+  const { helm, store } = makeHelm({ github: { ...seed.github.github, issueTitle: async () => lookup } });
+  const input = spawnBody(mkTempDir('helm-dispatch-concurrent-'), { issue: 322 });
+  const result = await helm.spawn(input);
+  assert.ok(result.ok && result.workerId);
+  const emitter = helm as unknown as { emitDispatched(workerId: string, input: SpawnInput): Promise<void> };
+  const repeated = Promise.all([emitter.emitDispatched(result.workerId, input), emitter.emitDispatched(result.workerId, input)]);
+  resolveTitle('Concurrent title');
+  await repeated;
+  await helm.settle(result.workerId);
+  assert.equal(store.listEvents(result.workerId).filter((event) => event.kind === 'dispatched').length, 1);
+});
+
+test('ticket worker PID hooks address the ticket capacity job', async () => {
+  const control = createControllableRunner();
+  const { helm, store } = makeHelm({ runner: control.runner });
+  const result = await helm.spawn(spawnBody(mkTempDir('helm-ticket-pid-')));
+  assert.ok(result.ok && result.workerId && result.ticketId);
+  const onPid = control.peekHooks().onPid;
+  assert.ok(onPid);
+  onPid(process.pid);
+  assert.equal((store.sql.prepare('SELECT pid FROM capacity_jobs WHERE id = ?').get(result.ticketId) as { pid: number }).pid, process.pid);
+  control.resolveNext(backlogDone);
+  await helm.settle(result.workerId);
+  await helm.close();
 });

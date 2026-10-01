@@ -83,7 +83,7 @@ import { createScorecard, type ScorecardExportInput, type ScorecardService } fro
 import type { RetryService } from './retry.js';
 import { createSelector, type Selection } from './select.js';
 import type { Jev } from './jev.js';
-import type { PromptInput } from './prompt.js';
+import { formatIssueBrief, type PromptInput } from './prompt.js';
 import { registerRouting } from './route.js';
 import { createRoutingCheck, type RoutingCheckService } from './routing/check.js';
 import { createModelCatalog, type CatalogProbe, type ModelCatalog } from './routing/catalog.js';
@@ -132,6 +132,9 @@ export type HelmDeps = Readonly<{
   stopTimeoutMs?: number;
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
+  /** How long review.request waits for GitHub to report the head pr.open pushed (default 60s), and how often it polls (default 2s). */
+  headWaitMs?: number;
+  headPollMs?: number;
   /** Install dependencies before builder/validator turns (the daemon enables it; off keeps turn start synchronous for fake runners). */
   workerInstall?: boolean;
   settings?: Settings;
@@ -236,8 +239,24 @@ function parseOwnerRepo(url: string): string | null {
 
 const SPEND_SERIES_POINTS = 300;
 
-/** Review family: leading letters of the last model path segment, independent of provider. */
+const VENDOR_FAMILIES: readonly (readonly [RegExp, string])[] = [
+  [/^(claude|anthropic)/, 'anthropic'],
+  [/^(codex|openai|gpt)/, 'openai'],
+  [/^(google|gemini)/, 'google'],
+  [/^qwen/, 'alibaba'],
+  [/^deepseek/, 'deepseek'],
+  [/^glm/, 'zhipu'],
+  [/^kimi/, 'moonshot'],
+  [/^nemotron/, 'nvidia'],
+];
+
+/** Review family: the model vendor, independent of lane or provider; unknown models use the first word of the id. */
 export function modelFamily(model: string): string {
+  const segments = model.toLowerCase().split('/');
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const hit = VENDOR_FAMILIES.find(([re]) => re.test(segments[i]!));
+    if (hit) return hit[1];
+  }
   const id = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
   const last = id.split('/').pop() ?? id;
   const m = /^[a-z]+/i.exec(last);
@@ -260,6 +279,9 @@ export class Helm {
   private readonly runner: WorkerRunner;
   private readonly prompts: HelmPrompts;
   private readonly now?: () => Date;
+  private readonly ticketCreations = new Map<string, { ready: Promise<void>; resolve: () => void }>();
+  private readonly dispatchMilestones = new Map<string, Promise<void>>();
+  private readonly dispatchedMilestones = new Set<string>();
   private readonly ticketDispatches = new Map<string, Promise<void>>();
   private readonly running = new Map<string, Promise<void>>();
   /** Workers with a stop requested for their current turn; cleared only once that turn settles (see runTurn). */
@@ -269,6 +291,8 @@ export class Helm {
   private readonly installedLocks = new Map<string, string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
+  private readonly headWaitMs: number;
+  private readonly headPollMs: number;
   private readonly workerInstall: boolean;
   private readonly installAborts = new Map<string, AbortController>();
   private readonly settings: Settings;
@@ -311,6 +335,8 @@ export class Helm {
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
+    this.headWaitMs = deps.headWaitMs ?? 60_000;
+    this.headPollMs = deps.headPollMs ?? 2_000;
     this.workerInstall = deps.workerInstall === true;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
@@ -561,6 +587,7 @@ export class Helm {
     await this.running.get(workerId);
     const ticket = this.store.sql.prepare('SELECT id FROM tickets WHERE workerId = ?').get(workerId) as { id: string } | undefined;
     if (ticket) await this.ticketDispatches.get(ticket.id);
+    await this.dispatchMilestones.get(workerId);
   }
 
   /** Called once on daemon start: every `running` worker becomes `interrupted`. */
@@ -604,9 +631,6 @@ export class Helm {
       try { selection = await this.selector.select(chosen.input); } catch (error) { return refuse(errMessage(error)); }
       const check = await quickCheck(this.jev, { objective: chosen.input.objective, project: chosen.input.repo });
       const outcome = await this.intakeTicket(chosen.input, selection, chosen.choice, check);
-      if (outcome.ok && outcome.workerId) void this.emitDispatched(outcome.workerId, chosen.input, chosen.choice).catch((error) => {
-        try { this.store.appendEvent(outcome.workerId!, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
-      });
       return outcome;
     });
   }
@@ -648,7 +672,12 @@ export class Helm {
     });
     if (!admission.queued) {
       // The callback takes the admission lock after intake releases it. Wait only for creation, never for the worker turn.
-      while (getTicket(this.store, admission.ticketId)?.state === 'queued') await new Promise((resolve) => setTimeout(resolve, 1));
+      const ready = this.ticketCreations.get(admission.ticketId)?.ready;
+      if (ready) {
+        let timer: NodeJS.Timeout | undefined;
+        try { await Promise.race([ready, new Promise<void>((resolve) => { timer = setTimeout(resolve, 10_000); })]); }
+        finally { if (timer) clearTimeout(timer); }
+      }
     }
     refreshTickets(this.store, this.effectiveSpend().maxWorkers, this.nowDate());
     const ticket = requireValue(getTicket(this.store, admission.ticketId), 'ticket not found');
@@ -662,15 +691,19 @@ export class Helm {
   }
 
   private beginTicketDispatch(ticketId: string): void {
+    let resolve!: () => void;
+    const ready = new Promise<void>((done) => { resolve = done; });
+    this.ticketCreations.set(ticketId, { ready, resolve });
     const promise = this.dispatchTicket(ticketId);
     this.ticketDispatches.set(ticketId, promise);
-    void promise.finally(() => this.ticketDispatches.delete(ticketId)).catch(() => undefined);
+    void promise.finally(() => { this.ticketDispatches.delete(ticketId); this.ticketCreations.delete(ticketId); }).catch(() => undefined);
   }
 
   private async dispatchTicket(ticketId: string): Promise<void> {
     let workerId: string | undefined;
-    const release = this.lifecycle.admit('ticket.dispatch');
+    let release = () => {};
     try {
+      release = this.lifecycle.admit('ticket.dispatch');
       await this.withLock(async () => {
         const ticket = requireValue(getTicket(this.store, ticketId), 'ticket not found');
         if (ticket.state !== 'queued') return;
@@ -680,14 +713,15 @@ export class Helm {
         const outcome = await this.spawnLocked(payload.input, undefined, payload.selection, payload.choice, payload.check, ticketId);
         must(outcome.ok, outcome.ok ? '' : outcome.reason);
         workerId = outcome.workerId;
-        void this.emitDispatched(workerId, payload.input, payload.choice).catch(() => undefined);
+        this.beginDispatchMilestone(workerId, payload.input, payload.choice);
       });
       release();
+      this.ticketCreations.get(ticketId)?.resolve();
       if (workerId) await this.running.get(workerId);
     } catch (error) {
       this.store.sql.prepare("UPDATE tickets SET state = 'failed', finishedAt = ?, lastPosition = 0 WHERE id = ?").run(this.nowIso(), ticketId);
       this.store.appendEvent(ticketId, 'ticket.failed', { message: errMessage(error) });
-    } finally { this.capacity.finish(ticketId); release(); }
+    } finally { this.ticketCreations.get(ticketId)?.resolve(); this.capacity.finish(ticketId); release(); }
   }
 
   async ticketCancel(input: { ticketId: string }) {
@@ -768,11 +802,14 @@ export class Helm {
     for (const skipped of choice?.skippedCandidates ?? []) this.store.appendEvent(workerId, 'route.skipped', skipped);
     if (selection.suggested) this.store.appendEvent(workerId, 'select.suggested', selection.suggested);
     if (selection.warning) this.store.appendEvent(workerId, 'select.warning', { warning: selection.warning });
-    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}) };
+    const issueNumber = baseline?.issue ?? input.issue;
+    const issueText = issueNumber !== undefined ? await this.fetchIssueText(repoSlug, issueNumber) : undefined;
+    const promptInput: PromptInput = { objective: input.objective, acceptance: input.acceptance ?? null, contextPaths: input.contextPaths, ...(input.role === 'builder' && selection.guidance ? { guidance: selection.guidance } : {}), ...(issueText ? { issueText } : {}) };
     this.store.appendEvent(workerId, 'admission.priority', { stated, requestedBy: input.requestedBy ?? 'auto', class: check.class ?? null, size: check.size ?? null, effective, score: rank.base, reasons: rank.reasons });
-    const message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
+    let message = input.role === 'reviewer' ? this.prompts.reviewer(promptInput)
       : input.role === 'validator' ? this.prompts.validator(promptInput)
         : this.prompts.builder(promptInput);
+    if (issueText && !message.includes(issueText)) message = `${message}\n\n${issueText}`;
     if (ticketId) {
       this.store.sql.prepare("UPDATE tickets SET state = 'dispatched', workerId = ?, dispatchedAt = ?, baseRef = ?, repo = ?, lastPosition = 0, etaAt = NULL WHERE id = ?").run(workerId, this.nowIso(), baseRef, repo, ticketId);
       this.store.sql.prepare('UPDATE capacity_jobs SET workerId = ? WHERE id = ?').run(workerId, ticketId);
@@ -785,13 +822,35 @@ export class Helm {
     return { ok: true, workerId, branch, worktree, loadClass, ...(warnings.length ? { warning: warnings.join('; ') } : {}), ...('queued' in admitted ? { queued: true as const } : {}) };
   }
 
+  private async fetchIssueText(repoSlug: string, issue: number): Promise<string | undefined> {
+    if (!this.github.issue) return undefined;
+    let cancelTimeout: (() => void) | undefined;
+    try {
+      const lookup = this.github.issue(repoSlug, issue);
+      const data = await Promise.race([lookup, new Promise<undefined>((resolve) => { const timer = setTimeout(resolve, 5_000); cancelTimeout = () => clearTimeout(timer); })]);
+      if (data) return formatIssueBrief(issue, data);
+    } catch { /* issue lookup is best effort */ }
+    finally { cancelTimeout?.(); }
+    return undefined;
+  }
+
+  private beginDispatchMilestone(workerId: string, input: SpawnInput, choice?: ModelChoice): void {
+    const pending = this.emitDispatched(workerId, input, choice).catch((error) => {
+      try { this.store.appendEvent(workerId, 'dispatched.warning', { message: `dispatch milestone failed: ${errMessage(error)}` }); } catch { /* warning logging must not break spawn */ }
+    });
+    this.dispatchMilestones.set(workerId, pending);
+    void pending.finally(() => { if (this.dispatchMilestones.get(workerId) === pending) this.dispatchMilestones.delete(workerId); }).catch(() => undefined);
+  }
+
   private async emitDispatched(workerId: string, input: SpawnInput, choice?: ModelChoice): Promise<void> {
     if (input.role !== 'builder' && input.role !== 'validator') return;
-    if (this.store.listEvents(workerId, { limit: 100 }).some((event) => event.kind === 'dispatched')) return;
+    if (this.dispatchedMilestones.has(workerId) || this.store.listEvents(workerId, { limit: 100 }).some((event) => event.kind === 'dispatched')) return;
     const row = this.store.getWorker(workerId);
     const meta = this.store.getMeta(workerId);
     const issue = meta?.issue ?? null;
     if (!row || issue === null) return;
+    // Reserve synchronously before the title lookup yields to another caller.
+    this.dispatchedMilestones.add(workerId);
     const fallback = input.objective.split(/\r?\n/, 1)[0]!.trim().slice(0, 80);
     let title: string | undefined;
     const lookup = this.github.issueTitle?.(row.repoSlug, issue);
@@ -1080,7 +1139,14 @@ export class Helm {
       must(model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
       must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
         `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
-      const head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      // GitHub can lag a push: review the head pr.open recorded, once GitHub reports it.
+      const deadline = Date.now() + this.headWaitMs;
+      let head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      while (head !== pr.head && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, this.headPollMs));
+        head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      }
+      must(head === pr.head, `GitHub still reports PR head ${head}, not the pushed head ${pr.head} after ${Math.round(this.headWaitMs / 1000)}s; retry review.request shortly`);
       try { await this.workspace.fetch(sourceWorker.repo, `pull-${pr.number}`, `refs/pull/${pr.number}/head`); } catch { /* offline: use local objects */ }
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {
@@ -1349,6 +1415,11 @@ export class Helm {
     });
   }
 
+  private setWorkerPid(workerId: string, pid: number): void {
+    const ticket = this.store.sql.prepare("SELECT id FROM tickets WHERE workerId = ? AND state = 'dispatched'").get(workerId) as { id: string } | undefined;
+    this.capacity.setPid(ticket?.id ?? workerId, pid);
+  }
+
   /** Give a worker turn node_modules by running the repo's install gate step (sandboxed, install network only); hygiene removes it when the turn settles. */
   private async installWorkerDeps(row: WorkerRow): Promise<string | undefined> {
     let refused: string | undefined;
@@ -1364,7 +1435,7 @@ export class Helm {
       if (this.installedLocks.get(row.workerId) === digest && existsSync(join(row.worktree, 'node_modules'))) return;
       const outcome = await this.gates.run(row.worktree, checks, join(this.config.home, 'logs', row.workerId, `install-${Date.now()}`), {
         timeoutMs: this.config.gateTimeoutMs, nodeModulesRoot: this.workerWorktreeRoot(row), keepNodeModules: true, signal: abort.signal, sandbox: await sandboxEnabled(row.repo, row.baseSha),
-        onPid: (pid) => this.capacity.setPid(row.workerId, pid),
+        onPid: (pid) => this.setWorkerPid(row.workerId, pid),
         onRefused: (reason) => { refused = reason; this.store.appendEvent(row.workerId, 'worker.install.refused', { reason }); },
       });
       if (outcome.passed) this.installedLocks.set(row.workerId, digest);
@@ -1475,7 +1546,7 @@ export class Helm {
 
   async capacityStatus(): Promise<CapacityStatus> { return this.capacity.status(); }
 
-  async close(): Promise<void> { await this.capacity.close(); }
+  async close(): Promise<void> { await this.capacity.close(); await Promise.all(this.dispatchMilestones.values()); }
 
   private async runTurn(workerId: string, message: string, onDone?: OnDone): Promise<void> {
     const row = this.store.getWorker(workerId);
@@ -1495,7 +1566,7 @@ export class Helm {
       onSession: (sessionFile) => {
         this.store.updateWorker(workerId, { sessionFile });
       },
-      onPid: (pid) => { this.capacity.setPid(workerId, pid); },
+      onPid: (pid) => { this.setWorkerPid(workerId, pid); },
       onUsage: (usage) => {
         const before = this.store.spendTotal().spendUsd;
         this.store.addSpend({ ...usage, workerId, at: this.nowIso() });

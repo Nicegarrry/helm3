@@ -290,3 +290,18 @@ test('capacity.queued and capacity.started events carry the score and reasons', 
     assert.equal(store.listEvents('first').find((event) => event.kind === 'capacity.started')?.data.score, 10);
   } finally { store.close(); }
 });
+
+test('setPid updates only the job id when gate and ticket share a worker', async () => {
+  const { store, capacity } = admission(snapshot());
+  try {
+    await capacity.admit({ id: 'ticket', workerId: 'worker', kind: 'builder', loadClass: 'light' }, () => {});
+    await capacity.admit({ id: 'gate', workerId: 'worker', kind: 'gate', loadClass: 'light' }, () => {});
+    capacity.setPid('worker', process.pid);
+    assert.deepEqual((store.sql.prepare('SELECT pid FROM capacity_jobs').all() as Array<{ pid: number | null }>).map((row) => row.pid), [null, null]);
+    capacity.setPid('ticket', process.pid);
+    assert.equal((store.sql.prepare('SELECT pid FROM capacity_jobs WHERE id = ?').get('ticket') as { pid: number }).pid, process.pid);
+    assert.equal((store.sql.prepare('SELECT pid FROM capacity_jobs WHERE id = ?').get('gate') as { pid: null }).pid, null);
+    capacity.setPid('gate', process.pid);
+    assert.equal((store.sql.prepare('SELECT pid FROM capacity_jobs WHERE id = ?').get('gate') as { pid: number }).pid, process.pid);
+  } finally { await capacity.close(); store.close(); }
+});

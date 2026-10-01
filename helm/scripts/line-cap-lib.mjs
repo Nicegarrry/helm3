@@ -46,7 +46,7 @@ export async function loadAgents(options = {}) {
   } catch {
     const branch = resolveBranch(base);
     try {
-      await exec('git', ['fetch', 'origin', `+${branch}:refs/remotes/origin/${branch}`, '--depth=1'], { cwd: root, timeout });
+      await exec('git', ['fetch', 'origin', `+${branch}:refs/remotes/origin/${branch}`], { cwd: root, timeout });
       const { stdout } = await exec('git', ['show', ref], { cwd: root, timeout });
       if (stdout.trim().length > 0) return stdout;
     } catch {

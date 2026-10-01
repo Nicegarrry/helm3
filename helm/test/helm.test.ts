@@ -34,6 +34,9 @@ function createFakeStore(): Store {
   return store;
 }
 
+/** Head each fake worktree last pushed; the fake GitHub reports it for the PR it opens from that worktree. */
+const pushedHeads = new Map<string, string>();
+
 function createFakeWorkspace() {
   const worktrees = new Map<string, { branch: string; baseSha: string; head: string; clean: boolean }>();
   const pushed: Array<{ path: string; branch: string }> = [];
@@ -83,6 +86,7 @@ function createFakeWorkspace() {
     },
     async push(path, branch) {
       pushed.push({ path, branch });
+      pushedHeads.set(path, worktrees.get(path)?.head ?? 'unknown');
     },
   };
 
@@ -121,11 +125,11 @@ function createFakeGitHub() {
   let nextNumber = 1;
 
   const github: GitHub = {
-    async openPr({ base, head: branch, title, body }) {
+    async openPr({ cwd, base, head: branch, title, body }) {
       opened.push({ base, head: branch, title, body });
       const number = nextNumber++;
       const url = `https://github.com/acme/repo/pull/${number}`;
-      prs.set(number, { number, state: 'open', head: `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
+      prs.set(number, { number, state: 'open', head: pushedHeads.get(cwd) ?? `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
       return { number, url };
     },
     async findPr(_repoSlug, head) { return existingByHead.get(head); },
@@ -256,6 +260,8 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
+    headWaitMs: 50,
+    headPollMs: 5,
   });
   return { helm, store, workspace, pushed, cloned, fetched, created, removed, markDirty, github: githubFake, config };
 }

@@ -129,6 +129,9 @@ export type HelmDeps = Readonly<{
   stopTimeoutMs?: number;
   /** How often worker.wait re-reads the store while blocking. */
   waitPollMs?: number;
+  /** How long review.request waits for GitHub to report the head pr.open pushed (default 60s), and how often it polls (default 2s). */
+  headWaitMs?: number;
+  headPollMs?: number;
   /** Install dependencies before builder/validator turns (the daemon enables it; off keeps turn start synchronous for fake runners). */
   workerInstall?: boolean;
   settings?: Settings;
@@ -281,6 +284,8 @@ export class Helm {
   private readonly installedLocks = new Map<string, string>();
   private readonly stopTimeoutMs: number;
   private readonly waitPollMs: number;
+  private readonly headWaitMs: number;
+  private readonly headPollMs: number;
   private readonly workerInstall: boolean;
   private readonly installAborts = new Map<string, AbortController>();
   private readonly settings: Settings;
@@ -323,6 +328,8 @@ export class Helm {
     this.now = deps.now;
     this.stopTimeoutMs = deps.stopTimeoutMs ?? 10_000;
     this.waitPollMs = deps.waitPollMs ?? 500;
+    this.headWaitMs = deps.headWaitMs ?? 60_000;
+    this.headPollMs = deps.headPollMs ?? 2_000;
     this.workerInstall = deps.workerInstall === true;
     this.settings = deps.settings ?? loadSettings(deps.config.home);
     const routingCatalog = deps.routingCatalog ?? createModelCatalog({ getSettings: () => loadSettings(this.config.home), probe: deps.routingProbe, claudeLaneRegistered: deps.claudeLaneRegistered });
@@ -972,7 +979,14 @@ export class Helm {
       must(model !== sourceWorker.model, `reviewer must not be the builder's model (${sourceWorker.model})`);
       must(input.allowSameFamily || modelFamily(model) !== modelFamily(sourceWorker.model),
         `reviewer model family '${modelFamily(model)}' matches the builder's; pick another family or pass allowSameFamily`);
-      const head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      // GitHub can lag a push: review the head pr.open recorded, once GitHub reports it.
+      const deadline = Date.now() + this.headWaitMs;
+      let head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      while (head !== pr.head && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, this.headPollMs));
+        head = (await this.github.prStatus(sourceWorker.repoSlug, pr.number)).head;
+      }
+      must(head === pr.head, `GitHub still reports PR head ${head}, not the pushed head ${pr.head} after ${Math.round(this.headWaitMs / 1000)}s; retry review.request shortly`);
       try { await this.workspace.fetch(sourceWorker.repo, `pull-${pr.number}`, `refs/pull/${pr.number}/head`); } catch { /* offline: use local objects */ }
       const objective = `Review PR #${pr.number} (${pr.url}) on branch ${sourceWorker.branch} in ${sourceWorker.repoSlug}. Read the diff, run relevant checks, and report findings as the worker result.`;
       const spawnPayload: SpawnInput = {

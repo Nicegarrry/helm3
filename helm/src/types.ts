@@ -144,6 +144,7 @@ export interface Store {
   findByIdempotencyKey(key: string): WorkerRow | undefined;
   listWorkers(filter?: { repo?: string; state?: WorkerState }): WorkerRow[];
   appendEvent(workerId: string, kind: string, data?: Record<string, unknown>, at?: string): EventRow;
+  latestEvent(workerId: string): EventRow | undefined;
   listEvents(workerId: string, opts?: { afterSeq?: number; limit?: number }): EventRow[];
   /** Events across every worker, ascending seq, `seq > afterSeq`. Default limit 100, capped at 1000. */
   listAllEvents(opts?: { afterSeq?: number; limit?: number }): EventRow[];

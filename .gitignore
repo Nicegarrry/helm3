@@ -16,3 +16,6 @@ dist/
 
 # helm harness package
 helm/node_modules
+
+# stray lockfile committed by #329; the repo installs from the root lockfile (#332)
+helm/package-lock.json

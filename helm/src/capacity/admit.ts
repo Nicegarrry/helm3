@@ -190,7 +190,7 @@ export function createCapacityAdmission(options: Readonly<{
         ? Math.max(snapshot.freeRamGb, pressureAvailableGb) / 2
         : Math.max(snapshot.freeRamGb, pressureAvailableGb);
     const ramUnits = testWithoutCapacityOverrides ? Number.MAX_SAFE_INTEGER : Math.floor(Math.max(0, availableGb - current.reserveGb) / Math.max(current.gbPerUnit, 0.1));
-    const resourceBudget = Math.max(0, ramUnits - snapshot.bootedSimulators * current.simulatorPenalty);
+    const resourceBudget = Math.max(0, ramUnits - (snapshot.bootedSimulators ?? 0) * current.simulatorPenalty);
     const budget = processLimited ? 0 : resourceBudget;
     const queue = queueEntries(rows.filter((row) => row.startedAt === null || row.startedAt === undefined));
     const runningClasses: Record<LoadClass, number> = { light: 0, medium: 0, heavy: 0 };

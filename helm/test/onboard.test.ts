@@ -7,13 +7,17 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test, { type TestContext } from 'node:test';
+import { cleanupTestDaemons } from './daemon-fixture.js';
 
 const exec = promisify(execFile);
 const launcher = resolve(dirname(fileURLToPath(import.meta.url)), '../bin/helm.js');
 const secret = 'onboarding-secret-must-not-appear';
 async function fixture(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'helm-onboard-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => {
+    await cleanupTestDaemons(home);
+    await rm(root, { recursive: true, force: true });
+  });
   const home = join(root, 'state'), repo = join(root, 'repo'), bin = join(root, 'bin'), agent = join(root, 'pi');
   await Promise.all([home, repo, bin, agent].map((p) => mkdir(p)));
   await exec('git', ['init', '-q', repo]);

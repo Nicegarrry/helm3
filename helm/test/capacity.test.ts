@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +8,7 @@ import test from 'node:test';
 import { createCapacityAdmission } from '../src/capacity/admit.js';
 import { askLoadClass, classifyLoad } from '../src/capacity/classify.js';
 import { admissionRank } from '../src/capacity/priority.js';
-import { createCapacitySampler, type CapacitySnapshot } from '../src/capacity/sampler.js';
+import { createCapacitySampler, createSimulatorProbe, defaultExec, type CapacitySnapshot } from '../src/capacity/sampler.js';
 import { openStore } from '../src/store.js';
 import { loadSettings } from '../src/settings.js';
 
@@ -197,6 +199,7 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
         calls.push(`${file}:${options.timeoutMs}`);
         if (file === 'vm_stat') return { stdout: 'page size of 4096 bytes\nPages free: 1048576\nPages inactive: 524288\nPages speculative: 262144\nPages purgeable: 262144\n' };
         if (file === 'memory_pressure') return { stdout: 'System-wide memory free percentage: 20%\n' };
+        if (file === 'xcodebuild') return { stdout: '', code: 0 };
         if (file === 'xcrun') return { stdout: JSON.stringify({ devices: { iOS: [{ state: 'Booted' }, { state: 'Shutdown' }] } }), code: 0 };
         if (file === 'ps' && args.includes('comm=')) return { stdout: 'xcodebuild\nxcodebuild\nnode\n', code: 0 };
         if (file === 'ps') return { stdout: '1\n2\n3\n', code: 0 };
@@ -215,9 +218,105 @@ test('the sampler uses bounded probes, disk/simulator telemetry, and its cache',
     assert.equal(first.maxProcesses, 100);
     assert.equal(first.processHeadroomPct, 0.97);
     assert.deepEqual(first.topProcesses, [{ name: 'xcodebuild', count: 2 }, { name: 'node', count: 1 }]);
-    assert.deepEqual(calls.sort(), ['memory_pressure:500', 'ps:500', 'ps:500', 'sysctl:500', 'vm_stat:500', 'xcrun:300']);
+    assert.deepEqual(calls.sort(), ['memory_pressure:500', 'ps:500', 'ps:500', 'sysctl:500', 'vm_stat:500', 'xcodebuild:1000', 'xcrun:300']);
     sampler.stop();
   } finally { store.close(); }
+});
+
+test('a timed capacity probe kills its grandchild process group', { timeout: 5_000 }, async () => {
+  const result = await defaultExec(process.execPath, ['-e', `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    console.log(child.pid);
+    setInterval(() => {}, 1000);
+  `], { timeoutMs: 500 });
+  const pid = Number(result.stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, result.stderr);
+  assert.equal(result.transient, true);
+  await assert.rejects(async () => {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      process.kill(pid, 0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }, (error: NodeJS.ErrnoException) => error.code === 'ESRCH');
+});
+
+test('defaultExec resolves a spawn error with null stdio as transient', async () => {
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, { pid: undefined, kill: () => true });
+  Object.defineProperty(child, 'stdout', { get() { assert.equal(child.listenerCount('error'), 1); return null; } });
+  Object.defineProperty(child, 'stderr', { get() { assert.equal(child.listenerCount('error'), 1); return null; } });
+  const result = defaultExec('unused', [], { timeoutMs: 100 }, () => {
+    queueMicrotask(() => { child.emit('error', Object.assign(new Error('too many files'), { code: 'EMFILE' })); });
+    return child;
+  });
+  assert.deepEqual(await result, { stdout: '', transient: true });
+});
+
+test('a failed first-launch check is retried after ten minutes before simctl runs', async () => {
+  let clock = 0;
+  let checks = 0;
+  let simctlCalls = 0;
+  const probe = createSimulatorProbe(async (file) => {
+    if (file === 'xcodebuild') return { stdout: '', code: ++checks === 1 ? 69 : 0 };
+    simctlCalls += 1;
+    return { stdout: '{"devices":{}}', code: 0 };
+  }, () => clock);
+  assert.equal((await probe()).code, 1);
+  assert.equal((await probe()).code, 1);
+  assert.equal(checks, 1);
+  assert.equal(simctlCalls, 0);
+  clock += 10 * 60_000;
+  assert.equal((await probe()).code, 0);
+  assert.equal((await probe()).code, 0);
+  assert.equal(checks, 2);
+  assert.equal(simctlCalls, 2);
+});
+
+test('the simulator probe retries spawn failures and timeouts after ten minutes', async () => {
+  let clock = 0;
+  let checks = 0;
+  let simctlCalls = 0;
+  const probe = createSimulatorProbe(async (file) => {
+    if (file === 'xcodebuild') {
+      checks += 1;
+      if (checks === 1) throw new Error('spawn failed');
+      if (checks === 2) return { stdout: '', code: 0, transient: true };
+      return { stdout: '', code: 0 };
+    }
+    simctlCalls += 1;
+    return { stdout: '{"devices":{}}', code: 0 };
+  }, () => clock);
+  assert.equal((await probe()).code, 1);
+  assert.equal((await probe()).code, 1);
+  assert.equal(checks, 1);
+  clock += 10 * 60_000;
+  assert.equal((await probe()).code, 1);
+  assert.equal(checks, 2);
+  clock += 10 * 60_000;
+  assert.equal((await probe()).code, 0);
+  assert.equal(checks, 3);
+  assert.equal(simctlCalls, 1);
+});
+
+test('simctl probes are single-flight', async () => {
+  let simctlCalls = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const probe = createSimulatorProbe(async (file) => {
+      if (file === 'xcodebuild') return { stdout: '', code: 0 };
+      if (file === 'xcrun') { simctlCalls += 1; await blocked; return { stdout: '{"devices":{}}', code: 0 }; }
+      return { stdout: '', code: 1 };
+    });
+    const first = probe();
+    const second = probe();
+    assert.equal(first, second);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(simctlCalls, 1);
+    release();
+    await Promise.all([first, second]);
+  } finally { release(); }
 });
 
 /** One worker slot, so every job after `first` queues; each admit advances the clock one second. */

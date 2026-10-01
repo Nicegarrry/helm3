@@ -1,12 +1,12 @@
-import { execFile } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { statfs as fsStatfs } from 'node:fs/promises';
 import { cpus, freemem, loadavg, totalmem } from 'node:os';
-import { promisify } from 'node:util';
 import type { Store } from '../types.js';
 import type { StatfsResult } from '../hygiene.js';
 
 export type MemoryPressure = 'normal' | 'warn' | 'critical' | 'unknown';
-export type CapacityExec = (file: string, args: string[], options: { timeoutMs: number }) => Promise<{ stdout: string; stderr?: string; code?: number }>;
+export type CapacityExecResult = { stdout: string; stderr?: string; code?: number; transient?: boolean };
+export type CapacityExec = (file: string, args: string[], options: { timeoutMs: number }) => Promise<CapacityExecResult>;
 export type CapacityRunning = Readonly<{ gates: number; builds: number; reviews: number }>;
 export type ProcessCount = Readonly<{ name: string; count: number }>;
 export type CapacitySnapshot = Readonly<{
@@ -18,7 +18,7 @@ export type CapacitySnapshot = Readonly<{
   load1: number;
   cpuCount: number;
   freeDiskGb: number | null;
-  bootedSimulators: number;
+  bootedSimulators: number | null;
   processCount?: number;
   maxProcesses?: number | null;
   processHeadroomPct?: number | null;
@@ -26,18 +26,43 @@ export type CapacitySnapshot = Readonly<{
   running: CapacityRunning;
 }>;
 
-const realExec = promisify(execFile);
 const GB = 1024 ** 3;
 
-const defaultExec: CapacityExec = async (file, args, options) => {
-  try {
-    const result = await realExec(file, args, { timeout: options.timeoutMs, maxBuffer: 2 * 1024 * 1024 });
-    return { stdout: result.stdout, stderr: result.stderr, code: 0 };
-  } catch (error) {
-    const value = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: number };
-    return { stdout: String(value.stdout ?? ''), stderr: String(value.stderr ?? value.message ?? ''), code: typeof value.code === 'number' ? value.code : 1 };
-  }
-};
+type CapacitySpawn = (file: string, args: string[], options: { detached: boolean; stdio: ['ignore', 'pipe', 'pipe'] }) => ChildProcess;
+
+export function defaultExec(file: string, args: string[], options: { timeoutMs: number }, spawnProcess: CapacitySpawn = spawn): Promise<CapacityExecResult> {
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try { child = spawnProcess(file, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch { resolve({ stdout: '', transient: true }); return; }
+    let stdout = '', stderr = '', transient = false;
+    let timer: NodeJS.Timeout | undefined;
+    let settled = false;
+    const finish = (result: CapacityExecResult) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    const killGroup = () => {
+      if (!child.pid) return;
+      try { process.kill(-child.pid, 'SIGKILL'); }
+      catch { child.kill('SIGKILL'); }
+    };
+    const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
+      if (target === 'stdout') stdout += chunk.toString(); else stderr += chunk.toString();
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 2 * 1024 * 1024) { transient = true; killGroup(); }
+    };
+    child.once('error', () => { finish({ stdout: '', transient: true }); });
+    child.stdout?.on('data', (chunk: Buffer) => { append('stdout', chunk); });
+    child.stderr?.on('data', (chunk: Buffer) => { append('stderr', chunk); });
+    child.once('close', (code) => { finish({ stdout, stderr, ...(code === null ? {} : { code }), ...(transient || code === null ? { transient: true } : {}) }); });
+    if (!settled) {
+      timer = setTimeout(() => { transient = true; killGroup(); }, options.timeoutMs);
+      timer.unref?.();
+    }
+  });
+}
 
 export function availableRamGbFromVmStat(output: string): number | null {
   const pageSize = Number(output.match(/page size of (\d+) bytes/i)?.[1] ?? 4096);
@@ -82,6 +107,26 @@ export function countBootedSimulators(output: string): number {
   }
 }
 
+export function createSimulatorProbe(exec: CapacityExec, now: () => number = Date.now): () => Promise<CapacityExecResult> {
+  let firstLaunchReady = false;
+  let retryFirstLaunchAt = 0;
+  let inFlight: Promise<CapacityExecResult> | undefined;
+  const safeExec = (file: string, args: string[], timeoutMs: number): Promise<CapacityExecResult> => exec(file, args, { timeoutMs }).catch(() => ({ stdout: '', transient: true }));
+  return () => {
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      if (!firstLaunchReady && now() >= retryFirstLaunchAt) {
+        const firstLaunch = await safeExec('xcodebuild', ['-checkFirstLaunchStatus'], 1_000);
+        if (!firstLaunch.transient && firstLaunch.code === 0) firstLaunchReady = true;
+        else retryFirstLaunchAt = now() + 10 * 60_000;
+      }
+      if (!firstLaunchReady) return { stdout: '', code: 1 };
+      return safeExec('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], 300);
+    })().finally(() => { inFlight = undefined; });
+    return inFlight;
+  };
+}
+
 function runningFromStore(store: Store): CapacityRunning {
   const workers = store.listWorkers().filter((worker) => worker.state === 'running');
   let gates = 0;
@@ -118,6 +163,7 @@ export function createCapacitySampler(options: Readonly<{
   let timer: ReturnType<typeof setInterval> | undefined;
   let sampling: Promise<CapacitySnapshot> | undefined;
   const safeExec = (file: string, args: string[], timeoutMs: number) => exec(file, args, { timeoutMs }).catch(() => ({ stdout: '', code: 1 }));
+  const probeSimulators = createSimulatorProbe(exec);
 
   async function sample(): Promise<CapacitySnapshot> {
     if (cached && Date.parse(cached.sampledAt) + (options.sampleSec ?? 5) * 1000 > now().getTime()) return cached;
@@ -127,7 +173,7 @@ export function createCapacitySampler(options: Readonly<{
         safeExec('vm_stat', [], 500),
         safeExec('memory_pressure', ['-Q'], 500),
         statfs(options.home).catch(() => null),
-        safeExec('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], 300),
+        probeSimulators(),
       ]);
       const uid = typeof process.getuid === 'function' ? String(process.getuid()) : undefined;
       const [processes, names, maxProcesses] = uid ? await Promise.all([
@@ -149,7 +195,7 @@ export function createCapacitySampler(options: Readonly<{
         load1: loadavg()[0] ?? 0,
         cpuCount: Math.max(1, cpus().length),
         freeDiskGb: disk ? (disk.bavail * disk.bsize) / GB : null,
-        bootedSimulators: simulators.code === 0 ? countBootedSimulators(simulators.stdout) : 0,
+        bootedSimulators: simulators.code === 0 ? countBootedSimulators(simulators.stdout) : null,
         ...(processCount !== undefined ? { processCount } : {}),
         maxProcesses: maxCount,
         processHeadroomPct: processCount !== undefined && maxCount ? Math.max(0, (maxCount - processCount) / maxCount) : null,

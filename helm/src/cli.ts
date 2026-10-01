@@ -1,6 +1,7 @@
 /** The `helm` command line. */
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -523,7 +524,9 @@ async function cmdServe(args: string[]): Promise<void> {
   const serveJsonPath = join(config.home, 'serve.json');
   const port = values.port ? Number(values.port) : 0;
   if (values.stdio && !values.http) {
-    const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port, tools));
+    const configuredPort = loadSettings(config.home).port;
+    const requestedPort = values.port ? port : configuredPort ?? 4747;
+    const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, requestedPort, tools));
     const handle = await serveStdioProxy(live.port, tools, config.home);
     console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);
     await handle.closed;
@@ -616,14 +619,40 @@ export async function launchRestartHelper(home: string, port: number, spawnHelpe
 }
 
 /** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */
+async function canListen(port: number): Promise<boolean> {
+  const probe = createServer();
+  return new Promise((done) => {
+    probe.once('error', () => done(false));
+    probe.listen(port, '127.0.0.1', () => probe.close(() => done(true)));
+  });
+}
+
+async function isHelmListener(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/status`, {
+      headers: { authorization: `Bearer ${'0'.repeat(64)}` },
+      signal: AbortSignal.timeout(1000), redirect: 'error',
+    });
+    return response.status === 401 && await response.text() === '';
+  } catch { return false; }
+}
+
+async function detachedDaemonPort(port: number): Promise<number> {
+  if (port !== 4747 || await canListen(port)) return port;
+  if (await isHelmListener(port)) throw new Error('port 4747 is already used by a Helm daemon; use its HELM_HOME to attach');
+  console.error('warning: port 4747 is in use by a non-Helm process; starting Helm on a random port');
+  return 0;
+}
+
 async function startDetachedDaemon(home: string, serveJsonPath: string, port: number, tools: ToolProfile): Promise<{ port: number; pid: number }> {
   if (existsSync(join(home, 'upgrade.lock'))) throw new Error('upgrade in progress; automatic startup is paused');
   const update = readMetadata(join(home, 'upgrade.json'));
   if (update?.phase === 'failed' && update.handoverStarted) throw new Error('upgrade failed after shutdown; explicit manual recovery is required');
   const selected = readMetadata(join(home, 'current-release.json'));
   const entry = selected ? join(String(selected.root), 'helm', 'src', 'cli.ts') : process.argv[1] ?? '';
+  const selectedPort = await detachedDaemonPort(port);
   const log = openSync(join(home, 'daemon.log'), 'a');
-  const child = spawn(process.execPath, ['--import', 'tsx', entry, 'serve', '--http', '--port', String(port)], {
+  const child = spawn(process.execPath, ['--import', 'tsx', entry, 'serve', '--http', '--port', String(selectedPort)], {
     cwd: resolve(entry, '..'), detached: true, stdio: ['ignore', log, log], env: { ...process.env, HELM_TOOLS: tools },
   });
   closeSync(log);

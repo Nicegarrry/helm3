@@ -59,6 +59,7 @@ test('mcp stdio: a real client lists core tools and calls them through helm serv
     assert.equal(missing.reason, 'worker not found');
     // The front-end started a daemon, which records itself in serve.json.
     const daemon = daemonOf(home);
+    assert.equal(daemon.port, 4747, 'a new shared-home daemon starts on the shared default port');
     assert.notEqual(daemon.pid, transport.pid, 'the daemon is a separate process from the stdio front-end');
     assert.match(daemon.token, /^[a-f0-9]{64}$/);
     const { stdout, stderr } = await promisify(execFile)(process.execPath,

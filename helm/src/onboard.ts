@@ -31,7 +31,7 @@ export function helmHttpDaemons(output: string, defaultHome: string): DaemonProc
     if (!pid || !command) return [];
     if (!/(?:^|\s)(?:(?:\S+\/)?helm(?:\.js)?|(?:\S+\/)?helm\/src\/cli\.ts)(?=\s|$)/.test(command) || !/(?:^|\s)serve(?=\s|$)/.test(command) || !/(?:^|\s)--http(?=\s|$)/.test(command)) return [];
     const requestedPort = command.match(/(?:^|\s)--port(?:=|\s+)(\d+)(?=\s|$)/)?.[1];
-    const port = requestedPort && Number(requestedPort) > 0 && Number(requestedPort) <= 65535 ? requestedPort : '4747';
+    const port = requestedPort && Number(requestedPort) > 0 && Number(requestedPort) <= 65535 ? requestedPort : 'unknown';
     const home = command.match(/(?:^|\s)HELM_HOME=(?:"([^"]*)"|'([^']*)'|(\S+))/)?.slice(1).find((value) => value !== undefined) || defaultHome;
     return [{ pid, port, home }];
   });
@@ -40,7 +40,7 @@ export function helmHttpDaemons(output: string, defaultHome: string): DaemonProc
 export async function doctor(repo = process.cwd()) {
   const home = loadConfig().home, checks: Check[] = [];
   const add = (name: string, status: Check['status'], detail: string, next: string) => checks.push({ name, status, detail, next });
-  const probe = async (file: string, args: string[]) => { try { return (await exec(file, args, { timeout: 5000, maxBuffer: 1024 * 1024 })).stdout; } catch { return undefined; } };
+  const probe = async (file: string, args: string[], maxBuffer = 1024 * 1024) => { try { return (await exec(file, args, { timeout: 5000, maxBuffer })).stdout; } catch { return undefined; } };
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
   add('node', (major > 22 || major === 22 && minor >= 22) && await probe(process.execPath, ['-e', "require('node:sqlite')"]) !== undefined ? 'ok' : 'fail', 'Node >= 22.22.0 with node:sqlite', 'nvm install 22.22.0');
   add('git', await probe('git', ['--version']) !== undefined ? 'ok' : 'fail', 'git available', 'brew install git');
@@ -83,17 +83,24 @@ export async function doctor(repo = process.cwd()) {
   const servePath = join(home, 'serve.json');
   if (!existsSync(servePath)) add('daemon', 'warn', 'serve.json absent', 'helm serve --stdio');
   else {
-    let alive = false, authenticated = false, stale = false;
+    let alive = false, authenticated = false, stale = false, daemonPort: number | undefined;
     try {
       const metadata = jsonFile(servePath);
       if (!Number.isInteger(metadata.pid) || metadata.pid <= 0 || !Number.isInteger(metadata.port) || metadata.port < 1 || metadata.port > 65535 || typeof metadata.token !== 'string' || !metadata.token) throw new Error();
+      daemonPort = metadata.port;
       try { process.kill(metadata.pid, 0); alive = true; } catch (e) { alive = (e as NodeJS.ErrnoException).code === 'EPERM'; stale = (e as NodeJS.ErrnoException).code === 'ESRCH'; }
       if (alive) { const res = await fetch(`http://127.0.0.1:${metadata.port}/tools/daemon.control`, { method: 'POST', headers: { authorization: `Bearer ${metadata.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'status' }), signal: AbortSignal.timeout(3000), redirect: 'error' }); authenticated = res.ok && (await res.json() as { ok?: boolean }).ok === true; }
     } catch { /* metadata and remote error bodies are never printed */ }
-    add('daemon-pid', alive ? 'ok' : stale ? 'warn' : 'fail', 'serve.json present; pid checked', stale ? 'start the daemon: helm serve' : 'helm doctor');
+    add('daemon-pid', alive ? 'ok' : stale ? 'warn' : 'fail', `serve.json present; pid checked${daemonPort ? ` on port ${daemonPort}` : ''}`, stale ? 'start the daemon: helm serve' : 'helm doctor');
     if (!stale) add('daemon-status', authenticated ? 'ok' : 'fail', 'authenticated status checked', 'helm doctor');
   }
-  const daemons = helmHttpDaemons(await probe('ps', ['eww', '-ax', '-o', 'pid=', '-o', 'command=']) ?? '', join(homedir(), '.helm'));
+  const daemons = helmHttpDaemons(await probe('ps', ['eww', '-ax', '-o', 'pid=', '-o', 'command='], 16 * 1024 * 1024) ?? '', join(homedir(), '.helm')).map((daemon) => {
+    try {
+      const metadata = jsonFile(join(daemon.home, 'serve.json'));
+      if (metadata.pid === Number(daemon.pid) && Number.isInteger(metadata.port) && metadata.port > 0 && metadata.port <= 65535) return { ...daemon, port: String(metadata.port) };
+    } catch { /* unavailable metadata leaves the command-line port unknown */ }
+    return daemon;
+  });
   if (daemons.length > 1) add('daemon-processes', 'warn', `${daemons.length} Helm daemons: ${daemons.map((daemon) => `pid ${daemon.pid} port ${daemon.port} HELM_HOME=${daemon.home}`).join('; ')}`, 'stop an unneeded daemon with helm shutdown');
   const ok = !checks.some((c) => c.status === 'fail');
   return { ok, checks, lanes, tiers, nextCommand: (checks.find((c) => c.status === 'fail') ?? checks.find((c) => c.status === 'warn' && ['config', 'daemon', 'daemon-pid'].includes(c.name)))?.next ?? `helm spawn --repo '${resolve(repo).replaceAll("'", "'\\''")}' --objective "Describe your task"` };

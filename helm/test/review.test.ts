@@ -14,7 +14,7 @@ import type { GateRunner, GitHub, HelmConfig, PrStatus, WorkerRow, WorkerRunner,
 const head1 = 'a'.repeat(40);
 const head2 = 'b'.repeat(40);
 
-function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchIds?: Record<string, string>; home?: string; runner?: WorkerRunner } = {}) {
+function setup(options: { headWaitMs?: number; jev?: Jev; body?: string; issueNumber?: number; patchIds?: Record<string, string>; home?: string; runner?: WorkerRunner } = {}) {
   const store = openStore(':memory:');
   const now = new Date().toISOString();
   const worker: WorkerRow = { workerId: 'w-review', repo: options.home ?? '/repo', repoSlug: 'owner/repo', role: 'builder', model: 'codex/gpt-6-luna:high', objective: 'work', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'base', branch: 'helm/review', worktree: '/repo', state: 'succeeded', head: head1, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: now, updatedAt: now };
@@ -36,7 +36,7 @@ function setup(options: { jev?: Jev; body?: string; issueNumber?: number; patchI
   const config: HelmConfig = { home: options.home ?? '/tmp/helm-review', spendCapUsd: 0, maxWorkers: 3, gateTimeoutMs: 1000 };
   const gates: GateRunner = { async run() { return { passed: true, checks: [] }; }, async defaultChecks() { return []; } };
   const runner: WorkerRunner = { async run() { return { result: null, rawText: '', sessionFile: null }; } };
-  const helm = new Helm({ config, store, workspace, gates, github, runner: options.runner ?? runner, prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, review });
+  const helm = new Helm({ config, store, workspace, gates, github, runner: options.runner ?? runner, prompts: { builder: () => '', reviewer: () => '', validator: () => '' }, review, headWaitMs: options.headWaitMs ?? 50, headPollMs: 5 });
   return { store, helm, review, github, posted, setHead: (head: string) => { currentHead = head; }, merged: () => merges };
 }
 
@@ -146,7 +146,7 @@ test('pr.merge refuses a review from the builder model family', async () => {
   try {
   const recorded = await d.review.record({ number: 1, head: head1, commentUrl: 'https://github.com/owner/repo/pull/1#issuecomment-14', reviewer: 'codex/gpt-6-luna:high', verdict: 'approve' });
     assert.equal(recorded.ok, true);
-    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: "reviewer model family 'gpt' matches the builder's" });
+    assert.deepEqual(await d.helm.prMerge({ number: 1, expectedHead: head1 }), { ok: false, reason: "reviewer model family 'openai' matches the builder's" });
   } finally { d.store.close(); }
 });
 
@@ -217,6 +217,30 @@ test('review.request does not record an approval if the PR head changes during r
     assert.equal(d.store.sql.prepare('SELECT * FROM reviews').all().length, 0);
     assert.ok(d.store.listAllEvents().some((event) => event.kind === 'review.record.failed'));
   } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review.request waits for GitHub to report the pushed head', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-lagging-review-'));
+  const d = setup({ home, headWaitMs: 2000 });
+  d.store.updatePr({ ...d.store.getPrByWorker('w-review')!, head: head2 });
+  setTimeout(() => d.setHead(head2), 30);
+  try {
+    const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    assert.equal(result.ok, true); if (!result.ok) return;
+    assert.equal(d.store.getWorker(result.reviewWorkerId)?.baseSha, head2);
+    await d.helm.settle(result.reviewWorkerId);
+  } finally { await d.helm.close(); d.store.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
+test('review.request refuses when GitHub never reports the pushed head', async () => {
+  const d = setup();
+  try {
+    d.store.updatePr({ ...d.store.getPrByWorker('w-review')!, head: head2 });
+    const result = await d.helm.reviewRequest({ number: 1, model: 'google/gemini-3.8-flash', allowSameFamily: false });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, new RegExp(`still reports PR head ${head1}, not the pushed head ${head2}`));
+    assert.equal(d.store.listWorkers().length, 1);
+  } finally { await d.helm.close(); d.store.close(); }
 });
 
 for (const example of [

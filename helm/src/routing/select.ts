@@ -26,23 +26,23 @@ type Options = Readonly<{
   now: Date;
 }>;
 
+/** Shared eligibility check for routing and read-only onboarding diagnostics. */
+export async function candidateUnavailableReason(settings: Settings, policy: AppliedRoutingPolicy, catalog: ModelCatalog, model: string): Promise<string | undefined> {
+  if (settings.routing.allowed.length > 0 && !settings.routing.allowed.includes(model)) return 'not allowed by routing.allowed';
+  if (!policyAllows(policy, model)) return policyReason(policy, model);
+  const available = await catalog.availability(model);
+  return available.available ? undefined : `unavailable: ${available.reason ?? 'model is unavailable'}`;
+}
+
 export async function selectCandidate(options: Options): Promise<CandidateSelection> {
   const policy = appliedPolicy(options.settings, options.input);
   const skipped: SkippedCandidate[] = [];
   const order = [...Array.from({ length: 6 - options.judgedTier }, (_, index) => options.judgedTier + index), ...Array.from({ length: options.judgedTier - 1 }, (_, index) => options.judgedTier - index - 1)];
   for (const tier of order) {
     for (const model of options.settings.routing.tiers[String(tier)] ?? []) {
-      if (options.settings.routing.allowed.length > 0 && !options.settings.routing.allowed.includes(model)) {
-        skipped.push({ model, reason: 'not allowed by routing.allowed', tier });
-        continue;
-      }
-      if (!policyAllows(policy, model)) {
-        skipped.push({ model, reason: policyReason(policy, model), tier });
-        continue;
-      }
-      const available = await options.catalog.availability(model);
-      if (!available.available) {
-        skipped.push({ model, reason: `unavailable: ${available.reason ?? 'model is unavailable'}`, tier });
+      const reason = await candidateUnavailableReason(options.settings, policy, options.catalog, model);
+      if (reason !== undefined) {
+        skipped.push({ model, reason, tier });
         continue;
       }
       const rate = cleanRateForRouting(options.store, model, tier, options.now, options.project);

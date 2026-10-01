@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -32,6 +33,9 @@ function createFakeStore(): Store {
   cleanupStores.push(store);
   return store;
 }
+
+/** Head each fake worktree last pushed; the fake GitHub reports it for the PR it opens from that worktree. */
+const pushedHeads = new Map<string, string>();
 
 function createFakeWorkspace() {
   const worktrees = new Map<string, { branch: string; baseSha: string; head: string; clean: boolean }>();
@@ -82,6 +86,7 @@ function createFakeWorkspace() {
     },
     async push(path, branch) {
       pushed.push({ path, branch });
+      pushedHeads.set(path, worktrees.get(path)?.head ?? 'unknown');
     },
   };
 
@@ -120,11 +125,11 @@ function createFakeGitHub() {
   let nextNumber = 1;
 
   const github: GitHub = {
-    async openPr({ base, head: branch, title, body }) {
+    async openPr({ cwd, base, head: branch, title, body }) {
       opened.push({ base, head: branch, title, body });
       const number = nextNumber++;
       const url = `https://github.com/acme/repo/pull/${number}`;
-      prs.set(number, { number, state: 'open', head: `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
+      prs.set(number, { number, state: 'open', head: pushedHeads.get(cwd) ?? `pr-head-${branch}`, mergeable: true, draft: false, checks: [], reviews: [], url });
       return { number, url };
     },
     async findPr(_repoSlug, head) { return existingByHead.get(head); },
@@ -224,7 +229,7 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number; jev: Jev; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
+type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; workerInstall: boolean; stopTimeoutMs: number; waitPollMs: number; jev: Jev; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
   settings?: Omit<Partial<Settings>, 'budgets'> & { budgets?: Partial<Settings['budgets']> };
 };
 
@@ -250,10 +255,13 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     prompts: FAKE_PROMPTS,
     routingCatalog,
     settings,
+    workerInstall: overrides.workerInstall,
     jev: overrides.jev,
     statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
+    headWaitMs: 50,
+    headPollMs: 5,
   });
   return { helm, store, workspace, pushed, cloned, fetched, created, removed, markDirty, github: githubFake, config };
 }
@@ -379,6 +387,80 @@ test('dispatch milestone rejection becomes a warning event instead of an unhandl
   assert.equal(warning?.data.message, 'dispatch milestone failed: milestone write failed');
 });
 
+test('worker.spawn with issue: injects issue title, body, and last 3 comments into brief', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async (_repo, number) => ({
+      title: 'Fix widget overflow',
+      body: 'Widget overflows container when screen is narrow.',
+      comments: [
+        { author: 'carol', body: 'Old comment that should be skipped' },
+        { author: 'alice', body: 'Confirmed on mobile' },
+        { author: 'bob', body: 'Reproduced in Chrome too' },
+        { author: 'dave', body: 'I will write tests' },
+      ],
+    }),
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 294, objective: 'Fix widget' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Issue #294: Fix widget overflow'));
+  assert.ok(capturedMessage.includes('Widget overflows container when screen is narrow.'));
+  assert.ok(!capturedMessage.includes('Old comment that should be skipped'));
+  assert.ok(capturedMessage.includes('alice: Confirmed on mobile'));
+  assert.ok(capturedMessage.includes('bob: Reproduced in Chrome too'));
+  assert.ok(capturedMessage.includes('dave: I will write tests'));
+});
+
+test('worker.spawn with issue: caps injected issue at 8000 chars', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const hugeBody = 'A'.repeat(10_000);
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async () => ({
+      title: 'Huge issue',
+      body: hugeBody,
+    }),
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-cap-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 295, objective: 'Investigate' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Issue #295: Huge issue'));
+  assert.ok(!capturedMessage.includes('A'.repeat(8001)));
+  assert.ok(capturedMessage.includes('A'.repeat(7900)));
+});
+
+test('worker.spawn with issue: gracefully handles github.issue error', async () => {
+  let capturedMessage = '';
+  const runner = createFakeRunner(async (_input, message) => {
+    capturedMessage = message;
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const seed = makeHelm();
+  const github: GitHub = {
+    ...seed.github.github,
+    issue: async () => { throw new Error('gh CLI error'); },
+  };
+  const { helm } = makeHelm({ runner, github });
+  const repo = mkTempDir('helm-spawn-issue-err-');
+  const outcome = await helm.spawn(spawnBody(repo, { issue: 296, objective: 'Handle error' }));
+  assert.ok(outcome.ok);
+  assert.ok(capturedMessage.includes('Handle error'));
+});
+
 test('a settled worker turn removes node_modules from every top-level package', async () => {
   const runner = createFakeRunner(async (input) => {
     mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });
@@ -400,6 +482,101 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'helm', 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
+});
+
+function installHarness(helmJson: object, gatesOverride?: GateRunner) {
+  const repo = mkTempDir('helm-install-repo-');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo });
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
+  writeFileSync(join(repo, 'helm.json'), JSON.stringify(helmJson));
+  git('add', '.'); git('commit', '-qm', 'base');
+  const installs: Array<{ commands: string[]; keepNodeModules?: boolean }> = [];
+  const seen: Array<'dir' | 'symlink' | 'missing'> = [];
+  const gates: GateRunner = {
+    async run(cwd, checks, _logDir, options) {
+      installs.push({ commands: checks.map((check) => check.command), keepNodeModules: options?.keepNodeModules });
+      mkdirSync(join(cwd, 'node_modules'), { recursive: true });
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks() { return []; },
+  };
+  const messages: string[] = [];
+  const runner = createFakeRunner(async (input, message) => {
+    messages.push(message);
+    const path = join(input.worktree, 'node_modules');
+    seen.push(!existsSync(path) ? 'missing' : lstatSync(path).isSymbolicLink() ? 'symlink' : 'dir');
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const made = makeHelm({ gates: gatesOverride ?? gates, runner, workerInstall: true });
+  made.workspace.resolveSha = async (_repo, ref) => execFileSync('git', ['rev-parse', ref === 'main' ? 'HEAD' : ref], { cwd: repo, encoding: 'utf8' }).trim();
+  return { ...made, installs, seen, messages, repo };
+}
+
+test('a failed install still runs the turn and prepends the install failure line to the message', async () => {
+  const gates: GateRunner = {
+    async run() { return { passed: false, checks: [{ name: 'install', command: 'npm ci', exitCode: 1, outputPath: '/tmp/install.log', durationMs: 1 }] }; },
+    async defaultChecks() { return []; },
+  };
+  const { helm, store, seen, messages, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }] }, gates);
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['missing']);
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0]!.startsWith('Dependency install failed: install exited 1; typecheck/tests may not run locally; the gate will run them.\n'), messages[0]);
+  assert.ok(messages[0]!.endsWith('BUILD: do the work'));
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'succeeded');
+});
+
+test('worker turns see a real node_modules from the install gate step and hygiene removes it afterwards', async () => {
+  const { helm, installs, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci --no-audit --no-fund' }, { name: 'test', command: 'npm test' }] });
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['dir']);
+  assert.deepEqual(installs, [{ commands: ['npm ci --no-audit --no-fund'], keepNodeModules: true }]);
+  assert.equal(existsSync(join(spawned.worktree, 'node_modules')), false);
+  assert.equal((await helm.steer({ workerId: spawned.workerId, message: 'again' })).ok, true);
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['dir', 'dir']);
+  assert.equal(installs.length, 2);
+  assert.equal(existsSync(join(spawned.worktree, 'node_modules')), false);
+});
+
+test('stop during the pre-turn install aborts it, never runs the turn, and settles stopped', async () => {
+  let installing!: () => void;
+  const started = new Promise<void>((resolve) => { installing = resolve; });
+  let signal: AbortSignal | undefined;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      signal = options?.signal;
+      installing();
+      return new Promise((resolve) => signal?.addEventListener('abort', () => resolve({ passed: false, checks: [] })));
+    },
+    async defaultChecks() { return []; },
+  };
+  const { helm, store, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }] }, gates);
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await started;
+  const stopped = await helm.stop({ workerId: spawned.workerId });
+  assert.deepEqual(stopped, { ok: true, state: 'stopped' });
+  assert.equal(signal?.aborted, true);
+  assert.deepEqual(seen, []);
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'stopped');
+});
+
+test('workerInstall false in helm.json skips the worker install', async () => {
+  const { helm, installs, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }], workerInstall: false });
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['missing']);
+  assert.deepEqual(installs, []);
 });
 
 test('gate node_modules cleanup failures are hygiene warnings', async () => {
@@ -730,13 +907,25 @@ test('soft spend cap defaults to 80% of the hard cap', async () => {
   assert.equal(none.helm.spendWarnUsd(), 0);
 });
 
-test('modelFamily strips provider and vendor prefixes', () => {
-  assert.equal(modelFamily('opencode-go/qwen3.8-flash'), 'qwen');
-  assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'glm');
-  assert.equal(modelFamily('google/gemini-3.8-flash'), 'gemini');
-  assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nemotron');
-  assert.equal(modelFamily('openai-codex/gpt-6-luna'), 'gpt');
-  assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'claude');
+test('modelFamily returns the model vendor and strips lane and provider prefixes', () => {
+  assert.equal(modelFamily('opencode-go/qwen3.8-flash'), 'alibaba');
+  assert.equal(modelFamily('opencode-go/glm-5.3-flash'), 'zhipu');
+  assert.equal(modelFamily('opencode-go/kimi-k3'), 'moonshot');
+  assert.equal(modelFamily('opencode-go/deepseek-v4'), 'deepseek');
+  assert.equal(modelFamily('google/gemini-3.8-flash'), 'google');
+  assert.equal(modelFamily('openrouter/nvidia/nemotron-3-ultra:free'), 'nvidia');
+  assert.equal(modelFamily('openai-codex/gpt-6-luna'), 'openai');
+  assert.equal(modelFamily('anthropic/claude-sonnet-5'), 'anthropic');
+  assert.equal(modelFamily('claude/sonnet:high'), 'anthropic');
+  assert.equal(modelFamily('codex/gpt-6-luna:high'), 'openai');
+  assert.equal(modelFamily('acme/reviewer'), 'reviewer');
+});
+
+test('modelFamily groups models by vendor', () => {
+  assert.equal(modelFamily('claude-sonnet-5'), modelFamily('claude-opus-5'));
+  assert.equal(modelFamily('codex/gpt-6-luna'), modelFamily('codex/gpt-6.1-sol'));
+  assert.notEqual(modelFamily('claude/sonnet'), modelFamily('codex/gpt-6-luna'));
+  assert.equal(modelFamily('openrouter/qwen/qwen3.7-plus'), modelFamily('opencode-go/qwen3.8-flash'));
 });
 
 test('review.request refuses the builder model and its family unless allowSameFamily', async () => {
@@ -754,7 +943,7 @@ test('review.request refuses the builder model and its family unless allowSameFa
   if (!same.ok) assert.match(same.reason, /builder's model/);
   const family = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: false });
   assert.equal(family.ok, false);
-  if (!family.ok) assert.match(family.reason, /family 'qwen'/);
+  if (!family.ok) assert.match(family.reason, /family 'alibaba'/);
   const forced = await helm.reviewRequest({ workerId: spawned.workerId, model: 'openrouter/qwen/qwen3.7-plus', allowSameFamily: true });
   assert.equal(forced.ok, true);
   if (forced.ok) await helm.settle(forced.reviewWorkerId);

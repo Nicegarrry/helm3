@@ -1,5 +1,4 @@
 /** The tool registry: maps tool names to their zod input schemas and dispatches validated calls to a Helm instance. */
-import { statusLines } from './tickets.js';
 import { z } from 'zod';
 import {
   budgetCloseInput,
@@ -52,6 +51,7 @@ import {
 import { scorecardExportInput } from './scorecard.js';
 import { READ_TOOLS } from './lifecycle.js';
 import type { Helm } from './helm.js';
+import { statusLines } from './tickets.js';
 
 type ToolDef = Readonly<{
   name: ToolName;

@@ -1,9 +1,9 @@
 /** SQLite storage for the core tables: workers, events, gates, prs, and spend. Feature modules own their tables via Store.sql. */
-import { ensureTickets } from './tickets.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { EventRow, GateRow, PrInput, PrRow, PrResolution, SpendLimitRow, SpendLimitState, SpendRow, SpendSummary, Store, WorkerMeta, WorkerRow, WorkerState } from './types.js';
+import { ensureTickets } from './tickets.js';
 
 const WORKER_COLUMNS = [
   'workerId', 'repo', 'repoSlug', 'role', 'model', 'objective', 'acceptance', 'contextPaths', 'allowWorkflows', 'baseRef', 'baseSha',

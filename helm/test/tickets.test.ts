@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openStore } from '../src/store.js';
+import { openBudget, attachWorker } from '../src/budget.js';
 import { createCapacityAdmission } from '../src/capacity/admit.js';
 import { loadSettings } from '../src/settings.js';
 import { getTicket, insertTicket, refreshTickets, statusLines, statusSections, ticketView, ticketLane, bumpTicket, type Ticket } from '../src/tickets.js';
@@ -69,15 +70,32 @@ test('status sections bound recent to twenty-four hours and ten rows, retain PR 
   } finally { await capacity.close(); store.close(); }
 });
 
-test('CLI status shows sections and JSON retains the complete backlog', () => {
+test('CLI status restores the compact spend and budget header above sections and JSON retains all rows', () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-ticket-cli-'));
   const store = openStore(join(home, 'helm.sqlite'));
   try {
     for (let i = 0; i < 30; i++) insertTicket(store, ticket(`t-${i}`, { lastPosition: i + 1 }));
+    for (let i = 0; i < 12; i++) insertTicket(store, ticket(`done-${i}`, { state: 'done', finishedAt: new Date().toISOString() }));
+    for (let i = 0; i < 5; i++) store.insertWorker({ workerId: `w-${i}`, repo: '/tmp/app', repoSlug: 'acme/app', role: 'builder', model: 'acme/model', objective: 'work', acceptance: null, contextPaths: [], allowWorkflows: false, baseRef: 'main', baseSha: 'abc', branch: `helm/w-${i}`, worktree: `/tmp/w-${i}`, state: 'running', head: null, sessionFile: null, result: null, rawResultText: null, idempotencyKey: null, createdAt: at.toISOString(), updatedAt: at.toISOString() });
+    const budget = openBudget(store, { project: 'acme/app', label: 'Sprint', capUsd: 5, openedAt: at.toISOString() });
+    attachWorker(store, 'w-0', budget.id);
+    store.addSpend({ workerId: 'w-0', model: 'acme/model', inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2, at: at.toISOString() });
+    for (const project of ['b/app', 'c/app', 'd/app']) openBudget(store, { project, label: 'Sprint', capUsd: 5, openedAt: at.toISOString() });
     store.close();
-    const run = (args: string[]) => execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'status', ...args], { encoding: 'utf8', env: { ...process.env, HELM_HOME: home } });
+    const run = (args: string[]) => execFileSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'status', ...args], { encoding: 'utf8', env: { ...process.env, HELM_HOME: home, HELM_SPEND_CAP_USD: '10', HELM_SPEND_WARN_USD: '8', HELM_MAX_WORKERS: '8' } });
     const compact = run([]); assert.match(compact, /Backlog\n/); assert.match(compact, /Working\n/); assert.match(compact, /Recent/); assert.ok(compact.trim().split('\n').length <= 25);
-    assert.equal(JSON.parse(run(['--json'])).sections.backlog.length, 30);
+    const lines = compact.trim().split('\n');
+    assert.equal(lines[0], 'spend:    $2.0000 / $10.00 cap | warn: $8.00 | workers: 5 / 8');
+    assert.match(lines[1]!, /^budgets:  acme\/app Sprint: \$2\.00 \/ \$5\.00 \(\$3\.00 remaining\).*; \+1 more$/);
+    assert.equal(lines[2], 'Backlog');
+    assert.equal(lines.length, 25);
+    const json = JSON.parse(run(['--json']));
+    assert.equal(json.sections.backlog.length, 30);
+    assert.equal(json.sections.working.length, 5);
+    assert.equal(json.sections.recent.length, 10);
+    assert.equal(json.projects.length, 4);
+    assert.equal(json.spendUsd, 2);
+    assert.equal(json.activeWorkers, 5);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 

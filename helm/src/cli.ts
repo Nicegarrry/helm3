@@ -1,5 +1,4 @@
 /** The `helm` command line. */
-import { statusSections, statusLines } from './tickets.js';
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -42,6 +41,7 @@ import { resolveToolProfile, type ToolProfile } from './tools.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
+import { statusSections, statusLines } from './tickets.js';
 
 // tsx has already registered; keep its override out of daemon/worker environments.
 delete process.env.TSX_TSCONFIG_PATH;
@@ -294,7 +294,9 @@ const cmdStatus = (args: string[]) =>
     const spend = createEffectiveSpendReader(config, store, loadSettings(config.home))();
     const payload = { sections: statusSections(store), spendUsd: total.spendUsd, spendCapUsd: spend.capUsd, spendWarnUsd: spend.warnUsd, activeWorkers, maxWorkers: spend.maxWorkers, unknownCostEvents: total.unknownCostEvents, projects: listBudgetStatuses(store), spendSources: spend.sources, spendCapSource: spend.sources.capUsd, spendWarnSource: spend.sources.warnUsd, maxWorkersSource: spend.sources.maxWorkers, ...(spend.warning ? { warning: spend.warning } : {}) };
     if (v.json) { console.log(JSON.stringify(payload, null, 2)); return; }
-    console.log(`spend:    $${payload.spendUsd.toFixed(4)}${payload.spendCapUsd > 0 ? ` / $${payload.spendCapUsd.toFixed(2)} cap` : ' (no cap)'}`);
+    console.log(`spend:    $${payload.spendUsd.toFixed(4)}${payload.spendCapUsd > 0 ? ` / $${payload.spendCapUsd.toFixed(2)} cap` : ' (no cap)'} | warn: $${payload.spendWarnUsd.toFixed(2)} | workers: ${payload.activeWorkers} / ${payload.maxWorkers > 0 ? payload.maxWorkers : 'unlimited'}`);
+    const budgets = payload.projects.slice(0, 3).map((budget) => `${`${budget.project} ${budget.label}`.replace(/[\r\n\t]/g, ' ').slice(0, 100)}: $${budget.spentUsd.toFixed(2)} / $${budget.capUsd.toFixed(2)} ($${budget.remainingUsd.toFixed(2)} remaining)${budget.exhausted ? ' exhausted' : ''}`);
+    console.log(`budgets:  ${budgets.join('; ') || 'none'}${payload.projects.length > budgets.length ? `; +${payload.projects.length - budgets.length} more` : ''}`);
     if (payload.warning) console.error(`warning: ${payload.warning}`);
     console.log(statusLines(payload.sections));
   });

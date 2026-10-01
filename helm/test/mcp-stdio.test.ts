@@ -1,6 +1,7 @@
 /** Drives `helm serve --stdio` as a child process through the real MCP client. */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,15 +12,23 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { serve } from '../src/server.ts';
 import { CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.ts';
 
-function stdioFrontEnd(home: string, tools = 'core', progressPollMs?: number) {
+function stdioFrontEnd(home: string, tools = 'core', options: { progressPollMs?: number; defaultPort?: number } = {}) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['--import', 'tsx', 'src/cli.ts', 'serve', '--stdio'],
     cwd: process.cwd(),
-    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools, ...(progressPollMs ? { HELM_PROGRESS_POLL_MS: String(progressPollMs) } : {}) } as Record<string, string>,
+    env: { ...process.env, HELM_HOME: home, HELM_MAX_WORKERS: '3', HELM_TOOLS: tools, ...(options.progressPollMs ? { HELM_PROGRESS_POLL_MS: String(options.progressPollMs) } : {}), ...(options.defaultPort ? { HELM_DEFAULT_PORT: String(options.defaultPort) } : {}) } as Record<string, string>,
     stderr: 'pipe',
   });
   return { transport, client: new Client({ name: 'helm-test', version: '0' }) };
+}
+
+async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const address = server.address(); assert.ok(address && typeof address !== 'string');
+  await new Promise<void>((done) => server.close(() => done()));
+  return address.port;
 }
 
 function alive(pid: number): boolean {
@@ -86,7 +95,7 @@ function waitingDaemon(home: string) {
 async function progressProxy(home: string) {
   const daemon = waitingDaemon(home);
   const daemonHandle = await serve({ helm: daemon.helm as never });
-  const { transport, client } = stdioFrontEnd(home, 'all', 50);
+  const { transport, client } = stdioFrontEnd(home, 'all', { progressPollMs: 50 });
   await client.connect(transport);
   return {
     daemon,
@@ -149,7 +158,8 @@ test('mcp stdio: worker.wait does not poll or emit progress without a progress t
 
 test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
-  const { transport, client } = stdioFrontEnd(home);
+  const defaultPort = await freePort();
+  const { transport, client } = stdioFrontEnd(home, 'core', defaultPort);
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
@@ -162,6 +172,7 @@ test('mcp stdio: a real client lists core tools and calls them through helm serv
     assert.equal(missing.reason, 'worker not found');
     // The front-end started a daemon, which records itself in serve.json.
     const daemon = daemonOf(home);
+    assert.equal(daemon.port, defaultPort, 'a new shared-home daemon starts on the injected default port');
     assert.notEqual(daemon.pid, transport.pid, 'the daemon is a separate process from the stdio front-end');
     assert.match(daemon.token, /^[a-f0-9]{64}$/);
     const { stdout, stderr } = await promisify(execFile)(process.execPath,
@@ -182,8 +193,9 @@ test('mcp stdio: a real client lists core tools and calls them through helm serv
 
 test('mcp stdio: the front-end exits with its client, the daemon outlives it, and a second client attaches to the same daemon', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
-  const a = stdioFrontEnd(home);
-  const b = stdioFrontEnd(home, 'supervisor');
+  const defaultPort = await freePort();
+  const a = stdioFrontEnd(home, 'core', defaultPort);
+  const b = stdioFrontEnd(home, 'supervisor', defaultPort);
   try {
     await a.client.connect(a.transport);
     const daemon = daemonOf(home);

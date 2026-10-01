@@ -122,10 +122,12 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
     const timeoutMs = typeof (input as { timeoutMs?: unknown }).timeoutMs === 'number' ? (input as { timeoutMs: number }).timeoutMs : 600_000;
     const started = Date.now();
     let progressValue = 0;
+    let done = false;
+    let progressFailureLogged = false;
     const sent = new Map<string, string>();
     const sentAt = new Map<string, number>();
     const publish = async (force = false) => {
-      if (extra.signal.aborted) return;
+      if (done || extra.signal.aborted) return;
       const query = new URLSearchParams({ workerIds: workerIds.join(','), timeoutMs: String(timeoutMs), startedAt: String(started) });
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let snapshot: ProgressState & { ok?: boolean };
@@ -135,9 +137,9 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
           new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error('progress read timed out')), PROGRESS_READ_TIMEOUT_MS); }),
         ]) as ProgressState & { ok?: boolean };
       } finally { clearTimeout(timeout); }
-      if (snapshot.ok !== true || !Array.isArray(snapshot.workers)) throw new Error('progress read failed');
+      if (snapshot.ok !== true || !Array.isArray(snapshot.workers)) throw new Error(String((snapshot as { reason?: unknown }).reason ?? 'progress read failed'));
       for (const workerId of workerIds) {
-        if (extra.signal.aborted) return;
+        if (done || extra.signal.aborted) return;
         const update = waitProgress(snapshot, workerId);
         const signature = progressSignature(update);
         const last = sent.get(workerId);
@@ -151,7 +153,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
             progressToken,
             progress: ++progressValue,
             message: `worker=${workerId}; state=${update.state}; position=${update.position ?? '-'}; etaMs=${update.etaMs}; activity=${update.activity}`,
-            _meta: { helm: update },
+            _meta: { helm: { ...update, workerId } },
           },
         });
       }
@@ -159,7 +161,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
     const wait = proxyRequest(port, `/tools/${encodeURIComponent(params.name)}`, input, profile, home, observe);
     const publishSafely = async (force = false) => {
       try { await publish(force); }
-      catch (error) { logProgressError(error); }
+      catch (error) { if (!progressFailureLogged) { progressFailureLogged = true; logProgressError(error); } }
     };
     const publishTerminal = async (outcome: { settled?: Array<{ workerId?: string; id?: string; state?: string; status?: string }>; workers?: Array<{ workerId?: string; id?: string; state?: string; status?: string }> }) => {
       if (extra.signal.aborted) return false;
@@ -174,7 +176,7 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
             progressToken,
             progress: ++progressValue,
             message: `worker=${workerId}; state=${state}; position=-; etaMs=0; activity=worker wait completed`,
-            _meta: { helm: { state, position: null, etaMs: 0, activity: 'worker wait completed' } },
+            _meta: { helm: { workerId, state, position: null, etaMs: 0, activity: 'worker wait completed' } },
           },
         });
         sentTerminal = true;
@@ -182,10 +184,11 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
       return sentTerminal;
     };
     let publishing = false;
+    let publishingNow: Promise<void> | undefined;
     const pollProgress = () => {
       if (publishing || extra.signal.aborted) return;
       publishing = true;
-      void publishSafely().finally(() => { publishing = false; });
+      publishingNow = publishSafely().finally(() => { publishing = false; });
     };
     pollProgress();
     const progress = setInterval(() => {
@@ -196,7 +199,9 @@ export async function serveStdioProxy(port: number, profile = process.env.HELM_T
     extra.signal.addEventListener('abort', stopProgress, { once: true });
     try {
       const outcome = await wait;
+      done = true;
       stopProgress();
+      await publishingNow;
       const terminalSent = await publishTerminal(outcome).catch((error) => { logProgressError(error); return false; });
       if (!terminalSent) await publishSafely(true);
       return { content: [{ type: 'text', text: JSON.stringify(outcome) }] };

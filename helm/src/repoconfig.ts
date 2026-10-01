@@ -14,6 +14,7 @@ export const repoConfigSchema = z.object({
   gates: z.array(z.object({ name: z.string().min(1), command: z.string().min(1) })).default([]),
   priority: z.enum(PRIORITIES).optional(),
   gate: z.object({ sandbox: z.boolean().default(true) }).optional(),
+  workerInstall: z.boolean().optional(),
   acceptance: z.object({ testGlobs: z.array(z.string().min(1)), command: z.string().min(1).optional() }).optional(),
   deploy: z.object({ targets: z.array(z.object({
     name: z.string().min(1),

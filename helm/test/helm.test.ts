@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -224,7 +225,7 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; stopTimeoutMs: number; waitPollMs: number; jev: Jev; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
+type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; workerInstall: boolean; stopTimeoutMs: number; waitPollMs: number; jev: Jev; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
   settings?: Omit<Partial<Settings>, 'budgets'> & { budgets?: Partial<Settings['budgets']> };
 };
 
@@ -250,6 +251,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     prompts: FAKE_PROMPTS,
     routingCatalog,
     settings,
+    workerInstall: overrides.workerInstall,
     jev: overrides.jev,
     statfs: overrides.statfs,
     stopTimeoutMs: overrides.stopTimeoutMs,
@@ -411,6 +413,101 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'helm', 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
+});
+
+function installHarness(helmJson: object, gatesOverride?: GateRunner) {
+  const repo = mkTempDir('helm-install-repo-');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo });
+  git('init', '-q'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
+  writeFileSync(join(repo, 'helm.json'), JSON.stringify(helmJson));
+  git('add', '.'); git('commit', '-qm', 'base');
+  const installs: Array<{ commands: string[]; keepNodeModules?: boolean }> = [];
+  const seen: Array<'dir' | 'symlink' | 'missing'> = [];
+  const gates: GateRunner = {
+    async run(cwd, checks, _logDir, options) {
+      installs.push({ commands: checks.map((check) => check.command), keepNodeModules: options?.keepNodeModules });
+      mkdirSync(join(cwd, 'node_modules'), { recursive: true });
+      return { passed: true, checks: [] };
+    },
+    async defaultChecks() { return []; },
+  };
+  const messages: string[] = [];
+  const runner = createFakeRunner(async (input, message) => {
+    messages.push(message);
+    const path = join(input.worktree, 'node_modules');
+    seen.push(!existsSync(path) ? 'missing' : lstatSync(path).isSymbolicLink() ? 'symlink' : 'dir');
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const made = makeHelm({ gates: gatesOverride ?? gates, runner, workerInstall: true });
+  made.workspace.resolveSha = async (_repo, ref) => execFileSync('git', ['rev-parse', ref === 'main' ? 'HEAD' : ref], { cwd: repo, encoding: 'utf8' }).trim();
+  return { ...made, installs, seen, messages, repo };
+}
+
+test('a failed install still runs the turn and prepends the install failure line to the message', async () => {
+  const gates: GateRunner = {
+    async run() { return { passed: false, checks: [{ name: 'install', command: 'npm ci', exitCode: 1, outputPath: '/tmp/install.log', durationMs: 1 }] }; },
+    async defaultChecks() { return []; },
+  };
+  const { helm, store, seen, messages, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }] }, gates);
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['missing']);
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0]!.startsWith('Dependency install failed: install exited 1; typecheck/tests may not run locally; the gate will run them.\n'), messages[0]);
+  assert.ok(messages[0]!.endsWith('BUILD: do the work'));
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'succeeded');
+});
+
+test('worker turns see a real node_modules from the install gate step and hygiene removes it afterwards', async () => {
+  const { helm, installs, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci --no-audit --no-fund' }, { name: 'test', command: 'npm test' }] });
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['dir']);
+  assert.deepEqual(installs, [{ commands: ['npm ci --no-audit --no-fund'], keepNodeModules: true }]);
+  assert.equal(existsSync(join(spawned.worktree, 'node_modules')), false);
+  assert.equal((await helm.steer({ workerId: spawned.workerId, message: 'again' })).ok, true);
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['dir', 'dir']);
+  assert.equal(installs.length, 2);
+  assert.equal(existsSync(join(spawned.worktree, 'node_modules')), false);
+});
+
+test('stop during the pre-turn install aborts it, never runs the turn, and settles stopped', async () => {
+  let installing!: () => void;
+  const started = new Promise<void>((resolve) => { installing = resolve; });
+  let signal: AbortSignal | undefined;
+  const gates: GateRunner = {
+    async run(_cwd, _checks, _logDir, options) {
+      signal = options?.signal;
+      installing();
+      return new Promise((resolve) => signal?.addEventListener('abort', () => resolve({ passed: false, checks: [] })));
+    },
+    async defaultChecks() { return []; },
+  };
+  const { helm, store, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }] }, gates);
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await started;
+  const stopped = await helm.stop({ workerId: spawned.workerId });
+  assert.deepEqual(stopped, { ok: true, state: 'stopped' });
+  assert.equal(signal?.aborted, true);
+  assert.deepEqual(seen, []);
+  assert.equal(store.getWorker(spawned.workerId)?.state, 'stopped');
+});
+
+test('workerInstall false in helm.json skips the worker install', async () => {
+  const { helm, installs, seen, repo } = installHarness({ gates: [{ name: 'install', command: 'npm ci' }], workerInstall: false });
+  const spawned = await helm.spawn(spawnBody(repo));
+  assert.equal(spawned.ok, true);
+  if (!spawned.ok) return;
+  await helm.settle(spawned.workerId);
+  assert.deepEqual(seen, ['missing']);
+  assert.deepEqual(installs, []);
 });
 
 test('gate node_modules cleanup failures are hygiene warnings', async () => {

@@ -204,7 +204,7 @@ export type GateCheck = Readonly<{ name: string; command: string }>;
 
 export interface GateRunner {
   /** Run each check in `cwd` sequentially; capture output to files under `logDir`. */
-  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
+  run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; keepNodeModules?: boolean; signal?: AbortSignal; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }): Promise<Omit<GateRow, 'gateId' | 'workerId' | 'head' | 'at'>>;
   /** Read helm.gates from `<repo>/helm.json` or fall back to defaults derived from package.json scripts. */
   defaultChecks(repo: string, sha?: string): Promise<GateCheck[]>;
 }

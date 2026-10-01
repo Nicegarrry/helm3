@@ -171,6 +171,23 @@ test('mcp stdio: a timed-out worker.wait sends a final progress update', async (
   } finally { await harness.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
+test('mcp stdio: final progress survives a client that reads it together with the response', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
+  const harness = await progressProxy(home);
+  try {
+    const updates: ProgressUpdate[] = [];
+    const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } }, undefined, { onprogress: (update) => updates.push(update as unknown as ProgressUpdate) });
+    await waitForProgressState(updates, 'queued');
+    harness.daemon.finish();
+    await new Promise((resolve) => setImmediate(resolve));
+    // A loaded client: block its event loop so the proxy's final progress and response arrive in one read.
+    const busyUntil = Date.now() + 500;
+    while (Date.now() < busyUntil) { /* spin */ }
+    await waiting;
+    assert.ok(updates.some((update) => update._meta?.helm?.state === 'succeeded'), 'final progress is dispatched before the response');
+  } finally { await harness.close(); rmSync(home, { recursive: true, force: true }); }
+});
+
 test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const defaultPort = await freePort();

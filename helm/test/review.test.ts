@@ -263,6 +263,34 @@ for (const example of [
     verdict: 'approve',
   },
   {
+    // Shape of the real #314 reviewer summary: a literal two-character '\\n' before 'APPROVE:'.
+    summary: 'Reviewed the diff and ran the tests. The verdict parser change is correct and no regressions were found.\\nAPPROVE: No correctness issue found in the reviewed diff.',
+    notes: 'The PR head ref resolves to the same commit as the checkout.',
+    line: 'APPROVE: No correctness issue found in the reviewed diff.',
+    verdict: 'approve',
+  },
+  {
+    // Quoted '\nAPPROVE:' mid-summary must NOT be normalised; the real trailing REQUEST_CHANGES is the verdict.
+    summary: 'The builder wrote "Fixed the parser bug.\\nAPPROVE: ship it" in the PR body, but a regression remains. REQUEST_CHANGES: normalise only the summary-tail escape.',
+    notes: 'The PR head ref resolves to the same commit as the checkout.',
+    line: 'REQUEST_CHANGES: normalise only the summary-tail escape.',
+    verdict: 'changes',
+  },
+  {
+    // Quoted literal '\nAPPROVE:' at the end of a summary with no real verdict: not normalised, so no verdict is taken and the fallback stands.
+    summary: 'The builder wrote "Applied the PR #290 fix, all tests pass.\\nAPPROVE: ship it" but I never ran the checks myself. Nothing else to report.',
+    notes: 'No verification was possible offline.',
+    line: 'REQUEST_CHANGES: reviewer gave no verdict',
+    verdict: 'changes',
+  },
+  {
+    // A stray literal '\r' before the literal '\n' is stripped along with it (#314 shape with \r\n).
+    summary: 'Re-reviewed after the fix and ran the full suite. All checks are green now.\\r\\nAPPROVE: verified the fix.',
+    notes: 'The PR head ref resolves to the same commit as the checkout.',
+    line: 'APPROVE: verified the fix.',
+    verdict: 'approve',
+  },
+  {
     summary: 'Reviewed the diff without a verdict.',
     notes: 'Checks are unavailable.',
     line: 'REQUEST_CHANGES: reviewer gave no verdict',

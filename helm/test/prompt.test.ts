@@ -22,6 +22,18 @@ test('reviewer prompt stays read-only guidance without the commit line', () => {
   assert.ok(!text.includes(COMMIT_LINE));
 });
 
+test('reviewer prompt reports all blocking findings in one pass and scopes re-reviews (#327)', () => {
+  const text = reviewerPrompt(input);
+  assert.ok(
+    text.includes('In a single pass, list every blocking finding you can find, numbered. Separate blocking findings\nfrom non-blocking ones; non-blocking nits never gate a round.'),
+    'reviewer prompt missing single-pass blocking-findings guidance',
+  );
+  assert.ok(
+    text.includes('On a re-review, check only that the previous findings were fixed and look for regressions in the\nnew diff; do not invent new nits outside it.'),
+    'reviewer prompt missing re-review scope guidance',
+  );
+});
+
 test('formatIssueBrief: formats title and body', () => {
   const result = formatIssueBrief(42, { title: 'Fix bug', body: 'The bug is here.' });
   assert.equal(result, 'Issue #42: Fix bug\n\nThe bug is here.');

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { attachWorker, openBudget } from '../src/budget.js';
+import { attachWorker, closeBudget, openBudget } from '../src/budget.js';
 import { ensureTapTable } from '../src/envelope.js';
 import { insertInbox } from '../src/inbox.js';
 import { createReportTicker, formatPortfolio, portfolio, reportContent, startNotificationTickers } from '../src/portfolio.js';
@@ -48,11 +48,96 @@ test('seeded portfolio reuses scorecard activity, includes old workers, budget a
     assert.equal(one.merged, 1); assert.equal(one.cleanRate, 0.5); assert.equal(one.firstPassGateRate, 0.5); assert.equal(one.taps, 1);
     assert.deepEqual(one.openPrs, [{ number: 1, waiting: 'review' }, { number: 2, waiting: 'merge' }]);
     assert.equal(report.total.stuck, 1); assert.equal(report.total.inbox, 1);
-    const content = formatPortfolio(report); assert.ok(content.split('\n').length <= 25); assert.match(content, /Fleet: \$2.00; Codex 120 tokens; merged 1/);
+    const content = formatPortfolio(report);
+    const lines = content.split('\n');
+    assert.match(lines[0]!, /^\*\*Helm · [A-Za-z]{3} \d{1,2} [A-Za-z]{3}\*\*$/);
+    assert.deepEqual(lines.slice(1), ['1 merged · 2 PRs open (1 needs review) · 1 stuck · 1 ask · 1 tap pending', '$2.00 spent · $10.00 budgeted · Codex 120 tokens', '',
+      '**one**: 1 merged, 2 PRs open (1 needs review), 50% gates pass first time, $2.00, 1 tap pending', '**two**: 1 stuck, 1 ask', 'Idle: empty']);
+    assert.doesNotMatch(content, /\d{4}-\d{2}-\d{2}|T\d{2}:\d{2}/, 'no ISO timestamps in the report');
+    assert.doesNotMatch(content, /acme\//, 'repo names drop the owner prefix');
+    assert.ok(!content.includes('clean'), 'clean rate is dropped');
     assert.equal(f.store.sql.prepare("SELECT 1 FROM sqlite_master WHERE name='memory_outbox'").get(), undefined);
     assert.equal((await portfolio(f.store, f.settings, '2026-10-01T11:00:00Z', now)).total.usd, 0);
     await assert.rejects(portfolio(f.store, f.settings, 'yesterday', now), /ISO date/);
   } finally { f.close(); }
+});
+
+test('one compact line per active project; idle collapse after a blank line; a zero fleet says Nothing needs you', async () => {
+  const f = fixture({ discord: { projects: { 'acme/idle-a': { webhookEnv: 'E1' }, 'acme/idle-b': { webhookEnv: 'E2' } } } });
+  try {
+    const zero = formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n');
+    assert.equal(zero[1], 'Nothing needs you');
+    assert.deepEqual(zero.slice(2), ['$0.00 spent · Codex 0 tokens', '', 'Idle: idle-a, idle-b']);
+    f.store.insertWorker(worker('paid', 'acme/active'));
+    f.store.addSpend({ workerId: 'paid', model: 'pi/paid', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 1, at: recent });
+    assert.deepEqual(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n').slice(1), ['0 merged', '$1.00 spent · Codex 0 tokens', '', '**active**: $1.00', 'Idle: idle-a, idle-b']);
+    f.store.insertPr({ repoSlug: 'acme/idle-a', workerId: 'paid', number: 201, head: 'b', state: 'open', url: 'https://pr/201', createdAt: old });
+    const second = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
+    assert.ok(second.includes('**idle-a**: 1 PR open (1 needs review)'), 'open PRs alone make a project active');
+    assert.ok(second.includes('· 1 PR open (1 needs review)'), 'singular PR and needs in the headline');
+    assert.ok(!second.includes('tap'), 'no taps segment when fleet taps are zero');
+    assert.match(second, /^Idle: idle-b$/m);
+    f.store.insertPr({ repoSlug: 'acme/idle-b', workerId: 'paid', number: 202, head: 'b', state: 'open', url: 'https://pr/202', createdAt: old });
+    const third = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
+    assert.doesNotMatch(third, /Idle:/, 'no Idle line when none are idle');
+    assert.ok(!third.includes('stuck'), 'stuck is omitted from the headline when zero');
+    assert.ok(third.includes('· 2 PRs open (2 need review)'), 'plural PRs and need review in the headline');
+    assert.ok(third.includes('**idle-b**: 1 PR open (1 needs review)'), 'project line stays singular');
+    assert.doesNotMatch(third, /1 PRs|1 asks|1 needs review\) · 2 PRs/);
+  } finally { f.close(); }
+});
+
+test('asks pluralise: 1 ask vs 2 asks on the project line and in the headline', async () => {
+  const f = fixture();
+  try {
+    insertInbox(f.store.sql, { id: 'a1', project: 'acme/x', workerId: 'w', question: 'q', createdAt: old });
+    let content = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
+    assert.ok(content.includes('0 merged · 1 ask'), 'singular headline ask');
+    assert.ok(content.includes('**x**: 1 ask'));
+    insertInbox(f.store.sql, { id: 'a2', project: 'acme/x', workerId: 'w', question: 'q', createdAt: old });
+    content = formatPortfolio(await portfolio(f.store, f.settings, undefined, now));
+    assert.ok(content.includes('0 merged · 2 asks'), 'plural headline asks');
+    assert.ok(content.includes('**x**: 2 asks'));
+    assert.doesNotMatch(content, /1 asks/);
+  } finally { f.close(); }
+});
+
+test('spend line totals window spend across all projects and shows the budget cap only while a budget is open', async () => {
+  const f = fixture();
+  try {
+    openBudget(f.store, { project: 'acme/a', label: 'l', capUsd: 50, capCodexTokens: null, openedAt: old });
+    f.store.insertWorker(worker('wa', 'acme/a')); f.store.insertWorker(worker('wb', 'acme/b'));
+    f.store.addSpend({ workerId: 'wa', model: 'pi/paid', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.43, at: recent });
+    f.store.addSpend({ workerId: 'wb', model: 'pi/paid', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 2, at: recent });
+    const lines = formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n');
+    assert.equal(lines[2], '$2.43 spent · $50.00 budgeted · Codex 0 tokens', 'unbudgeted project spend is included in the total');
+    assert.ok(lines.includes('**a**: $0.43') && lines.includes('**b**: $2.00'), 'per-project spend stays separate');
+    closeBudget(f.store, 'acme/a', recent);
+    const closed = formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).split('\n');
+    assert.equal(closed[2], '$2.43 spent · Codex 0 tokens', 'no budgeted segment when no budget is open');
+  } finally { f.close(); }
+});
+
+test('taps count as visible activity: taps-only projects show 1 tap pending / 2 taps pending', async () => {
+  const f = fixture();
+  try {
+    ensureTapTable(f.store);
+    f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('t1', 'acme/taps', 'test', 'a', 'h', 'h', 'used', recent, recent);
+    assert.ok(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes('**taps**: 1 tap pending'), 'taps-only project is not dropped');
+    f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('t2', 'acme/taps', 'test', 'a', 'h', 'h', 'used', recent, recent);
+    assert.ok(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes('**taps**: 2 taps pending'));
+  } finally { f.close(); }
+});
+
+test('fleet token counts are humanised (17M, 850k)', async () => {
+  for (const [tokens, expected] of [[17_000_000, 'Codex 17M tokens'], [850_000, 'Codex 850k tokens']] as const) {
+    const f = fixture();
+    try {
+      f.store.insertWorker(worker('big', 'acme/big'));
+      f.store.addSpend({ workerId: 'big', model: 'codex/luna', inputTokens: tokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0, at: recent });
+      assert.ok(formatPortfolio(await portfolio(f.store, f.settings, undefined, now)).includes(expected));
+    } finally { f.close(); }
+  }
 });
 
 test('CLI portfolio supports compact text, --json and --since without a daemon', () => {
@@ -61,7 +146,7 @@ test('CLI portfolio supports compact text, --json and --since without a daemon',
     for (const args of [[], ['--json', '--since', '2026-10-01T00:00:00Z']]) {
       const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'portfolio', ...args], { cwd: new URL('..', import.meta.url), env: { ...process.env, HELM_HOME: f.home }, encoding: 'utf8' });
       assert.equal(result.status, 0, result.stderr);
-      if (args.length) assert.equal(JSON.parse(result.stdout).since, '2026-10-01T00:00:00.000Z'); else assert.match(result.stdout, /Fleet:/);
+      if (args.length) assert.equal(JSON.parse(result.stdout).since, '2026-10-01T00:00:00.000Z'); else assert.match(result.stdout, /\*\*Helm · /);
     }
   } finally { f.close(); }
 });
@@ -101,12 +186,23 @@ test('fallback uses first configured Discord project when report env is unset or
   }
 });
 
-test('Discord payload truncates cleanly at 2000 chars and preserves fleet total', async () => {
+test('Discord truncation keeps the first three summary lines and marks dropped lines', async () => {
   assert.equal(reportContent('x'.repeat(2000)).length, 2000);
-  const text = Array.from({ length: 100 }, () => 'a project line').join('\n') + '\n' + '😀'.repeat(1000) + '\nFleet: total';
-  const bounded = reportContent(text); assert.ok(bounded.length <= 2000); assert.match(bounded, /… report truncated\nFleet: total$/); assert.doesNotMatch(bounded, /[\uD800-\uDBFF]\n/);
-  const f = fixture({ report: { webhookEnv: 'REPORT' }, discord: { projects: Object.fromEntries(Array.from({ length: 50 }, (_, i) => ['project-' + i, { webhookEnv: 'EMPTY' }])) } }); const sent: { url: string; content: string }[] = [];
-  try { await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /truncated/); } finally { f.close(); }
+  const rows = ['**Helm · Wed 1 Oct**', '1 merged · 2 asks', '$2.43 spent · $50.00 budgeted · Codex 17.5M tokens',
+    ...Array.from({ length: 120 }, (_, i) => `**project-${i}**: 1 ask, ${'😀'.repeat(30)}`)];
+  const bounded = reportContent(rows.join('\n'));
+  assert.ok(bounded.length <= 2000);
+  assert.ok(bounded.startsWith(rows.slice(0, 3).join('\n') + '\n'), 'title, headline and spend/totals lines survive truncation');
+  const dropped = Number(bounded.match(/\n…and (\d+) more$/)![1]);
+  assert.equal(bounded.split('\n').length - 1 + dropped, rows.length, 'marker counts exactly the dropped lines');
+  assert.doesNotMatch(bounded, /[\uD800-\uDBFF]\n/);
+  const fallback = reportContent(['a'.repeat(1_200), 'b'.repeat(1_200), 'c'.repeat(1_200), 'd'].join('\n'));
+  assert.ok(fallback.length <= 2000); assert.match(fallback, /\n…and 4 more$/);
+  const f = fixture({ report: { webhookEnv: 'REPORT' }, discord: { projects: Object.fromEntries(Array.from({ length: 200 }, (_, i) => ['project-' + i, { webhookEnv: 'EMPTY' }])) } }); const sent: { url: string; content: string }[] = [];
+  try { for (let i = 0; i < 200; i++) insertInbox(f.store.sql, { id: 'bulk-' + i, project: 'project-' + i, workerId: 'w', question: 'q', createdAt: old });
+    ensureTapTable(f.store); const tapAt = new Date(2026, 9, 1, 6).toISOString();
+    f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('tr1', 'project-0', 'test', 'a', 'h', 'h', 'used', tapAt, tapAt); f.store.sql.prepare('INSERT INTO taps VALUES (?,?,?,?,?,?,?,0,?,NULL,NULL,?)').run('tr2', 'project-1', 'test', 'a', 'h', 'h', 'used', tapAt, tapAt);
+    await delivery(f, { date: new Date(2026, 9, 1, 7) }, sent)(); assert.equal(sent.length, 1); assert.ok(sent[0]!.content.length <= 2000); assert.match(sent[0]!.content, /\n…and \d+ more$/); assert.ok(sent[0]!.content.startsWith('**Helm')); assert.ok(sent[0]!.content.includes('200 asks · 2 taps pending'), 'headline totals including fleet taps survive the webhook truncation'); } finally { f.close(); }
 });
 
 test('unsuccessful webhook sends do not advance the persisted date and can retry', async () => {

@@ -228,20 +228,27 @@ test('mcp stdio: a timed-out worker.wait sends a final progress update', { timeo
   } finally { await harness.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
-test('mcp stdio: final progress survives a client that reads it together with the response', async () => {
+test('mcp stdio: final progress survives a client that reads it together with the response', { timeout: 60_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
   const harness = await progressProxy(home);
   try {
-    const updates: ProgressUpdate[] = [];
-    const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } }, undefined, { onprogress: (update) => updates.push(update as unknown as ProgressUpdate) });
-    await waitForProgressState(updates, 'queued');
+    const progress = progressNotifications();
+    const waiting = harness.client.callTool(
+      { name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } },
+      undefined,
+      { onprogress: (update) => progress.receive(update as unknown as ProgressUpdate) },
+    );
+    await harness.daemon.waitUntilStarted();
+    harness.daemon.setState('queued', 'capacity.queued');
+    await progress.waitForState('queued');
     harness.daemon.finish();
     await new Promise((resolve) => setImmediate(resolve));
     // A loaded client: block its event loop so the proxy's final progress and response arrive in one read.
     const busyUntil = Date.now() + 500;
     while (Date.now() < busyUntil) { /* spin */ }
     await waiting;
-    assert.ok(updates.some((update) => update._meta?.helm?.state === 'succeeded'), 'final progress is dispatched before the response');
+    // No waitForState here: the ping barrier must deliver the final update before the response resolves.
+    assert.ok(progress.updates.some((update) => update._meta?.helm?.state === 'succeeded'), 'final progress is dispatched before the response');
   } finally { await harness.close(); rmSync(home, { recursive: true, force: true }); }
 });
 

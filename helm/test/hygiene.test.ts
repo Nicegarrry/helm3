@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -183,11 +185,12 @@ test('GC removes old terminal deploys, keeps recent or long-running deploy workt
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
-test('repository does not commit a stray helm/package-lock.json and .gitignore ignores it', () => {
-  const helmDir = process.cwd(); // tests run from helm/
-  const gitignore = readFileSync(join(helmDir, '..', '.gitignore'), 'utf8');
+test('repository does not track a stray helm/package-lock.json and .gitignore ignores it', () => {
+  const repoRoot = fileURLToPath(new URL('../..', import.meta.url)); // tests live in helm/test/
+  const gitignore = readFileSync(join(repoRoot, '.gitignore'), 'utf8');
   assert.ok(gitignore.split('\n').map((line) => line.trim()).includes('helm/package-lock.json'));
-  assert.equal(existsSync(join(helmDir, 'package-lock.json')), false);
+  const tracked = execFileSync('git', ['ls-files', '--', 'helm/package-lock.json'], { cwd: repoRoot, encoding: 'utf8' }).trim();
+  assert.equal(tracked, '');
 });
 
 test('node_modules cleanup refuses symlink targets outside the worker worktree', async () => {

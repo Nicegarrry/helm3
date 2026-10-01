@@ -11,7 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Lifecycle } from '../src/lifecycle.js';
 import { callDaemon, serve } from '../src/server.js';
-import { ALL_TOOL_NAMES, CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES } from '../src/tools.js';
+import { ALL_TOOL_NAMES, CORE_TOOL_NAMES, META_TOOL_NAMES, SUPERVISOR_TOOL_NAMES, createToolRegistry } from '../src/tools.js';
 import type { ToolOutcome } from '../src/types.js';
 import type { Helm } from '../src/helm.js';
 
@@ -208,6 +208,26 @@ test('F12: an invalid JSON body returns 400, not 500', async () => {
   });
 });
 
+
+test('compact registry keeps reads available during drain and admits spawn after resume', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'helm-drain-registry-'));
+  try {
+    const registry = createToolRegistry(createFakeHelm(home), 'all', true);
+    const drained = await registry.call('daemon.control', { action: 'drain' });
+    assert.ok(drained.ok);
+    assert.equal(drained.phase, 'ready');
+    assert.equal((await registry.call('worker.spawn', { repo: '/repo', objective: 'new' })).ok, false);
+    const status = await registry.call('run.status', {});
+    assert.equal(status.ok, true, JSON.stringify(status));
+    assert.equal(status.sections, 'Backlog\nWorking\nRecent');
+    assert.equal(status.spendUsd, 0);
+    const resumed = await registry.call('daemon.control', { action: 'resume' });
+    assert.ok(resumed.ok);
+    assert.equal(resumed.phase, 'accepting');
+    const spawned = await registry.call('worker.spawn', { repo: '/repo', objective: 'new' });
+    assert.equal(spawned.ok, true, JSON.stringify(spawned));
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
 
 test('MCP drain closes admission for both MCP and CLI HTTP calls and keeps reads available', async () => {
   await withServer(async (port, _helm, authorization) => {

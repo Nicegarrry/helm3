@@ -177,7 +177,8 @@ function compactRunStatus(outcome: ToolOutcome<unknown>, verbose: boolean): Tool
   if (verbose || !outcome.ok) return outcome as ToolOutcome<Record<string, unknown>>;
   const source = outcome as JsonObject;
   const keys = ['spendUsd', 'spendCapUsd', 'spendWarnUsd', 'aboveSoftCap', 'activeWorkers', 'maxWorkers', 'unknownCostEvents', 'warning'];
-  return { ok: true, ...Object.fromEntries(keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])), sections: statusLines(source.sections as Parameters<typeof statusLines>[0]) };
+  const sections = source.sections as Parameters<typeof statusLines>[0] | undefined;
+  return { ok: true, ...Object.fromEntries(keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]])), sections: statusLines(sections ?? { backlog: [], working: [], recent: [] }) };
 }
 
 function compactOutcome(name: string, input: unknown, outcome: ToolOutcome<unknown>): ToolOutcome<unknown> {

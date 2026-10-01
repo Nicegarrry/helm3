@@ -1,6 +1,6 @@
 /** Real daemon handover and recovery checks for the standalone upgrade helper. */
 import assert from 'node:assert/strict';
-import { execFileSync, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -258,6 +258,30 @@ test('upgrade setup failure releases its lock before any helper starts', (t) => 
   assert.throws(() => launchUpgrade(home, 1, { bootId: 'test' }, 1000), /EISDIR/);
   assert.equal(existsSync(join(home, 'upgrade.lock')), false);
   assert.equal(existsSync(join(home, 'upgrade.json')), false);
+});
+
+test('test cleanup kills the detached update helper process group', async (t) => {
+  const home = testHome(t);
+  const helper = join(home, 'update.mjs'), ready = join(home, 'helper-ready');
+  writeFileSync(helper, `
+    import { spawn } from 'node:child_process';
+    import { writeFileSync } from 'node:fs';
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    writeFileSync(${JSON.stringify(ready)}, String(child.pid));
+    setInterval(() => {}, 1000);
+  `);
+  const child = spawn(process.execPath, [helper, 'apply', home, 'test-upgrade'], { detached: true, stdio: 'ignore' });
+  assert.ok(child.pid);
+  write(join(home, 'upgrade.json'), { id: 'test-upgrade', helperPid: child.pid, phase: 'draining' });
+  await eventually(() => existsSync(ready), Boolean);
+  const grandchildPid = Number(readFileSync(ready, 'utf8'));
+  await cleanupTestDaemons(home);
+  await eventually(() => child.exitCode !== null || child.signalCode !== null, Boolean, 2_000);
+  assert.ok(child.signalCode === 'SIGTERM' || child.signalCode === 'SIGKILL');
+  await eventually(() => {
+    try { process.kill(grandchildPid, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+  }, Boolean, 2_000);
 });
 
 test('release digest covers installed and linked dependencies', (t) => {

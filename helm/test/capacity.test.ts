@@ -230,6 +230,7 @@ test('a timed capacity probe kills its grandchild process group', { timeout: 5_0
   `], { timeoutMs: 100 });
   const pid = Number(result.stdout.trim());
   assert.ok(Number.isInteger(pid) && pid > 0, result.stderr);
+  assert.equal(result.transient, true);
   await assert.rejects(async () => {
     for (let attempt = 0; attempt < 50; attempt += 1) {
       try { process.kill(pid, 0); } catch (error) { throw error; }
@@ -255,6 +256,32 @@ test('the sampler caches a failed first-launch check and skips simctl', async ()
     assert.equal(calls.filter((file) => file === 'xcodebuild').length, 1);
     assert.equal(calls.includes('xcrun'), false);
   } finally { store.close(); }
+});
+
+test('the simulator probe retries spawn failures and timeouts after ten minutes', async () => {
+  let clock = 0;
+  let checks = 0;
+  let simctlCalls = 0;
+  const probe = createSimulatorProbe(async (file) => {
+    if (file === 'xcodebuild') {
+      checks += 1;
+      if (checks === 1) throw new Error('spawn failed');
+      if (checks === 2) return { stdout: '', code: 0, transient: true };
+      return { stdout: '', code: 0 };
+    }
+    simctlCalls += 1;
+    return { stdout: '{"devices":{}}', code: 0 };
+  }, () => clock);
+  assert.equal((await probe()).code, 1);
+  assert.equal((await probe()).code, 1);
+  assert.equal(checks, 1);
+  clock += 10 * 60_000;
+  assert.equal((await probe()).code, 1);
+  assert.equal(checks, 2);
+  clock += 10 * 60_000;
+  assert.equal((await probe()).code, 0);
+  assert.equal(checks, 3);
+  assert.equal(simctlCalls, 1);
 });
 
 test('simctl probes are single-flight', async () => {

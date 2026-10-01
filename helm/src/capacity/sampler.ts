@@ -5,7 +5,8 @@ import type { Store } from '../types.js';
 import type { StatfsResult } from '../hygiene.js';
 
 export type MemoryPressure = 'normal' | 'warn' | 'critical' | 'unknown';
-export type CapacityExec = (file: string, args: string[], options: { timeoutMs: number }) => Promise<{ stdout: string; stderr?: string; code?: number }>;
+export type CapacityExecResult = { stdout: string; stderr?: string; code?: number; transient?: boolean };
+export type CapacityExec = (file: string, args: string[], options: { timeoutMs: number }) => Promise<CapacityExecResult>;
 export type CapacityRunning = Readonly<{ gates: number; builds: number; reviews: number }>;
 export type ProcessCount = Readonly<{ name: string; count: number }>;
 export type CapacitySnapshot = Readonly<{
@@ -29,7 +30,7 @@ const GB = 1024 ** 3;
 
 export const defaultExec: CapacityExec = (file, args, options) => new Promise((resolve) => {
   const child = spawn(file, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '', failed = false;
+  let stdout = '', stderr = '', transient = false;
   const killGroup = () => {
     if (!child.pid) return;
     try { process.kill(-child.pid, 'SIGKILL'); }
@@ -37,13 +38,13 @@ export const defaultExec: CapacityExec = (file, args, options) => new Promise((r
   };
   const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
     if (target === 'stdout') stdout += chunk.toString(); else stderr += chunk.toString();
-    if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 2 * 1024 * 1024) { failed = true; killGroup(); }
+    if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > 2 * 1024 * 1024) { transient = true; killGroup(); }
   };
   child.stdout.on('data', (chunk: Buffer) => { append('stdout', chunk); });
   child.stderr.on('data', (chunk: Buffer) => { append('stderr', chunk); });
-  child.on('error', (error) => { failed = true; stderr ||= error.message; });
-  child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, code: failed ? 1 : code ?? 1 }); });
-  const timer = setTimeout(() => { failed = true; killGroup(); }, options.timeoutMs);
+  child.on('error', (error) => { transient = true; stderr ||= error.message; });
+  child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, ...(code === null ? {} : { code }), ...(transient || code === null ? { transient: true } : {}) }); });
+  const timer = setTimeout(() => { transient = true; killGroup(); }, options.timeoutMs);
   timer.unref?.();
 });
 
@@ -90,14 +91,19 @@ export function countBootedSimulators(output: string): number {
   }
 }
 
-export function createSimulatorProbe(exec: CapacityExec): () => Promise<{ stdout: string; stderr?: string; code?: number }> {
+export function createSimulatorProbe(exec: CapacityExec, now: () => number = Date.now): () => Promise<CapacityExecResult> {
   let firstLaunchReady: boolean | undefined;
-  let inFlight: Promise<{ stdout: string; stderr?: string; code?: number }> | undefined;
-  const safeExec = (file: string, args: string[], timeoutMs: number) => exec(file, args, { timeoutMs }).catch(() => ({ stdout: '', code: 1 }));
+  let retryFirstLaunchAt = 0;
+  let inFlight: Promise<CapacityExecResult> | undefined;
+  const safeExec = (file: string, args: string[], timeoutMs: number): Promise<CapacityExecResult> => exec(file, args, { timeoutMs }).catch(() => ({ stdout: '', transient: true }));
   return () => {
     if (inFlight) return inFlight;
     inFlight = (async () => {
-      if (firstLaunchReady === undefined) firstLaunchReady = (await safeExec('xcodebuild', ['-checkFirstLaunchStatus'], 1_000)).code === 0;
+      if (firstLaunchReady === undefined && now() >= retryFirstLaunchAt) {
+        const firstLaunch = await safeExec('xcodebuild', ['-checkFirstLaunchStatus'], 1_000);
+        if (firstLaunch.transient || typeof firstLaunch.code !== 'number') retryFirstLaunchAt = now() + 10 * 60_000;
+        else firstLaunchReady = firstLaunch.code === 0;
+      }
       if (!firstLaunchReady) return { stdout: '', code: 1 };
       return safeExec('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], 300);
     })().finally(() => { inFlight = undefined; });

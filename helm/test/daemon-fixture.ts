@@ -30,7 +30,7 @@ function processTarget(pid: number): number | undefined {
   if (pid === process.pid) return undefined;
   try {
     const command = execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
-    if (!/(?:serve\s+--http|restart\s+--handover)/.test(command)) return undefined;
+    if (!/(?:serve\s+--http|restart\s+--handover|update\.mjs\s+apply(?:\s|$))/.test(command)) return undefined;
     const group = Number(execFileSync('ps', ['-p', String(pid), '-o', 'pgid='], { encoding: 'utf8' }).trim());
     return group === pid ? -pid : pid;
   } catch { return undefined; }

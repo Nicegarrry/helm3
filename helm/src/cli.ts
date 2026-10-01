@@ -627,7 +627,7 @@ async function cmdShutdown(): Promise<void> {
 const cmdDaemon = (args: string[]) => simpleCmd('daemon.control', args, (_p, v) => ({ action: v.action ?? 'status' }), { action: { type: 'string' } });
 async function cmdPortfolio(args: string[]): Promise<void> {
   const { values } = parseArgs({ args, options: { json: { type: 'boolean' }, since: { type: 'string' } } });
-  const { config, store } = openReadStore();
+  const { config, store } = await openReadStore();
   try { const report = await portfolio(store, loadSettings(config.home), values.since); console.log(values.json ? JSON.stringify(report, null, 2) : formatPortfolio(report)); }
   finally { store.close(); }
 }

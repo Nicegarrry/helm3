@@ -45,18 +45,17 @@ const PROGRESS_TIMEOUT_MS = 20_000;
 
 type ProgressUpdate = { progress?: number; _meta?: { helm?: { state?: string; position?: number | null; etaMs?: number; activity?: string } } };
 
-async function waitForProgressState(updates: ProgressUpdate[], state: string) {
-  assert.equal(await until(() => updates.some((update) => update._meta?.helm?.state === state), PROGRESS_TIMEOUT_MS), true, `did not receive ${state} progress`);
-  return updates.find((update) => update._meta?.helm?.state === state)!;
-}
-
 function progressNotifications() {
   const updates: ProgressUpdate[] = [];
   const waiters = new Map<string, Array<(update: ProgressUpdate) => void>>();
+  const updateWaiters = new Set<(update: ProgressUpdate) => void>();
   return {
     updates,
     receive(update: ProgressUpdate) {
       updates.push(update);
+      const waitingForUpdate = [...updateWaiters];
+      updateWaiters.clear();
+      waitingForUpdate.forEach((resolve) => resolve(update));
       const state = update._meta?.helm?.state;
       if (!state) return;
       const waiting = waiters.get(state) ?? [];
@@ -77,6 +76,20 @@ function progressNotifications() {
           resolve(update);
         };
         waiters.set(state, [...(waiters.get(state) ?? []), receive]);
+      });
+    },
+    waitForUpdateAfter(count: number): Promise<ProgressUpdate> {
+      if (updates.length > count) return Promise.resolve(updates.at(-1)!);
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          updateWaiters.delete(receive);
+          reject(new Error('did not receive subsequent progress'));
+        }, PROGRESS_TIMEOUT_MS);
+        const receive = (update: ProgressUpdate) => {
+          clearTimeout(timeout);
+          resolve(update);
+        };
+        updateWaiters.add(receive);
       });
     },
   };
@@ -179,12 +192,12 @@ test('mcp stdio: worker.wait forwards token-scoped queued, running, and done pro
   }
 });
 
-test('mcp stdio: worker.wait does not poll or emit progress without a progress token', async () => {
+test('mcp stdio: worker.wait does not poll or emit progress without a progress token', { timeout: 60_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
   const harness = await progressProxy(home);
   try {
     const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await harness.daemon.waitUntilStarted();
     assert.equal(harness.daemon.progressCalls(), 0);
     harness.daemon.finish();
     await waiting;
@@ -195,17 +208,23 @@ test('mcp stdio: worker.wait does not poll or emit progress without a progress t
   }
 });
 
-test('mcp stdio: a timed-out worker.wait sends a final progress update', async () => {
+test('mcp stdio: a timed-out worker.wait sends a final progress update', { timeout: 60_000 }, async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-progress-'));
   const harness = await progressProxy(home);
   try {
-    const updates: ProgressUpdate[] = [];
-    const waiting = harness.client.callTool({ name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } }, undefined, { onprogress: (update) => updates.push(update as unknown as ProgressUpdate) });
-    await waitForProgressState(updates, 'queued');
-    const before = updates.length;
+    const progress = progressNotifications();
+    const waiting = harness.client.callTool(
+      { name: 'worker.wait', arguments: { workerIds: ['w-progress'], timeoutMs: 10_000 } },
+      undefined,
+      { onprogress: (update) => progress.receive(update as unknown as ProgressUpdate) },
+    );
+    await harness.daemon.waitUntilStarted();
+    harness.daemon.setState('queued', 'capacity.queued');
+    await progress.waitForState('queued');
+    const before = progress.updates.length;
     harness.daemon.timeout();
+    await progress.waitForUpdateAfter(before);
     await waiting;
-    assert.equal(await until(() => updates.length > before, PROGRESS_TIMEOUT_MS), true, 'timed out wait sends final progress');
   } finally { await harness.close(); rmSync(home, { recursive: true, force: true }); }
 });
 

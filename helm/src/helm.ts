@@ -233,8 +233,24 @@ function parseOwnerRepo(url: string): string | null {
 
 const SPEND_SERIES_POINTS = 300;
 
-/** Review family: leading letters of the last model path segment, independent of provider. */
+const VENDOR_FAMILIES: readonly (readonly [RegExp, string])[] = [
+  [/^(claude|anthropic)/, 'anthropic'],
+  [/^(codex|openai|gpt)/, 'openai'],
+  [/^(google|gemini)/, 'google'],
+  [/^qwen/, 'alibaba'],
+  [/^deepseek/, 'deepseek'],
+  [/^glm/, 'zhipu'],
+  [/^kimi/, 'moonshot'],
+  [/^nemotron/, 'nvidia'],
+];
+
+/** Review family: the model vendor, independent of lane or provider; unknown models use the first word of the id. */
 export function modelFamily(model: string): string {
+  const segments = model.toLowerCase().split('/');
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const hit = VENDOR_FAMILIES.find(([re]) => re.test(segments[i]!));
+    if (hit) return hit[1];
+  }
   const id = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
   const last = id.split('/').pop() ?? id;
   const m = /^[a-z]+/i.exec(last);

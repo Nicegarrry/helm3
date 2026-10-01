@@ -54,7 +54,8 @@ falls back across tiers; routing fails only when no tier has an available allowe
    keeps running between sessions, and is shared by every project that points at the same
    `$HELM_HOME` (default `~/.helm`) — so two Claude Code sessions in two repos see one store,
    one cap. Use a different `HELM_HOME` only for deliberate isolation, because it creates a
-   separate daemon, capacity queue and spend state.
+   separate daemon, capacity queue and spend state. Isolated homes auto-start on a random port
+   when the shared default is occupied; set top-level `port` in that home's `helm.json` to pin one.
 
    For Codex or anything that speaks Streamable HTTP, point it at `http://127.0.0.1:<port>/mcp`
    with `Authorization: Bearer <token>` on every request. The daemon generates a new
@@ -69,7 +70,8 @@ falls back across tiers; routing fails only when no tier has an available allowe
    (the actual port is in `$HELM_HOME/serve.json`; start the daemon by hand with
    `HELM_SPEND_CAP_USD=5 ./bin/helm.js serve --http` if nothing has yet). Set a top-level
    `port` in `$HELM_HOME/helm.json` to choose the auto-start port. If another non-Helm process
-   owns 4747, auto-start warns and selects a random port; read `serve.json` rather than assuming one.
+   owns the default port, auto-start waits briefly for a same-home startup, otherwise warns and
+   selects a random port; read `serve.json` rather than assuming one.
 
 3. Safely stop an idle daemon with `helm shutdown`. If busy, it refuses without changing admissions and
    reports blockers; let them finish, then repeat the command. See safe updates below.

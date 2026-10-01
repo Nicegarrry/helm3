@@ -159,7 +159,7 @@ test('mcp stdio: worker.wait does not poll or emit progress without a progress t
 test('mcp stdio: a real client lists core tools and calls them through helm serve --stdio', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const defaultPort = await freePort();
-  const { transport, client } = stdioFrontEnd(home, 'core', defaultPort);
+  const { transport, client } = stdioFrontEnd(home, 'core', { defaultPort });
   try {
     await client.connect(transport);
     const { tools } = await client.listTools();
@@ -194,8 +194,8 @@ test('mcp stdio: a real client lists core tools and calls them through helm serv
 test('mcp stdio: the front-end exits with its client, the daemon outlives it, and a second client attaches to the same daemon', async () => {
   const home = mkdtempSync(join(tmpdir(), 'helm-mcp-'));
   const defaultPort = await freePort();
-  const a = stdioFrontEnd(home, 'core', defaultPort);
-  const b = stdioFrontEnd(home, 'supervisor', defaultPort);
+  const a = stdioFrontEnd(home, 'core', { defaultPort });
+  const b = stdioFrontEnd(home, 'supervisor', { defaultPort });
   try {
     await a.client.connect(a.transport);
     const daemon = daemonOf(home);

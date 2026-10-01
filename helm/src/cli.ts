@@ -1,6 +1,7 @@
 /** The `helm` command line. */
 import { execFile, spawn } from 'node:child_process';
 import { existsSync, openSync, closeSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -38,6 +39,7 @@ import { portfolio, formatPortfolio, createReportTicker, startNotificationTicker
 import { createPrTicker } from './pr-watch.js';
 import type { CapacityExec } from './capacity/sampler.js';
 import { resolveToolProfile, type ToolProfile } from './tools.js';
+import { DEFAULT_DAEMON_PORT, defaultDaemonPort } from './daemon-port.js';
 
 import { ownDaemon, readMetadata, VERSION } from './lifecycle.js';
 import { launchUpgrade } from '../bin/update.mjs';
@@ -490,7 +492,11 @@ export async function startSupervisor(input: StartSupervisorInput, deps: StartSu
   } else {
     const config = loadConfig();
     const serveJsonPath = join(config.home, 'serve.json');
-    if (!readLiveServeJson(serveJsonPath)) await startDetachedDaemon(config.home, serveJsonPath, 0, resolveToolProfile(process.env.HELM_TOOLS));
+    if (!readLiveServeJson(serveJsonPath)) {
+      const settings = loadSettings(config.home);
+      const defaultPort = defaultDaemonPort();
+      await startDetachedDaemon(config.home, serveJsonPath, settings.port ?? defaultPort, resolveToolProfile(process.env.HELM_TOOLS), defaultPort);
+    }
     printOutcome(await postTool('supervisor.register', { project: input.project, repo, host: hostName, label }), input.json === true);
   }
 }
@@ -523,7 +529,10 @@ async function cmdServe(args: string[]): Promise<void> {
   const serveJsonPath = join(config.home, 'serve.json');
   const port = values.port ? Number(values.port) : 0;
   if (values.stdio && !values.http) {
-    const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, port, tools));
+    const configuredPort = loadSettings(config.home).port;
+    const defaultPort = defaultDaemonPort();
+    const requestedPort = values.port ? port : configuredPort ?? defaultPort;
+    const live = readLiveServeJson(serveJsonPath) ?? (await startDetachedDaemon(config.home, serveJsonPath, requestedPort, tools, defaultPort));
     const handle = await serveStdioProxy(live.port, tools, config.home);
     console.error(`helm stdio front-end attached to daemon pid ${live.pid} on port ${live.port}`);
     await handle.closed;
@@ -616,14 +625,58 @@ export async function launchRestartHelper(home: string, port: number, spawnHelpe
 }
 
 /** Spawns `helm serve --http` as its own process group, logging to `$HELM_HOME/daemon.log`, and waits for serve.json. */
-async function startDetachedDaemon(home: string, serveJsonPath: string, port: number, tools: ToolProfile): Promise<{ port: number; pid: number }> {
+async function canListen(port: number): Promise<boolean> {
+  const probe = createServer();
+  return new Promise((done) => {
+    probe.once('error', () => done(false));
+    probe.listen(port, '127.0.0.1', () => probe.close(() => done(true)));
+  });
+}
+
+async function isHelmListener(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/status`, {
+      headers: { authorization: `Bearer ${'0'.repeat(64)}` },
+      signal: AbortSignal.timeout(1000), redirect: 'error',
+    });
+    return response.status === 401 && await response.text() === '';
+  } catch { return false; }
+}
+
+type LiveDaemon = { port: number; pid: number };
+type DetachedPortDeps = Readonly<{
+  canListen?: (port: number) => Promise<boolean>;
+  isHelmListener?: (port: number) => Promise<boolean>;
+  readLive?: () => LiveDaemon | undefined;
+  sleep?: (ms: number) => Promise<void>;
+  warn?: (line: string) => void;
+}>;
+
+export async function selectDetachedDaemonPort(port: number, defaultPort: number, serveJsonPath: string, deps: DetachedPortDeps = {}): Promise<{ port: number; live?: LiveDaemon }> {
+  const canUse = deps.canListen ?? canListen;
+  if (port !== defaultPort || await canUse(port)) return { port };
+  const readLive = deps.readLive ?? (() => readLiveServeJson(serveJsonPath));
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const live = readLive();
+    if (live) return { port: live.port, live };
+    await sleep(100);
+  }
+  const helm = await (deps.isHelmListener ?? isHelmListener)(port);
+  (deps.warn ?? console.error)(`warning: port ${port} is in use by ${helm ? 'another Helm home' : 'a non-Helm process'}; starting Helm on a random port`);
+  return { port: 0 };
+}
+
+async function startDetachedDaemon(home: string, serveJsonPath: string, port: number, tools: ToolProfile, defaultPort = DEFAULT_DAEMON_PORT): Promise<LiveDaemon> {
   if (existsSync(join(home, 'upgrade.lock'))) throw new Error('upgrade in progress; automatic startup is paused');
   const update = readMetadata(join(home, 'upgrade.json'));
   if (update?.phase === 'failed' && update.handoverStarted) throw new Error('upgrade failed after shutdown; explicit manual recovery is required');
-  const selected = readMetadata(join(home, 'current-release.json'));
-  const entry = selected ? join(String(selected.root), 'helm', 'src', 'cli.ts') : process.argv[1] ?? '';
+  const release = readMetadata(join(home, 'current-release.json'));
+  const entry = release ? join(String(release.root), 'helm', 'src', 'cli.ts') : process.argv[1] ?? '';
+  const selectedPort = await selectDetachedDaemonPort(port, defaultPort, serveJsonPath);
+  if (selectedPort.live) return selectedPort.live;
   const log = openSync(join(home, 'daemon.log'), 'a');
-  const child = spawn(process.execPath, ['--import', 'tsx', entry, 'serve', '--http', '--port', String(port)], {
+  const child = spawn(process.execPath, ['--import', 'tsx', entry, 'serve', '--http', '--port', String(selectedPort.port)], {
     cwd: resolve(entry, '..'), detached: true, stdio: ['ignore', log, log], env: { ...process.env, HELM_TOOLS: tools },
   });
   closeSync(log);

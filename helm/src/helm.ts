@@ -1168,7 +1168,14 @@ export class Helm {
       this.store.appendEvent(workerId, 'review.warning', { project, number, summary: 'reviewer produced no result; no review recorded' });
       return;
     }
-    const raw = `${result.summary}${result.notes ? `\n\n${result.notes}` : ''}`;
+    // Reviewers sometimes write a literal two-character '\n' before a trailing verdict (#290, #314), occasionally with a stray literal '\r'.
+    // Normalise only when that escape immediately precedes the summary-tail verdict and is not quoted; a literal '\n' elsewhere (quotes, notes, code) stays untouched.
+    const verdictKey = /(?:APPROVE|REQUEST_CHANGES):/g;
+    const summary = result.summary.replace(/(?:\\r)?\\n((?:APPROVE|REQUEST_CHANGES):[^\n]*)$/, (match, line: string, offset: number, whole: string) => {
+      if (line.match(verdictKey)?.length !== 1) return match;
+      return isQuoted(whole, offset + match.length - line.length) ? match : `\n${line}`;
+    });
+    const raw = `${summary}${result.notes ? `\n\n${result.notes}` : ''}`;
     let lastVerdict = 'REQUEST_CHANGES: reviewer gave no verdict';
     // Move verdict lines or trailing verdict sentences below the summary and notes.
     const content = raw.replace(/(^[\t ]*|[.!?][\t ]+)((?:APPROVE|REQUEST_CHANGES):[^\r\n]*)/gm, (match, prefix: string, line: string, offset: number, whole: string) => {

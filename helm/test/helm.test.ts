@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import { Helm, modelFamily, type HelmPrompts, type SpawnInput } from '../src/helm.js';
+import { budgetForWorker } from '../src/budget.js';
 import { createModelCatalog } from '../src/routing/catalog.js';
 import { openStore } from '../src/store.js';
+import { createSupervisor } from '../src/supervise.js';
 import { createToolRegistry } from '../src/tools.js';
 import { loadSettings, type Settings } from '../src/settings.js';
 import type { Jev } from '../src/jev.js';
@@ -218,7 +220,9 @@ const FAKE_PROMPTS: HelmPrompts = {
 
 const cleanupDirs: string[] = [];
 const cleanupStores: Store[] = [];
-test.after(() => {
+const cleanupHelms: Helm[] = [];
+test.after(async () => {
+  for (const helm of cleanupHelms) await helm.close();
   for (const store of cleanupStores) store.close();
   for (const dir of cleanupDirs) rmSync(dir, { recursive: true, force: true });
 });
@@ -245,6 +249,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     sources: { codexModels: () => [], piModels: () => [], claudeAvailable: () => false },
     probe: { codex: () => true, pi: () => true, claude: () => false },
   });
+  const supervisor = createSupervisor({ store, settings, hosts: { herdr: {} as never, tmux: {} as never } });
   const helm = new Helm({
     config,
     store,
@@ -255,6 +260,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     prompts: FAKE_PROMPTS,
     routingCatalog,
     settings,
+    supervisor,
     workerInstall: overrides.workerInstall,
     jev: overrides.jev,
     statfs: overrides.statfs,
@@ -263,6 +269,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     headWaitMs: 50,
     headPollMs: 5,
   });
+  cleanupHelms.push(helm);
   return { helm, store, workspace, pushed, cloned, fetched, created, removed, markDirty, github: githubFake, config };
 }
 
@@ -352,40 +359,62 @@ test('a repo helm.json priority is the project default and an explicit priority 
   if (plain.ok) assert.equal(admissionEvent(store, plain.workerId)?.stated, 'normal');
 });
 
-test('dispatched issue-title lookup runs after spawn admission and falls back on failure', async (t) => {
+test('dispatched issue-title lookup runs after spawn admission and falls back on failure', { timeout: 10_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dispatchedEvent = (store: Store) => new Promise<void>((resolve) => {
+    const append = store.appendEvent.bind(store);
+    store.appendEvent = (workerId, kind, data, at) => {
+      const event = append(workerId, kind, data, at);
+      if (kind === 'dispatched') resolve();
+      return event;
+    };
+  });
   let resolveTitle!: (title: string) => void;
   const lookup = new Promise<string>((resolve) => { resolveTitle = resolve; });
-  const seed = makeHelm();
-  const first = makeHelm({ github: { ...seed.github.github, issueTitle: async () => lookup } });
+  const github = createFakeGitHub().github;
+  const first = makeHelm({ github: { ...github, issueTitle: async () => {
+    assert.equal(first.store.listWorkers().length, 1, 'lookup starts after admission');
+    return lookup;
+  } } });
+  const firstDispatched = dispatchedEvent(first.store);
+  t.after(async () => { resolveTitle('Issue title'); await firstDispatched; await first.helm.close(); });
   const repo = mkTempDir('helm-dispatched-title-');
-  // A daemon ticker normally warms capacity; keep cold OS probes outside the title-lookup timing check.
-  await first.helm.capacityStatus();
-  const started = Date.now();
   const outcome = await first.helm.spawn(spawnBody(repo, { issue: 42, objective: 'first objective line\nmore detail' }));
-  assert.ok(outcome.ok);
-  t.after(async () => {
-    resolveTitle('Issue title');
-    if (outcome.ok && outcome.workerId) await first.helm.settle(outcome.workerId);
-    await first.helm.close();
-  });
-  assert.ok(Date.now() - started < 500, 'spawn should not wait for issue title lookup');
-  if (!outcome.ok) return;
   assert.ok(outcome.ok && outcome.workerId);
+  const firstWorkerId = outcome.workerId;
+  t.after(() => first.helm.settle(firstWorkerId));
+  assert.equal(first.store.listEvents(outcome.workerId, { limit: 100 }).some((event) => event.kind === 'dispatched'), false, 'spawn returns while the title lookup is pending');
   resolveTitle('Issue title');
-  await first.helm.settle(outcome.workerId);
+  await firstDispatched;
   const dispatched = first.store.listEvents(outcome.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched');
   assert.equal(dispatched?.data.issue, 42);
   assert.equal(dispatched?.data.title, 'Issue title');
   assert.equal(dispatched?.data.model, 'acme/model-1');
 
-  const second = makeHelm({ github: { ...seed.github.github, issueTitle: async () => { throw new Error('unavailable'); } } });
+  const second = makeHelm({ github: { ...github, issueTitle: async () => { throw new Error('unavailable'); } } });
+  const secondDispatched = dispatchedEvent(second.store);
+  t.after(async () => { await secondDispatched; await second.helm.close(); });
   const fallback = await second.helm.spawn(spawnBody(mkTempDir('helm-dispatched-fallback-'), { issue: 43, objective: 'fallback title\nother detail' }));
   assert.ok(fallback.ok && fallback.workerId);
   assert.ok(fallback.ok);
   if (fallback.ok) {
-    await second.helm.settle(fallback.workerId);
+    const secondWorkerId = fallback.workerId;
+    t.after(() => second.helm.settle(secondWorkerId));
+    await secondDispatched;
     assert.equal(second.store.listEvents(fallback.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched')?.data.title, 'fallback title');
   }
+
+  const third = makeHelm({ github: { ...github, issueTitle: () => new Promise(() => {}) } });
+  const thirdDispatched = dispatchedEvent(third.store);
+  const timedOut = await third.helm.spawn(spawnBody(mkTempDir('helm-dispatched-timeout-'), { issue: 45, objective: 'timeout title\nother detail' }));
+  assert.ok(timedOut.ok && timedOut.workerId);
+  const thirdWorkerId = timedOut.workerId;
+  t.after(async () => { t.mock.timers.tick(3_000); await thirdDispatched; await third.helm.settle(thirdWorkerId); await third.helm.close(); });
+  t.mock.timers.tick(2_999);
+  assert.equal(third.store.listEvents(timedOut.workerId, { limit: 100 }).some((event) => event.kind === 'dispatched'), false);
+  t.mock.timers.tick(1);
+  await thirdDispatched;
+  assert.equal(third.store.listEvents(timedOut.workerId, { limit: 100 }).find((event) => event.kind === 'dispatched')?.data.title, 'timeout title');
 });
 
 test('dispatch milestone rejection becomes a warning event instead of an unhandled rejection', async () => {
@@ -758,6 +787,41 @@ test('spawn queues once active workers reach maxWorkers', async () => {
   const second = await helm.spawn(spawnBody(repo));
   assert.equal(second.ok, true);
   if (second.ok) assert.equal(second.queued, true);
+});
+
+test('one daemon Helm instance admits two repos through one queue while retaining their budgets and supervisors', async () => {
+  const control = createControllableRunner();
+  const { helm, store } = makeHelm({ config: { maxWorkers: 1 }, runner: control.runner });
+  const alphaRepo = mkTempDir('helm-alpha-'), betaRepo = mkTempDir('helm-beta-');
+  const alphaProject = basename(alphaRepo), betaProject = basename(betaRepo);
+  const [alphaSupervisor, betaSupervisor] = await Promise.all([
+    helm.supervisorRegister({ project: alphaProject, repo: alphaRepo, host: 'herdr', label: 'alpha' }),
+    helm.supervisorRegister({ project: betaProject, repo: betaRepo, host: 'tmux', label: 'beta' }),
+  ]);
+  assert.ok(alphaSupervisor.ok && betaSupervisor.ok);
+
+  const alpha = await helm.spawn(spawnBody(alphaRepo));
+  const beta = await helm.spawn(spawnBody(betaRepo));
+  assert.ok(alpha.ok && alpha.workerId && beta.ok && beta.ticketId);
+  assert.equal(beta.queued, true);
+  assert.equal(beta.workerId, undefined);
+  assert.equal(budgetForWorker(store, alpha.workerId)?.project, alphaProject);
+  assert.equal((store.sql.prepare('SELECT project FROM budgets WHERE project = ? AND closedAt IS NULL').get(betaProject) as { project: string }).project, betaProject);
+  const registered = await helm.supervisorList();
+  assert.ok(registered.ok);
+  if (!registered.ok) return;
+  assert.deepEqual(registered.supervisors.map((row) => row.project), [alphaProject, betaProject].sort());
+  assert.deepEqual((await helm.capacity.status()).queue.map((job) => job.id), [beta.ticketId]);
+
+  const succeeded: WorkerRunOutcome = { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  control.resolveNext(succeeded); await helm.settle(alpha.workerId);
+  await helm.capacityTick();
+  const dispatched = await helm.wait({ workerIds: [beta.ticketId], timeoutMs: 1000 });
+  assert.ok(dispatched.ok && dispatched.workerId);
+  assert.equal(store.getWorker(dispatched.workerId)?.state, 'running');
+  assert.equal(budgetForWorker(store, dispatched.workerId)?.project, betaProject);
+  assert.notEqual(budgetForWorker(store, alpha.workerId)?.id, budgetForWorker(store, dispatched.workerId)?.id);
+  control.resolveNext(succeeded); await helm.settle(dispatched.workerId);
 });
 
 test('spawn refuses when free disk is below half the hygiene threshold', async () => {

@@ -185,8 +185,15 @@ test('GC removes old terminal deploys, keeps recent or long-running deploy workt
   } finally { store.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
-test('repository does not track a stray helm/package-lock.json and .gitignore ignores it', () => {
-  const repoRoot = fileURLToPath(new URL('../..', import.meta.url)); // tests live in helm/test/
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url)); // tests live in helm/test/
+let gitWorkTree = true;
+try {
+  execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: repoRoot, stdio: 'ignore' });
+} catch {
+  gitWorkTree = false;
+}
+
+test('repository does not track a stray helm/package-lock.json and .gitignore ignores it', { skip: gitWorkTree ? false : 'requires a Git work tree' }, () => {
   const gitignore = readFileSync(join(repoRoot, '.gitignore'), 'utf8');
   assert.ok(gitignore.split('\n').map((line) => line.trim()).includes('helm/package-lock.json'));
   const tracked = execFileSync('git', ['ls-files', '--', 'helm/package-lock.json'], { cwd: repoRoot, encoding: 'utf8' }).trim();

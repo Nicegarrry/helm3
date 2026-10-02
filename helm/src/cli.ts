@@ -34,7 +34,7 @@ import { createReview } from './review.js';
 import { createRetry } from './retry.js';
 import { createEnvelopeTicker } from './envelope.js';
 import { createMemorySync } from './memory-sync.js';
-import { createHygiene } from './hygiene.js';
+import { createHygiene, installCacheRoot } from './hygiene.js';
 import { portfolio, formatPortfolio, createReportTicker, startNotificationTickers } from './portfolio.js';
 import { createPrTicker } from './pr-watch.js';
 import type { CapacityExec } from './capacity/sampler.js';
@@ -552,7 +552,7 @@ async function cmdServe(args: string[]): Promise<void> {
   const workspace = gitWorkspace();
   const github = ghGitHub();
   const helm = new Helm({
-    config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules, allowUnsandboxed: settings.gates?.allowUnsandboxed === true, denyLocalPorts: settings.gates?.denyLocalPorts, daemonHome: config.home }), github,
+    config, store, workspace, gates: gateRunner({ keepNodeModules: settings.hygiene.keepNodeModules, allowUnsandboxed: settings.gates?.allowUnsandboxed === true, denyLocalPorts: settings.gates?.denyLocalPorts, daemonHome: config.home, installCacheRoot: installCacheRoot(settings.hygiene) }), github,
     claudeLaneRegistered: claudeAvailable(), workerInstall: true,
     runner: laneRunner({
       pi: piWorkerRunner(),

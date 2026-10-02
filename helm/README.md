@@ -482,6 +482,25 @@ The live spend settings can be placed alongside the other daemon settings in `$H
 hard cap or worker limit through `helm cap` needs a granted `spend.cap` tap; the refusal names that
 kind so the supervisor can call `tap.request` with the exact action returned by the refusal.
 
+Bulky per-worker data can live on another drive while the database and logs stay in `$HELM_HOME`:
+
+```json
+{ "hygiene": { "worktreeRoot": "/Volumes/T7/helm/worktrees", "installCacheRoot": "/Volumes/T7/helm/cache" } }
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `hygiene.worktreeRoot` | `$HELM_HOME/worktrees` | Where new worker worktrees go (absolute or `~/`). Rows created under the old default stay valid: GC and node_modules cleanup accept both roots. Spawn admission and the hygiene disk alert also check free space on this volume. |
+| `hygiene.installCacheRoot` | unset (a fresh cache per gate run) | Shared `<root>/<npm\|pnpm\|yarn>-cache` for sandboxed gate installs; the gate sandbox gets read/write on it. |
+
+A root under `/Volumes/<name>` is checked before any directory is created: if the drive is not
+mounted, `worker.spawn` refuses with `worktree volume not mounted: /Volumes/<name>` (Helm never
+creates `/Volumes/<name>` itself, which would make macOS mount the real drive as `<name> 1`),
+hygiene GC skips those worktrees until the drive returns, and gates fall back to the per-run cache
+with a warning in `daemon.log`. `helm update --stage` keeps the newest two releases plus any named by
+`current-release.json`, `staged-release.json` or `upgrade.json`, and removes `staging-*` leftovers
+older than an hour.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `HELM_HOME` | `~/.helm` | State directory |

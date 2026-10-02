@@ -233,7 +233,7 @@ function mkTempDir(prefix: string): string {
   return dir;
 }
 
-type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; workerInstall: boolean; stopTimeoutMs: number; waitPollMs: number; jev: Jev; statfs: (path: string) => Promise<{ bavail: number; bsize: number }> }> & {
+type HelmTestOverrides = Partial<{ config: Partial<HelmConfig>; runner: WorkerRunner; gates: GateRunner; github: GitHub; workerInstall: boolean; stopTimeoutMs: number; waitPollMs: number; jev: Jev; statfs: (path: string) => Promise<{ bavail: number; bsize: number }>; volumeStat: (path: string) => Promise<{ dev: number }> }> & {
   settings?: Omit<Partial<Settings>, 'budgets'> & { budgets?: Partial<Settings['budgets']> };
 };
 
@@ -264,6 +264,7 @@ function makeHelm(overrides: HelmTestOverrides = {}) {
     workerInstall: overrides.workerInstall,
     jev: overrides.jev,
     statfs: overrides.statfs,
+    volumeStat: overrides.volumeStat,
     stopTimeoutMs: overrides.stopTimeoutMs,
     waitPollMs: overrides.waitPollMs,
     headWaitMs: 50,
@@ -578,6 +579,33 @@ test('a settled worker turn removes node_modules from every top-level package', 
   assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'helm', 'node_modules')), false);
   assert.equal(existsSync(join(row.worktree, 'app', 'node_modules')), false);
+});
+
+test('spawn places worktrees under hygiene.worktreeRoot and settles node_modules cleanup there', async () => {
+  const runner = createFakeRunner(async (input) => {
+    mkdirSync(join(input.worktree, 'node_modules'), { recursive: true });
+    return { result: { status: 'succeeded', summary: 'done', changedFiles: [], commandsRun: [] }, rawText: '', sessionFile: null };
+  });
+  const root = mkTempDir('helm-ext-root-');
+  const { helm, store, config } = makeHelm({ runner, settings: { hygiene: { ...loadSettings(mkTempDir('helm-defaults-')).hygiene, worktreeRoot: root } } });
+  const outcome = await helm.spawn(spawnBody(mkTempDir('helm-repo-root-')));
+  assert.ok(outcome.ok && outcome.workerId);
+  await helm.wait({ workerIds: [outcome.workerId], timeoutMs: 2000 });
+  const row = store.getWorker(outcome.workerId)!;
+  assert.ok(row.worktree.startsWith(`${root}/`), row.worktree);
+  assert.equal(existsSync(join(row.worktree, 'node_modules')), false);
+  const nodeModulesRoot = (target: Partial<typeof row>) => (helm as unknown as { workerWorktreeRoot(row: object): string }).workerWorktreeRoot({ ...row, ...target });
+  const legacy = join(config.home, 'worktrees', row.repoSlug.replace(/\//g, '__'), row.workerId);
+  assert.equal(nodeModulesRoot({ worktree: legacy }), legacy);
+  assert.equal(nodeModulesRoot({ worktree: '/elsewhere/w-1' }), row.worktree);
+});
+
+test('spawn refuses and creates nothing when the worktree volume is not mounted', async () => {
+  const volume = `/Volumes/helm-absent-${process.pid}-${Date.now()}`;
+  const { helm, created } = makeHelm({ volumeStat: async () => ({ dev: 1 }), settings: { hygiene: { ...loadSettings(mkTempDir('helm-defaults-')).hygiene, worktreeRoot: `${volume}/helm/worktrees` } } });
+  assert.deepEqual(await helm.spawn(spawnBody(mkTempDir('helm-repo-unmounted-'))), { ok: false, reason: `worktree volume not mounted: ${volume}` });
+  assert.equal(created.length, 0);
+  assert.equal(existsSync(volume), false);
 });
 
 function installHarness(helmJson: object, gatesOverride?: GateRunner) {

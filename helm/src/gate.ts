@@ -5,7 +5,7 @@ import { copyFile, lstat, mkdir, readFile, readdir, realpath, unlink, writeFile 
 import { join, relative, resolve } from 'node:path';
 import type { GateCheck, GateRunner } from './types.js';
 import { loadRepoConfig } from './repoconfig.js';
-import { cleanupNodeModules } from './hygiene.js';
+import { cleanupNodeModules, unmountedVolume, type VolumeStat } from './hygiene.js';
 import { DEFAULT_DENY_LOCAL_PORTS, disposeGateSandbox, installManager, prepareGateSandbox, prepareUnsandboxedGate, sandboxExecutable, sandboxUnavailableReason, type InstallManager } from './sandbox.js';
 
 type CheckResult = { name: string; command: string; exitCode: number | null; outputPath: string; durationMs: number };
@@ -83,12 +83,22 @@ export async function expandInstallChecks(cwd: string, checks: readonly GateChec
   return expanded;
 }
 
-function withGateCache(command: string, tempDir: string): string {
+/** Point an install at `<cacheRoot>/<manager>-cache`: the per-run temp dir, or the shared `hygiene.installCacheRoot`. */
+export function withGateCache(command: string, cacheRoot: string): string {
   const manager = installManager(command);
   if (!manager) return command;
   const flag = manager === 'npm' ? '--cache' : manager === 'pnpm' ? '--store-dir' : '--cache-folder';
   if (new RegExp(`(?:^|\\s)${flag}(?:\\s|=)`, 'i').test(command)) return command;
-  return `${command} ${flag} ${JSON.stringify(join(tempDir, `${manager}-cache`))}`;
+  return `${command} ${flag} ${JSON.stringify(join(cacheRoot, `${manager}-cache`))}`;
+}
+
+/** The shared install cache when configured and reachable; an unmounted or unusable root falls back to the per-run temp cache. */
+export async function sharedCacheRoot(root: string | undefined, volumeStat?: VolumeStat, warn: (message: string) => void = console.error): Promise<string | undefined> {
+  if (!root) return undefined;
+  const volume = await unmountedVolume(root, volumeStat);
+  if (volume) { warn(`helm gate: install cache volume not mounted: ${volume}; using a per-run temp cache`); return undefined; }
+  try { await mkdir(root, { recursive: true }); return await realpath(root); }
+  catch (error) { warn(`helm gate: install cache unavailable (${error instanceof Error ? error.message : String(error)}); using a per-run temp cache`); return undefined; }
 }
 
 function insideOrEqual(root: string, candidate: string): boolean {
@@ -142,7 +152,7 @@ async function refuseEscapingSymlinks(worktree: string, logDir: string): Promise
   return { reason, result: { name: 'gate.refused', command: 'symlink preflight', exitCode: 1, outputPath, durationMs: 0 } };
 }
 
-async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; daemonHome?: string; denyLocalPorts: readonly number[]; denyLocalSocketPaths: readonly string[]; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void; signal?: AbortSignal }): Promise<CheckResult> {
+async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: string, logDir: string, timeoutMs: number, options: { sandbox: boolean; allowUnsandboxed: boolean; operatorHome?: string; daemonHome?: string; denyLocalPorts: readonly number[]; denyLocalSocketPaths: readonly string[]; onUnsandboxed?: (reason: string) => void; onPid?: (pid: number) => void; signal?: AbortSignal; cacheRoot?: string }): Promise<CheckResult> {
   const start = Date.now();
   const outputPath = join(logDir, `${outputSlug}.log`);
   let sandbox: Awaited<ReturnType<typeof prepareGateSandbox>> | Awaited<ReturnType<typeof prepareUnsandboxedGate>> | undefined;
@@ -160,7 +170,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
       options.onUnsandboxed?.(`sandbox-exec is unavailable on ${process.platform}; running gate unsandboxed because allowUnsandboxed is enabled`);
     }
     sandbox = options.sandbox && executable
-      ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome, daemonHome: options.daemonHome, denyLocalPorts: options.denyLocalPorts, denyLocalSocketPaths: options.denyLocalSocketPaths })
+      ? await prepareGateSandbox({ cwd, allowNetwork: check.allowNetwork === true, operatorHome: options.operatorHome, daemonHome: options.daemonHome, denyLocalPorts: options.denyLocalPorts, denyLocalSocketPaths: options.denyLocalSocketPaths, writePaths: options.cacheRoot ? [options.cacheRoot] : [] })
       : await prepareUnsandboxedGate();
     if (sandbox.executable && sandbox.profilePath && /^(1|true)$/i.test(process.env.HELM_DEBUG_SANDBOX ?? '')) {
       await copyFile(sandbox.profilePath, join(logDir, `${outputSlug}.profile.sb`)).catch(() => {});
@@ -171,7 +181,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
 
   const execute = (child: NonNullable<typeof sandbox>): Promise<{ error: ExecFileError | null; stdout: string; stderr: string }> => new Promise((resolve) => {
       const executable = child.executable ?? '/bin/sh';
-      const command = child.executable ? withGateCache(check.command, child.tempDir) : check.command;
+      const command = child.executable ? withGateCache(check.command, options.cacheRoot ?? child.tempDir) : check.command;
       const args = child.executable ? ['-f', child.profilePath!, '/bin/sh', '-c', command] : ['-c', command];
       const childProcess = execFile(executable, args, { cwd, env: child.env, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, signal: options.signal }, (error, stdout, stderr) => {
         resolve({ error: error as ExecFileError | null, stdout, stderr });
@@ -197,7 +207,7 @@ async function runCheck(cwd: string, check: PreparedGateCheck, outputSlug: strin
   }
 }
 
-export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string; denyLocalPorts?: readonly number[]; denyLocalSocketPaths?: readonly string[]; daemonHome?: string; daemonPort?: number; daemonSocketPath?: string } = {}): GateRunner {
+export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxed?: boolean; operatorHome?: string; denyLocalPorts?: readonly number[]; denyLocalSocketPaths?: readonly string[]; daemonHome?: string; daemonPort?: number; daemonSocketPath?: string; installCacheRoot?: string; volumeStat?: VolumeStat } = {}): GateRunner {
   return {
     async run(cwd: string, checks: readonly GateCheck[], logDir: string, opts?: { timeoutMs?: number; nodeModulesRoot?: string; keepNodeModules?: boolean; signal?: AbortSignal; sandbox?: boolean; onNodeModulesError?: (message: string) => void; onUnsandboxed?: (reason: string) => void; onRefused?: (reason: string) => void; onPid?: (pid: number) => void }) {
       await mkdir(logDir, { recursive: true });
@@ -212,6 +222,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
         opts?.onRefused?.(refusal.reason);
         return { passed: false, checks: [refusal.result] };
       }
+      const cacheRoot = await sharedCacheRoot(options.installCacheRoot, options.volumeStat);
       try {
         for (const check of await expandInstallChecks(cwd, checks)) {
           if (opts?.signal?.aborted) break;
@@ -229,6 +240,7 @@ export function gateRunner(options: { keepNodeModules?: boolean; allowUnsandboxe
             onUnsandboxed: opts?.onUnsandboxed,
             onPid: opts?.onPid,
             signal: opts?.signal,
+            cacheRoot,
           });
           results.push(result);
         }

@@ -21,6 +21,8 @@ export type GateSandboxOptions = Readonly<{
   daemonHome?: string;
   denyLocalPorts?: readonly number[];
   denyLocalSocketPaths?: readonly string[];
+  /** Extra read/write directories, e.g. a shared install cache. */
+  writePaths?: readonly string[];
 }>;
 
 export type InstallManager = 'npm' | 'pnpm' | 'yarn';
@@ -128,13 +130,16 @@ export function buildSandboxProfile(options: {
   gitDirs?: readonly string[];
   denyLocalPorts?: readonly number[];
   denyLocalSocketPaths?: readonly string[];
+  writePaths?: readonly string[];
   allowNetwork: boolean;
 }): string {
   const cwd = resolve(options.cwd);
   const tempDir = resolve(options.tempDir);
   const gitDirs = unique([options.gitDir ?? '', ...(options.gitDirs ?? [])].filter(Boolean));
+  const writePaths = unique(options.writePaths ?? []);
   const readOnlyExceptions = unique([
     cwd,
+    ...writePaths,
     ...gitDirs,
     tempDir,
     ...(options.gateHome ? [options.gateHome] : []),
@@ -158,6 +163,7 @@ export function buildSandboxProfile(options: {
     `(allow file-read* ${subpath('/')})`,
     `(allow file-write* ${subpath(cwd)})`,
     `(allow file-write* ${subpath(tempDir)})`,
+    ...writePaths.map((path) => `(allow file-write* ${subpath(path)})`),
     `(deny file-write* ${subpath(join(cwd, '.git'))})`,
     '(allow signal (target same-sandbox))',
     options.allowNetwork ? '(allow network*)' : '(deny network*)',
@@ -306,6 +312,7 @@ export async function prepareGateSandbox(options: GateSandboxOptions): Promise<G
       gitDirs: await worktreeGitDirs(profileCwd),
       denyLocalPorts: options.denyLocalPorts,
       denyLocalSocketPaths: await Promise.all((options.denyLocalSocketPaths ?? []).map((path) => canonicalPath(path))),
+      writePaths: await Promise.all((options.writePaths ?? []).map((path) => canonicalPath(path))),
       allowNetwork: options.allowNetwork,
     });
     const profilePath = join(tempDir, 'profile.sb');

@@ -1,6 +1,7 @@
 /** Conservative cleanup for worker, deploy, and low-disk state. */
 import { execFile } from 'node:child_process';
 import { realpath, readdir, rm, stat, statfs as fsStatfs } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Settings } from './settings.js';
@@ -26,6 +27,7 @@ type Options = Readonly<{
   fs?: HygieneFs;
   statfs?: (path: string) => Promise<StatfsResult>;
   withWorkerLock?: <T>(workerId: string, fn: () => Promise<T>) => Promise<T>;
+  volumeStat?: VolumeStat;
   deployInProgress?: (project: string, target: string) => boolean;
 }>;
 
@@ -78,6 +80,33 @@ export async function cleanupNodeModules(worktree: string, keepNodeModules = fal
   }));
 }
 
+export type VolumeStat = (path: string) => Promise<{ dev: number }>;
+const expandHome = (path: string): string => path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+/** The worktree root new workers use, plus every root existing rows may live under (the `$HELM_HOME/worktrees` default stays allowed for legacy rows). */
+export function worktreeRoots(home: string, hygiene: Settings['hygiene']): Readonly<{ root: string; allowed: readonly string[] }> {
+  const fallback = resolve(home, 'worktrees'), root = hygiene.worktreeRoot ? resolve(expandHome(hygiene.worktreeRoot)) : fallback;
+  return { root, allowed: [...new Set([root, fallback])] };
+}
+export function installCacheRoot(hygiene: Settings['hygiene']): string | undefined { return hygiene.installCacheRoot ? resolve(expandHome(hygiene.installCacheRoot)) : undefined; }
+/**
+ * `/Volumes/<name>` when `path` lives on an external volume that is not mounted now (absent, or a plain
+ * directory on the boot disk). Callers must not mkdir there: macOS would mount the real drive as "<name> 1".
+ */
+export async function unmountedVolume(path: string, volumeStat: VolumeStat = (entry) => stat(entry)): Promise<string | undefined> {
+  const name = /^\/Volumes\/([^/]+)/.exec(resolve(path))?.[1];
+  if (!name) return undefined;
+  const volume = `/Volumes/${name}`;
+  try {
+    const [mount, root, parent] = await Promise.all([volume, '/', '/Volumes'].map((entry) => volumeStat(entry)));
+    return mount!.dev !== root!.dev && mount!.dev !== parent!.dev ? undefined : volume;
+  } catch { return volume; }
+}
+/** Lowest free space across the volumes holding `paths`; unreadable paths are ignored. */
+export async function lowestFreeGb(paths: readonly string[], statfs?: (path: string) => Promise<StatfsResult>): Promise<number | null> {
+  const values = (await Promise.all(paths.map((path) => freeSpaceGb(path, statfs)))).filter((value): value is number => value !== null);
+  return values.length ? Math.min(...values) : null;
+}
+
 export async function freeSpaceGb(path: string, statfs: (path: string) => Promise<StatfsResult> = fsStatfs): Promise<number | null> {
   try {
     const value = await statfs(path);
@@ -103,7 +132,8 @@ export function createHygiene(options: Options): HygieneService {
   const rawExec = options.exec ?? defaultExec;
   const exec: HygieneExec = (file, args, execOptions) => rawExec(file, file === 'git' ? hardenedGitArgs(args) : args, execOptions);
   const fs = options.fs ?? defaultFs;
-  const worktreeRoot = join(options.home, 'worktrees');
+  const roots = worktreeRoots(options.home, options.settings.hygiene);
+  const underRoot = (path: string): boolean => roots.allowed.some((root) => inside(root, path));
   const deployRoot = join(options.home, 'deploys');
   const workerLocks = new Map<string, Promise<void>>();
 
@@ -201,11 +231,12 @@ export function createHygiene(options: Options): HygieneService {
   }
 
   async function gcWorker(candidate: WorkerRow): Promise<void> {
-    if (!inside(worktreeRoot, candidate.worktree)) return;
+    // An unplugged drive is not a removed worktree: skip it untouched until the volume returns.
+    if (!underRoot(candidate.worktree) || await unmountedVolume(candidate.worktree, options.volumeStat)) return;
     await withWorkerLock(candidate.workerId, async () => {
       const worker = options.store.getWorker(candidate.workerId);
       if (!worker || removed(worker.workerId) || !settled(worker) || options.isRunning?.(worker.workerId)) return;
-      if (!inside(worktreeRoot, worker.worktree) || !await trackedClean(worker) || !await dispositionAllows(worker)) return;
+      if (!underRoot(worker.worktree) || !await trackedClean(worker) || !await dispositionAllows(worker)) return;
       const pushed = await reachableFromOrigin(worker);
       const latest = options.store.getWorker(worker.workerId);
       if (!latest || !sameWorker(worker, latest) || !settled(latest) || options.isRunning?.(latest.workerId)) return;
@@ -289,7 +320,7 @@ export function createHygiene(options: Options): HygieneService {
 
   return {
     async tick(): Promise<void> {
-      const freeGb = await freeSpaceGb(options.home, options.statfs);
+      const freeGb = await lowestFreeGb([options.home, ...(await unmountedVolume(roots.root, options.volumeStat) ? [] : [roots.root])], options.statfs);
       await gc();
       if (freeGb !== null && freeGb < options.settings.hygiene.minFreeGb) await alertDiskLow(freeGb);
     },

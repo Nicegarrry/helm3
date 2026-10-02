@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { hardenedGitArgs } from './git.js';
@@ -89,7 +89,7 @@ import { createRoutingCheck, type RoutingCheckService } from './routing/check.js
 import { createModelCatalog, type CatalogProbe, type ModelCatalog } from './routing/catalog.js';
 import { actionHash, commitTap as commitDeployTap, reserveTap as reserveDeployTap, rollbackTap as rollbackDeployTap } from './envelope.js';
 import { createDeploy, markDeploysInterrupted, type DeployExec, type DeployService } from './deploy.js';
-import { cleanupNodeModules, freeSpaceGb, type StatfsResult } from './hygiene.js';
+import { cleanupNodeModules, lowestFreeGb, unmountedVolume, worktreeRoots, type StatfsResult, type VolumeStat } from './hygiene.js';
 import { askLoadClass } from './capacity/classify.js';
 import { admissionRank, effectivePriority, quickCheck, type QuickCheck } from './capacity/priority.js';
 import { createCapacityAdmission, type CapacityAdmission, type CapacityStatus } from './capacity/admit.js';
@@ -154,6 +154,7 @@ export type HelmDeps = Readonly<{
   deploySleep?: (ms: number) => Promise<void>;
   deployEnv?: NodeJS.ProcessEnv;
   statfs?: (path: string) => Promise<StatfsResult>;
+  volumeStat?: VolumeStat;
   capacity?: CapacityAdmission;
   capacitySampler?: CapacitySampler;
   capacityExec?: CapacityExec;
@@ -299,6 +300,7 @@ export class Helm {
   private readonly settings: Settings;
   private readonly spendSettings: EffectiveSpendReader;
   private readonly statfs?: (path: string) => Promise<StatfsResult>;
+  private readonly volumeStat?: VolumeStat;
   private readonly jev?: Jev;
   private readonly tapRandomInt?: (min: number, max: number) => number;
   private readonly tapPepper: Buffer;
@@ -344,6 +346,7 @@ export class Helm {
     this.routingCheck = createRoutingCheck({ store: this.store, settings: this.settings, settingsHome: this.config.home, now: () => this.now ? new Date(this.now()) : new Date(), catalog: routingCatalog, skipStartup: deps.routingSkipStartup });
     this.spendSettings = createEffectiveSpendReader(deps.config, this.store, this.settings, () => this.nowDate(), deps.spendStartup ? 'startup' : 'read');
     this.statfs = deps.statfs;
+    this.volumeStat = deps.volumeStat;
     this.jev = deps.jev;
     this.tapRandomInt = deps.randomInt;
     this.tapPepper = deps.tapPepper ?? randomBytes(32);
@@ -629,7 +632,9 @@ export class Helm {
 
   async spawn(input: SpawnInput): Promise<ToolOutcome<SpawnResponse>> {
     return runGuard<SpawnResponse>(async () => {
-      const freeGb = await freeSpaceGb(this.config.home, this.statfs);
+      const unmounted = await this.unmountedWorktreeVolume();
+      if (unmounted) return refuse(unmounted);
+      const freeGb = await lowestFreeGb([this.config.home, worktreeRoots(this.config.home, this.settings.hygiene).root], this.statfs);
       if (freeGb !== null && freeGb < this.settings.hygiene.minFreeGb / 2) return refuse('disk low');
       const chosen = await this.chosenModel(input);
       if (chosen.choice?.refusal) return refuse(chosen.choice.refusal);
@@ -779,7 +784,9 @@ export class Helm {
     const effective = effectivePriority(stated, check), rank = admissionRank(effective, input.requestedBy ?? 'auto', check.size);
     const workerId = genId('w');
     const branch = `helm/${workerId}`;
-    const worktree = join(this.config.home, 'worktrees', repoSlug.replace(/\//g, '__'), workerId);
+    const worktree = join(worktreeRoots(this.config.home, this.settings.hygiene).root, repoSlug.replace(/\//g, '__'), workerId);
+    const unmounted = await this.unmountedWorktreeVolume();
+    if (unmounted) return refuse(unmounted);
     mkdirSync(dirname(worktree), { recursive: true });
     await this.workspace.create(repo, worktree, branch, baseSha);
     const createdAt = this.nowIso();
@@ -1433,8 +1440,16 @@ export class Helm {
 
   private nowDate(): Date { return this.now ? this.now() : new Date(); }
 
+  /** The row's own worktree when it sits where Helm would have put it under any allowed root (legacy rows keep the old default); else the configured location. */
   private workerWorktreeRoot(row: WorkerRow): string {
-    return join(this.config.home, 'worktrees', row.repoSlug.replace(/\//g, '__'), row.workerId);
+    const { root, allowed } = worktreeRoots(this.config.home, this.settings.hygiene), rel = [row.repoSlug.replace(/\//g, '__'), row.workerId];
+    return allowed.map((base) => join(base, ...rel)).find((path) => path === resolve(row.worktree)) ?? join(root, ...rel);
+  }
+
+  /** Refusal text when the worktree root is on a `/Volumes/<name>` drive that is not mounted. */
+  private async unmountedWorktreeVolume(): Promise<string | undefined> {
+    const volume = await unmountedVolume(worktreeRoots(this.config.home, this.settings.hygiene).root, this.volumeStat);
+    return volume && `worktree volume not mounted: ${volume}`;
   }
 
   private async cleanupWorkerNodeModules(row: WorkerRow): Promise<void> {

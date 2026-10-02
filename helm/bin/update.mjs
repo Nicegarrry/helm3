@@ -1,9 +1,9 @@
 // Standalone release installer: it must survive the daemon whose code it is replacing.
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, realpathSync, readlinkSync, readdirSync, statSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, realpathSync, readlinkSync, readdirSync, statSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
@@ -85,8 +85,49 @@ function stageLocked(home, repo, ref, validate) {
     renameSync(root, destination);
     const staged = { root: destination, version: pkg.version, revision, digest: digestRelease(destination) };
     write(join(home, 'staged-release.json'), staged);
+    try { pruneReleases(home); } catch (err) { console.error(`release prune skipped: ${err.message}`); }
     return staged;
   } finally { rmSync(scratch, { recursive: true, force: true }); }
+}
+
+const RELEASE_NAME = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?-[0-9a-f]{12}-[0-9a-f]{8}$/;
+/**
+ * Keep the newest `keep` releases by mtime plus every release a journal references; drop `staging-*` dirs
+ * older than an hour. Only real (non-symlink) direct children of the canonical releases dir with a release
+ * or staging name are ever removed, and an unreadable journal aborts the whole prune.
+ */
+export function pruneReleases(home, { keep = 2, now = Date.now() } = {}) {
+  const dir = join(home, 'releases');
+  if (!existsSync(dir)) return [];
+  const base = realpathSync(dir);
+  if (basename(base) !== 'releases' || !lstatSync(base).isDirectory()) throw new Error('releases is not a directory');
+  const canonical = (path) => { try { return realpathSync(path); } catch { return resolve(path); } };
+  const referenced = new Set();
+  for (const name of ['current-release.json', 'staged-release.json', 'upgrade.json']) {
+    const path = join(home, name);
+    if (!existsSync(path)) continue;
+    const data = read(path);
+    for (const root of [data?.root, data?.staged?.root]) if (typeof root === 'string') referenced.add(canonical(root));
+  }
+  const releases = [], staging = [];
+  for (const entry of readdirSync(base, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue; // symlinks and files are never touched
+    const path = join(base, entry.name);
+    const item = { path, mtimeMs: lstatSync(path).mtimeMs };
+    if (entry.name.startsWith('staging-')) staging.push(item);
+    else if (RELEASE_NAME.test(entry.name)) releases.push(item);
+  }
+  releases.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const doomed = [...releases.slice(keep), ...staging.filter((item) => now - item.mtimeMs > 60 * 60_000)];
+  const removed = [];
+  for (const { path } of doomed) {
+    const info = lstatSync(path);
+    const real = realpathSync(path);
+    if (info.isSymbolicLink() || !info.isDirectory() || real !== path || dirname(real) !== base || referenced.has(real)) continue;
+    rmSync(real, { recursive: true, force: true });
+    removed.push(real);
+  }
+  return removed;
 }
 
 export function launchUpgrade(home, port, source, timeoutMs) {

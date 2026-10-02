@@ -38,6 +38,7 @@ const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
 const HYGIENE_DEFAULTS = { keepNodeModules: false, gcSec: 600, worktreeTtlHours: 24, minFreeGb: 15 };
 
+const absolutePath = z.string().regex(/^(?:\/|~\/)./, 'must be an absolute or ~/ path');
 const settingsSchema = z.object({
   port: z.number().int().min(1).max(65_535).optional(),
   jev: z.object({
@@ -136,6 +137,9 @@ const settingsSchema = z.object({
     gcSec: z.number().int().positive().default(600),
     worktreeTtlHours: z.number().positive().default(24),
     minFreeGb: z.number().positive().default(15),
+    /** Absolute or `~/` paths; unset keeps worktrees in `$HELM_HOME/worktrees` and install caches per gate run. */
+    worktreeRoot: absolutePath.optional(),
+    installCacheRoot: absolutePath.optional(),
   }).default(HYGIENE_DEFAULTS),
 });
 

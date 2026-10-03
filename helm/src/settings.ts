@@ -32,7 +32,7 @@ const ROUTING_TIERS_DEFAULTS: Record<string, string[]> = {
 const ROUTING_DEFAULTS = {
   tiers: ROUTING_TIERS_DEFAULTS,
   allowed: Object.values(ROUTING_TIERS_DEFAULTS).flat(), minClean: 0.5, minN: 8,
-  policy: { subscriptionOnly: false }, checkDays: 7,
+  ignored: [] as string[], policy: { subscriptionOnly: false }, checkDays: 7,
 };
 const DISCORD_DEFAULTS = { projects: {}, digestSec: 60, maxPerHour: 20 };
 const DEPLOY_DEFAULTS = { smokeEnv: [] as string[] };
@@ -108,6 +108,8 @@ const settingsSchema = z.object({
   routing: z.object({
     tiers: z.record(z.string(), z.array(z.string().min(1))).default(ROUTING_DEFAULTS.tiers),
     allowed: z.array(z.string()).default(ROUTING_DEFAULTS.allowed),
+    /** Lane models deliberately left out of the tiers; routing checks do not report them as extra. */
+    ignored: z.array(z.string()).default([]),
     minClean: z.number().default(0.5),
     minN: z.number().int().default(8),
     policy: z.object({
@@ -148,9 +150,10 @@ export type Settings = Omit<ParsedSettings, 'deploy' | 'capacity' | 'routing' | 
   deploy?: ParsedSettings['deploy'];
   capacity?: ParsedSettings['capacity'];
   gates?: ParsedSettings['gates'];
-  routing: Omit<ParsedSettings['routing'], 'policy' | 'checkDays'> & {
+  routing: Omit<ParsedSettings['routing'], 'policy' | 'checkDays' | 'ignored'> & {
     policy?: { lanes?: ('codex' | 'pi' | 'claude')[]; subscriptionOnly?: boolean };
     checkDays?: number;
+    ignored?: string[];
   };
 };
 

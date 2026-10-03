@@ -170,7 +170,8 @@ silently choosing one.
 `helm routing check` (or the `routing.check` tool) probes the catalog and records the last
 check in the Helm store. The weekly ticker runs it when `checkDays` has elapsed and emits
 `routing.stale` for unavailable tier candidates or models present in a lane but absent from
-the table. The Codex probe runs `codex debug models`; Pi reads its
+the table. List models you never want routed in `routing.ignored` so the check stops
+reporting them. The Codex probe runs `codex debug models`; Pi reads its
 operator and built-in provider catalogs; Claude requires both a binary and a registered
 Helm lane.
 

@@ -122,6 +122,18 @@ test('catalog probes are cached and routing checks report stale entries', async 
   } finally { store.close(); }
 });
 
+test('routing check skips lane models listed in routing.ignored', async () => {
+  const store = openStore(':memory:');
+  const base = settings({ '1': ['codex/routed'] }, {});
+  const settingsValue = { ...base, routing: { ...base.routing, ignored: ['codex/gpt-6.2-new'] } };
+  const catalog = createModelCatalog({ getSettings: () => settingsValue, probe: { codex: () => true, models: (lane) => lane === 'codex' ? ['codex/routed', 'codex/gpt-6.2-new'] : [] } });
+  try {
+    const result = await createRoutingCheck({ store, settings: settingsValue, catalog }).check();
+    assert.equal(result.report.extraModels, undefined);
+    assert.equal(store.listEvents('project:routing').length, 0);
+  } finally { store.close(); }
+});
+
 test('concurrent startup routing ticks share one check and stale event', async () => {
   const store = openStore(':memory:');
   let checks = 0;

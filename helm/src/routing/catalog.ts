@@ -228,7 +228,7 @@ export function createModelCatalog(options: { getSettings?: () => Settings; prob
         const result = await availability(model);
         if (!result.available) unavailable.push({ tier: Object.entries(settings.routing.tiers).find(([, models]) => models.includes(model))?.[0] ? Number(Object.entries(settings.routing.tiers).find(([, models]) => models.includes(model))![0]) : index + 1, model, reason: result.reason ?? 'unavailable' });
       }
-      const routed = new Set(candidates.map((model) => model.replace(/:[^:]+$/, '')));
+      const routed = new Set([...candidates, ...(settings.routing.ignored ?? [])].map((model) => model.replace(/:[^:]+$/, '')));
       const extraModels: CatalogExtra[] = [];
       for (const lane of ['codex', 'pi', 'claude'] as const) {
         for (const model of await modelsForLane(lane)) {
